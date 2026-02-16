@@ -1,7 +1,9 @@
 use std::{
     net::TcpListener,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU32, Ordering},
     sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use tracing::{debug, warn};
@@ -17,7 +19,30 @@ fn generate_random_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .map(|addr| addr.port())
-        .unwrap_or(18789) // Fallback to default if binding fails
+        .unwrap_or_else(|err| {
+            // Some sandboxed environments disallow binding sockets even on localhost.
+            // Fall back to a pseudo-random ephemeral port instead of a constant value
+            // to reduce the chance of collisions.
+            warn!(error = %err, "failed to bind to an ephemeral port; using fallback");
+            fallback_ephemeral_port()
+        })
+}
+
+fn fallback_ephemeral_port() -> u16 {
+    const EPHEMERAL_START: u16 = 49152;
+    const EPHEMERAL_END: u16 = 65535;
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed) as u64;
+    let pid = u64::from(std::process::id());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    let mixed = now ^ (pid.rotate_left(32)) ^ counter.rotate_left(1);
+    let span = u64::from(EPHEMERAL_END - EPHEMERAL_START) + 1;
+    EPHEMERAL_START + (mixed % span) as u16
 }
 
 /// Standard config file names, checked in order.

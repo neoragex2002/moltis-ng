@@ -21,6 +21,7 @@ var toasts = signal([]);
 var toastId = 0;
 var installProgresses = signal([]);
 var installProgressId = 0;
+var lastSkillSearchErrorAtMs = 0;
 
 // Lazy prefetch: starts on first navigation to /skills, not at module load
 var prefetchPromise = null;
@@ -132,8 +133,23 @@ function doInstall(source) {
 // Debounced server-side search for skills within a repo
 function searchSkills(source, query) {
 	return fetch(`/api/skills/search?source=${encodeURIComponent(source)}&q=${encodeURIComponent(query)}`)
-		.then((r) => r.json())
-		.then((data) => data.skills || []);
+		.then(async (r) => {
+			if (!r) return { skills: [], error: "no response" };
+			if (!r.ok) {
+				var msg = "";
+				try {
+					var payload = await r.json();
+					msg = payload && payload.error ? String(payload.error) : "";
+				} catch (e) {
+					msg = "";
+				}
+				if (!msg) msg = r.statusText || `HTTP ${r.status}`;
+				return { skills: [], error: msg };
+			}
+			var data = await r.json();
+			return { skills: (data && data.skills) || [], error: null };
+		})
+		.catch((e) => ({ skills: [], error: e?.message || "network error" }));
 }
 
 // ── Components ───────────────────────────────────────────────
@@ -489,6 +505,7 @@ function RepoCard(props) {
 	var expanded = useSignal(false);
 	var searchQuery = useSignal("");
 	var searchResults = useSignal([]);
+	var searchHint = useSignal("");
 	var searching = useSignal(false);
 	var activeDetail = useSignal(null);
 	var detailLoading = useSignal(false);
@@ -508,16 +525,34 @@ function RepoCard(props) {
 		var q = e.target.value;
 		searchQuery.value = q;
 		activeDetail.value = null;
+		searchHint.value = "";
 		if (searchTimer.current) clearTimeout(searchTimer.current);
 		if (!q.trim()) {
 			searchResults.value = [];
+			searching.value = false;
+			return;
+		}
+		var trimmed = q.trim();
+		// Common confusion: users paste `owner/repo` here. This input searches skill names.
+		if (trimmed.includes("/") || trimmed.includes("://")) {
+			searchResults.value = [];
+			searching.value = false;
+			searchHint.value = 'This box searches skill names in this repo (e.g. "book-photographer"), not repo URLs. Use the Install box above to add repos.';
 			return;
 		}
 		searching.value = true;
 		searchTimer.current = setTimeout(() => {
-			searchSkills(repo.source, q.trim()).then((results) => {
-				searchResults.value = results;
+			searchSkills(repo.source, trimmed).then(({ skills, error }) => {
+				searchResults.value = skills;
 				searching.value = false;
+				if (error) {
+					// Avoid toast spam while typing.
+					var now = Date.now();
+					if (now - lastSkillSearchErrorAtMs > 4000) {
+						lastSkillSearchErrorAtMs = now;
+						showToast(`Skill search failed: ${error}`, "error");
+					}
+				}
 			});
 		}, 200);
 	}
@@ -573,12 +608,21 @@ function RepoCard(props) {
 			expanded.value &&
 			html`<div class="skills-repo-detail" style="display:block">
       <div style="position:relative;margin-bottom:8px">
-        <input type="text" placeholder=${isOrphan ? "Orphaned repo: reinstall to restore metadata" : `Search skills in ${repo.source}\u2026`} value=${searchQuery.value} disabled=${isOrphan}
+        <input type="text" placeholder=${isOrphan ? "Orphaned repo: reinstall to restore metadata" : `Search skill names in ${repo.source}\u2026 (e.g. book-photographer)`} value=${searchQuery.value} disabled=${isOrphan}
           onInput=${onSearchInput}
           style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font-size:.8rem;font-family:var(--font-mono);box-sizing:border-box" />
+				${
+					searchHint.value &&
+					searchQuery.value &&
+					!activeDetail.value &&
+					html`<div class="skills-ac-dropdown" style="display:block">
+            <div style="padding:8px 10px;color:var(--muted);font-size:.78rem">${searchHint.value}</div>
+          </div>`
+				}
         ${
 					searchQuery.value &&
 					searchResults.value.length > 0 &&
+					!searchHint.value &&
 					!activeDetail.value &&
 					html`
           <div class="skills-ac-dropdown" style="display:block">
@@ -605,6 +649,7 @@ function RepoCard(props) {
         ${
 					searchQuery.value &&
 					searchResults.value.length === 0 &&
+					!searchHint.value &&
 					!activeDetail.value &&
 					!searching.value &&
 					html`

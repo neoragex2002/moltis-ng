@@ -6,10 +6,13 @@ use tracing::{debug, trace, warn};
 
 use {
     super::openai_compat::{
-        SseLineResult, StreamingToolState, finalize_stream, parse_tool_calls,
+        SseFrameParser, SseLineResult, StreamingToolState, finalize_stream, parse_tool_calls,
         process_openai_sse_line, to_openai_tools,
     },
-    crate::model::{ChatMessage, CompletionResponse, LlmProvider, StreamEvent, Usage},
+    super::openai_responses::OpenAiResponsesProvider,
+    crate::model::{
+        ChatMessage, CompletionResponse, LlmProvider, StreamEvent, Usage,
+    },
 };
 
 pub struct OpenAiProvider {
@@ -21,6 +24,7 @@ pub struct OpenAiProvider {
 }
 
 const OPENAI_MODELS_ENDPOINT_PATH: &str = "/models";
+const OPENAI_CHAT_COMPLETIONS_ENDPOINT_PATH: &str = "/chat/completions";
 
 #[derive(Clone, Copy)]
 struct ModelCatalogEntry {
@@ -216,6 +220,12 @@ fn is_chat_endpoint_unsupported_model_error(body_text: &str) -> bool {
         || lower.contains("requires audio")
 }
 
+fn is_responses_only_model_error(body_text: &str) -> bool {
+    let lower = body_text.to_ascii_lowercase();
+    lower.contains("only supported in v1/responses")
+        || (lower.contains("v1/responses") && lower.contains("v1/chat/completions"))
+}
+
 fn should_warn_on_api_error(status: reqwest::StatusCode, body_text: &str) -> bool {
     if is_chat_endpoint_unsupported_model_error(body_text) {
         return false;
@@ -228,6 +238,22 @@ fn models_endpoint(base_url: &str) -> String {
         "{}{OPENAI_MODELS_ENDPOINT_PATH}",
         base_url.trim_end_matches('/')
     )
+}
+
+fn chat_completions_endpoint(base_url: &str) -> String {
+    format!(
+        "{}{OPENAI_CHAT_COMPLETIONS_ENDPOINT_PATH}",
+        base_url.trim_end_matches('/')
+    )
+}
+
+fn base_url_is_openai_platform(base_url: &str) -> bool {
+    // Only enable Responses API fallback for the OpenAI Platform endpoint.
+    // Many "OpenAI-compatible" providers only implement /chat/completions.
+    match reqwest::Url::parse(base_url) {
+        Ok(parsed_url) => parsed_url.host_str() == Some("api.openai.com"),
+        Err(_) => base_url.contains("api.openai.com"),
+    }
 }
 
 async fn fetch_models_from_api(
@@ -334,6 +360,10 @@ impl OpenAiProvider {
         }
     }
 
+    fn can_use_responses_api(&self) -> bool {
+        base_url_is_openai_platform(&self.base_url) || cfg!(test)
+    }
+
     fn requires_reasoning_content_on_tool_messages(&self) -> bool {
         self.provider_name.eq_ignore_ascii_case("moonshot")
             || self.base_url.contains("moonshot.ai")
@@ -429,7 +459,7 @@ impl LlmProvider for OpenAiProvider {
 
         let http_resp = self
             .client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(chat_completions_endpoint(&self.base_url))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.api_key.expose_secret()),
@@ -442,6 +472,20 @@ impl LlmProvider for OpenAiProvider {
         let status = http_resp.status();
         if !status.is_success() {
             let body_text = http_resp.text().await.unwrap_or_default();
+            if self.can_use_responses_api() && is_responses_only_model_error(&body_text) {
+                debug!(
+                    model = %self.model,
+                    provider = %self.provider_name,
+                    "retrying OpenAI request via /responses"
+                );
+                let responses_provider = OpenAiResponsesProvider::new_with_name(
+                    self.api_key.clone(),
+                    self.model.clone(),
+                    self.base_url.clone(),
+                    self.provider_name.clone(),
+                );
+                return responses_provider.complete(messages, tools).await;
+            }
             if should_warn_on_api_error(status, &body_text) {
                 warn!(
                     status = %status,
@@ -522,30 +566,54 @@ impl LlmProvider for OpenAiProvider {
 
             let resp = match self
                 .client
-                .post(format!("{}/chat/completions", self.base_url))
+                .post(chat_completions_endpoint(&self.base_url))
                 .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
                 .header("content-type", "application/json")
                 .json(&body)
                 .send()
                 .await
             {
-                Ok(r) => {
-                    if let Err(e) = r.error_for_status_ref() {
-                        let status = e.status().map(|s| s.as_u16()).unwrap_or(0);
-                        let body_text = r.text().await.unwrap_or_default();
-                        yield StreamEvent::Error(format!("HTTP {status}: {body_text}"));
-                        return;
-                    }
-                    r
-                }
+                Ok(r) => r,
                 Err(e) => {
                     yield StreamEvent::Error(e.to_string());
                     return;
                 }
             };
 
+            if let Err(e) = resp.error_for_status_ref() {
+                let status = e.status().map(|s| s.as_u16()).unwrap_or(0);
+                let body_text = resp.text().await.unwrap_or_default();
+                if self.can_use_responses_api() && is_responses_only_model_error(&body_text) {
+                    debug!(
+                        model = %self.model,
+                        provider = %self.provider_name,
+                        "retrying OpenAI stream via /responses"
+                    );
+                    let responses_provider = OpenAiResponsesProvider::new_with_name(
+                        self.api_key.clone(),
+                        self.model.clone(),
+                        self.base_url.clone(),
+                        self.provider_name.clone(),
+                    );
+                    let mut responses_stream = responses_provider.stream_with_tools(messages, tools);
+                    while let Some(event) = responses_stream.next().await {
+                        let done = matches!(event, StreamEvent::Done(_) | StreamEvent::Error(_));
+                        yield event;
+                        if done {
+                            return;
+                        }
+                    }
+
+                    yield StreamEvent::Error("OpenAI Responses API stream ended unexpectedly".into());
+                    return;
+                }
+
+                yield StreamEvent::Error(format!("HTTP {status}: {body_text}"));
+                return;
+            }
+
             let mut byte_stream = resp.bytes_stream();
-            let mut buf = String::new();
+            let mut frame_parser = SseFrameParser::default();
             let mut state = StreamingToolState::default();
 
             while let Some(chunk) = byte_stream.next().await {
@@ -556,21 +624,8 @@ impl LlmProvider for OpenAiProvider {
                         return;
                     }
                 };
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].trim().to_string();
-                    buf = buf[pos + 1..].to_string();
-
-                    if line.is_empty() {
-                        continue;
-                    }
-
-                    let Some(data) = line.strip_prefix("data: ") else {
-                        continue;
-                    };
-
-                    match process_openai_sse_line(data, &mut state) {
+                for data in frame_parser.push_bytes(&chunk) {
+                    match process_openai_sse_line(&data, &mut state) {
                         SseLineResult::Done => {
                             for event in finalize_stream(&state) {
                                 yield event;
@@ -586,6 +641,8 @@ impl LlmProvider for OpenAiProvider {
                     }
                 }
             }
+
+            yield StreamEvent::Error("OpenAI stream ended unexpectedly".into());
         })
     }
 }
@@ -593,56 +650,49 @@ impl LlmProvider for OpenAiProvider {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use {
-        axum::{Router, extract::Request, routing::post},
-        secrecy::Secret,
-        tokio_stream::StreamExt,
-    };
+    use secrecy::Secret;
 
     use crate::model::{ChatMessage, ToolCall};
 
     use super::*;
 
-    #[derive(Default, Clone)]
-    struct CapturedRequest {
-        body: Option<serde_json::Value>,
-    }
-
-    /// Start a mock SSE server that captures the request body and returns
-    /// the given SSE payload verbatim.
-    async fn start_sse_mock(sse_payload: String) -> (String, Arc<Mutex<Vec<CapturedRequest>>>) {
-        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_clone = captured.clone();
-
-        let app = Router::new().route(
-            "/chat/completions",
-            post(move |req: Request| {
-                let cap = captured_clone.clone();
-                let payload = sse_payload.clone();
-                async move {
-                    let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
-                        .await
-                        .unwrap_or_default();
-                    let body: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
-                    cap.lock().unwrap().push(CapturedRequest { body });
-
-                    axum::response::Response::builder()
-                        .header("content-type", "text/event-stream")
-                        .body(axum::body::Body::from(payload))
-                        .unwrap()
-                }
-            }),
-        );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+    fn build_stream_request_body(
+        provider: &OpenAiProvider,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let openai_messages = provider.serialize_messages_for_request(messages);
+        let mut body = serde_json::json!({
+            "model": provider.model,
+            "messages": openai_messages,
+            "stream": true,
+            "stream_options": { "include_usage": true },
         });
 
-        (format!("http://{addr}"), captured)
+        if !tools.is_empty() {
+            body["tools"] = serde_json::Value::Array(to_openai_tools(tools));
+        }
+
+        body
+    }
+
+    fn collect_events_from_chat_completions_sse(payload: &str) -> Vec<StreamEvent> {
+        let mut frame_parser = SseFrameParser::default();
+        let mut state = StreamingToolState::default();
+        let mut events = Vec::new();
+
+        for data in frame_parser.push_bytes(payload.as_bytes()) {
+            match process_openai_sse_line(&data, &mut state) {
+                SseLineResult::Done => {
+                    events.extend(finalize_stream(&state));
+                    break;
+                }
+                SseLineResult::Events(mut evs) => events.append(&mut evs),
+                SseLineResult::Skip => {}
+            }
+        }
+
+        events
     }
 
     fn test_provider(base_url: &str) -> OpenAiProvider {
@@ -676,11 +726,14 @@ mod tests {
             "https://api.moonshot.ai/v1".to_string(),
             "moonshot".to_string(),
         );
-        let messages = vec![ChatMessage::assistant_with_tools(None, vec![ToolCall {
-            id: "call_1".into(),
-            name: "exec".into(),
-            arguments: serde_json::json!({ "command": "uname -a" }),
-        }])];
+        let messages = vec![ChatMessage::assistant_with_tools(
+            None,
+            vec![ToolCall {
+                id: "call_1".into(),
+                name: "exec".into(),
+                arguments: serde_json::json!({ "command": "uname -a" }),
+            }],
+        )];
 
         let serialized = provider.serialize_messages_for_request(&messages);
         assert_eq!(serialized.len(), 1);
@@ -696,44 +749,41 @@ mod tests {
             "gpt-4o".to_string(),
             "https://api.openai.com/v1".to_string(),
         );
-        let messages = vec![ChatMessage::assistant_with_tools(None, vec![ToolCall {
-            id: "call_1".into(),
-            name: "exec".into(),
-            arguments: serde_json::json!({ "command": "uname -a" }),
-        }])];
+        let messages = vec![ChatMessage::assistant_with_tools(
+            None,
+            vec![ToolCall {
+                id: "call_1".into(),
+                name: "exec".into(),
+                arguments: serde_json::json!({ "command": "uname -a" }),
+            }],
+        )];
 
         let serialized = provider.serialize_messages_for_request(&messages);
         assert_eq!(serialized.len(), 1);
         assert!(serialized[0].get("reasoning_content").is_none());
     }
 
-    #[tokio::test]
-    async fn moonshot_stream_request_includes_reasoning_content_on_tool_history() {
-        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n\
-                   data: [DONE]\n\n";
-        let (base_url, captured) = start_sse_mock(sse.to_string()).await;
+    #[test]
+    fn moonshot_stream_request_includes_reasoning_content_on_tool_history() {
         let provider = OpenAiProvider::new_with_name(
             Secret::new("test-key".to_string()),
             "kimi-k2.5".to_string(),
-            base_url,
+            "https://api.moonshot.ai/v1".to_string(),
             "moonshot".to_string(),
         );
         let messages = vec![
             ChatMessage::user("run uname"),
-            ChatMessage::assistant_with_tools(None, vec![ToolCall {
-                id: "exec:0".into(),
-                name: "exec".into(),
-                arguments: serde_json::json!({ "command": "uname -a" }),
-            }]),
+            ChatMessage::assistant_with_tools(
+                None,
+                vec![ToolCall {
+                    id: "exec:0".into(),
+                    name: "exec".into(),
+                    arguments: serde_json::json!({ "command": "uname -a" }),
+                }],
+            ),
             ChatMessage::tool("exec:0", "Linux host 6.0"),
         ];
-
-        let mut stream = provider.stream_with_tools(messages, sample_tools());
-        while stream.next().await.is_some() {}
-
-        let reqs = captured.lock().unwrap();
-        assert_eq!(reqs.len(), 1);
-        let body = reqs[0].body.as_ref().expect("request should have a body");
+        let body = build_stream_request_body(&provider, &messages, &sample_tools());
         let history = body["messages"]
             .as_array()
             .expect("messages should be an array");
@@ -745,23 +795,11 @@ mod tests {
 
     // ── Regression: stream_with_tools must send tools in the API body ────
 
-    #[tokio::test]
-    async fn stream_with_tools_sends_tools_in_request_body() {
-        // This is the core regression test: before the fix,
-        // stream_with_tools() fell back to stream() which never
-        // included tools in the request body.
-        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n\
-                   data: [DONE]\n\n";
-        let (base_url, captured) = start_sse_mock(sse.to_string()).await;
-        let provider = test_provider(&base_url);
+    #[test]
+    fn stream_with_tools_sends_tools_in_request_body() {
+        let provider = test_provider("https://example.com");
         let tools = sample_tools();
-
-        let mut stream = provider.stream_with_tools(vec![ChatMessage::user("test")], tools);
-        while stream.next().await.is_some() {}
-
-        let reqs = captured.lock().unwrap();
-        assert_eq!(reqs.len(), 1);
-        let body = reqs[0].body.as_ref().expect("request should have a body");
+        let body = build_stream_request_body(&provider, &[ChatMessage::user("test")], &tools);
 
         // The body MUST contain the "tools" key with our tool in it.
         let tools_arr = body["tools"]
@@ -772,18 +810,10 @@ mod tests {
         assert_eq!(tools_arr[0]["function"]["name"], "create_skill");
     }
 
-    #[tokio::test]
-    async fn stream_with_empty_tools_omits_tools_key() {
-        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n\
-                   data: [DONE]\n\n";
-        let (base_url, captured) = start_sse_mock(sse.to_string()).await;
-        let provider = test_provider(&base_url);
-
-        let mut stream = provider.stream_with_tools(vec![ChatMessage::user("test")], vec![]);
-        while stream.next().await.is_some() {}
-
-        let reqs = captured.lock().unwrap();
-        let body = reqs[0].body.as_ref().unwrap();
+    #[test]
+    fn stream_with_empty_tools_omits_tools_key() {
+        let provider = test_provider("https://example.com");
+        let body = build_stream_request_body(&provider, &[ChatMessage::user("test")], &[]);
         assert!(
             body.get("tools").is_none(),
             "tools key should be absent when no tools provided"
@@ -792,8 +822,8 @@ mod tests {
 
     // ── Regression: stream_with_tools must parse tool_call streaming events ──
 
-    #[tokio::test]
-    async fn stream_with_tools_parses_single_tool_call() {
+    #[test]
+    fn stream_with_tools_parses_single_tool_call() {
         // Simulates OpenAI streaming a single tool call across multiple SSE chunks.
         let sse = concat!(
             // First chunk: tool call start (id + function name)
@@ -809,16 +839,7 @@ mod tests {
             "data: [DONE]\n\n",
         );
 
-        let (base_url, _) = start_sse_mock(sse.to_string()).await;
-        let provider = test_provider(&base_url);
-
-        let mut stream =
-            provider.stream_with_tools(vec![ChatMessage::user("test")], sample_tools());
-
-        let mut events = Vec::new();
-        while let Some(ev) = stream.next().await {
-            events.push(ev);
-        }
+        let events = collect_events_from_chat_completions_sse(sse);
 
         // Must contain ToolCallStart
         let starts: Vec<_> = events
@@ -863,8 +884,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn stream_with_tools_parses_multiple_tool_calls() {
+    #[test]
+    fn stream_with_tools_parses_multiple_tool_calls() {
         // Two parallel tool calls in one response.
         let sse = concat!(
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"tool_a\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
@@ -875,16 +896,7 @@ mod tests {
             "data: [DONE]\n\n",
         );
 
-        let (base_url, _) = start_sse_mock(sse.to_string()).await;
-        let provider = test_provider(&base_url);
-
-        let mut stream =
-            provider.stream_with_tools(vec![ChatMessage::user("test")], sample_tools());
-
-        let mut events = Vec::new();
-        while let Some(ev) = stream.next().await {
-            events.push(ev);
-        }
+        let events = collect_events_from_chat_completions_sse(sse);
 
         let starts: Vec<_> = events
             .iter()
@@ -906,8 +918,8 @@ mod tests {
         assert_eq!(completes.len(), 2, "expected 2 ToolCallComplete events");
     }
 
-    #[tokio::test]
-    async fn stream_with_tools_text_and_tool_call_mixed() {
+    #[test]
+    fn stream_with_tools_text_and_tool_call_mixed() {
         // Some providers emit text content before switching to tool calls.
         let sse = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"Let me \"},\"finish_reason\":null}]}\n\n",
@@ -917,24 +929,25 @@ mod tests {
             "data: [DONE]\n\n",
         );
 
-        let (base_url, _) = start_sse_mock(sse.to_string()).await;
-        let provider = test_provider(&base_url);
-
-        let mut stream =
-            provider.stream_with_tools(vec![ChatMessage::user("test")], sample_tools());
-
+        let events = collect_events_from_chat_completions_sse(sse);
         let mut text_deltas = Vec::new();
         let mut tool_starts = Vec::new();
-        while let Some(ev) = stream.next().await {
+        for ev in events {
             match ev {
                 StreamEvent::Delta(t) => text_deltas.push(t),
                 StreamEvent::ToolCallStart { name, .. } => tool_starts.push(name),
-                _ => {},
+                _ => {}
             }
         }
 
         assert_eq!(text_deltas.join(""), "Let me help.");
         assert_eq!(tool_starts, vec!["my_tool"]);
+    }
+
+    #[test]
+    fn detects_responses_only_model_error() {
+        let chat_error = r#"{"error":{"message":"This model is only supported in v1/responses and not in v1/chat/completions."}}"#;
+        assert!(is_responses_only_model_error(chat_error));
     }
 
     #[test]
@@ -968,13 +981,16 @@ mod tests {
         let ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
         // Only chat-capable models pass; non-chat (image, TTS, whisper,
         // embedding, moderation, audio, realtime, transcribe) are excluded.
-        assert_eq!(ids, vec![
-            "gpt-5.2",
-            "gpt-5.2-2025-12-11",
-            "o4-mini-deep-research",
-            "kimi-k2.5",
-            "moonshot-v1-8k",
-        ]);
+        assert_eq!(
+            ids,
+            vec![
+                "gpt-5.2",
+                "gpt-5.2-2025-12-11",
+                "o4-mini-deep-research",
+                "kimi-k2.5",
+                "moonshot-v1-8k",
+            ]
+        );
     }
 
     #[test]
@@ -1032,10 +1048,13 @@ mod tests {
     #[test]
     fn merge_with_fallback_uses_fallback_when_discovery_is_empty() {
         use crate::providers::DiscoveredModel;
-        let merged = crate::providers::merge_discovered_with_fallback_catalog(Vec::new(), vec![
-            DiscoveredModel::new("gpt-5.2", "GPT-5.2"),
-            DiscoveredModel::new("gpt-5-mini", "GPT-5 Mini"),
-        ]);
+        let merged = crate::providers::merge_discovered_with_fallback_catalog(
+            Vec::new(),
+            vec![
+                DiscoveredModel::new("gpt-5.2", "GPT-5.2"),
+                DiscoveredModel::new("gpt-5-mini", "GPT-5 Mini"),
+            ],
+        );
         let ids: Vec<String> = merged.into_iter().map(|m| m.id).collect();
         assert_eq!(ids, vec!["gpt-5.2", "gpt-5-mini"]);
     }

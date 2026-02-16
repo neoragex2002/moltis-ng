@@ -87,6 +87,9 @@ enum KnownKeys {
 const KNOWN_PROVIDER_NAMES: &[&str] = &[
     "anthropic",
     "openai",
+    "openai-responses",
+    "openai-codex",
+    "github-copilot",
     "gemini",
     "groq",
     "xai",
@@ -96,8 +99,10 @@ const KNOWN_PROVIDER_NAMES: &[&str] = &[
     "cerebras",
     "minimax",
     "moonshot",
+    "kimi-code",
     "venice",
     "ollama",
+    "local-llm",
 ];
 
 /// Static metadata keys allowed directly under `[providers]`.
@@ -277,10 +282,13 @@ fn build_schema_map() -> KnownKeys {
                 ("update_repository_url", Leaf),
             ])),
         ),
-        ("providers", MapWithFields {
-            value: Box::new(provider_entry()),
-            fields: HashMap::from([("offered", Array(Box::new(Leaf)))]),
-        }),
+        (
+            "providers",
+            MapWithFields {
+                value: Box::new(provider_entry()),
+                fields: HashMap::from([("offered", Array(Box::new(Leaf)))]),
+            },
+        ),
         (
             "chat",
             Struct(HashMap::from([
@@ -336,6 +344,7 @@ fn build_schema_map() -> KnownKeys {
                 ("emoji", Leaf),
                 ("creature", Leaf),
                 ("vibe", Leaf),
+                ("soul", Leaf),
             ])),
         ),
         (
@@ -856,6 +865,22 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
         });
     }
 
+    if let Some(entry) = config.providers.providers.get("openai-responses") {
+        if let Some(ref base_url) = entry.base_url {
+            let normalized = base_url.trim_end_matches('/');
+            if !normalized.ends_with("/v1") {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "providers",
+                    path: "providers.openai-responses.base_url".into(),
+                    message: format!(
+                        "openai-responses base_url must end with '/v1' (example: https://api.openai.com/v1), got: {base_url}"
+                    ),
+                });
+            }
+        }
+    }
+
     // Unknown memory backend
     if let Some(ref backend) = config.memory.backend {
         let valid_backends = ["builtin", "qmd"];
@@ -1004,11 +1029,13 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
 }
 
 /// Check that file paths referenced in TLS config exist on disk.
-fn check_file_references(toml_str: &str, _config_path: &Path, diagnostics: &mut Vec<Diagnostic>) {
+fn check_file_references(toml_str: &str, config_path: &Path, diagnostics: &mut Vec<Diagnostic>) {
     // Only check if we can parse the config
     let Ok(config) = toml::from_str::<MoltisConfig>(toml_str) else {
         return;
     };
+
+    let base_dir = config_path.parent();
 
     let file_refs: &[(&str, &Option<String>)] = &[
         ("tls.cert_path", &config.tls.cert_path),
@@ -1019,6 +1046,13 @@ fn check_file_references(toml_str: &str, _config_path: &Path, diagnostics: &mut 
     for (path_name, value) in file_refs {
         if let Some(file_path) = value {
             let p = Path::new(file_path);
+            let p = if p.is_absolute() {
+                p.to_path_buf()
+            } else if let Some(base_dir) = base_dir {
+                base_dir.join(p)
+            } else {
+                p.to_path_buf()
+            };
             if !p.exists() {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Warning,
@@ -1683,6 +1717,86 @@ enabled = true
         assert!(
             warnings.is_empty(),
             "known providers should not be warned about: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn openai_responses_base_url_requires_v1_suffix() {
+        let toml = r#"
+[providers.openai-responses]
+enabled = true
+base_url = "https://api.example.com"
+"#;
+        let result = validate_toml_str(toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error
+                    && d.path == "providers.openai-responses.base_url")
+        );
+    }
+
+    #[test]
+    fn identity_soul_field_allowed() {
+        let toml = r#"
+[identity]
+soul = "hello"
+"#;
+        let result = validate_toml_str(toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| !(d.category == "unknown-field" && d.path == "identity.soul")),
+            "unexpected unknown-field for identity.soul: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn known_provider_names_include_copilot_and_codex() {
+        let toml = r#"
+[providers.github-copilot]
+enabled = true
+
+[providers.openai-codex]
+enabled = true
+"#;
+        let result = validate_toml_str(toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| d.category != "unknown-provider"),
+            "unexpected unknown-provider diagnostics: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn tls_file_refs_resolve_relative_to_config_dir() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, "cert").unwrap();
+        std::fs::write(&key_path, "key").unwrap();
+
+        let config_path = dir.path().join("moltis.toml");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        writeln!(
+            f,
+            "[tls]\ncert_path = \"cert.pem\"\nkey_path = \"key.pem\"\n"
+        )
+        .unwrap();
+
+        let result = validate(Some(&config_path));
+        assert!(
+            result.diagnostics.iter().all(|d| d.category != "file-ref"),
+            "unexpected file-ref diagnostics: {:?}",
+            result.diagnostics
         );
     }
 }

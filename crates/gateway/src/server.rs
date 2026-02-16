@@ -4399,52 +4399,6 @@ async fn api_skills_handler(State(state): State<AppState>) -> impl IntoResponse 
     Json(serde_json::json!({ "skills": skills, "repos": repos }))
 }
 
-/// Search skills within a specific repo. Query params: source, q (optional).
-#[cfg(feature = "web-ui")]
-async fn api_search_handler(
-    repos: Vec<serde_json::Value>,
-    source: &str,
-    query: &str,
-) -> Json<serde_json::Value> {
-    let query = query.to_lowercase();
-    let skills: Vec<serde_json::Value> = repos
-        .into_iter()
-        .find(|repo| {
-            repo.get("source")
-                .and_then(|s| s.as_str())
-                .map(|s| s == source)
-                .unwrap_or(false)
-        })
-        .and_then(|repo| repo.get("skills").and_then(|s| s.as_array()).cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|skill| {
-            if query.is_empty() {
-                return true;
-            }
-            let name = skill
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let display = skill
-                .get("display_name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let desc = skill
-                .get("description")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            name.contains(&query) || display.contains(&query) || desc.contains(&query)
-        })
-        .take(30)
-        .collect();
-
-    Json(serde_json::json!({ "skills": skills }))
-}
-
 #[cfg(feature = "web-ui")]
 async fn api_skills_search_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -4452,16 +4406,104 @@ async fn api_skills_search_handler(
 ) -> impl IntoResponse {
     let source = params.get("source").cloned().unwrap_or_default();
     let query = params.get("q").cloned().unwrap_or_default();
-    let repos = state
-        .gateway
-        .services
-        .skills
-        .repos_list_full()
-        .await
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
-    api_search_handler(repos, &source, &query).await
+
+    // Fast path: search from the skills manifest instead of loading full per-skill
+    // metadata for every installed repo (which can be extremely slow for large
+    // repos like openclaw/skills).
+    match search_skills_from_manifest(state.gateway.services.skills.as_ref(), &source, &query).await {
+        Ok(skills) => Json(serde_json::json!({ "skills": skills })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(feature = "web-ui")]
+async fn search_skills_from_manifest(
+    _svc: &dyn crate::services::SkillsService,
+    source: &str,
+    query: &str,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    use moltis_skills::{
+        formats::PluginFormat,
+        manifest::ManifestStore,
+        parse,
+        requirements::check_requirements,
+        types::SkillsManifest,
+    };
+
+    let install_dir = moltis_skills::install::default_install_dir()?;
+    let manifest_path = ManifestStore::default_path()?;
+    let store = ManifestStore::new(manifest_path);
+    let manifest: SkillsManifest = store.load()?;
+
+    let Some(repo) = manifest.find_repo(source) else {
+        return Ok(Vec::new());
+    };
+
+    let drifted = repo
+        .commit_sha
+        .as_ref()
+        .and_then(|expected| {
+            let repo_dir = install_dir.join(&repo.repo_name);
+            crate::services::local_repo_head_sha(&repo_dir)
+                .map(|current| current != *expected)
+        })
+        .unwrap_or(false);
+
+    let needle = query.trim().to_ascii_lowercase();
+    let mut out = Vec::new();
+
+    // Manifest search is name-first for speed; enrich results by reading SKILL.md
+    // (for SKILL.md repos) only for the final results we return.
+    for state in &repo.skills {
+        if !needle.is_empty() && !state.name.to_ascii_lowercase().contains(&needle) {
+            continue;
+        }
+
+        let skill_dir = install_dir.join(&state.relative_path);
+        let meta_json = parse::read_meta_json(&skill_dir);
+        let display_name = meta_json.and_then(|m| m.display_name);
+
+        let mut description = String::new();
+        let mut eligible = true;
+        let mut missing_bins: Vec<String> = Vec::new();
+        let mut install_options: Vec<moltis_skills::types::InstallSpec> = Vec::new();
+
+        if repo.format == PluginFormat::Skill {
+            let skill_md = skill_dir.join("SKILL.md");
+            if let Ok(content) = std::fs::read_to_string(&skill_md)
+                && let Ok(meta) = parse::parse_metadata(&content, &skill_dir)
+            {
+                description = meta.description.clone();
+                let req = check_requirements(&meta);
+                eligible = req.eligible;
+                missing_bins = req.missing_bins;
+                install_options = req.install_options;
+            }
+        }
+
+        out.push(serde_json::json!({
+            "name": state.name.as_str(),
+            "display_name": display_name,
+            "description": description,
+            "relative_path": state.relative_path.as_str(),
+            "trusted": state.trusted,
+            "enabled": state.enabled,
+            "drifted": drifted,
+            "eligible": eligible,
+            "missing_bins": missing_bins,
+            "install_options": install_options,
+        }));
+
+        if out.len() >= 30 {
+            break;
+        }
+    }
+
+    Ok(out)
 }
 
 /// List cached tool images.
@@ -5509,8 +5551,9 @@ mod tests {
         assert!(content.contains("Hi there"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn websocket_header_auth_accepts_valid_session_cookie() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = Arc::new(
             crate::auth::CredentialStore::with_config(pool, &moltis_config::AuthConfig::default())
@@ -5527,8 +5570,9 @@ mod tests {
         assert!(websocket_header_authenticated(&headers, Some(&store), false).await);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn websocket_header_auth_accepts_valid_bearer_api_key() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = Arc::new(
             crate::auth::CredentialStore::with_config(pool, &moltis_config::AuthConfig::default())
@@ -5548,8 +5592,9 @@ mod tests {
         assert!(websocket_header_authenticated(&headers, Some(&store), false).await);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn websocket_header_auth_rejects_missing_credentials_when_setup_complete() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = Arc::new(
             crate::auth::CredentialStore::with_config(pool, &moltis_config::AuthConfig::default())
@@ -5569,8 +5614,9 @@ mod tests {
     /// so trusting loopback alone would bypass authentication for all
     /// internet traffic.  See CVE-2026-25253 for the analogous OpenClaw
     /// vulnerability.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn websocket_header_auth_rejects_local_when_password_set() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = Arc::new(
             crate::auth::CredentialStore::with_config(pool, &moltis_config::AuthConfig::default())
@@ -6179,5 +6225,58 @@ mod tests {
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("connect-src 'self' ws: wss:"));
+    }
+
+    #[cfg(feature = "web-ui")]
+    #[tokio::test]
+    async fn skills_search_uses_manifest_and_returns_matches() {
+        use moltis_skills::{
+            formats::PluginFormat,
+            types::{RepoEntry, SkillState, SkillsManifest},
+        };
+
+        let _guard = crate::test_support::TestDirsGuard::lock_only();
+
+        let tmp = tempfile::tempdir().unwrap();
+        moltis_config::set_data_dir(tmp.path().to_path_buf());
+
+        // Create installed skill dir + SKILL.md.
+        let install_dir = moltis_skills::install::default_install_dir().unwrap();
+        let skill_rel = "openclaw-skills/skills/tester/norway-roads";
+        let skill_dir = install_dir.join(skill_rel);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: norway-roads\ndescription: Norway roads\n---\nbody\n",
+        )
+        .unwrap();
+
+        // Write manifest pointing at the skill.
+        let mut manifest = SkillsManifest::default();
+        manifest.add_repo(RepoEntry {
+            source: "openclaw/skills".into(),
+            repo_name: "openclaw-skills".into(),
+            installed_at_ms: 0,
+            commit_sha: None,
+            format: PluginFormat::Skill,
+            skills: vec![SkillState {
+                name: "norway-roads".into(),
+                relative_path: skill_rel.into(),
+                trusted: false,
+                enabled: false,
+            }],
+        });
+        let manifest_path = moltis_skills::manifest::ManifestStore::default_path().unwrap();
+        std::fs::write(manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+        let svc = crate::services::NoopSkillsService;
+        let results = search_skills_from_manifest(&svc, "openclaw/skills", "norway")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["name"].as_str(), Some("norway-roads"));
+        assert_eq!(results[0]["description"].as_str(), Some("Norway roads"));
+
+        moltis_config::clear_data_dir();
     }
 }

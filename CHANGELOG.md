@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Instead, the backend exposes a `keyOptional` field on provider
   metadata, making the UI provider-agnostic.
 
+### Fixed
+
+- **Skills search UX**: The per-repo search input now clarifies it searches skill names (not repo URLs) and surfaces server search failures instead of silently returning empty results.
+
 ## [0.8.14] - 2026-02-11
 
 ### Security

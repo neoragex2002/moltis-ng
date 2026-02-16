@@ -161,14 +161,90 @@ fn risky_install_pattern(command: &str) -> Option<&'static str> {
         .find_map(|(needle, reason)| c.contains(needle).then_some(reason))
 }
 
+fn is_safe_markdown_url(url: &str) -> bool {
+    let compact: String = url
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect();
+    if compact.is_empty() {
+        return true;
+    }
+
+    if compact.starts_with('#')
+        || compact.starts_with('/')
+        || compact.starts_with("./")
+        || compact.starts_with("../")
+        || compact.starts_with("//")
+    {
+        return true;
+    }
+
+    let lower = compact.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+    {
+        return true;
+    }
+
+    if lower.starts_with("javascript:") || lower.starts_with("data:") || lower.starts_with("vbscript:") {
+        return false;
+    }
+
+    if let Some(colon) = compact.find(':') {
+        let first_delim = compact
+            .find(|c| c == '/' || c == '?' || c == '#')
+            .unwrap_or(compact.len());
+        if colon < first_delim {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Convert markdown to sanitized HTML using pulldown-cmark.
 pub(crate) fn markdown_to_html(md: &str) -> String {
-    use pulldown_cmark::{Options, Parser, html};
+    use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_TASKLISTS);
-    let parser = Parser::new_ext(md, opts);
+    let parser = Parser::new_ext(md, opts).filter_map(|event| match event {
+        Event::Html(_) | Event::InlineHtml(_) => None,
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Some(Event::Start(Tag::Link {
+            link_type,
+            dest_url: if is_safe_markdown_url(dest_url.as_ref()) {
+                dest_url
+            } else {
+                CowStr::Borrowed("#")
+            },
+            title,
+            id,
+        })),
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Some(Event::Start(Tag::Image {
+            link_type,
+            dest_url: if is_safe_markdown_url(dest_url.as_ref()) {
+                dest_url
+            } else {
+                CowStr::Borrowed("about:blank")
+            },
+            title,
+            id,
+        })),
+        other => Some(other),
+    });
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
     html_output
@@ -1322,7 +1398,7 @@ impl SkillsService for NoopSkillsService {
     }
 }
 
-fn local_repo_head_sha(repo_dir: &Path) -> Option<String> {
+pub(crate) fn local_repo_head_sha(repo_dir: &Path) -> Option<String> {
     let repo = gix::open(repo_dir).ok()?;
     let obj = repo.rev_parse_single("HEAD").ok()?;
     Some(obj.detach().to_hex().to_string())
@@ -2250,5 +2326,32 @@ mod tests {
     fn model_service_not_configured_error_returns_expected_message() {
         let error = model_service_not_configured_error("models.test");
         assert_eq!(error, "model service not configured");
+    }
+
+    #[test]
+    fn markdown_to_html_blocks_javascript_links() {
+        let html = markdown_to_html("[x](javascript:alert(1))");
+        assert!(!html.to_ascii_lowercase().contains("javascript:"));
+        assert!(html.contains("href=\"#\""));
+    }
+
+    #[test]
+    fn markdown_to_html_allows_https_links() {
+        let html = markdown_to_html("[x](https://example.com)");
+        assert!(html.contains("href=\"https://example.com\""));
+    }
+
+    #[test]
+    fn markdown_to_html_blocks_javascript_images() {
+        let html = markdown_to_html("![alt](javascript:alert(1))");
+        assert!(!html.to_ascii_lowercase().contains("javascript:"));
+        assert!(html.contains("src=\"about:blank\""));
+    }
+
+    #[test]
+    fn markdown_to_html_blocks_javascript_links_with_unicode_whitespace() {
+        let html = markdown_to_html("[x](java\u{00A0}script:alert(1))");
+        assert!(!html.to_ascii_lowercase().contains("javascript:"));
+        assert!(html.contains("href=\"#\""));
     }
 }

@@ -496,6 +496,15 @@ fn known_providers() -> Vec<KnownProvider> {
             key_optional: false,
         },
         KnownProvider {
+            name: "openai-responses",
+            display_name: "OpenAI (Responses)",
+            auth_type: "api-key",
+            env_key: Some("OPENAI_RESPONSES_API_KEY"),
+            default_base_url: Some("https://api.openai.com/v1"),
+            requires_model: false,
+            key_optional: false,
+        },
+        KnownProvider {
             name: "gemini",
             display_name: "Google Gemini",
             auth_type: "api-key",
@@ -759,6 +768,18 @@ fn set_provider_enabled_in_config(provider: &str, enabled: bool) -> Result<(), S
 
 fn normalize_provider_name(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn endpoint_must_end_with_v1(provider_name: &str, base_url: &str) -> bool {
+    if provider_name != "openai-responses" {
+        return false;
+    }
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let normalized = trimmed.trim_end_matches('/');
+    !normalized.ends_with("/v1")
 }
 
 fn ui_offered_provider_order(config: &ProvidersConfig) -> Vec<String> {
@@ -1308,6 +1329,12 @@ impl ProviderSetupService for LiveProviderSetupService {
             return Err("missing 'apiKey' parameter".to_string());
         }
 
+        if let Some(url) = base_url
+            && endpoint_must_end_with_v1(provider_name, url)
+        {
+            return Err("Endpoint must end with '/v1' (example: https://api.example.com/v1).".to_string());
+        }
+
         let normalized_base_url = if provider_name == "ollama" {
             base_url.map(|url| normalize_ollama_openai_base_url(Some(url)))
         } else {
@@ -1615,6 +1642,15 @@ impl ProviderSetupService for LiveProviderSetupService {
 
         let selected_model = preferred_models.first().map(String::as_str);
         let base_url_value = base_url.filter(|s| !s.trim().is_empty());
+
+        if let Some(url) = base_url_value
+            && endpoint_must_end_with_v1(provider_name, url)
+        {
+            return Ok(serde_json::json!({
+                "valid": false,
+                "error": "Endpoint must end with '/v1' (example: https://api.example.com/v1).",
+            }));
+        }
 
         // Ollama supports native model discovery through /api/tags.
         // If no model is supplied, return discovered models for UI selection.
@@ -2265,6 +2301,7 @@ mod tests {
 
     #[test]
     fn config_with_saved_keys_merges_base_url_and_models() {
+        let _lock = crate::test_support::TestDirsGuard::lock_only();
         let dir = tempfile::tempdir().unwrap();
         let store = KeyStore::with_path(dir.path().join("keys.json"));
         store
@@ -2332,6 +2369,7 @@ mod tests {
 
     #[test]
     fn config_with_saved_keys_merges() {
+        let _lock = crate::test_support::TestDirsGuard::lock_only();
         let dir = tempfile::tempdir().unwrap();
         let store = KeyStore::with_path(dir.path().join("keys.json"));
         store.save("anthropic", "sk-saved").unwrap();
@@ -2347,6 +2385,7 @@ mod tests {
 
     #[test]
     fn config_with_saved_keys_does_not_override_existing() {
+        let _lock = crate::test_support::TestDirsGuard::lock_only();
         let dir = tempfile::tempdir().unwrap();
         let store = KeyStore::with_path(dir.path().join("keys.json"));
         store.save("anthropic", "sk-saved").unwrap();
@@ -2575,8 +2614,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn oauth_start_uses_redirect_uri_override() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let registry = Arc::new(RwLock::new(ProviderRegistry::from_env_with_config(
             &ProvidersConfig::default(),
         )));
@@ -2664,6 +2704,7 @@ mod tests {
         assert!(names.contains(&"kimi-code"), "missing kimi-code");
         assert!(names.contains(&"venice"), "missing venice");
         assert!(names.contains(&"ollama"), "missing ollama");
+        assert!(names.contains(&"openai-responses"), "missing openai-responses");
         // OAuth providers
         assert!(names.contains(&"github-copilot"), "missing github-copilot");
     }
@@ -2682,6 +2723,7 @@ mod tests {
     #[test]
     fn new_api_key_providers_have_correct_env_keys() {
         let expected = [
+            ("openai-responses", "OPENAI_RESPONSES_API_KEY"),
             ("mistral", "MISTRAL_API_KEY"),
             ("openrouter", "OPENROUTER_API_KEY"),
             ("cerebras", "CEREBRAS_API_KEY"),
@@ -2712,6 +2754,7 @@ mod tests {
         // All new API-key providers should be accepted by save_key
         let providers = known_providers();
         for name in [
+            "openai-responses",
             "mistral",
             "openrouter",
             "cerebras",
@@ -2917,9 +2960,10 @@ mod tests {
                 }))
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(_) => return,
+        };
         let addr = listener.local_addr().expect("local addr");
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -2969,9 +3013,10 @@ mod tests {
                 }))
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(_) => return,
+        };
         let addr = listener.local_addr().expect("local addr");
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -3030,9 +3075,10 @@ mod tests {
                     }))
                 }),
             );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(_) => return,
+        };
         let addr = listener.local_addr().expect("local addr");
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;

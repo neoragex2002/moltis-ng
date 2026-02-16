@@ -41,11 +41,13 @@ export function getProviderModal() {
 // Providers that support custom endpoint configuration
 var OPENAI_COMPATIBLE_PROVIDERS = [
 	"openai",
+	"openai-responses",
 	"mistral",
 	"openrouter",
 	"cerebras",
 	"minimax",
 	"moonshot",
+	"kimi-code",
 	"venice",
 	"ollama",
 ];
@@ -181,7 +183,8 @@ export function showApiKeyForm(provider) {
 		var endpointLabel = document.createElement("label");
 		endpointLabel.className = "text-xs text-[var(--muted)]";
 		endpointLabel.style.marginTop = "8px";
-		endpointLabel.textContent = "Endpoint (optional)";
+		endpointLabel.textContent =
+			provider.name === "openai-responses" ? "Endpoint (must end with /v1)" : "Endpoint (optional)";
 		form.appendChild(endpointLabel);
 
 		endpointInp = document.createElement("input");
@@ -193,7 +196,10 @@ export function showApiKeyForm(provider) {
 		var hint = document.createElement("div");
 		hint.className = "text-xs text-[var(--muted)]";
 		hint.style.marginTop = "2px";
-		hint.textContent = "Leave empty to use the default endpoint.";
+		hint.textContent =
+			provider.name === "openai-responses"
+				? "Must end with /v1 (example: https://api.example.com/v1). Uses /responses + /models (no /chat/completions). Leave empty to use the default endpoint."
+				: "Leave empty to use the default endpoint.";
 		form.appendChild(hint);
 	}
 
@@ -1041,7 +1047,11 @@ function renderLocalModelSelection(provider, sysInfo, modelsData) {
 		// Non-Apple Silicon - just show info
 		var backendDiv = document.createElement("div");
 		backendDiv.className = "text-xs text-[var(--muted)] mb-4";
-		backendDiv.innerHTML = `<span class="font-medium">Backend:</span> ${sysInfo.backendNote}`;
+		var backendLabel = document.createElement("span");
+		backendLabel.className = "font-medium";
+		backendLabel.textContent = "Backend:";
+		backendDiv.appendChild(backendLabel);
+		backendDiv.appendChild(document.createTextNode(` ${sysInfo.backendNote}`));
 		wrapper.appendChild(backendDiv);
 	}
 
@@ -1126,7 +1136,11 @@ function renderLocalModelSelection(provider, sysInfo, modelsData) {
 		searchBtn.disabled = false;
 		searchBtn.textContent = "Search";
 		if (!(res?.ok && res.payload?.results?.length)) {
-			searchResults.innerHTML = '<div class="text-xs text-[var(--muted)] py-2">No results found</div>';
+			searchResults.textContent = "";
+			var empty = document.createElement("div");
+			empty.className = "text-xs text-[var(--muted)] py-2";
+			empty.textContent = "No results found";
+			searchResults.appendChild(empty);
 			return;
 		}
 		res.payload.results.forEach((result) => {
@@ -1226,7 +1240,11 @@ function renderLocalModelSelection(provider, sysInfo, modelsData) {
 			showModelDownloadProgress({ id: res.payload.modelId, displayName: repo }, provider);
 		} else {
 			var err = res?.error?.message || "Failed to configure model";
-			searchResults.innerHTML = `<div class="text-xs text-[var(--error)] py-2">${err}</div>`;
+			searchResults.textContent = "";
+			var errEl = document.createElement("div");
+			errEl.className = "text-xs text-[var(--error)] py-2";
+			errEl.textContent = err;
+			searchResults.appendChild(errEl);
 		}
 	});
 
@@ -1303,21 +1321,32 @@ function createHfSearchResultCard(model, _provider) {
 
 		// Show configuring state in modal
 		var m = els();
-		m.body.innerHTML = "";
+		m.body.textContent = "";
 		var status = document.createElement("div");
 		status.className = "provider-key-form";
-		status.innerHTML = `<div class="text-sm text-[var(--text)]">Configuring ${model.displayName}...</div>`;
+		var statusText = document.createElement("div");
+		statusText.className = "text-sm text-[var(--text)]";
+		statusText.textContent = `Configuring ${model.displayName}...`;
+		status.appendChild(statusText);
 		m.body.appendChild(status);
 
 		var res = await sendRpc("providers.local.configure_custom", params);
 		if (res?.ok) {
 			fetchModels();
 			if (S.refreshProvidersPage) S.refreshProvidersPage();
-			status.innerHTML = `<div class="provider-status">${model.displayName} configured!</div>`;
+			status.textContent = "";
+			var done = document.createElement("div");
+			done.className = "provider-status";
+			done.textContent = `${model.displayName} configured!`;
+			status.appendChild(done);
 			setTimeout(closeProviderModal, 1500);
 		} else {
 			var err = res?.error?.message || "Failed to configure model";
-			status.innerHTML = `<div class="text-sm text-[var(--error)]">${err}</div>`;
+			status.textContent = "";
+			var errText = document.createElement("div");
+			errText.className = "text-sm text-[var(--error)]";
+			errText.textContent = err;
+			status.appendChild(errText);
 		}
 	});
 

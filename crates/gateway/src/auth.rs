@@ -809,8 +809,9 @@ mod tests {
         assert_ne!(h, sha256_hex("world"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_credential_store_password() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -837,8 +838,9 @@ mod tests {
         assert!(store.change_password("wrong", "x").await.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_credential_store_sessions() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -850,8 +852,9 @@ mod tests {
         assert!(!store.validate_session(&token).await.unwrap());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_credential_store_api_keys() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -882,8 +885,9 @@ mod tests {
         assert!(keys.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_credential_store_api_keys_with_scopes() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -924,8 +928,9 @@ mod tests {
         assert!(store.verify_api_key(&raw_key2).await.unwrap().is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_credential_store_reset_all() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -961,8 +966,9 @@ mod tests {
         assert!(!store.is_auth_disabled());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_auth_disabled_persists_across_restart() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool.clone()).await.unwrap();
 
@@ -984,8 +990,9 @@ mod tests {
         assert!(store3.is_setup_complete());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_credential_store_env_vars() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -1025,8 +1032,9 @@ mod tests {
         assert_eq!(vars[0].key, "OTHER");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_credential_store_passkeys() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -1054,8 +1062,9 @@ mod tests {
         assert!(!store.has_passkeys().await.unwrap());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_change_password_invalidates_sessions() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -1079,8 +1088,9 @@ mod tests {
         assert!(store.validate_session(&token3).await.unwrap());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_add_password_marks_setup_complete_and_reenables_auth() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -1094,8 +1104,9 @@ mod tests {
         assert!(!store.is_auth_disabled());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_store_passkey_marks_setup_complete_and_reenables_auth() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -1112,8 +1123,9 @@ mod tests {
         assert!(!store.is_auth_disabled());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_mark_setup_complete_with_passkey_only() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -1132,8 +1144,9 @@ mod tests {
         assert!(!store.is_auth_disabled());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_setup_complete_persists_with_passkey_only() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool.clone()).await.unwrap();
 
@@ -1149,8 +1162,9 @@ mod tests {
         assert!(store2.is_setup_complete());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_removing_last_passkey_clears_setup_complete() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 
@@ -1170,8 +1184,9 @@ mod tests {
         assert!(!store.is_setup_complete());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_removing_passkey_keeps_setup_when_password_exists() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = CredentialStore::new(pool).await.unwrap();
 

@@ -62,6 +62,9 @@ pub mod voice;
 pub mod voice_agent_tools;
 pub mod ws;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 /// Run database migrations for the gateway crate.
 ///
 /// This creates the auth tables (auth_password, passkeys, api_keys, auth_sessions),

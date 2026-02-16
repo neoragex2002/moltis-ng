@@ -255,6 +255,95 @@ pub enum SseLineResult {
     Events(Vec<StreamEvent>),
 }
 
+#[derive(Default)]
+pub struct SseFrameParser {
+    buf: Vec<u8>,
+}
+
+impl SseFrameParser {
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() {
+            return Some(0);
+        }
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    fn take_next_frame(&mut self) -> Option<Vec<u8>> {
+        let lf = Self::find_subsequence(&self.buf, b"\n\n");
+        let crlf = Self::find_subsequence(&self.buf, b"\r\n\r\n");
+        let (pos, delim_len) = match (lf, crlf) {
+            (Some(a), Some(b)) => {
+                if a <= b {
+                    (a, 2)
+                } else {
+                    (b, 4)
+                }
+            }
+            (Some(a), None) => (a, 2),
+            (None, Some(b)) => (b, 4),
+            (None, None) => return None,
+        };
+
+        let remainder = self.buf.split_off(pos + delim_len);
+        let frame_with_delim = std::mem::replace(&mut self.buf, remainder);
+        Some(frame_with_delim[..pos].to_vec())
+    }
+
+    fn assemble_data_payload(frame: &[u8]) -> Option<Vec<u8>> {
+        let mut data_lines: Vec<&[u8]> = Vec::new();
+        for raw_line in frame.split(|b| *b == b'\n') {
+            let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with(b":") {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix(b"data:") else {
+                continue;
+            };
+            let value = rest.strip_prefix(b" ").unwrap_or(rest);
+            data_lines.push(value);
+        }
+
+        if data_lines.is_empty() {
+            return None;
+        }
+
+        let mut out = Vec::new();
+        for (idx, line) in data_lines.into_iter().enumerate() {
+            if idx > 0 {
+                out.push(b'\n');
+            }
+            out.extend_from_slice(line);
+        }
+        Some(out)
+    }
+
+    pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(bytes);
+        let mut out = Vec::new();
+
+        while let Some(frame) = self.take_next_frame() {
+            let Some(payload_bytes) = Self::assemble_data_payload(&frame) else {
+                continue;
+            };
+            let Ok(payload) = String::from_utf8(payload_bytes) else {
+                continue;
+            };
+            let payload = payload.trim().to_string();
+            if payload.is_empty() {
+                continue;
+            }
+            out.push(payload);
+        }
+
+        out
+    }
+}
+
 /// Process a single SSE data line and return any events to yield.
 ///
 /// This handles the common OpenAI streaming format used by:
@@ -305,14 +394,25 @@ pub fn process_openai_sse_line(data: &str, state: &mut StreamingToolState) -> Ss
 
             // Check if this is a new tool call (has id and function.name)
             if let (Some(id), Some(name)) = (tc["id"].as_str(), tc["function"]["name"].as_str()) {
-                state
-                    .tool_calls
-                    .insert(index, (id.to_string(), name.to_string(), String::new()));
-                events.push(StreamEvent::ToolCallStart {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    index,
-                });
+                match state.tool_calls.entry(index) {
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert((id.to_string(), name.to_string(), String::new()));
+                        events.push(StreamEvent::ToolCallStart {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            index,
+                        });
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut o) => {
+                        let (existing_id, existing_name, _) = o.get_mut();
+                        if existing_id.is_empty() {
+                            *existing_id = id.to_string();
+                        }
+                        if existing_name.is_empty() {
+                            *existing_name = name.to_string();
+                        }
+                    }
+                }
             }
 
             // Handle arguments delta

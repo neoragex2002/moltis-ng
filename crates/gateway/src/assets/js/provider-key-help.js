@@ -9,6 +9,10 @@ var KEY_SOURCE_BY_PROVIDER = {
 		url: "https://platform.openai.com/api-keys",
 		label: "OpenAI Platform",
 	},
+	"openai-responses": {
+		url: "https://platform.openai.com/api-keys",
+		label: "OpenAI Platform",
+	},
 	gemini: {
 		url: "https://aistudio.google.com/app/apikey",
 		label: "Google AI Studio",

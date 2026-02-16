@@ -43,10 +43,14 @@ fn is_context_window_error(msg: &str) -> bool {
 
 /// Error patterns that indicate a transient server error worth retrying.
 const RETRYABLE_PATTERNS: &[&str] = &[
+    "http 429",
     "http 500",
     "http 502",
     "http 503",
     "http 529",
+    "too many requests",
+    "rate limit",
+    "retry after",
     "server_error",
     "internal server error",
     "overloaded",
@@ -2720,6 +2724,51 @@ mod tests {
 
     #[tokio::test]
     async fn test_parallel_execution_is_concurrent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ConcurrencyProbeTool {
+            tool_name: String,
+            delay_ms: u64,
+            current: Arc<AtomicUsize>,
+            max_seen: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl crate::tool_registry::AgentTool for ConcurrencyProbeTool {
+            fn name(&self) -> &str {
+                &self.tool_name
+            }
+
+            fn description(&self) -> &str {
+                "Concurrency probe tool for testing"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+
+            async fn execute(&self, _params: serde_json::Value) -> Result<serde_json::Value> {
+                let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+                loop {
+                    let max = self.max_seen.load(Ordering::SeqCst);
+                    if now <= max {
+                        break;
+                    }
+                    if self
+                        .max_seen
+                        .compare_exchange(max, now, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+                self.current.fetch_sub(1, Ordering::SeqCst);
+                Ok(serde_json::json!({ "tool": self.tool_name }))
+            }
+        }
+
         let provider = Arc::new(MultiToolProvider {
             call_count: std::sync::atomic::AtomicUsize::new(0),
             tool_calls: vec![
@@ -2742,33 +2791,38 @@ mod tests {
         });
 
         let mut tools = ToolRegistry::new();
-        tools.register(Box::new(SlowTool {
+        let current = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        tools.register(Box::new(ConcurrencyProbeTool {
             tool_name: "slow_a".into(),
             delay_ms: 100,
+            current: Arc::clone(&current),
+            max_seen: Arc::clone(&max_seen),
         }));
-        tools.register(Box::new(SlowTool {
+        tools.register(Box::new(ConcurrencyProbeTool {
             tool_name: "slow_b".into(),
             delay_ms: 100,
+            current: Arc::clone(&current),
+            max_seen: Arc::clone(&max_seen),
         }));
-        tools.register(Box::new(SlowTool {
+        tools.register(Box::new(ConcurrencyProbeTool {
             tool_name: "slow_c".into(),
             delay_ms: 100,
+            current: Arc::clone(&current),
+            max_seen: Arc::clone(&max_seen),
         }));
 
-        let start = std::time::Instant::now();
         let uc = UserContent::text("Use all tools");
         let result = run_agent_loop(provider, &tools, "Test bot", &uc, None, None)
             .await
             .unwrap();
-        let elapsed = start.elapsed();
 
         assert_eq!(result.text, "All done");
         assert_eq!(result.tool_calls_made, 3);
-        // If sequential, would take ≥300ms. Parallel should be ~100ms.
         assert!(
-            elapsed < std::time::Duration::from_millis(250),
-            "parallel execution took {:?}, expected < 250ms",
-            elapsed
+            max_seen.load(Ordering::SeqCst) > 1,
+            "expected concurrent tool execution, but max parallelism was {}",
+            max_seen.load(Ordering::SeqCst)
         );
     }
 
@@ -3882,6 +3936,7 @@ mod tests {
 
     #[test]
     fn test_is_retryable_server_error() {
+        assert!(is_retryable_server_error("HTTP 429 Too Many Requests"));
         assert!(is_retryable_server_error(
             "openai-codex API error HTTP 500 Internal Server Error: {}"
         ));

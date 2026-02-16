@@ -364,7 +364,8 @@ impl LlmProvider for AnthropicProvider {
                     buf = buf[pos + 2..].to_string();
 
                     for line in block.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
+                        if let Some(rest) = line.strip_prefix("data:") {
+                            let data = rest.trim_start();
                             if let Ok(evt) = serde_json::from_str::<serde_json::Value>(data) {
                                 let evt_type = evt["type"].as_str().unwrap_or("");
                                 match evt_type {

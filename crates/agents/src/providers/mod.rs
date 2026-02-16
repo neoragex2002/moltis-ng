@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod openai;
 pub mod openai_compat;
+pub mod openai_responses;
 
 #[cfg(feature = "provider-genai")]
 pub mod genai_provider;
@@ -303,10 +304,13 @@ fn resolve_api_key(
         .get(provider)
         .and_then(|e| e.api_key.clone())
         .or_else(|| {
-            std::env::var(env_key)
-                .ok()
-                .filter(|k| !k.is_empty())
-                .map(secrecy::Secret::new)
+            let primary = std::env::var(env_key).ok().filter(|k| !k.is_empty());
+            let legacy = if provider == "gemini" && env_key == "GEMINI_API_KEY" {
+                std::env::var("GOOGLE_API_KEY").ok().filter(|k| !k.is_empty())
+            } else {
+                None
+            };
+            primary.or(legacy).map(secrecy::Secret::new)
         })
         .filter(|s| !s.expose_secret().is_empty())
 }
@@ -1235,6 +1239,11 @@ impl ProviderRegistry {
                 let (model_id, display_name, created_at) =
                     (model.id, model.display_name, model.created_at);
                 if self.has_provider_model(&provider_label, &model_id) {
+                    tracing::warn!(
+                        provider = %provider_label,
+                        model = %model_id,
+                        "skipping duplicate model registration; check provider aliases for collisions"
+                    );
                     continue;
                 }
                 let provider = Arc::new(anthropic::AnthropicProvider::with_alias(
@@ -1280,9 +1289,65 @@ impl ProviderRegistry {
                 let (model_id, display_name, created_at) =
                     (model.id, model.display_name, model.created_at);
                 if self.has_provider_model(&provider_label, &model_id) {
+                    tracing::warn!(
+                        provider = %provider_label,
+                        model = %model_id,
+                        "skipping duplicate model registration; check provider aliases for collisions"
+                    );
                     continue;
                 }
                 let provider = Arc::new(openai::OpenAiProvider::new_with_name(
+                    key.clone(),
+                    model_id.clone(),
+                    base_url.clone(),
+                    provider_label.clone(),
+                ));
+                self.register(
+                    ModelInfo {
+                        id: model_id,
+                        provider: provider_label.clone(),
+                        display_name,
+                        created_at,
+                    },
+                    provider,
+                );
+            }
+        }
+
+        // OpenAI (Responses-only) — register models from `/models` and use `/responses` for all requests.
+        if config.is_enabled("openai-responses")
+            && let Some(key) =
+                resolve_api_key(config, "openai-responses", "OPENAI_RESPONSES_API_KEY")
+        {
+            let base_url = config
+                .get("openai-responses")
+                .and_then(|e| e.base_url.clone())
+                .or_else(|| std::env::var("OPENAI_RESPONSES_BASE_URL").ok())
+                .unwrap_or_else(|| "https://api.openai.com/v1".into());
+
+            let alias = config.get("openai-responses").and_then(|e| e.alias.clone());
+            let provider_label = alias.clone().unwrap_or_else(|| "openai-responses".into());
+
+            let preferred = configured_models_for_provider(config, "openai-responses");
+            let discovered = if should_fetch_models(config, "openai-responses") {
+                openai::available_models(&key, &base_url)
+            } else {
+                Vec::new()
+            };
+            let models = merge_preferred_and_discovered_models(preferred, discovered);
+
+            for model in models {
+                let (model_id, display_name, created_at) =
+                    (model.id, model.display_name, model.created_at);
+                if self.has_provider_model(&provider_label, &model_id) {
+                    tracing::warn!(
+                        provider = %provider_label,
+                        model = %model_id,
+                        "skipping duplicate model registration; check provider aliases for collisions"
+                    );
+                    continue;
+                }
+                let provider = Arc::new(openai_responses::OpenAiResponsesProvider::new_with_name(
                     key.clone(),
                     model_id.clone(),
                     base_url.clone(),

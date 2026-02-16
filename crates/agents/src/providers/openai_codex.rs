@@ -1,4 +1,9 @@
-use std::{collections::HashSet, pin::Pin, sync::mpsc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    sync::mpsc,
+    time::Duration,
+};
 
 use {
     async_trait::async_trait,
@@ -14,7 +19,7 @@ use crate::{
     model::{
         ChatMessage, CompletionResponse, LlmProvider, StreamEvent, ToolCall, Usage, UserContent,
     },
-    providers::openai_compat::to_responses_api_tools,
+    providers::openai_compat::{SseFrameParser, to_responses_api_tools},
 };
 
 pub struct OpenAiCodexProvider {
@@ -569,35 +574,47 @@ impl LlmProvider for OpenAiCodexProvider {
         // Collect the SSE stream into a final response
         let mut text_buf = String::new();
         let mut tool_calls: Vec<ToolCall> = vec![];
-        // Track in-progress function calls by index
-        let mut fn_call_ids: Vec<String> = vec![];
-        let mut fn_call_names: Vec<String> = vec![];
-        let mut fn_call_args: Vec<String> = vec![];
+
+        let mut tool_calls_by_index: HashMap<usize, (String, String)> = HashMap::new();
+        let mut tool_args_by_index: HashMap<usize, String> = HashMap::new();
+        let mut tool_args_started: HashSet<usize> = HashSet::new();
+        let mut tool_index_by_call_id: HashMap<String, usize> = HashMap::new();
+        let mut tool_index_by_item_key: HashMap<(u64, String), usize> = HashMap::new();
+        let mut current_tool_index: usize = 0;
         let mut input_tokens: u32 = 0;
         let mut output_tokens: u32 = 0;
 
         let mut byte_stream = http_resp.bytes_stream();
-        let mut buf = String::new();
+        let mut sse = SseFrameParser::default();
+        let mut done = false;
 
         while let Some(chunk) = byte_stream.next().await {
             let chunk = chunk?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].trim().to_string();
-                buf = buf[pos + 1..].to_string();
-
-                if line.is_empty() {
-                    continue;
-                }
-                let Some(data) = line.strip_prefix("data: ") else {
-                    continue;
-                };
-                if data == "[DONE]" {
+            for payload in sse.push_bytes(&chunk) {
+                if payload == "[DONE]" {
+                    done = true;
                     break;
                 }
-                let Ok(evt) = serde_json::from_str::<serde_json::Value>(data) else {
+
+                let Ok(evt) = serde_json::from_str::<serde_json::Value>(&payload) else {
                     continue;
+                };
+
+                let resolve_args_index = |evt: &serde_json::Value| -> Option<usize> {
+                    evt.get("output_index")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|output_index| {
+                            evt.get("item_id").and_then(|v| v.as_str()).and_then(|item_id| {
+                                tool_index_by_item_key
+                                    .get(&(output_index, item_id.to_string()))
+                                    .copied()
+                            })
+                        })
+                        .or_else(|| {
+                            evt.get("call_id")
+                                .and_then(|v| v.as_str())
+                                .and_then(|id| tool_index_by_call_id.get(id).copied())
+                        })
                 };
 
                 match evt["type"].as_str().unwrap_or("") {
@@ -608,22 +625,56 @@ impl LlmProvider for OpenAiCodexProvider {
                     },
                     "response.output_item.added" => {
                         if evt["item"]["type"].as_str() == Some("function_call") {
-                            fn_call_ids
-                                .push(evt["item"]["call_id"].as_str().unwrap_or("").to_string());
-                            fn_call_names
-                                .push(evt["item"]["name"].as_str().unwrap_or("").to_string());
-                            fn_call_args.push(String::new());
+                            let output_index = evt.get("output_index").and_then(|v| v.as_u64());
+                            let item_id = evt
+                                .get("item")
+                                .and_then(|v| v.get("id"))
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string());
+                            let id = evt["item"]["call_id"]
+                                .as_str()
+                                .map(|v| v.to_string())
+                                .or_else(|| item_id.clone())
+                                .unwrap_or_default();
+                            let name = evt["item"]["name"].as_str().unwrap_or("").to_string();
+
+                            let index = current_tool_index;
+                            current_tool_index = current_tool_index.saturating_add(1);
+                            tool_calls_by_index.insert(index, (id.clone(), name.clone()));
+                            tool_index_by_call_id.insert(id.clone(), index);
+                            if let (Some(output_index), Some(item_id)) = (output_index, item_id) {
+                                tool_index_by_item_key.insert((output_index, item_id), index);
+                            }
                         }
                     },
                     "response.function_call_arguments.delta" => {
                         if let Some(delta) = evt["delta"].as_str()
-                            && let Some(last) = fn_call_args.last_mut()
+                            && !delta.is_empty()
                         {
-                            last.push_str(delta);
+                            let Some(index) = resolve_args_index(&evt) else {
+                                continue;
+                            };
+                            tool_args_started.insert(index);
+                            tool_args_by_index.entry(index).or_default().push_str(delta);
                         }
                     },
                     "response.function_call_arguments.done" => {
-                        // function call complete — will be collected at the end
+                        let Some(arguments) = evt.get("arguments").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        if arguments.is_empty() {
+                            continue;
+                        }
+                        let Some(index) = resolve_args_index(&evt) else {
+                            continue;
+                        };
+                        if !tool_args_started.contains(&index) {
+                            tool_args_started.insert(index);
+                            tool_args_by_index
+                                .entry(index)
+                                .or_default()
+                                .push_str(arguments);
+                        }
                     },
                     "response.completed" => {
                         if let Some(u) = evt["response"]["usage"].as_object() {
@@ -643,17 +694,22 @@ impl LlmProvider for OpenAiCodexProvider {
                     _ => {},
                 }
             }
+
+            if done {
+                break;
+            }
         }
 
         // Build tool calls from collected parts
-        for i in 0..fn_call_ids.len() {
-            let args_str = &fn_call_args[i];
+        let mut indices: Vec<usize> = tool_calls_by_index.keys().copied().collect();
+        indices.sort_unstable();
+        for index in indices {
+            let Some((id, name)) = tool_calls_by_index.get(&index).cloned() else {
+                continue;
+            };
+            let args_str = tool_args_by_index.get(&index).map(String::as_str).unwrap_or("");
             let arguments = serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
-            tool_calls.push(ToolCall {
-                id: fn_call_ids[i].clone(),
-                name: fn_call_names[i].clone(),
-                arguments,
-            });
+            tool_calls.push(ToolCall { id, name, arguments });
         }
 
         let text = if text_buf.is_empty() {
@@ -757,13 +813,15 @@ impl LlmProvider for OpenAiCodexProvider {
             };
 
             let mut byte_stream = resp.bytes_stream();
-            let mut buf = String::new();
+            let mut sse = SseFrameParser::default();
             let mut input_tokens: u32 = 0;
             let mut output_tokens: u32 = 0;
 
             // Track tool calls being streamed (index -> (id, name))
-            let mut tool_calls: std::collections::HashMap<usize, (String, String)> =
-                std::collections::HashMap::new();
+            let mut tool_calls: HashMap<usize, (String, String)> = HashMap::new();
+            let mut tool_args_started: HashSet<usize> = HashSet::new();
+            let mut tool_index_by_call_id: HashMap<String, usize> = HashMap::new();
+            let mut tool_index_by_item_key: HashMap<(u64, String), usize> = HashMap::new();
             let mut current_tool_index: usize = 0;
 
             while let Some(chunk) = byte_stream.next().await {
@@ -774,32 +832,45 @@ impl LlmProvider for OpenAiCodexProvider {
                         return;
                     }
                 };
-                buf.push_str(&String::from_utf8_lossy(&chunk));
 
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].trim().to_string();
-                    buf = buf[pos + 1..].to_string();
-
-                    if line.is_empty() {
-                        continue;
-                    }
-
-                    let Some(data) = line.strip_prefix("data: ") else {
-                        continue;
-                    };
-
-                    if data == "[DONE]" {
+                for payload in sse.push_bytes(&chunk) {
+                    if payload == "[DONE]" {
                         // Emit completion for any pending tool calls
-                        for index in tool_calls.keys() {
-                            yield StreamEvent::ToolCallComplete { index: *index };
+                        let mut indices: Vec<usize> = tool_calls.keys().copied().collect();
+                        indices.sort_unstable();
+                        for index in indices {
+                            yield StreamEvent::ToolCallComplete { index };
                         }
-                        yield StreamEvent::Done(Usage { input_tokens, output_tokens, ..Default::default() });
+                        yield StreamEvent::Done(Usage {
+                            input_tokens,
+                            output_tokens,
+                            ..Default::default()
+                        });
                         return;
                     }
 
-                    if let Ok(evt) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Ok(evt) = serde_json::from_str::<serde_json::Value>(&payload) {
                         let evt_type = evt["type"].as_str().unwrap_or("");
                         trace!(evt_type = %evt_type, evt = %evt, "openai-codex stream event");
+
+                        let resolve_args_index = |evt: &serde_json::Value| -> Option<usize> {
+                            evt.get("output_index")
+                                .and_then(|v| v.as_u64())
+                                .and_then(|output_index| {
+                                    evt.get("item_id")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|item_id| {
+                                            tool_index_by_item_key
+                                                .get(&(output_index, item_id.to_string()))
+                                                .copied()
+                                        })
+                                })
+                                .or_else(|| {
+                                    evt.get("call_id")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|id| tool_index_by_call_id.get(id).copied())
+                                })
+                        };
 
                         match evt_type {
                             "response.output_text.delta" => {
@@ -812,23 +883,35 @@ impl LlmProvider for OpenAiCodexProvider {
                             "response.output_item.added" => {
                                 // New output item - could be text or function_call
                                 if evt["item"]["type"].as_str() == Some("function_call") {
-                                    let id = evt["item"]["call_id"].as_str().unwrap_or("").to_string();
+                                    let output_index = evt.get("output_index").and_then(|v| v.as_u64());
+                                    let item_id = evt
+                                        .get("item")
+                                        .and_then(|v| v.get("id"))
+                                        .and_then(|v| v.as_str())
+                                        .map(|v| v.to_string());
+                                    let id = evt["item"]["call_id"]
+                                        .as_str()
+                                        .map(|v| v.to_string())
+                                        .or_else(|| item_id.clone())
+                                        .unwrap_or_default();
                                     let name = evt["item"]["name"].as_str().unwrap_or("").to_string();
                                     let index = current_tool_index;
                                     current_tool_index += 1;
                                     tool_calls.insert(index, (id.clone(), name.clone()));
+                                    tool_index_by_call_id.insert(id.clone(), index);
+                                    if let (Some(output_index), Some(item_id)) = (output_index, item_id) {
+                                        tool_index_by_item_key.insert((output_index, item_id), index);
+                                    }
                                     yield StreamEvent::ToolCallStart { id, name, index };
                                 }
                             }
                             "response.function_call_arguments.delta" => {
                                 if let Some(delta) = evt["delta"].as_str() {
                                     if !delta.is_empty() {
-                                        // Find the index for this tool call (use the most recent one)
-                                        let index = if current_tool_index > 0 {
-                                            current_tool_index - 1
-                                        } else {
-                                            0
+                                        let Some(index) = resolve_args_index(&evt) else {
+                                            continue;
                                         };
+                                        tool_args_started.insert(index);
                                         yield StreamEvent::ToolCallArgumentsDelta {
                                             index,
                                             delta: delta.to_string(),
@@ -837,7 +920,22 @@ impl LlmProvider for OpenAiCodexProvider {
                                 }
                             }
                             "response.function_call_arguments.done" => {
-                                // Function call arguments complete - tool call will be finalized at [DONE]
+                                let Some(arguments) = evt.get("arguments").and_then(|v| v.as_str()) else {
+                                    continue;
+                                };
+                                if arguments.is_empty() {
+                                    continue;
+                                }
+                                let Some(index) = resolve_args_index(&evt) else {
+                                    continue;
+                                };
+                                if !tool_args_started.contains(&index) {
+                                    tool_args_started.insert(index);
+                                    yield StreamEvent::ToolCallArgumentsDelta {
+                                        index,
+                                        delta: arguments.to_string(),
+                                    };
+                                }
                             }
                             "response.completed" => {
                                 if let Some(u) = evt["response"]["usage"].as_object() {
@@ -849,10 +947,16 @@ impl LlmProvider for OpenAiCodexProvider {
                                         .unwrap_or(0) as u32;
                                 }
                                 // Emit completion for any pending tool calls
-                                for index in tool_calls.keys() {
-                                    yield StreamEvent::ToolCallComplete { index: *index };
+                                let mut indices: Vec<usize> = tool_calls.keys().copied().collect();
+                                indices.sort_unstable();
+                                for index in indices {
+                                    yield StreamEvent::ToolCallComplete { index };
                                 }
-                                yield StreamEvent::Done(Usage { input_tokens, output_tokens, ..Default::default() });
+                                yield StreamEvent::Done(Usage {
+                                    input_tokens,
+                                    output_tokens,
+                                    ..Default::default()
+                                });
                                 return;
                             }
                             "error" | "response.failed" => {

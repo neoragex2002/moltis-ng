@@ -313,8 +313,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn speak_tool_returns_media_path() {
+        let _dirs = crate::test_support::TestDirsGuard::new();
         let tool = SpeakTool::new(Arc::new(MockTts));
         let out = tool
             .execute(json!({ "text": "hello world", "format": "ogg" }))

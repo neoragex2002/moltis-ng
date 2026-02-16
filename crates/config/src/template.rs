@@ -84,9 +84,9 @@ auto_generate = true              # Auto-generate local CA and server certificat
 #   alias     - Custom name for metrics labels (useful for multiple instances)
 
 [providers]
-offered = ["local-llm", "github-copilot", "openai", "anthropic", "ollama", "moonshot"] # Enabled providers and those shown in onboarding/picker UI ([] = enable/show all)
+offered = ["local-llm", "github-copilot", "openai", "openai-responses", "anthropic", "ollama", "moonshot"] # Enabled providers and those shown in onboarding/picker UI ([] = enable/show all)
 # All available providers:
-#   "anthropic", "openai", "gemini", "groq", "xai", "deepseek",
+#   "anthropic", "openai", "openai-responses", "gemini", "groq", "xai", "deepseek",
 #   "mistral", "openrouter", "cerebras", "minimax", "moonshot",
 #   "venice", "ollama", "local-llm", "openai-codex", "github-copilot",
 #   "kimi-code"
@@ -104,15 +104,27 @@ offered = ["local-llm", "github-copilot", "openai", "anthropic", "ollama", "moon
 [providers.openai]
 # enabled = true
 # api_key = "sk-..."                          # Or set OPENAI_API_KEY env var
-models = ["gpt-5.3", "gpt-5.2"]              # Preferred models shown first
+models = ["gpt-5.2", "gpt-5.2-chat-latest", "gpt-5-mini"] # Preferred models shown first
 # fetch_models = true
 # base_url = "https://api.openai.com/v1"     # API endpoint (change for Azure, etc.)
+#                                           # Note: Moltis auto-retries via `/responses` for models
+#                                           # that aren't supported on `/chat/completions`.
 # alias = "openai"
+
+# ── OpenAI (Responses-only) ───────────────────────────────────
+# Uses `/responses` + `/models` only (never calls `/chat/completions`).
+# [providers.openai-responses]
+# enabled = true
+# api_key = "sk-..."                          # Or set OPENAI_RESPONSES_API_KEY env var
+# base_url = "https://api.openai.com/v1"     # Must end with `/v1` (e.g. https://api.example.com/v1)
+# models = ["gpt-5.2"]                       # Optional preferred models
+# fetch_models = true
+# alias = "openai-responses"
 
 # ── Google Gemini ─────────────────────────────────────────────
 # [providers.gemini]
 # enabled = true
-# api_key = "..."                             # Or set GOOGLE_API_KEY env var
+# api_key = "..."                             # Or set GEMINI_API_KEY env var
 # models = ["gemini-2.0-flash"]
 # alias = "gemini"
 
