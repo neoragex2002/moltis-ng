@@ -1748,9 +1748,12 @@ impl ProviderSetupService for LiveProviderSetupService {
             };
 
             probe_attempted = true;
+            let llm_context = moltis_agents::model::LlmRequestContext {
+                session_key: Some(format!("provider_setup:{provider_name}:{}", probe_model.id)),
+            };
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(20),
-                llm_provider.complete(&probe, &[]),
+                llm_provider.complete_with_context(&llm_context, &probe, &[]),
             )
             .await;
 

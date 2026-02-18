@@ -2361,9 +2361,12 @@ impl MethodRegistry {
                                         "Generate a {context} TTS test phrase."
                                     )),
                                 ];
+                                let llm_context = moltis_agents::model::LlmRequestContext {
+                                    session_key: Some(format!("tts.generate_phrase:{context}")),
+                                };
                                 let result = tokio::time::timeout(
                                     Duration::from_secs(3),
-                                    provider.complete(&messages, &[]),
+                                    provider.complete_with_context(&llm_context, &messages, &[]),
                                 )
                                 .await;
 

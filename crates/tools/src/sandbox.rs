@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use {
-    anyhow::Result,
+    anyhow::{Context, Result},
     async_trait::async_trait,
     serde::{Deserialize, Serialize},
     tokio::sync::RwLock,
@@ -401,6 +401,15 @@ pub struct SandboxConfig {
     pub mode: SandboxMode,
     pub scope: SandboxScope,
     pub workspace_mount: WorkspaceMount,
+    /// Additional host directory mounts exposed inside the sandbox container.
+    ///
+    /// Deny-by-default: mounts require `mount_allowlist` entries and are validated
+    /// before container creation.
+    #[serde(default)]
+    pub mounts: Vec<SandboxMount>,
+    /// Allowlist of host directory roots permitted for `mounts[*].host_dir`.
+    #[serde(default)]
+    pub mount_allowlist: Vec<std::path::PathBuf>,
     pub image: Option<String>,
     pub container_prefix: Option<String>,
     pub no_network: bool,
@@ -415,12 +424,33 @@ pub struct SandboxConfig {
     pub timezone: Option<String>,
 }
 
+/// External mount configuration entry for sandbox containers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxMount {
+    pub host_dir: std::path::PathBuf,
+    pub guest_dir: std::path::PathBuf,
+    pub mode: WorkspaceMount,
+}
+
+impl Default for SandboxMount {
+    fn default() -> Self {
+        Self {
+            host_dir: std::path::PathBuf::new(),
+            guest_dir: std::path::PathBuf::new(),
+            mode: WorkspaceMount::Ro,
+        }
+    }
+}
+
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             mode: SandboxMode::default(),
             scope: SandboxScope::default(),
             workspace_mount: WorkspaceMount::default(),
+            mounts: Vec::new(),
+            mount_allowlist: Vec::new(),
             image: None,
             container_prefix: None,
             no_network: false,
@@ -450,6 +480,23 @@ impl From<&moltis_config::schema::SandboxConfig> for SandboxConfig {
                 "none" => WorkspaceMount::None,
                 _ => WorkspaceMount::Ro,
             },
+            mounts: cfg
+                .mounts
+                .iter()
+                .map(|m| SandboxMount {
+                    host_dir: std::path::PathBuf::from(&m.host_dir),
+                    guest_dir: std::path::PathBuf::from(&m.guest_dir),
+                    mode: match m.mode.as_str() {
+                        "rw" => WorkspaceMount::Rw,
+                        _ => WorkspaceMount::Ro,
+                    },
+                })
+                .collect(),
+            mount_allowlist: cfg
+                .mount_allowlist
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
             image: cfg.image.clone(),
             container_prefix: cfg.container_prefix.clone(),
             no_network: cfg.no_network,
@@ -773,6 +820,117 @@ impl DockerSandbox {
             WorkspaceMount::None => Vec::new(),
         }
     }
+
+    fn external_mount_args(&self) -> Result<Vec<String>> {
+        const GUEST_PREFIX: &str = "/mnt/host/";
+
+        if self.config.mounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.config.mount_allowlist.is_empty() {
+            anyhow::bail!(
+                "sandbox mounts are configured but mount_allowlist is empty (deny-by-default)"
+            );
+        }
+
+        let mut allow_roots = Vec::with_capacity(self.config.mount_allowlist.len());
+        for root in &self.config.mount_allowlist {
+            if !root.is_absolute() {
+                anyhow::bail!(
+                    "sandbox mount_allowlist entry must be an absolute path: {}",
+                    root.display()
+                );
+            }
+            let canonical = std::fs::canonicalize(root).with_context(|| {
+                format!("canonicalize sandbox mount_allowlist entry: {}", root.display())
+            })?;
+            if !canonical.is_dir() {
+                anyhow::bail!(
+                    "sandbox mount_allowlist entry must be a directory: {}",
+                    canonical.display()
+                );
+            }
+            allow_roots.push(canonical);
+        }
+
+        let mut args = Vec::new();
+        for (i, mount) in self.config.mounts.iter().enumerate() {
+            if mount.host_dir.as_os_str().is_empty() {
+                anyhow::bail!("sandbox mounts[{i}].host_dir is empty");
+            }
+            if !mount.host_dir.is_absolute() {
+                anyhow::bail!(
+                    "sandbox mounts[{i}].host_dir must be an absolute path: {}",
+                    mount.host_dir.display()
+                );
+            }
+            let canonical_host =
+                std::fs::canonicalize(&mount.host_dir).with_context(|| {
+                    format!(
+                        "canonicalize sandbox mounts[{i}].host_dir: {}",
+                        mount.host_dir.display()
+                    )
+                })?;
+            if !canonical_host.is_dir() {
+                anyhow::bail!(
+                    "sandbox mounts[{i}].host_dir must be a directory: {}",
+                    canonical_host.display()
+                );
+            }
+            if !allow_roots.iter().any(|root| canonical_host.starts_with(root)) {
+                anyhow::bail!(
+                    "sandbox mounts[{i}].host_dir is outside mount_allowlist: {}",
+                    canonical_host.display()
+                );
+            }
+
+            if mount.guest_dir.as_os_str().is_empty() {
+                anyhow::bail!("sandbox mounts[{i}].guest_dir is empty");
+            }
+            if !mount.guest_dir.is_absolute() {
+                anyhow::bail!(
+                    "sandbox mounts[{i}].guest_dir must be an absolute path: {}",
+                    mount.guest_dir.display()
+                );
+            }
+            let guest_str = mount.guest_dir.display().to_string();
+            if !guest_str.starts_with(GUEST_PREFIX) {
+                anyhow::bail!(
+                    "sandbox mounts[{i}].guest_dir must be under {GUEST_PREFIX} (got: {guest_str})"
+                );
+            }
+            if guest_str == "/" || guest_str == "/proc" || guest_str == "/sys" || guest_str == "/dev"
+            {
+                anyhow::bail!("sandbox mounts[{i}].guest_dir is a protected path: {guest_str}");
+            }
+            if mount
+                .guest_dir
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir))
+            {
+                anyhow::bail!(
+                    "sandbox mounts[{i}].guest_dir must not contain '.' or '..': {guest_str}"
+                );
+            }
+
+            let mode = match mount.mode {
+                WorkspaceMount::Ro => "ro",
+                WorkspaceMount::Rw => "rw",
+                WorkspaceMount::None => {
+                    anyhow::bail!("sandbox mounts[{i}].mode must be \"ro\" or \"rw\"")
+                }
+            };
+
+            args.push("-v".to_string());
+            args.push(format!(
+                "{}:{}:{}",
+                canonical_host.display(),
+                mount.guest_dir.display(),
+                mode
+            ));
+        }
+        Ok(args)
+    }
 }
 
 #[async_trait]
@@ -815,6 +973,7 @@ impl Sandbox for DockerSandbox {
 
         args.extend(self.resource_args());
         args.extend(self.workspace_args());
+        args.extend(self.external_mount_args()?);
 
         let image = image_override.unwrap_or_else(|| self.image());
         args.push(image.to_string());
@@ -1031,6 +1190,9 @@ impl Sandbox for CgroupSandbox {
     }
 
     async fn ensure_ready(&self, _id: &SandboxId, _image_override: Option<&str>) -> Result<()> {
+        if !self.config.mounts.is_empty() {
+            anyhow::bail!("external sandbox mounts are only supported on the Docker backend");
+        }
         let output = tokio::process::Command::new("systemd-run")
             .arg("--version")
             .output()
@@ -1481,6 +1643,9 @@ impl Sandbox for AppleContainerSandbox {
     }
 
     async fn ensure_ready(&self, id: &SandboxId, image_override: Option<&str>) -> Result<()> {
+        if !self.config.mounts.is_empty() {
+            anyhow::bail!("external sandbox mounts are not supported on the apple-container backend");
+        }
         let mut name = self.container_name(id).await;
         let image = image_override.unwrap_or_else(|| self.image());
 
@@ -2288,6 +2453,57 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         assert!(docker.workspace_args().is_empty());
+    }
+
+    #[test]
+    fn test_docker_external_mount_args_ro() {
+        let dir = tempfile::tempdir().unwrap();
+        let allow_root = dir.path().join("allow");
+        let host_dir = allow_root.join("proj");
+        std::fs::create_dir_all(&host_dir).unwrap();
+
+        let config = SandboxConfig {
+            mounts: vec![SandboxMount {
+                host_dir: host_dir.clone(),
+                guest_dir: std::path::PathBuf::from("/mnt/host/proj"),
+                mode: WorkspaceMount::Ro,
+            }],
+            mount_allowlist: vec![allow_root.clone()],
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let args = docker.external_mount_args().unwrap();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-v");
+        assert!(args[1].contains(":/mnt/host/proj:ro"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_docker_external_mount_args_symlink_escape_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let allow_root = dir.path().join("allow");
+        let outside_root = dir.path().join("outside");
+        std::fs::create_dir_all(&allow_root).unwrap();
+        std::fs::create_dir_all(&outside_root).unwrap();
+
+        let link = allow_root.join("link");
+        symlink(&outside_root, &link).unwrap();
+
+        let config = SandboxConfig {
+            mounts: vec![SandboxMount {
+                host_dir: link,
+                guest_dir: std::path::PathBuf::from("/mnt/host/outside"),
+                mode: WorkspaceMount::Ro,
+            }],
+            mount_allowlist: vec![allow_root],
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let err = docker.external_mount_args().unwrap_err().to_string();
+        assert!(err.contains("outside mount_allowlist"));
     }
 
     #[test]

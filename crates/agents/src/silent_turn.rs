@@ -13,7 +13,7 @@ use {
 
 use crate::{
     model::{ChatMessage, LlmProvider},
-    runner::run_agent_loop,
+    runner::run_agent_loop_with_context,
     tool_registry::{AgentTool, ToolRegistry},
 };
 
@@ -132,6 +132,7 @@ pub async fn run_silent_memory_turn(
     provider: Arc<dyn LlmProvider>,
     conversation: &[ChatMessage],
     workspace_dir: &Path,
+    session_key: Option<&str>,
 ) -> Result<Vec<PathBuf>> {
     let write_tool = Arc::new(MemoryWriteFileTool::new(workspace_dir.to_path_buf()));
 
@@ -177,11 +178,7 @@ pub async fn run_silent_memory_turn(
             ChatMessage::Tool { content, .. } => ("tool", content.as_str()),
         };
         // Skip very long messages (tool results, etc.)
-        let truncated = if content.len() > 2000 {
-            &content[..2000]
-        } else {
-            content
-        };
+        let truncated = truncate_bytes_at_char_boundary(content, 2000);
         conversation_text.push_str(&format!("{role}: {truncated}\n\n"));
     }
 
@@ -191,13 +188,19 @@ pub async fn run_silent_memory_turn(
     );
 
     let user_content = crate::model::UserContent::Text(conversation_text);
-    let result = run_agent_loop(
+    let tool_context = session_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| serde_json::json!({ "_session_key": s }));
+    let result = run_agent_loop_with_context(
         provider,
         &tools,
         MEMORY_FLUSH_SYSTEM_PROMPT,
         &user_content,
         None, // no event callbacks — silent
         None, // no history
+        tool_context,
+        None, // no hooks
     )
     .await;
 
@@ -216,6 +219,19 @@ pub async fn run_silent_memory_turn(
             Ok(Vec::new()) // Don't fail compaction if memory flush fails
         },
     }
+}
+
+fn truncate_bytes_at_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    &text[..end]
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -305,7 +321,7 @@ mod tests {
             ChatMessage::assistant("Noted! Rust is a great choice."),
         ];
 
-        let paths = run_silent_memory_turn(provider, &conversation, tmp.path())
+        let paths = run_silent_memory_turn(provider, &conversation, tmp.path(), Some("main"))
             .await
             .unwrap();
 
@@ -324,11 +340,29 @@ mod tests {
             call_count: std::sync::atomic::AtomicUsize::new(0),
         });
 
-        let paths = run_silent_memory_turn(provider, &[], tmp.path())
+        let paths = run_silent_memory_turn(provider, &[], tmp.path(), None)
             .await
             .unwrap();
 
         // Should succeed even with empty conversation (provider still writes)
+        assert!(!paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_silent_memory_turn_no_panic_on_multibyte_truncation_boundary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = Arc::new(MemoryWritingProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+
+        let long = format!("{}。tail", "a".repeat(1999));
+        assert!(long.len() > 2000, "long message must exceed limit");
+
+        let conversation = vec![ChatMessage::user(long)];
+        let paths = run_silent_memory_turn(provider, &conversation, tmp.path(), Some("main"))
+            .await
+            .unwrap();
+
         assert!(!paths.is_empty());
     }
 }

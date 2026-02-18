@@ -15,6 +15,21 @@ use moltis_gateway::{
     state::GatewayState,
 };
 
+fn can_bind_localhost() -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", 0)).is_ok()
+}
+
+macro_rules! skip_if_cannot_bind_localhost {
+    () => {
+        if !can_bind_localhost() {
+            eprintln!(
+                "skipping auth middleware integration test — cannot bind localhost in this environment"
+            );
+            return;
+        }
+    };
+}
+
 /// Start a test server with a credential store (auth enabled).
 async fn start_auth_server() -> (SocketAddr, Arc<CredentialStore>) {
     let (addr, store, _state) = start_auth_server_with_state().await;
@@ -130,6 +145,7 @@ async fn start_noauth_server() -> SocketAddr {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn no_auth_configured_passes_through() {
+    skip_if_cannot_bind_localhost!();
     let addr = start_noauth_server().await;
     let resp = reqwest::get(format!("http://{addr}/api/bootstrap"))
         .await
@@ -142,6 +158,7 @@ async fn no_auth_configured_passes_through() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn setup_not_complete_passes_through() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store) = start_auth_server().await;
     // No password set yet, so setup is not complete.
     let resp = reqwest::get(format!("http://{addr}/api/bootstrap"))
@@ -155,6 +172,7 @@ async fn setup_not_complete_passes_through() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn unauthenticated_returns_401() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -170,6 +188,7 @@ async fn unauthenticated_returns_401() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn session_cookie_auth_succeeds() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
     let token = store.create_session().await.unwrap();
@@ -188,6 +207,7 @@ async fn session_cookie_auth_succeeds() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn api_key_auth_succeeds() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
     let (_id, raw_key) = store.create_api_key("test", None).await.unwrap();
@@ -206,6 +226,7 @@ async fn api_key_auth_succeeds() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn images_endpoint_returns_401() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -219,6 +240,7 @@ async fn images_endpoint_returns_401() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn public_routes_accessible_without_auth() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -241,6 +263,7 @@ async fn public_routes_accessible_without_auth() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn invalid_session_cookie_returns_401() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -258,6 +281,7 @@ async fn invalid_session_cookie_returns_401() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn reset_auth_removes_all_authentication() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
     let token = store.create_session().await.unwrap();
@@ -312,6 +336,7 @@ async fn reset_auth_removes_all_authentication() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn reenable_auth_after_reset() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, state) = start_auth_server_with_state().await;
     store.set_initial_password("testpass123").await.unwrap();
     let token = store.create_session().await.unwrap();
@@ -378,6 +403,7 @@ async fn reenable_auth_after_reset() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn reset_auth_requires_session() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -394,6 +420,7 @@ async fn reset_auth_requires_session() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn revoked_api_key_returns_401() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
     let (id, raw_key) = store.create_api_key("test", None).await.unwrap();
@@ -415,6 +442,7 @@ async fn revoked_api_key_returns_401() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn setup_without_code_when_required_returns_403() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store, state) = start_auth_server_with_state().await;
     state.inner.write().await.setup_code = Some(secrecy::Secret::new("123456".to_string()));
 
@@ -433,6 +461,7 @@ async fn setup_without_code_when_required_returns_403() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn setup_with_wrong_code_returns_403() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store, state) = start_auth_server_with_state().await;
     state.inner.write().await.setup_code = Some(secrecy::Secret::new("123456".to_string()));
 
@@ -451,6 +480,7 @@ async fn setup_with_wrong_code_returns_403() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn setup_with_correct_code_succeeds() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store, state) = start_auth_server_with_state().await;
     state.inner.write().await.setup_code = Some(secrecy::Secret::new("123456".to_string()));
 
@@ -472,6 +502,7 @@ async fn setup_with_correct_code_succeeds() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn setup_code_not_required_when_already_setup() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_auth_server_with_state().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -489,6 +520,7 @@ async fn setup_code_not_required_when_already_setup() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn status_reports_setup_code_required() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store, state) = start_proxied_server().await;
     state.inner.write().await.setup_code = Some(secrecy::Secret::new("654321".to_string()));
 
@@ -504,6 +536,7 @@ async fn status_reports_setup_code_required() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn setup_code_not_required_when_auth_disabled() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_auth_server_with_state().await;
     store.set_initial_password("testpass123").await.unwrap();
     let token = store.create_session().await.unwrap();
@@ -533,6 +566,7 @@ async fn setup_code_not_required_when_auth_disabled() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn localhost_no_password_status_authenticated() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store, _state) = start_localhost_server().await;
 
     let resp = reqwest::get(format!("http://{addr}/api/auth/status"))
@@ -550,6 +584,7 @@ async fn localhost_no_password_status_authenticated() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn localhost_no_password_session_endpoints_accessible() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store, _state) = start_localhost_server().await;
 
     // /api/auth/api-keys requires AuthSession — should work on localhost without password.
@@ -563,6 +598,7 @@ async fn localhost_no_password_session_endpoints_accessible() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn localhost_set_password_without_current() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_localhost_server().await;
 
     let client = reqwest::Client::new();
@@ -598,6 +634,7 @@ async fn localhost_set_password_without_current() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn upload_endpoint_requires_auth() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -630,6 +667,7 @@ async fn upload_endpoint_requires_auth() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn media_endpoint_requires_auth() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -655,6 +693,7 @@ async fn media_endpoint_requires_auth() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn localhost_with_password_requires_login() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_localhost_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -672,6 +711,7 @@ async fn localhost_with_password_requires_login() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn localhost_with_passkey_requires_login() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_localhost_server().await;
     store
         .store_passkey(b"cred-1", "MacBook Touch ID", b"serialized-passkey")
@@ -700,6 +740,7 @@ async fn localhost_with_passkey_requires_login() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn proxied_no_password_protected_returns_401() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store, _state) = start_proxied_server().await;
     let resp = reqwest::get(format!("http://{addr}/api/bootstrap"))
         .await
@@ -715,6 +756,7 @@ async fn proxied_no_password_protected_returns_401() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn proxied_no_password_auth_status_accessible() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store, _state) = start_proxied_server().await;
     let resp = reqwest::get(format!("http://{addr}/api/auth/status"))
         .await
@@ -730,6 +772,7 @@ async fn proxied_no_password_auth_status_accessible() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn proxied_with_password_requires_auth() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_proxied_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -758,6 +801,7 @@ async fn proxied_with_password_requires_auth() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn login_cookie_includes_domain_for_localhost_subdomain() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_localhost_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -795,6 +839,7 @@ async fn login_cookie_includes_domain_for_localhost_subdomain() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn login_cookie_includes_domain_for_plain_localhost() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_localhost_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -831,6 +876,7 @@ async fn login_cookie_includes_domain_for_plain_localhost() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn login_cookie_omits_domain_for_external_host() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_localhost_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -866,6 +912,7 @@ async fn login_cookie_omits_domain_for_external_host() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn login_endpoint_rate_limited_after_repeated_failures() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -912,6 +959,7 @@ async fn login_endpoint_rate_limited_after_repeated_failures() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn api_endpoint_rate_limited_after_high_request_volume() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -947,6 +995,7 @@ async fn api_endpoint_rate_limited_after_high_request_volume() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn onboarding_accessible_during_setup_for_remote() {
+    skip_if_cannot_bind_localhost!();
     let (addr, _store, _state) = start_proxied_server().await;
 
     let client = reqwest::Client::builder()
@@ -977,6 +1026,7 @@ async fn onboarding_accessible_during_setup_for_remote() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn onboarding_requires_auth_after_setup() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_proxied_server().await;
     store.set_initial_password("testpass123").await.unwrap();
 
@@ -1013,6 +1063,7 @@ async fn onboarding_requires_auth_after_setup() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn onboarding_accessible_with_session_after_setup() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_proxied_server().await;
     store.set_initial_password("testpass123").await.unwrap();
     let token = store.create_session().await.unwrap();
@@ -1047,6 +1098,7 @@ async fn onboarding_accessible_with_session_after_setup() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn setup_endpoint_rejected_after_setup_complete() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store, _state) = start_proxied_server().await;
     store.set_initial_password("testpass123").await.unwrap();
     let token = store.create_session().await.unwrap();
@@ -1073,6 +1125,7 @@ async fn setup_endpoint_rejected_after_setup_complete() {
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn authenticated_api_endpoint_not_rate_limited() {
+    skip_if_cannot_bind_localhost!();
     let (addr, store) = start_auth_server().await;
     store.set_initial_password("testpass123").await.unwrap();
     let token = store.create_session().await.unwrap();

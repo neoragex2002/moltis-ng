@@ -755,8 +755,16 @@ pub async fn run_agent_loop_with_context(
             cb(RunnerEvent::Thinking);
         }
 
+        let llm_context = crate::model::LlmRequestContext {
+            session_key: (!session_key_for_hooks.is_empty())
+                .then_some(session_key_for_hooks.clone()),
+        };
+
         let mut response: CompletionResponse =
-            match provider.complete(&messages, schemas_for_api).await {
+            match provider
+                .complete_with_context(&llm_context, &messages, schemas_for_api)
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     let msg = e.to_string();
@@ -1228,7 +1236,15 @@ pub async fn run_agent_loop_streaming(
         // Use streaming API.
         #[cfg(feature = "metrics")]
         let iter_start = std::time::Instant::now();
-        let mut stream = provider.stream_with_tools(messages.clone(), schemas_for_api.clone());
+        let llm_context = crate::model::LlmRequestContext {
+            session_key: (!session_key_for_hooks.is_empty())
+                .then_some(session_key_for_hooks.clone()),
+        };
+        let mut stream = provider.stream_with_tools_with_context(
+            &llm_context,
+            messages.clone(),
+            schemas_for_api.clone(),
+        );
 
         // Accumulate text and tool calls from the stream.
         let mut accumulated_text = String::new();

@@ -526,6 +526,19 @@ impl LlmProvider for OpenAiCodexProvider {
         super::supports_tools_for_model(&self.model)
     }
 
+    fn context_window(&self) -> u32 {
+        super::resolved_openai_limits(&self.model).context
+    }
+
+    fn input_limit(&self) -> Option<u32> {
+        super::cached_openai_model_limits(&moltis_config::data_dir(), &self.model)
+            .and_then(|l| l.input)
+    }
+
+    fn output_limit(&self) -> Option<u32> {
+        Some(super::resolved_openai_limits(&self.model).output)
+    }
+
     async fn complete(
         &self,
         messages: &[ChatMessage],

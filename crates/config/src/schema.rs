@@ -1267,6 +1267,16 @@ pub struct SandboxConfig {
     pub mode: String,
     pub scope: String,
     pub workspace_mount: String,
+    /// Additional host directory mounts exposed inside the sandbox container.
+    ///
+    /// Deny-by-default: enabling mounts requires `mount_allowlist` entries.
+    #[serde(default)]
+    pub mounts: Vec<SandboxMountConfig>,
+    /// Allowlist of host directory roots permitted for `mounts[*].host_dir`.
+    ///
+    /// Deny-by-default: when empty, all external mounts are rejected.
+    #[serde(default)]
+    pub mount_allowlist: Vec<String>,
     pub image: Option<String>,
     pub container_prefix: Option<String>,
     pub no_network: bool,
@@ -1278,6 +1288,28 @@ pub struct SandboxConfig {
     /// Set to an empty list to skip provisioning.
     #[serde(default = "default_sandbox_packages")]
     pub packages: Vec<String>,
+}
+
+/// External mount configuration entry for sandbox containers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxMountConfig {
+    /// Host directory to mount (must be an absolute directory path).
+    pub host_dir: String,
+    /// Container path where the directory will appear (must be absolute).
+    pub guest_dir: String,
+    /// Mount mode: "ro" (default) or "rw".
+    pub mode: String,
+}
+
+impl Default for SandboxMountConfig {
+    fn default() -> Self {
+        Self {
+            host_dir: String::new(),
+            guest_dir: String::new(),
+            mode: "ro".into(),
+        }
+    }
 }
 
 /// Default packages installed in sandbox containers.
@@ -1442,6 +1474,8 @@ impl Default for SandboxConfig {
             mode: "all".into(),
             scope: "session".into(),
             workspace_mount: "ro".into(),
+            mounts: Vec::new(),
+            mount_allowlist: Vec::new(),
             image: None,
             container_prefix: None,
             no_network: true,
@@ -1495,6 +1529,139 @@ pub struct ProvidersConfig {
     pub local_models: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct BuiltinWebSearchConfig {
+    pub enabled: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_domains: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_context_size: Option<WebSearchContextSize>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_location: Option<WebSearchUserLocation>,
+
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_sources: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OpenAiResponsesGenerationConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_verbosity: Option<TextVerbosity>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextVerbosity {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptCacheBucketHashMode {
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PromptCacheBucketHashConfig {
+    Bool(bool),
+    Mode(PromptCacheBucketHashMode),
+}
+
+impl Default for PromptCacheBucketHashConfig {
+    fn default() -> Self {
+        Self::Mode(PromptCacheBucketHashMode::Auto)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenAiResponsesPromptCacheConfig {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub bucket_hash: PromptCacheBucketHashConfig,
+}
+
+impl Default for OpenAiResponsesPromptCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bucket_hash: PromptCacheBucketHashConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchContextSize {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebSearchUserLocation {
+    #[serde(rename = "type")]
+    pub kind: WebSearchUserLocationType,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+impl Default for WebSearchUserLocation {
+    fn default() -> Self {
+        Self {
+            kind: WebSearchUserLocationType::Approximate,
+            city: None,
+            country: None,
+            region: None,
+            timezone: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchUserLocationType {
+    Approximate,
+}
+
 /// Configuration for a single LLM provider.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1529,6 +1696,15 @@ pub struct ProviderEntry {
     /// (e.g., "anthropic-work", "anthropic-personal").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_web_search: Option<BuiltinWebSearchConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<OpenAiResponsesGenerationConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<OpenAiResponsesPromptCacheConfig>,
 }
 
 impl std::fmt::Debug for ProviderEntry {
@@ -1540,6 +1716,9 @@ impl std::fmt::Debug for ProviderEntry {
             .field("models", &self.models)
             .field("fetch_models", &self.fetch_models)
             .field("alias", &self.alias)
+            .field("builtin_web_search", &self.builtin_web_search)
+            .field("generation", &self.generation)
+            .field("prompt_cache", &self.prompt_cache)
             .finish()
     }
 }
@@ -1553,6 +1732,9 @@ impl Default for ProviderEntry {
             models: Vec::new(),
             fetch_models: true,
             alias: None,
+            builtin_web_search: None,
+            generation: None,
+            prompt_cache: None,
         }
     }
 }
@@ -1579,6 +1761,10 @@ where
 
 const fn is_true(value: &bool) -> bool {
     *value
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ProvidersConfig {
@@ -1694,10 +1880,13 @@ mod tests {
     #[test]
     fn providers_config_local_alias_maps_local_llm_to_local() {
         let mut config = ProvidersConfig::default();
-        config.providers.insert("local-llm".into(), ProviderEntry {
-            enabled: false,
-            ..ProviderEntry::default()
-        });
+        config.providers.insert(
+            "local-llm".into(),
+            ProviderEntry {
+                enabled: false,
+                ..ProviderEntry::default()
+            },
+        );
 
         assert!(!config.is_enabled("local"));
         assert!(!config.is_enabled("local-llm"));
@@ -1707,14 +1896,20 @@ mod tests {
     #[test]
     fn providers_config_local_alias_prefers_exact_key() {
         let mut config = ProvidersConfig::default();
-        config.providers.insert("local".into(), ProviderEntry {
-            enabled: false,
-            ..ProviderEntry::default()
-        });
-        config.providers.insert("local-llm".into(), ProviderEntry {
-            enabled: true,
-            ..ProviderEntry::default()
-        });
+        config.providers.insert(
+            "local".into(),
+            ProviderEntry {
+                enabled: false,
+                ..ProviderEntry::default()
+            },
+        );
+        config.providers.insert(
+            "local-llm".into(),
+            ProviderEntry {
+                enabled: true,
+                ..ProviderEntry::default()
+            },
+        );
 
         assert!(!config.is_enabled("local"));
         assert!(config.is_enabled("local-llm"));
@@ -1746,10 +1941,13 @@ mod tests {
             offered: vec!["openai".into()],
             ..ProvidersConfig::default()
         };
-        config.providers.insert("openai".into(), ProviderEntry {
-            enabled: false,
-            ..ProviderEntry::default()
-        });
+        config.providers.insert(
+            "openai".into(),
+            ProviderEntry {
+                enabled: false,
+                ..ProviderEntry::default()
+            },
+        );
         assert!(!config.is_enabled("openai"));
     }
 

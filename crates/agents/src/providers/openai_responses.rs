@@ -9,7 +9,15 @@ use secrecy::ExposeSecret;
 use tokio_stream::Stream;
 use tracing::{debug, trace, warn};
 
-use crate::model::{ChatMessage, CompletionResponse, ContentPart, LlmProvider, StreamEvent, ToolCall, Usage, UserContent};
+use moltis_config::schema::{
+    BuiltinWebSearchConfig, OpenAiResponsesGenerationConfig, OpenAiResponsesPromptCacheConfig,
+    PromptCacheBucketHashConfig, ReasoningEffort, TextVerbosity, WebSearchContextSize,
+};
+
+use crate::model::{
+    ChatMessage, CompletionResponse, ContentPart, LlmProvider, LlmRequestContext, StreamEvent,
+    ToolCall, Usage, UserContent,
+};
 
 use super::openai_compat::to_responses_api_tools;
 
@@ -225,6 +233,7 @@ struct ResponsesSseParser {
     buf: Vec<u8>,
     input_tokens: u32,
     output_tokens: u32,
+    cache_read_tokens: u32,
     tool_calls_by_index: HashMap<usize, (String, String)>,
     tool_index_by_call_id: HashMap<String, usize>,
     tool_index_by_item_key: HashMap<(u64, String), usize>,
@@ -355,6 +364,7 @@ impl ResponsesSseParser {
                 out.push(StreamEvent::Done(Usage {
                     input_tokens: self.input_tokens,
                     output_tokens: self.output_tokens,
+                    cache_read_tokens: self.cache_read_tokens,
                     ..Default::default()
                 }));
                 self.done = true;
@@ -446,6 +456,12 @@ impl ResponsesSseParser {
                             .get("output_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as u32;
+
+                        self.cache_read_tokens = u
+                            .get("input_tokens_details")
+                            .and_then(|v| v.get("cached_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32;
                     }
 
                     let mut indices: Vec<usize> = self.tool_calls_by_index.keys().copied().collect();
@@ -456,6 +472,7 @@ impl ResponsesSseParser {
                     out.push(StreamEvent::Done(Usage {
                         input_tokens: self.input_tokens,
                         output_tokens: self.output_tokens,
+                        cache_read_tokens: self.cache_read_tokens,
                         ..Default::default()
                     }));
                     self.done = true;
@@ -484,17 +501,22 @@ pub struct OpenAiResponsesProvider {
     base_url: String,
     provider_name: String,
     client: reqwest::Client,
+    builtin_web_search: Option<BuiltinWebSearchConfig>,
+    generation: Option<OpenAiResponsesGenerationConfig>,
+    prompt_cache: Option<OpenAiResponsesPromptCacheConfig>,
 }
 
 impl OpenAiResponsesProvider {
     pub fn new(api_key: secrecy::Secret<String>, model: String, base_url: String) -> Self {
-        Self {
+        Self::new_with_name(
             api_key,
             model,
             base_url,
-            provider_name: "openai-responses".into(),
-            client: reqwest::Client::new(),
-        }
+            "openai-responses".into(),
+            None,
+            None,
+            None,
+        )
     }
 
     pub fn new_with_name(
@@ -502,6 +524,9 @@ impl OpenAiResponsesProvider {
         model: String,
         base_url: String,
         provider_name: String,
+        builtin_web_search: Option<BuiltinWebSearchConfig>,
+        generation: Option<OpenAiResponsesGenerationConfig>,
+        prompt_cache: Option<OpenAiResponsesPromptCacheConfig>,
     ) -> Self {
         Self {
             api_key,
@@ -509,7 +534,189 @@ impl OpenAiResponsesProvider {
             base_url,
             provider_name,
             client: reqwest::Client::new(),
+            builtin_web_search,
+            generation,
+            prompt_cache,
         }
+    }
+
+    fn is_builtin_web_search_enabled(&self) -> bool {
+        self.builtin_web_search
+            .as_ref()
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(false)
+    }
+
+    fn is_prompt_cache_enabled(&self) -> bool {
+        self.prompt_cache
+            .as_ref()
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(false)
+    }
+
+    fn prompt_cache_key_for_request(&self, ctx: Option<&LlmRequestContext>) -> Option<String> {
+        if !self.is_prompt_cache_enabled() {
+            return None;
+        }
+
+        let session_key = ctx
+            .and_then(|c| c.session_key.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        if let Some(session_key) = session_key {
+            return Some(self.prompt_cache_bucket_id(session_key));
+        }
+
+        // Fallback: still send a deterministic key so Responses gateways that
+        // require `prompt_cache_key` don't reject context-less calls (e.g.
+        // model probes, or callers using `complete()` without context).
+        //
+        // This does not leak user/session identifiers and is stable across runs.
+        let fallback = format!("moltis:{}:{}:no-session", self.provider_name, self.model);
+        debug!(
+            provider = %self.provider_name,
+            model = %self.model,
+            "prompt_cache enabled but no session_key in request context; using fallback prompt_cache_key"
+        );
+        Some(self.prompt_cache_bucket_id(&fallback))
+    }
+
+    fn prompt_cache_bucket_id(&self, session_key: &str) -> String {
+        let Some(ref cfg) = self.prompt_cache else {
+            return session_key.to_string();
+        };
+
+        let should_hash = match cfg.bucket_hash {
+            PromptCacheBucketHashConfig::Bool(force) => force,
+            PromptCacheBucketHashConfig::Mode(_) => session_key.as_bytes().len() > 64,
+        };
+
+        if should_hash {
+            blake3::hash(session_key.as_bytes()).to_hex().to_string()
+        } else {
+            session_key.to_string()
+        }
+    }
+
+    fn apply_generation_options(&self, body: &mut serde_json::Value) {
+        let Some(ref cfg) = self.generation else {
+            return;
+        };
+
+        let resolved_limits = super::resolved_openai_limits(&self.model);
+        let mut max_output_tokens = cfg.max_output_tokens.unwrap_or(resolved_limits.output);
+        if max_output_tokens > resolved_limits.output {
+            warn!(
+                provider = %self.provider_name,
+                model = %self.model,
+                configured = max_output_tokens,
+                limit = resolved_limits.output,
+                "clamping max_output_tokens to model limit"
+            );
+            max_output_tokens = resolved_limits.output;
+        }
+        body["max_output_tokens"] = serde_json::json!(max_output_tokens);
+
+        if let Some(reasoning_effort) = cfg.reasoning_effort {
+            let effort = match reasoning_effort {
+                ReasoningEffort::None => "none",
+                ReasoningEffort::Minimal => "minimal",
+                ReasoningEffort::Low => "low",
+                ReasoningEffort::Medium => "medium",
+                ReasoningEffort::High => "high",
+                ReasoningEffort::Xhigh => "xhigh",
+            };
+            body["reasoning"] = serde_json::json!({"effort": effort});
+        }
+
+        if let Some(text_verbosity) = cfg.text_verbosity {
+            let verbosity = match text_verbosity {
+                TextVerbosity::Low => "low",
+                TextVerbosity::Medium => "medium",
+                TextVerbosity::High => "high",
+            };
+            body["text"] = serde_json::json!({"verbosity": verbosity});
+        }
+
+        if let Some(temperature) = cfg.temperature {
+            body["temperature"] = serde_json::json!(temperature);
+        }
+    }
+
+    fn build_responses_body_with_context(
+        &self,
+        ctx: Option<&LlmRequestContext>,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+        stream: bool,
+    ) -> serde_json::Value {
+        let mut body = self.build_responses_body(messages, tools, stream);
+
+        self.apply_generation_options(&mut body);
+
+        if let Some(prompt_cache_key) = self.prompt_cache_key_for_request(ctx) {
+            body["prompt_cache_key"] = serde_json::json!(prompt_cache_key);
+        }
+
+        body
+    }
+
+    fn build_builtin_web_search_tool(cfg: &BuiltinWebSearchConfig) -> serde_json::Value {
+        let mut tool = serde_json::json!({
+            "type": "web_search",
+        });
+
+        if let Some(ref domains) = cfg.allowed_domains {
+            let allowed_domains: Vec<&str> = domains
+                .iter()
+                .map(|d| d.trim())
+                .filter(|d| !d.is_empty())
+                .collect();
+            if !allowed_domains.is_empty() {
+                tool["filters"] = serde_json::json!({
+                    "allowed_domains": allowed_domains,
+                });
+            }
+        }
+
+        if let Some(size) = cfg.search_context_size {
+            let size = match size {
+                WebSearchContextSize::Low => "low",
+                WebSearchContextSize::Medium => "medium",
+                WebSearchContextSize::High => "high",
+            };
+            tool["search_context_size"] = serde_json::json!(size);
+        }
+
+        if let Some(ref loc) = cfg.user_location {
+            let mut user_location = serde_json::json!({
+                "type": "approximate",
+            });
+            if let Some(ref city) = loc.city {
+                if !city.trim().is_empty() {
+                    user_location["city"] = serde_json::json!(city);
+                }
+            }
+            if let Some(ref country) = loc.country {
+                if !country.trim().is_empty() {
+                    user_location["country"] = serde_json::json!(country);
+                }
+            }
+            if let Some(ref region) = loc.region {
+                if !region.trim().is_empty() {
+                    user_location["region"] = serde_json::json!(region);
+                }
+            }
+            if let Some(ref timezone) = loc.timezone {
+                if !timezone.trim().is_empty() {
+                    user_location["timezone"] = serde_json::json!(timezone);
+                }
+            }
+            tool["user_location"] = user_location;
+        }
+
+        tool
     }
 
     async fn post_responses(
@@ -557,72 +764,69 @@ impl OpenAiResponsesProvider {
             body["stream"] = serde_json::Value::Bool(true);
         }
 
-        if !tools.is_empty() {
-            body["tools"] = serde_json::Value::Array(to_responses_api_tools(tools));
+        let builtin_search_enabled = self.is_builtin_web_search_enabled();
+        let function_tools: Vec<serde_json::Value> = if builtin_search_enabled {
+            let filtered: Vec<serde_json::Value> = tools
+                .iter()
+                .filter(|t| t.get("name").and_then(|v| v.as_str()) != Some("web_search"))
+                .cloned()
+                .collect();
+            let dropped = tools.len().saturating_sub(filtered.len());
+            if dropped > 0 {
+                debug!(
+                    provider = %self.provider_name,
+                    model = %self.model,
+                    dropped,
+                    "filtered local function tool 'web_search' because builtin web_search is enabled"
+                );
+            }
+            filtered
+        } else {
+            tools.to_vec()
+        };
+
+        let mut out_tools: Vec<serde_json::Value> = Vec::new();
+        if !function_tools.is_empty() {
+            out_tools.extend(to_responses_api_tools(&function_tools));
+        }
+
+        if let Some(ref cfg) = self.builtin_web_search {
+            if cfg.enabled {
+                out_tools.push(Self::build_builtin_web_search_tool(cfg));
+                if cfg.include_sources {
+                    let include = body.get_mut("include");
+                    match include {
+                        Some(serde_json::Value::Array(arr)) => {
+                            if !arr.iter().any(|v| v.as_str() == Some("web_search_call.action.sources")) {
+                                arr.push(serde_json::json!("web_search_call.action.sources"));
+                            }
+                        }
+                        _ => {
+                            body["include"] = serde_json::json!(["web_search_call.action.sources"]);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !out_tools.is_empty() {
+            body["tools"] = serde_json::Value::Array(out_tools);
             body["tool_choice"] = serde_json::json!("auto");
         }
 
         body
     }
 
-    #[cfg(test)]
-    fn parse_streaming_completion_from_sse(payload: &str) -> anyhow::Result<CompletionResponse> {
-        let mut parser = ResponsesSseParser::default();
-        let mut collector = ResponsesSseCollector::default();
-
-        for event in parser.push_bytes(payload.as_bytes()) {
-            match event {
-                StreamEvent::Error(msg) => {
-                    anyhow::bail!("OpenAI Responses API stream error: {msg}");
-                }
-                StreamEvent::Done(_) => {
-                    collector.ingest_event(event);
-                    break;
-                }
-                other => collector.ingest_event(other),
-            }
-        }
-
-        Ok(collector.into_completion())
-    }
-}
-
-#[async_trait]
-impl LlmProvider for OpenAiResponsesProvider {
-    fn name(&self) -> &str {
-        &self.provider_name
-    }
-
-    fn id(&self) -> &str {
-        &self.model
-    }
-
-    fn supports_tools(&self) -> bool {
-        super::supports_tools_for_model(&self.model)
-    }
-
-    fn context_window(&self) -> u32 {
-        super::context_window_for_model(&self.model)
-    }
-
-    fn supports_vision(&self) -> bool {
-        super::supports_vision_for_model(&self.model)
-    }
-
-    async fn complete(
+    async fn complete_using_body(
         &self,
-        messages: &[ChatMessage],
-        tools: &[serde_json::Value],
+        body: serde_json::Value,
+        tools_count: usize,
     ) -> anyhow::Result<CompletionResponse> {
-        // Some Codex-style Responses gateways only support streaming mode.
-        // Use `stream: true` and collect the full result into a single response.
-        let body = self.build_responses_body(messages, tools, true);
-
         debug!(
             provider = %self.provider_name,
             model = %self.model,
             input_items_count = body["input"].as_array().map(|a| a.len()).unwrap_or(0),
-            tools_count = tools.len(),
+            tools_count,
             "openai-responses complete request"
         );
         trace!(
@@ -684,20 +888,14 @@ impl LlmProvider for OpenAiResponsesProvider {
         anyhow::bail!("OpenAI Responses API stream ended unexpectedly");
     }
 
-    fn stream(
-        &self,
-        messages: Vec<ChatMessage>,
-    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
-        self.stream_with_tools(messages, vec![])
-    }
-
-    fn stream_with_tools(
-        &self,
+    fn stream_with_tools_impl<'a>(
+        &'a self,
+        ctx: Option<LlmRequestContext>,
         messages: Vec<ChatMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + 'a>> {
         Box::pin(async_stream::stream! {
-            let body = self.build_responses_body(&messages, &tools, true);
+            let body = self.build_responses_body_with_context(ctx.as_ref(), &messages, &tools, true);
 
             debug!(
                 provider = %self.provider_name,
@@ -788,6 +986,104 @@ impl LlmProvider for OpenAiResponsesProvider {
             yield StreamEvent::Error("OpenAI Responses API stream ended unexpectedly".into());
         })
     }
+
+    #[cfg(test)]
+    fn parse_streaming_completion_from_sse(payload: &str) -> anyhow::Result<CompletionResponse> {
+        let mut parser = ResponsesSseParser::default();
+        let mut collector = ResponsesSseCollector::default();
+
+        for event in parser.push_bytes(payload.as_bytes()) {
+            match event {
+                StreamEvent::Error(msg) => {
+                    anyhow::bail!("OpenAI Responses API stream error: {msg}");
+                }
+                StreamEvent::Done(_) => {
+                    collector.ingest_event(event);
+                    break;
+                }
+                other => collector.ingest_event(other),
+            }
+        }
+
+        Ok(collector.into_completion())
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiResponsesProvider {
+    fn name(&self) -> &str {
+        &self.provider_name
+    }
+
+    fn id(&self) -> &str {
+        &self.model
+    }
+
+    fn supports_tools(&self) -> bool {
+        super::supports_tools_for_model(&self.model)
+    }
+
+    fn context_window(&self) -> u32 {
+        super::resolved_openai_limits(&self.model).context
+    }
+
+    fn input_limit(&self) -> Option<u32> {
+        super::cached_openai_model_limits(&moltis_config::data_dir(), &self.model)
+            .and_then(|l| l.input)
+    }
+
+    fn output_limit(&self) -> Option<u32> {
+        Some(super::resolved_openai_limits(&self.model).output)
+    }
+
+    fn supports_vision(&self) -> bool {
+        super::supports_vision_for_model(&self.model)
+    }
+
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<CompletionResponse> {
+        // Some Codex-style Responses gateways only support streaming mode.
+        // Use `stream: true` and collect the full result into a single response.
+        let body = self.build_responses_body_with_context(None, messages, tools, true);
+        self.complete_using_body(body, tools.len()).await
+    }
+
+    async fn complete_with_context(
+        &self,
+        ctx: &LlmRequestContext,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<CompletionResponse> {
+        let body = self.build_responses_body_with_context(Some(ctx), messages, tools, true);
+        self.complete_using_body(body, tools.len()).await
+    }
+
+    fn stream(
+        &self,
+        messages: Vec<ChatMessage>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools(messages, vec![])
+    }
+
+    fn stream_with_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools_impl(None, messages, tools)
+    }
+
+    fn stream_with_tools_with_context(
+        &self,
+        ctx: &LlmRequestContext,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools_impl(Some(ctx.clone()), messages, tools)
+    }
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -805,6 +1101,51 @@ mod tests {
         )
     }
 
+    fn test_provider_with_builtin_web_search(
+        base_url: &str,
+        builtin_web_search: BuiltinWebSearchConfig,
+    ) -> OpenAiResponsesProvider {
+        OpenAiResponsesProvider::new_with_name(
+            Secret::new("test-key".to_string()),
+            "gpt-4o".to_string(),
+            base_url.to_string(),
+            "openai-responses".into(),
+            Some(builtin_web_search),
+            None,
+            None,
+        )
+    }
+
+    fn test_provider_with_generation(
+        base_url: &str,
+        generation: OpenAiResponsesGenerationConfig,
+    ) -> OpenAiResponsesProvider {
+        OpenAiResponsesProvider::new_with_name(
+            Secret::new("test-key".to_string()),
+            "gpt-4o".to_string(),
+            base_url.to_string(),
+            "openai-responses".into(),
+            None,
+            Some(generation),
+            None,
+        )
+    }
+
+    fn test_provider_with_prompt_cache(
+        base_url: &str,
+        prompt_cache: OpenAiResponsesPromptCacheConfig,
+    ) -> OpenAiResponsesProvider {
+        OpenAiResponsesProvider::new_with_name(
+            Secret::new("test-key".to_string()),
+            "gpt-4o".to_string(),
+            base_url.to_string(),
+            "openai-responses".into(),
+            None,
+            None,
+            Some(prompt_cache),
+        )
+    }
+
     #[test]
     fn build_responses_body_requires_instructions_and_input() {
         let provider = test_provider("https://api.example.com/v1");
@@ -813,6 +1154,184 @@ mod tests {
         assert!(body.get("instructions").is_some());
         assert!(body.get("input").is_some());
         assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn build_responses_body_includes_prompt_cache_key_when_enabled_and_session_key_provided() {
+        let mut cfg = OpenAiResponsesPromptCacheConfig::default();
+        cfg.enabled = true;
+        cfg.bucket_hash = PromptCacheBucketHashConfig::Bool(false);
+
+        let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
+        let ctx = LlmRequestContext {
+            session_key: Some("main".to_string()),
+        };
+
+        let body = provider.build_responses_body_with_context(
+            Some(&ctx),
+            &[ChatMessage::user("ping")],
+            &[],
+            false,
+        );
+        assert_eq!(body["prompt_cache_key"].as_str(), Some("main"));
+    }
+
+    #[test]
+    fn build_responses_body_hashes_prompt_cache_key_when_auto_and_long() {
+        let mut cfg = OpenAiResponsesPromptCacheConfig::default();
+        cfg.enabled = true;
+        cfg.bucket_hash = PromptCacheBucketHashConfig::Mode(
+            moltis_config::schema::PromptCacheBucketHashMode::Auto,
+        );
+
+        let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
+        let session_key = "a".repeat(65);
+        let ctx = LlmRequestContext {
+            session_key: Some(session_key.clone()),
+        };
+
+        let body = provider.build_responses_body_with_context(
+            Some(&ctx),
+            &[ChatMessage::user("ping")],
+            &[],
+            false,
+        );
+
+        let expected = blake3::hash(session_key.as_bytes()).to_hex().to_string();
+        assert_eq!(body["prompt_cache_key"].as_str(), Some(expected.as_str()));
+        assert_eq!(expected.len(), 64);
+    }
+
+    #[test]
+    fn build_responses_body_uses_fallback_prompt_cache_key_when_context_missing() {
+        let mut cfg = OpenAiResponsesPromptCacheConfig::default();
+        cfg.enabled = true;
+        cfg.bucket_hash = PromptCacheBucketHashConfig::Bool(false);
+
+        let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
+        let body =
+            provider.build_responses_body_with_context(None, &[ChatMessage::user("ping")], &[], false);
+
+        assert_eq!(
+            body["prompt_cache_key"].as_str(),
+            Some("moltis:openai-responses:gpt-4o:no-session")
+        );
+    }
+
+    #[test]
+    fn build_responses_body_applies_generation_options_when_configured() {
+        let mut cfg = OpenAiResponsesGenerationConfig::default();
+        cfg.max_output_tokens = Some(1024);
+        cfg.reasoning_effort = Some(ReasoningEffort::None);
+        cfg.text_verbosity = Some(TextVerbosity::High);
+        cfg.temperature = Some(0.2);
+
+        let provider = test_provider_with_generation("https://api.example.com/v1", cfg);
+        let body = provider.build_responses_body_with_context(None, &[ChatMessage::user("ping")], &[], false);
+        assert_eq!(body["max_output_tokens"].as_u64(), Some(1024));
+        assert_eq!(body["reasoning"]["effort"].as_str(), Some("none"));
+        assert_eq!(body["text"]["verbosity"].as_str(), Some("high"));
+        let temp = body["temperature"].as_f64().expect("expected temperature");
+        assert!((temp - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn build_responses_body_clamps_max_output_tokens_to_model_limit() {
+        let limit = super::super::resolved_openai_limits("gpt-4o").output;
+
+        let mut cfg = OpenAiResponsesGenerationConfig::default();
+        cfg.max_output_tokens = Some(limit.saturating_add(1));
+
+        let provider = test_provider_with_generation("https://api.example.com/v1", cfg);
+        let body = provider.build_responses_body_with_context(None, &[ChatMessage::user("ping")], &[], false);
+        assert_eq!(body["max_output_tokens"].as_u64(), Some(limit as u64));
+    }
+
+    #[test]
+    fn build_responses_body_injects_builtin_web_search_without_function_tools() {
+        let mut cfg = BuiltinWebSearchConfig::default();
+        cfg.enabled = true;
+
+        let provider =
+            test_provider_with_builtin_web_search("https://api.example.com/v1", cfg);
+        let body = provider.build_responses_body(&[ChatMessage::user("ping")], &[], false);
+
+        let tools = body["tools"].as_array().expect("expected tools array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"].as_str(), Some("web_search"));
+        assert_eq!(body["tool_choice"].as_str(), Some("auto"));
+    }
+
+    #[test]
+    fn build_responses_body_filters_local_web_search_function_tool_when_builtin_enabled() {
+        let mut cfg = BuiltinWebSearchConfig::default();
+        cfg.enabled = true;
+
+        let provider =
+            test_provider_with_builtin_web_search("https://api.example.com/v1", cfg);
+        let tools = vec![
+            serde_json::json!({
+                "name": "web_search",
+                "description": "local web search tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                }
+            }),
+            serde_json::json!({
+                "name": "exec",
+                "description": "exec tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                }
+            }),
+        ];
+
+        let body = provider.build_responses_body(&[ChatMessage::user("ping")], &tools, false);
+        let out_tools = body["tools"].as_array().expect("expected tools array");
+
+        assert!(out_tools.iter().any(|t| t["type"].as_str() == Some("web_search")));
+        assert!(out_tools.iter().any(|t| {
+            t["type"].as_str() == Some("function") && t["name"].as_str() == Some("exec")
+        }));
+        assert!(!out_tools.iter().any(|t| {
+            t["type"].as_str() == Some("function") && t["name"].as_str() == Some("web_search")
+        }));
+    }
+
+    #[test]
+    fn build_responses_body_include_sources_sets_include_param() {
+        let mut cfg = BuiltinWebSearchConfig::default();
+        cfg.enabled = true;
+        cfg.include_sources = true;
+
+        let provider =
+            test_provider_with_builtin_web_search("https://api.example.com/v1", cfg);
+        let body = provider.build_responses_body(&[ChatMessage::user("ping")], &[], false);
+
+        let include = body["include"].as_array().expect("expected include array");
+        assert!(include
+            .iter()
+            .any(|v| v.as_str() == Some("web_search_call.action.sources")));
+    }
+
+    #[test]
+    fn build_responses_body_includes_user_location_when_configured() {
+        let mut cfg = BuiltinWebSearchConfig::default();
+        cfg.enabled = true;
+        cfg.user_location = Some(moltis_config::schema::WebSearchUserLocation::default());
+
+        let provider =
+            test_provider_with_builtin_web_search("https://api.example.com/v1", cfg);
+        let body = provider.build_responses_body(&[ChatMessage::user("ping")], &[], false);
+
+        let tools = body["tools"].as_array().expect("expected tools array");
+        let web_search = tools
+            .iter()
+            .find(|t| t["type"].as_str() == Some("web_search"))
+            .expect("expected web_search tool");
+        assert_eq!(web_search["user_location"]["type"].as_str(), Some("approximate"));
     }
 
     #[test]
@@ -835,6 +1354,7 @@ mod tests {
         assert!(tool_calls.is_empty());
         assert_eq!(usage.input_tokens, 3);
         assert_eq!(usage.output_tokens, 4);
+        assert_eq!(usage.cache_read_tokens, 0);
     }
 
     #[test]
@@ -845,7 +1365,7 @@ mod tests {
             "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"item1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"do_thing\"}}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"item1\",\"delta\":\"{\\\"x\\\":1\"}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"item1\",\"delta\":\"}\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":6}}}\n\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":6,\"input_tokens_details\":{\"cached_tokens\":12}}}}\n\n"
         );
 
         let mut parser = ResponsesSseParser::default();
@@ -854,7 +1374,9 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Delta(d) if d == "llo")));
         assert!(events.iter().any(|e| matches!(e, StreamEvent::ToolCallStart { id, name, index } if id == "c1" && name == "do_thing" && *index == 0)));
         assert!(events.iter().any(|e| matches!(e, StreamEvent::ToolCallArgumentsDelta { index, delta } if *index == 0 && delta.contains("\"x\""))));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::Done(u) if u.input_tokens == 5 && u.output_tokens == 6)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Done(u) if u.input_tokens == 5 && u.output_tokens == 6 && u.cache_read_tokens == 12)));
     }
 
     #[test]
@@ -864,13 +1386,14 @@ mod tests {
             "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"item1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"do_thing\"}}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"item1\",\"delta\":\"{\\\"x\\\":1\"}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"item1\",\"delta\":\"}\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":4}}}\n\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":4,\"input_tokens_details\":{\"cached_tokens\":3}}}}\n\n"
         );
 
         let resp = OpenAiResponsesProvider::parse_streaming_completion_from_sse(payload).unwrap();
         assert_eq!(resp.text.as_deref(), Some("hi"));
         assert_eq!(resp.usage.input_tokens, 7);
         assert_eq!(resp.usage.output_tokens, 4);
+        assert_eq!(resp.usage.cache_read_tokens, 3);
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].id, "c1");
         assert_eq!(resp.tool_calls[0].name, "do_thing");
@@ -900,5 +1423,18 @@ mod tests {
         let err = OpenAiResponsesProvider::parse_streaming_completion_from_sse(payload)
             .expect_err("expected error");
         assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn streaming_parser_ignores_web_search_call_events() {
+        let payload = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            "data: {\"type\":\"response.web_search_call.searching\",\"output_index\":0,\"item_id\":\"ws1\",\"sequence_number\":1}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":4}}}\n\n"
+        );
+        let resp = OpenAiResponsesProvider::parse_streaming_completion_from_sse(payload).unwrap();
+        assert_eq!(resp.text.as_deref(), Some("hi"));
+        assert_eq!(resp.usage.input_tokens, 7);
+        assert_eq!(resp.usage.output_tokens, 4);
     }
 }

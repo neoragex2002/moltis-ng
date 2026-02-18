@@ -120,6 +120,38 @@ fn build_schema_map() -> KnownKeys {
             ("models", Leaf),
             ("fetch_models", Leaf),
             ("alias", Leaf),
+            (
+                "builtin_web_search",
+                Struct(HashMap::from([
+                    ("enabled", Leaf),
+                    ("allowed_domains", Array(Box::new(Leaf))),
+                    ("search_context_size", Leaf),
+                    ("include_sources", Leaf),
+                    (
+                        "user_location",
+                        Struct(HashMap::from([
+                            ("type", Leaf),
+                            ("city", Leaf),
+                            ("country", Leaf),
+                            ("region", Leaf),
+                            ("timezone", Leaf),
+                        ])),
+                    ),
+                ])),
+            ),
+            (
+                "generation",
+                Struct(HashMap::from([
+                    ("max_output_tokens", Leaf),
+                    ("reasoning_effort", Leaf),
+                    ("text_verbosity", Leaf),
+                    ("temperature", Leaf),
+                ])),
+            ),
+            (
+                "prompt_cache",
+                Struct(HashMap::from([("enabled", Leaf), ("bucket_hash", Leaf)])),
+            ),
         ]))
     };
 
@@ -136,6 +168,15 @@ fn build_schema_map() -> KnownKeys {
             ("mode", Leaf),
             ("scope", Leaf),
             ("workspace_mount", Leaf),
+            (
+                "mounts",
+                Array(Box::new(Struct(HashMap::from([
+                    ("host_dir", Leaf),
+                    ("guest_dir", Leaf),
+                    ("mode", Leaf),
+                ])))),
+            ),
+            ("mount_allowlist", Array(Box::new(Leaf))),
             ("image", Leaf),
             ("container_prefix", Leaf),
             ("no_network", Leaf),
@@ -865,6 +906,99 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
         });
     }
 
+    // External sandbox mounts (deny-by-default).
+    if !config.tools.exec.sandbox.mounts.is_empty() {
+        if config.tools.exec.sandbox.mount_allowlist.is_empty() {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                category: "security",
+                path: "tools.exec.sandbox.mount_allowlist".into(),
+                message: "sandbox mounts are configured but mount_allowlist is empty (deny-by-default); add allowed host roots or remove mounts".into(),
+            });
+        }
+
+        for (i, m) in config.tools.exec.sandbox.mounts.iter().enumerate() {
+            let host_path = format!("tools.exec.sandbox.mounts[{i}].host_dir");
+            let guest_path = format!("tools.exec.sandbox.mounts[{i}].guest_dir");
+            let mode_path = format!("tools.exec.sandbox.mounts[{i}].mode");
+
+            let host = m.host_dir.trim();
+            if host.is_empty() {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "security",
+                    path: host_path,
+                    message: "host_dir must be non-empty".into(),
+                });
+            } else if !host.starts_with('/') {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "security",
+                    path: host_path,
+                    message: "host_dir must be an absolute path".into(),
+                });
+            }
+
+            let guest = m.guest_dir.trim();
+            if guest.is_empty() {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "security",
+                    path: guest_path,
+                    message: "guest_dir must be non-empty".into(),
+                });
+            } else if !guest.starts_with('/') {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "security",
+                    path: guest_path,
+                    message: "guest_dir must be an absolute path".into(),
+                });
+            } else if !guest.starts_with("/mnt/host/") {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "security",
+                    path: guest_path,
+                    message: "guest_dir must be under /mnt/host/ (fixed prefix for auditability)".into(),
+                });
+            }
+
+            let mode = m.mode.trim();
+            let valid_modes = ["ro", "rw"];
+            if !valid_modes.contains(&mode) {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "security",
+                    path: mode_path,
+                    message: format!(
+                        "unknown mount mode \"{}\"; expected one of: {}",
+                        m.mode,
+                        valid_modes.join(", ")
+                    ),
+                });
+            }
+        }
+
+        for (i, root) in config.tools.exec.sandbox.mount_allowlist.iter().enumerate() {
+            let trimmed = root.trim();
+            if trimmed.is_empty() {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "security",
+                    path: format!("tools.exec.sandbox.mount_allowlist[{i}]"),
+                    message: "mount_allowlist entries must be non-empty absolute paths".into(),
+                });
+            } else if !trimmed.starts_with('/') {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "security",
+                    path: format!("tools.exec.sandbox.mount_allowlist[{i}]"),
+                    message: "mount_allowlist entries must be absolute paths".into(),
+                });
+            }
+        }
+    }
+
     if let Some(entry) = config.providers.providers.get("openai-responses") {
         if let Some(ref base_url) = entry.base_url {
             let normalized = base_url.trim_end_matches('/');
@@ -877,6 +1011,93 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
                         "openai-responses base_url must end with '/v1' (example: https://api.openai.com/v1), got: {base_url}"
                     ),
                 });
+            }
+        }
+
+        if let Some(ref builtin) = entry.builtin_web_search {
+            let has_other_fields = builtin.allowed_domains.is_some()
+                || builtin.search_context_size.is_some()
+                || builtin.user_location.is_some()
+                || builtin.include_sources;
+            if !builtin.enabled && has_other_fields {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "providers",
+                    path: "providers.openai-responses.builtin_web_search.enabled".into(),
+                    message: "builtin_web_search is configured but disabled; set enabled=true or remove other builtin_web_search fields".into(),
+                });
+            }
+
+            if let Some(ref domains) = builtin.allowed_domains {
+                for (i, domain) in domains.iter().enumerate() {
+                    let trimmed = domain.trim();
+                    if trimmed.is_empty() {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            category: "providers",
+                            path: format!(
+                                "providers.openai-responses.builtin_web_search.allowed_domains[{i}]"
+                            ),
+                            message: "allowed_domains entries must be non-empty".into(),
+                        });
+                        continue;
+                    }
+                    if trimmed.chars().any(|c| c.is_whitespace()) {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            category: "providers",
+                            path: format!(
+                                "providers.openai-responses.builtin_web_search.allowed_domains[{i}]"
+                            ),
+                            message: "allowed_domains entries must not contain whitespace".into(),
+                        });
+                    }
+                    if trimmed.contains("://") {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            category: "providers",
+                            path: format!(
+                                "providers.openai-responses.builtin_web_search.allowed_domains[{i}]"
+                            ),
+                            message:
+                                "allowed_domains entries must be domains only (do not include scheme like https://)"
+                                    .into(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(ref generation) = entry.generation {
+            if let Some(max_output_tokens) = generation.max_output_tokens {
+                if max_output_tokens == 0 {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        category: "providers",
+                        path: "providers.openai-responses.generation.max_output_tokens".into(),
+                        message: "max_output_tokens must be > 0".into(),
+                    });
+                }
+            }
+
+            if let Some(temp) = generation.temperature {
+                if !(0.0..=2.0).contains(&temp) {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        category: "providers",
+                        path: "providers.openai-responses.generation.temperature".into(),
+                        message: "temperature must be between 0.0 and 2.0".into(),
+                    });
+                }
+                if generation.reasoning_effort != Some(crate::schema::ReasoningEffort::None) {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        category: "providers",
+                        path: "providers.openai-responses.generation.temperature".into(),
+                        message:
+                            "temperature requires reasoning_effort=\"none\" for openai-responses models".into(),
+                    });
+                }
             }
         }
     }
@@ -1465,6 +1686,62 @@ backend = "podman"
     }
 
     #[test]
+    fn sandbox_mounts_keys_are_known() {
+        let toml = r#"
+[tools.exec.sandbox]
+mount_allowlist = ["/mnt/c/dev"]
+mounts = [{ host_dir = "/mnt/c/dev/myproj", guest_dir = "/mnt/host/myproj", mode = "ro" }]
+"#;
+
+        let result = validate_toml_str(toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| !(d.category == "unknown-field"
+                    && d.path.starts_with("tools.exec.sandbox.mount"))),
+            "unexpected unknown-field diagnostics: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn sandbox_mounts_without_allowlist_errors() {
+        let toml = r#"
+[tools.exec.sandbox]
+mounts = [{ host_dir = "/mnt/c/dev/myproj", guest_dir = "/mnt/host/myproj", mode = "ro" }]
+"#;
+
+        let result = validate_toml_str(toml);
+        assert!(
+            result.diagnostics.iter().any(|d| {
+                d.severity == Severity::Error && d.path == "tools.exec.sandbox.mount_allowlist"
+            }),
+            "expected error for mounts without allowlist, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn sandbox_mounts_invalid_guest_dir_errors() {
+        let toml = r#"
+[tools.exec.sandbox]
+mount_allowlist = ["/mnt/c/dev"]
+mounts = [{ host_dir = "/mnt/c/dev/myproj", guest_dir = "/tmp/myproj", mode = "ro" }]
+"#;
+
+        let result = validate_toml_str(toml);
+        assert!(
+            result.diagnostics.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.path == "tools.exec.sandbox.mounts[0].guest_dir"
+            }),
+            "expected error for guest_dir prefix constraint, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
     fn unknown_security_level_warned() {
         let toml = r#"
 [tools.exec]
@@ -1734,6 +2011,126 @@ base_url = "https://api.example.com"
                 .iter()
                 .any(|d| d.severity == Severity::Error
                     && d.path == "providers.openai-responses.base_url")
+        );
+    }
+
+    #[test]
+    fn openai_responses_builtin_web_search_keys_are_known() {
+        let toml = r#"
+[providers.openai-responses]
+enabled = true
+
+[providers.openai-responses.builtin_web_search]
+enabled = true
+search_context_size = "medium"
+allowed_domains = ["openai.com"]
+
+[providers.openai-responses.builtin_web_search.user_location]
+country = "US"
+"#;
+
+        let result = validate_toml_str(toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| !(d.category == "unknown-field"
+                    && d.path
+                        .starts_with("providers.openai-responses.builtin_web_search"))),
+            "unexpected unknown-field diagnostics: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn openai_responses_builtin_web_search_disabled_with_other_fields_errors() {
+        let toml = r#"
+[providers.openai-responses]
+enabled = true
+
+[providers.openai-responses.builtin_web_search]
+enabled = false
+search_context_size = "high"
+"#;
+
+        let result = validate_toml_str(toml);
+        assert!(
+            result.diagnostics.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.path == "providers.openai-responses.builtin_web_search.enabled"
+            }),
+            "expected semantic error for builtin_web_search.enabled, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn openai_responses_generation_keys_are_known() {
+        let toml = r#"
+[providers.openai-responses]
+enabled = true
+
+[providers.openai-responses.generation]
+max_output_tokens = 1024
+reasoning_effort = "none"
+text_verbosity = "medium"
+temperature = 0.2
+"#;
+
+        let result = validate_toml_str(toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| !(d.category == "unknown-field"
+                    && d.path.starts_with("providers.openai-responses.generation"))),
+            "unexpected unknown-field diagnostics: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn openai_responses_temperature_requires_reasoning_effort_none() {
+        let toml = r#"
+[providers.openai-responses]
+enabled = true
+
+[providers.openai-responses.generation]
+temperature = 0.2
+"#;
+
+        let result = validate_toml_str(toml);
+        assert!(
+            result.diagnostics.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.path == "providers.openai-responses.generation.temperature"
+            }),
+            "expected semantic error for temperature gating, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn openai_responses_prompt_cache_keys_are_known() {
+        let toml = r#"
+[providers.openai-responses]
+enabled = true
+
+[providers.openai-responses.prompt_cache]
+enabled = true
+bucket_hash = "auto"
+"#;
+
+        let result = validate_toml_str(toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| !(d.category == "unknown-field"
+                    && d.path
+                        .starts_with("providers.openai-responses.prompt_cache"))),
+            "unexpected unknown-field diagnostics: {:?}",
+            result.diagnostics
         );
     }
 

@@ -228,6 +228,14 @@ impl LlmProvider for ProviderChain {
         self.primary().provider.context_window()
     }
 
+    fn input_limit(&self) -> Option<u32> {
+        self.primary().provider.input_limit()
+    }
+
+    fn output_limit(&self) -> Option<u32> {
+        self.primary().provider.output_limit()
+    }
+
     async fn complete(
         &self,
         messages: &[ChatMessage],
@@ -337,6 +345,100 @@ impl LlmProvider for ProviderChain {
         )
     }
 
+    async fn complete_with_context(
+        &self,
+        ctx: &crate::model::LlmRequestContext,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<CompletionResponse> {
+        let mut errors = Vec::new();
+        #[cfg(feature = "metrics")]
+        let start = Instant::now();
+
+        for entry in &self.chain {
+            if entry.state.is_tripped() {
+                continue;
+            }
+
+            let provider_name = entry.provider.name().to_string();
+            let model_id = entry.provider.id().to_string();
+
+            match entry
+                .provider
+                .complete_with_context(ctx, messages, tools)
+                .await
+            {
+                Ok(resp) => {
+                    entry.state.record_success();
+
+                    // Record metrics on successful completion
+                    #[cfg(feature = "metrics")]
+                    {
+                        let duration = start.elapsed().as_secs_f64();
+
+                        counter!(
+                            llm_metrics::COMPLETIONS_TOTAL,
+                            labels::PROVIDER => provider_name.clone(),
+                            labels::MODEL => model_id.clone()
+                        )
+                        .increment(1);
+
+                        histogram!(
+                            llm_metrics::COMPLETION_DURATION_SECONDS,
+                            labels::PROVIDER => provider_name,
+                            labels::MODEL => model_id
+                        )
+                        .record(duration);
+                    }
+
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    let kind = classify_error(&e);
+                    entry.state.record_failure();
+
+                    // Record error metrics
+                    #[cfg(feature = "metrics")]
+                    {
+                        counter!(
+                            llm_metrics::COMPLETION_ERRORS_TOTAL,
+                            labels::PROVIDER => provider_name.clone(),
+                            labels::MODEL => model_id.clone(),
+                            labels::ERROR_TYPE => format!("{kind:?}")
+                        )
+                        .increment(1);
+                    }
+
+                    if !kind.should_failover() {
+                        // Non-retryable error — propagate immediately.
+                        return Err(e);
+                    }
+
+                    warn!(
+                        provider = entry.provider.id(),
+                        error = %e,
+                        kind = ?kind,
+                        "provider failed, trying next in chain"
+                    );
+                    errors.push(format!("{}: {e}", entry.provider.id()));
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            return self
+                .primary()
+                .provider
+                .complete_with_context(ctx, messages, tools)
+                .await;
+        }
+
+        anyhow::bail!(
+            "all providers in failover chain failed: {}",
+            errors.join("; ")
+        )
+    }
+
     fn stream(
         &self,
         messages: Vec<ChatMessage>,
@@ -359,6 +461,24 @@ impl LlmProvider for ProviderChain {
         }
         // All tripped — try primary anyway (it may have cooled down by now).
         self.primary().provider.stream_with_tools(messages, tools)
+    }
+
+    fn stream_with_tools_with_context(
+        &self,
+        ctx: &crate::model::LlmRequestContext,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        for entry in &self.chain {
+            if !entry.state.is_tripped() {
+                return entry
+                    .provider
+                    .stream_with_tools_with_context(ctx, messages, tools);
+            }
+        }
+        self.primary()
+            .provider
+            .stream_with_tools_with_context(ctx, messages, tools)
     }
 }
 

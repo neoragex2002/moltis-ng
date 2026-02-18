@@ -64,6 +64,7 @@ export var sessionSwitchInProgress = false;
 export var lastHistoryIndex = -1;
 export var sessionContextWindow = 0;
 export var sessionToolsEnabled = true;
+export var sessionBudget = null;
 
 // Provider/channel page refresh callbacks
 export var refreshProvidersPage = null;
@@ -237,6 +238,9 @@ export function setSessionContextWindow(v) {
 }
 export function setSessionToolsEnabled(v) {
 	sessionToolsEnabled = v;
+}
+export function setSessionBudget(v) {
+	sessionBudget = v;
 }
 export function setRefreshProvidersPage(v) {
 	refreshProvidersPage = v;

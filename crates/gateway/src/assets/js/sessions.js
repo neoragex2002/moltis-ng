@@ -430,15 +430,16 @@ function makeThinkingDots() {
 }
 
 function postHistoryLoadActions(key, searchContext, msgEls) {
-	sendRpc("chat.context", {}).then((ctxRes) => {
-		if (ctxRes?.ok && ctxRes.payload) {
-			if (ctxRes.payload.tokenUsage) {
-				S.setSessionContextWindow(ctxRes.payload.tokenUsage.contextWindow || 0);
+		sendRpc("chat.context", {}).then((ctxRes) => {
+			if (ctxRes?.ok && ctxRes.payload) {
+				if (ctxRes.payload.tokenUsage) {
+					S.setSessionContextWindow(ctxRes.payload.tokenUsage.contextWindow || 0);
+				}
+				S.setSessionBudget(ctxRes.payload.budget || null);
+				S.setSessionToolsEnabled(ctxRes.payload.supportsTools !== false);
 			}
-			S.setSessionToolsEnabled(ctxRes.payload.supportsTools !== false);
-		}
-		updateTokenBar();
-	});
+			updateTokenBar();
+		});
 	updateTokenBar();
 
 	if (searchContext?.query && S.chatMsgBox) {
@@ -542,6 +543,7 @@ export function switchSession(key, searchContext, projectId) {
 	S.setLastHistoryIndex(-1);
 	S.setSessionTokens({ input: 0, output: 0 });
 	S.setSessionContextWindow(0);
+	S.setSessionBudget(null);
 	updateTokenBar();
 	// Preact SessionList auto-rerenders active/unread from signals.
 

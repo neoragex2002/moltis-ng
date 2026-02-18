@@ -309,6 +309,11 @@ pub enum StreamEvent {
     Error(String),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LlmRequestContext {
+    pub session_key: Option<String>,
+}
+
 /// LLM provider trait (Anthropic, OpenAI, Google, etc.).
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -323,6 +328,15 @@ pub trait LlmProvider: Send + Sync {
         tools: &[serde_json::Value],
     ) -> anyhow::Result<CompletionResponse>;
 
+    async fn complete_with_context(
+        &self,
+        _ctx: &LlmRequestContext,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<CompletionResponse> {
+        self.complete(messages, tools).await
+    }
+
     /// Whether this provider supports tool/function calling.
     /// Defaults to false; providers that handle the `tools` parameter
     /// in `complete()` should override this to return true.
@@ -334,6 +348,19 @@ pub trait LlmProvider: Send + Sync {
     /// Used to detect when conversation approaches the limit and trigger auto-compact.
     fn context_window(&self) -> u32 {
         200_000
+    }
+
+    /// Maximum input (prompt) tokens accepted by the provider/model, if known.
+    ///
+    /// When `None`, callers should fall back to a conservative fraction of
+    /// `context_window()` for budgeting.
+    fn input_limit(&self) -> Option<u32> {
+        None
+    }
+
+    /// Maximum output tokens accepted by the provider/model, if known.
+    fn output_limit(&self) -> Option<u32> {
+        None
     }
 
     /// Whether this provider supports vision (image inputs).
@@ -363,6 +390,15 @@ pub trait LlmProvider: Send + Sync {
         _tools: Vec<serde_json::Value>,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         self.stream(messages)
+    }
+
+    fn stream_with_tools_with_context(
+        &self,
+        _ctx: &LlmRequestContext,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools(messages, tools)
     }
 }
 

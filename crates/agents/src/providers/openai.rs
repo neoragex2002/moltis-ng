@@ -11,9 +11,11 @@ use {
     },
     super::openai_responses::OpenAiResponsesProvider,
     crate::model::{
-        ChatMessage, CompletionResponse, LlmProvider, StreamEvent, Usage,
+        ChatMessage, CompletionResponse, LlmProvider, LlmRequestContext, StreamEvent, Usage,
     },
 };
+
+use moltis_config::schema::OpenAiResponsesPromptCacheConfig;
 
 pub struct OpenAiProvider {
     api_key: secrecy::Secret<String>,
@@ -410,32 +412,10 @@ impl OpenAiProvider {
             })
             .collect()
     }
-}
 
-#[async_trait]
-impl LlmProvider for OpenAiProvider {
-    fn name(&self) -> &str {
-        &self.provider_name
-    }
-
-    fn id(&self) -> &str {
-        &self.model
-    }
-
-    fn supports_tools(&self) -> bool {
-        super::supports_tools_for_model(&self.model)
-    }
-
-    fn context_window(&self) -> u32 {
-        super::context_window_for_model(&self.model)
-    }
-
-    fn supports_vision(&self) -> bool {
-        super::supports_vision_for_model(&self.model)
-    }
-
-    async fn complete(
+    async fn complete_impl(
         &self,
+        ctx: Option<&LlmRequestContext>,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> anyhow::Result<CompletionResponse> {
@@ -483,7 +463,17 @@ impl LlmProvider for OpenAiProvider {
                     self.model.clone(),
                     self.base_url.clone(),
                     self.provider_name.clone(),
+                    None,
+                    None,
+                    Some(OpenAiResponsesPromptCacheConfig::default()),
                 );
+
+                if let Some(ctx) = ctx {
+                    return responses_provider
+                        .complete_with_context(ctx, messages, tools)
+                        .await;
+                }
+
                 return responses_provider.complete(messages, tools).await;
             }
             if should_warn_on_api_error(status, &body_text) {
@@ -529,17 +519,9 @@ impl LlmProvider for OpenAiProvider {
         })
     }
 
-    #[allow(clippy::collapsible_if)]
-    fn stream(
+    fn stream_with_tools_impl(
         &self,
-        messages: Vec<ChatMessage>,
-    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
-        self.stream_with_tools(messages, vec![])
-    }
-
-    #[allow(clippy::collapsible_if)]
-    fn stream_with_tools(
-        &self,
+        ctx: Option<LlmRequestContext>,
         messages: Vec<ChatMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
@@ -594,8 +576,17 @@ impl LlmProvider for OpenAiProvider {
                         self.model.clone(),
                         self.base_url.clone(),
                         self.provider_name.clone(),
+                        None,
+                        None,
+                        Some(OpenAiResponsesPromptCacheConfig::default()),
                     );
-                    let mut responses_stream = responses_provider.stream_with_tools(messages, tools);
+
+                    let mut responses_stream = if let Some(ref ctx) = ctx {
+                        responses_provider.stream_with_tools_with_context(ctx, messages, tools)
+                    } else {
+                        responses_provider.stream_with_tools(messages, tools)
+                    };
+
                     while let Some(event) = responses_stream.next().await {
                         let done = matches!(event, StreamEvent::Done(_) | StreamEvent::Error(_));
                         yield event;
@@ -644,6 +635,81 @@ impl LlmProvider for OpenAiProvider {
 
             yield StreamEvent::Error("OpenAI stream ended unexpectedly".into());
         })
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiProvider {
+    fn name(&self) -> &str {
+        &self.provider_name
+    }
+
+    fn id(&self) -> &str {
+        &self.model
+    }
+
+    fn supports_tools(&self) -> bool {
+        super::supports_tools_for_model(&self.model)
+    }
+
+    fn context_window(&self) -> u32 {
+        super::resolved_openai_limits(&self.model).context
+    }
+
+    fn input_limit(&self) -> Option<u32> {
+        super::cached_openai_model_limits(&moltis_config::data_dir(), &self.model)
+            .and_then(|l| l.input)
+    }
+
+    fn output_limit(&self) -> Option<u32> {
+        Some(super::resolved_openai_limits(&self.model).output)
+    }
+
+    fn supports_vision(&self) -> bool {
+        super::supports_vision_for_model(&self.model)
+    }
+
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<CompletionResponse> {
+        self.complete_impl(None, messages, tools).await
+    }
+
+    async fn complete_with_context(
+        &self,
+        ctx: &LlmRequestContext,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<CompletionResponse> {
+        self.complete_impl(Some(ctx), messages, tools).await
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn stream(
+        &self,
+        messages: Vec<ChatMessage>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools(messages, vec![])
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn stream_with_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools_impl(None, messages, tools)
+    }
+
+    fn stream_with_tools_with_context(
+        &self,
+        ctx: &LlmRequestContext,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools_impl(Some(ctx.clone()), messages, tools)
     }
 }
 

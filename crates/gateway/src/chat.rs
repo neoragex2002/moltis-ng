@@ -481,9 +481,12 @@ async fn run_single_probe(
     }
 
     let probe = [ChatMessage::user("ping")];
+    let llm_context = moltis_agents::model::LlmRequestContext {
+        session_key: Some(format!("probe:{provider_name}:{model_id}")),
+    };
     let completion = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        provider.complete(&probe, &[]),
+        provider.complete_with_context(&llm_context, &probe, &[]),
     )
     .await;
 
@@ -1516,7 +1519,10 @@ impl ModelService for LiveModelService {
         // Dropping the stream closes the HTTP connection, which tells the
         // provider to stop generating — effectively max_tokens: 1.
         let probe = vec![ChatMessage::user("ping")];
-        let mut stream = provider.stream(probe);
+        let llm_context = moltis_agents::model::LlmRequestContext {
+            session_key: Some(format!("models.test:{model_id}")),
+        };
+        let mut stream = provider.stream_with_tools_with_context(&llm_context, probe, vec![]);
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while let Some(event) = stream.next().await {
@@ -2134,86 +2140,6 @@ impl ChatService for LiveChatService {
             .get("_accept_language")
             .and_then(|v| v.as_str())
             .map(String::from);
-        // Auto-compact: if conversation input tokens exceed 95% of context window, compact first.
-        let context_window = provider.context_window() as u64;
-        let total_input: u64 = history
-            .iter()
-            .filter_map(|m| m.get("inputTokens").and_then(|v| v.as_u64()))
-            .sum();
-        let compact_threshold = (context_window * 95) / 100;
-
-        if total_input >= compact_threshold {
-            let pre_compact_msg_count = history.len();
-            let total_output: u64 = history
-                .iter()
-                .filter_map(|m| m.get("outputTokens").and_then(|v| v.as_u64()))
-                .sum();
-            let pre_compact_total = total_input + total_output;
-
-            info!(
-                session = %session_key,
-                total_input,
-                context_window,
-                "auto-compact triggered (95% threshold reached)"
-            );
-            broadcast(
-                &self.state,
-                "chat",
-                serde_json::json!({
-                    "sessionKey": session_key,
-                    "state": "auto_compact",
-                    "phase": "start",
-                    "messageCount": pre_compact_msg_count,
-                    "totalTokens": pre_compact_total,
-                    "inputTokens": total_input,
-                    "outputTokens": total_output,
-                    "contextWindow": context_window,
-                }),
-                BroadcastOpts::default(),
-            )
-            .await;
-
-            let compact_params = serde_json::json!({ "_conn_id": conn_id });
-            match self.compact(compact_params).await {
-                Ok(_) => {
-                    // Reload history after compaction.
-                    history = self
-                        .session_store
-                        .read(&session_key)
-                        .await
-                        .unwrap_or_default();
-                    broadcast(
-                        &self.state,
-                        "chat",
-                        serde_json::json!({
-                            "sessionKey": session_key,
-                            "state": "auto_compact",
-                            "phase": "done",
-                            "messageCount": pre_compact_msg_count,
-                            "totalTokens": pre_compact_total,
-                            "contextWindow": context_window,
-                        }),
-                        BroadcastOpts::default(),
-                    )
-                    .await;
-                },
-                Err(e) => {
-                    warn!(session = %session_key, error = %e, "auto-compact failed, proceeding with full history");
-                    broadcast(
-                        &self.state,
-                        "chat",
-                        serde_json::json!({
-                            "sessionKey": session_key,
-                            "state": "auto_compact",
-                            "phase": "error",
-                            "error": e.to_string(),
-                        }),
-                        BroadcastOpts::default(),
-                    )
-                    .await;
-                },
-            }
-        }
 
         // Try to acquire the per-session semaphore.  If a run is already active,
         // queue the message according to the configured MessageQueueMode instead
@@ -2256,6 +2182,243 @@ impl ChatService for LiveChatService {
                 }));
             },
         };
+
+        // Auto-compact preflight (proactive).
+        //
+        // The persisted `inputTokens` field is "prompt tokens for that call" and includes
+        // the entire history; summing it is O(turn^2) and triggers compaction too early.
+        // Instead, estimate the next request input budget from the prompt text.
+        let budget = CompactionBudget::for_provider(provider.as_ref());
+        if budget.derived_input_cap {
+            warn!(
+                model = provider.id(),
+                context_window = budget.effective_context_window,
+                "provider did not report input_limit; deriving input_hard_cap=floor(context_window*0.8)"
+            );
+        }
+
+        let persona = load_prompt_persona();
+        let system_prompt = if stream_only {
+            build_system_prompt_minimal_runtime(
+                project_context.as_deref(),
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                Some(&runtime_context),
+            )
+        } else {
+            let native_tools = provider.supports_tools();
+            let filtered_registry = {
+                let registry_guard = self.tool_registry.read().await;
+                if native_tools {
+                    apply_runtime_tool_filters(
+                        &registry_guard,
+                        &persona.config,
+                        &discovered_skills,
+                        mcp_disabled,
+                    )
+                } else {
+                    registry_guard.clone_without(&[])
+                }
+            };
+            if native_tools {
+                build_system_prompt_with_session_runtime(
+                    &filtered_registry,
+                    native_tools,
+                    project_context.as_deref(),
+                    &discovered_skills,
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            } else {
+                build_system_prompt_minimal_runtime(
+                    project_context.as_deref(),
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            }
+        };
+        let system_prompt = if desired_reply_medium == ReplyMedium::Voice {
+            format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
+        } else {
+            system_prompt
+        };
+
+        let estimated_next_input_tokens =
+            estimate_next_input_tokens(&system_prompt, &history, &user_content);
+        let keep_start_idx = keep_window_start_idx(&history, KEEP_LAST_USER_ROUNDS);
+        let keep_window = &history[keep_start_idx..];
+        let estimated_keep_window_input_tokens =
+            estimate_next_input_tokens(&system_prompt, keep_window, &user_content);
+
+        if estimated_keep_window_input_tokens >= budget.input_hard_cap {
+            // Recovery mode: keep window itself doesn't fit — do not call the model.
+            // Still persist the user message so the session remains usable.
+            if let Err(e) = self
+                .session_store
+                .append(&session_key, &user_msg.to_value())
+                .await
+            {
+                warn!("failed to persist user message: {e}");
+            }
+            // Best-effort: update preview + metadata counts so the session stays visible in UI.
+            if let Some(entry) = self.session_metadata.get(&session_key).await
+                && entry.preview.is_none()
+            {
+                let preview_text = extract_preview_from_value(&user_msg.to_value());
+                if let Some(preview) = preview_text {
+                    self.session_metadata
+                        .set_preview(&session_key, Some(&preview))
+                        .await;
+                }
+            }
+            if let Ok(count) = self.session_store.count(&session_key).await {
+                self.session_metadata.touch(&session_key, count).await;
+            }
+
+            let error_obj = serde_json::json!({
+                "type": "keep_window_overflow",
+                "icon": "⚠️",
+                "title": "Context window overflow",
+                "detail": "The last 4 user rounds plus this message exceed the model's input limit, so auto-compaction cannot proceed. Shorten/split your latest message or start a new session.",
+                "budget": {
+                    "effectiveContextWindow": budget.effective_context_window,
+                    "inputHardCap": budget.input_hard_cap,
+                    "reservedOutputTokens": budget.reserved_output_tokens,
+                    "reserveSafetyTokens": budget.reserve_safety_tokens,
+                    "effectiveInputBudget": budget.effective_input_budget(),
+                    "estimatedNextInputTokens": estimated_next_input_tokens,
+                    "estimatedKeepWindowInputTokens": estimated_keep_window_input_tokens,
+                    "highWatermark": budget.high_watermark,
+                    "lowWatermark": budget.low_watermark,
+                }
+            });
+
+            broadcast(
+                &self.state,
+                "chat",
+                serde_json::json!({
+                    "runId": run_id,
+                    "sessionKey": session_key,
+                    "state": "error",
+                    "error": error_obj,
+                    "seq": client_seq,
+                }),
+                BroadcastOpts::default(),
+            )
+            .await;
+
+            drop(permit);
+            return Ok(serde_json::json!({ "runId": run_id }));
+        }
+
+        if estimated_next_input_tokens >= budget.high_watermark && keep_start_idx > 0 {
+            let pre_compact_msg_count = history.len();
+            info!(
+                session = %session_key,
+                estimated_next_input_tokens,
+                high_watermark = budget.high_watermark,
+                input_hard_cap = budget.input_hard_cap,
+                "auto-compact triggered (HIGH_WATERMARK reached)"
+            );
+            broadcast(
+                &self.state,
+                "chat",
+                serde_json::json!({
+                    "runId": run_id,
+                    "sessionKey": session_key,
+                    "state": "auto_compact",
+                    "phase": "start",
+                    "reason": "budget_high_watermark",
+                    "messageCount": pre_compact_msg_count,
+                    "budget": {
+                        "effectiveContextWindow": budget.effective_context_window,
+                        "inputHardCap": budget.input_hard_cap,
+                        "reservedOutputTokens": budget.reserved_output_tokens,
+                        "reserveSafetyTokens": budget.reserve_safety_tokens,
+                        "effectiveInputBudget": budget.effective_input_budget(),
+                        "estimatedNextInputTokens": estimated_next_input_tokens,
+                        "highWatermark": budget.high_watermark,
+                        "lowWatermark": budget.low_watermark,
+                    }
+                }),
+                BroadcastOpts::default(),
+            )
+            .await;
+
+            match compact_session(
+                &self.state,
+                self.hook_registry.clone(),
+                &self.session_store,
+                &session_key,
+                &provider,
+                KEEP_LAST_USER_ROUNDS,
+            )
+            .await
+            {
+                Ok(result) => {
+                    history = result.compacted.clone();
+                    broadcast(
+                        &self.state,
+                        "chat",
+                        serde_json::json!({
+                            "runId": run_id,
+                            "sessionKey": session_key,
+                            "state": "auto_compact",
+                            "phase": "done",
+                            "reason": "budget_high_watermark",
+                            "messageCount": pre_compact_msg_count,
+                            "keptMessageCount": result.kept_message_count,
+                            "keepLastUserRounds": KEEP_LAST_USER_ROUNDS,
+                            "summaryLen": result.summary_len,
+                            "budget": {
+                                "effectiveContextWindow": budget.effective_context_window,
+                                "inputHardCap": budget.input_hard_cap,
+                                "reservedOutputTokens": budget.reserved_output_tokens,
+                                "reserveSafetyTokens": budget.reserve_safety_tokens,
+                                "effectiveInputBudget": budget.effective_input_budget(),
+                                "estimatedNextInputTokens": estimated_next_input_tokens,
+                                "highWatermark": budget.high_watermark,
+                                "lowWatermark": budget.low_watermark,
+                            }
+                        }),
+                        BroadcastOpts::default(),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    warn!(
+                        session = %session_key,
+                        error = %e,
+                        "auto-compact failed, proceeding with full history"
+                    );
+                    broadcast(
+                        &self.state,
+                        "chat",
+                        serde_json::json!({
+                            "runId": run_id,
+                            "sessionKey": session_key,
+                            "state": "auto_compact",
+                            "phase": "error",
+                            "reason": "budget_high_watermark",
+                            "error": e.to_string(),
+                        }),
+                        BroadcastOpts::default(),
+                    )
+                    .await;
+                }
+            }
+        }
 
         // Persist the user message now that we know it won't be queued.
         // (Queued messages skip this; they are persisted when replayed.)
@@ -2554,6 +2717,100 @@ impl ChatService for LiveChatService {
             history.pop();
         }
 
+        // Proactive compaction for send_sync (channels / API callers).
+        let budget = CompactionBudget::for_provider(provider.as_ref());
+        let persona = load_prompt_persona();
+        let system_prompt = if stream_only {
+            build_system_prompt_minimal_runtime(
+                None,
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                Some(&runtime_context),
+            )
+        } else {
+            let native_tools = provider.supports_tools();
+            let filtered_registry = {
+                let registry_guard = self.tool_registry.read().await;
+                if native_tools {
+                    apply_runtime_tool_filters(
+                        &registry_guard,
+                        &persona.config,
+                        &[],
+                        false, // send_sync: MCP tools always enabled for API calls
+                    )
+                } else {
+                    registry_guard.clone_without(&[])
+                }
+            };
+            if native_tools {
+                build_system_prompt_with_session_runtime(
+                    &filtered_registry,
+                    native_tools,
+                    None,
+                    &[],
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            } else {
+                build_system_prompt_minimal_runtime(
+                    None,
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            }
+        };
+
+        let user_content = UserContent::text(text.clone());
+        let estimated_next_input_tokens =
+            estimate_next_input_tokens(&system_prompt, &history, &user_content);
+        let keep_start_idx = keep_window_start_idx(&history, KEEP_LAST_USER_ROUNDS);
+        let estimated_keep_window_input_tokens =
+            estimate_next_input_tokens(&system_prompt, &history[keep_start_idx..], &user_content);
+
+        if estimated_keep_window_input_tokens >= budget.input_hard_cap {
+            let msg = "keep_window_overflow: last 4 user rounds plus current message exceed input limit; shorten/split your message or start a new session";
+            let error_entry = PersistedMessage::system(format!("[error] {msg}"));
+            let _ = self
+                .session_store
+                .append(&session_key, &error_entry.to_value())
+                .await;
+            return Err(msg.to_string());
+        }
+
+        if estimated_next_input_tokens >= budget.high_watermark && keep_start_idx > 0 {
+            if let Ok(_result) = compact_session(
+                &self.state,
+                self.hook_registry.clone(),
+                &self.session_store,
+                &session_key,
+                &provider,
+                KEEP_LAST_USER_ROUNDS,
+            )
+            .await
+            {
+                // Reload history again (excluding the user message we appended).
+                history = self
+                    .session_store
+                    .read(&session_key)
+                    .await
+                    .unwrap_or_default();
+                if !history.is_empty() {
+                    history.pop();
+                }
+            }
+        }
+
         let run_id = uuid::Uuid::new_v4().to_string();
         let state = Arc::clone(&self.state);
         let tool_registry = Arc::clone(&self.tool_registry);
@@ -2828,151 +3085,30 @@ impl ChatService for LiveChatService {
             .await
             .map_err(|e| e.to_string())?;
 
-        if history.is_empty() {
-            return Err("nothing to compact".into());
-        }
-
-        // Dispatch BeforeCompaction hook.
-        if let Some(ref hooks) = self.hook_registry {
-            let payload = moltis_common::hooks::HookPayload::BeforeCompaction {
-                session_key: session_key.clone(),
-                message_count: history.len(),
-            };
-            if let Err(e) = hooks.dispatch(&payload).await {
-                warn!(session = %session_key, error = %e, "BeforeCompaction hook failed");
-            }
-        }
-
-        // Run silent memory turn before summarization — saves important memories to disk.
-        // Write into the data directory (e.g. ~/.moltis/) so files don't end up in cwd.
-        if let Some(ref mm) = self.state.memory_manager {
-            let memory_dir = moltis_config::data_dir();
-            if let Ok(provider) = self.resolve_provider(&session_key, &history).await {
-                let chat_history_for_memory = values_to_chat_messages(&history);
-                match moltis_agents::silent_turn::run_silent_memory_turn(
-                    provider,
-                    &chat_history_for_memory,
-                    &memory_dir,
-                )
-                .await
-                {
-                    Ok(paths) => {
-                        for path in &paths {
-                            if let Err(e) = mm.sync_path(path).await {
-                                warn!(path = %path.display(), error = %e, "compact: memory sync of written file failed");
-                            }
-                        }
-                        if !paths.is_empty() {
-                            info!(
-                                files = paths.len(),
-                                "compact: silent memory turn wrote files"
-                            );
-                        }
-                    },
-                    Err(e) => warn!(error = %e, "compact: silent memory turn failed"),
-                }
-            }
-        }
-
-        // Build a summary prompt from the conversation using structured messages.
-        // We pass the typed ChatMessage objects directly so role boundaries are
-        // maintained via the API's message structure, preventing prompt injection
-        // where user content could mimic role prefixes in concatenated text.
-        let mut summary_messages = vec![ChatMessage::system(
-            "You are a conversation summarizer. The messages that follow are a conversation you must summarize. Preserve all key facts, decisions, and context. After the conversation, you will receive a final instruction.",
-        )];
-        summary_messages.extend(values_to_chat_messages(&history));
-        summary_messages.push(ChatMessage::user(
-            "Summarize the conversation above into a concise form. Output only the summary, no preamble.",
-        ));
-
-        // Use the session's model if available, otherwise fall back to the model
-        // from the last assistant message, then to the first registered provider.
         let provider = self.resolve_provider(&session_key, &history).await?;
 
-        info!(session = %session_key, messages = history.len(), "chat.compact: summarizing");
+        let result = compact_session(
+            &self.state,
+            self.hook_registry.clone(),
+            &self.session_store,
+            &session_key,
+            &provider,
+            KEEP_LAST_USER_ROUNDS,
+        )
+        .await?;
 
-        let mut stream = provider.stream(summary_messages);
-        let mut summary = String::new();
-        while let Some(event) = stream.next().await {
-            match event {
-                StreamEvent::Delta(delta) => summary.push_str(&delta),
-                StreamEvent::Done(_) => break,
-                StreamEvent::Error(e) => return Err(format!("compact summarization failed: {e}")),
-                // Tool events not expected in summarization stream.
-                StreamEvent::ToolCallStart { .. }
-                | StreamEvent::ToolCallArgumentsDelta { .. }
-                | StreamEvent::ToolCallComplete { .. } => {},
-            }
+        // Update metadata counts after compaction.
+        if let Ok(count) = self.session_store.count(&session_key).await {
+            self.session_metadata.touch(&session_key, count).await;
         }
 
-        if summary.is_empty() {
-            return Err("compact produced empty summary".into());
-        }
-
-        // Replace history with a single assistant message containing the summary.
-        let compacted_msg = PersistedMessage::Assistant {
-            content: format!("[Conversation Summary]\n\n{summary}"),
-            created_at: Some(now_ms()),
-            model: None,
-            provider: None,
-            input_tokens: None,
-            output_tokens: None,
-            tool_calls: None,
-            audio: None,
-            seq: None,
-            run_id: None,
-        };
-        let compacted = vec![compacted_msg.to_value()];
-
-        self.session_store
-            .replace_history(&session_key, compacted.clone())
-            .await
-            .map_err(|e| e.to_string())?;
-
-        self.session_metadata.touch(&session_key, 1).await;
-
-        // Save compaction summary to memory file and trigger sync.
-        if let Some(ref mm) = self.state.memory_manager {
-            let memory_dir = moltis_config::data_dir().join("memory");
-            if let Err(e) = tokio::fs::create_dir_all(&memory_dir).await {
-                warn!(error = %e, "compact: failed to create memory dir");
-            } else {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let filename = format!("compaction-{}-{ts}.md", session_key);
-                let path = memory_dir.join(&filename);
-                let content = format!(
-                    "# Compaction Summary\n\n- **Session**: {session_key}\n- **Timestamp**: {ts}\n\n{summary}"
-                );
-                if let Err(e) = tokio::fs::write(&path, &content).await {
-                    warn!(error = %e, "compact: failed to write memory file");
-                } else {
-                    let mm = Arc::clone(mm);
-                    tokio::spawn(async move {
-                        if let Err(e) = mm.sync().await {
-                            tracing::warn!("compact: memory sync failed: {e}");
-                        }
-                    });
-                }
-            }
-        }
-
-        // Dispatch AfterCompaction hook.
-        if let Some(ref hooks) = self.hook_registry {
-            let payload = moltis_common::hooks::HookPayload::AfterCompaction {
-                session_key: session_key.clone(),
-                summary_len: summary.len(),
-            };
-            if let Err(e) = hooks.dispatch(&payload).await {
-                warn!(session = %session_key, error = %e, "AfterCompaction hook failed");
-            }
-        }
-
-        info!(session = %session_key, "chat.compact: done");
-        Ok(serde_json::json!(compacted))
+        info!(
+            session = %session_key,
+            summary_len = result.summary_len,
+            kept_messages = result.kept_message_count,
+            "chat.compact: done"
+        );
+        Ok(serde_json::json!(result.compacted))
     }
 
     async fn context(&self, params: Value) -> ServiceResult {
@@ -2989,23 +3125,20 @@ impl ChatService for LiveChatService {
         // Session info
         let message_count = self.session_store.count(&session_key).await.unwrap_or(0);
         let session_entry = self.session_metadata.get(&session_key).await;
-        let (provider_name, supports_tools) = {
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = {
             let reg = self.providers.read().await;
             let session_model = session_entry.as_ref().and_then(|e| e.model.as_deref());
             if let Some(id) = session_model {
-                let p = reg.get(id);
-                (
-                    p.as_ref().map(|p| p.name().to_string()),
-                    p.as_ref().map(|p| p.supports_tools()).unwrap_or(true),
-                )
+                reg.get(id)
+                    .or_else(|| reg.first())
+                    .ok_or_else(|| "no LLM providers configured".to_string())?
             } else {
-                let p = reg.first();
-                (
-                    p.as_ref().map(|p| p.name().to_string()),
-                    p.as_ref().map(|p| p.supports_tools()).unwrap_or(true),
-                )
+                reg.first()
+                    .ok_or_else(|| "no LLM providers configured".to_string())?
             }
         };
+        let provider_name = Some(provider.name().to_string());
+        let supports_tools = provider.supports_tools();
         let session_info = serde_json::json!({
             "key": session_key,
             "messageCount": message_count,
@@ -3110,16 +3243,8 @@ impl ChatService for LiveChatService {
             .sum();
         let total_tokens = total_input + total_output;
 
-        // Context window from the session's provider
-        let context_window = {
-            let reg = self.providers.read().await;
-            let session_model = session_entry.as_ref().and_then(|e| e.model.as_deref());
-            if let Some(id) = session_model {
-                reg.get(id).map(|p| p.context_window()).unwrap_or(200_000)
-            } else {
-                reg.first().map(|p| p.context_window()).unwrap_or(200_000)
-            }
-        };
+        // Context window from the resolved provider (may come from models.dev cache).
+        let context_window = provider.context_window();
 
         // Sandbox info
         let sandbox_info = if let Some(ref router) = self.state.sandbox_router {
@@ -3158,25 +3283,29 @@ impl ChatService for LiveChatService {
         };
 
         // Discover enabled skills/plugins (only if provider supports tools)
-        let skills_list: Vec<serde_json::Value> = if supports_tools {
+        let discovered_skills: Vec<moltis_skills::types::SkillMetadata> = if supports_tools {
             let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
             let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
             match discoverer.discover().await {
-                Ok(s) => s
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "name": s.name,
-                            "description": s.description,
-                            "source": s.source,
-                        })
-                    })
-                    .collect(),
-                Err(_) => vec![],
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("failed to discover skills: {e}");
+                    Vec::new()
+                }
             }
         } else {
-            vec![]
+            Vec::new()
         };
+        let skills_list: Vec<serde_json::Value> = discovered_skills
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "description": s.description,
+                    "source": s.source,
+                })
+            })
+            .collect();
 
         // MCP servers (only if provider supports tools)
         let mcp_servers = if supports_tools {
@@ -3189,6 +3318,76 @@ impl ChatService for LiveChatService {
         } else {
             serde_json::json!([])
         };
+
+        // Prompt budget estimation for auto-compaction (heuristic, conservative).
+        let budget = CompactionBudget::for_provider(provider.as_ref());
+        let stream_only = !self.has_tools_sync();
+        let persona = load_prompt_persona();
+        let project_context = self
+            .resolve_project_context(&session_key, conn_id.as_deref())
+            .await;
+        let runtime_context = build_prompt_runtime_context(
+            &self.state,
+            &provider,
+            &session_key,
+            session_entry.as_ref(),
+        )
+        .await;
+        let system_prompt = if stream_only {
+            build_system_prompt_minimal_runtime(
+                project_context.as_deref(),
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                Some(&runtime_context),
+            )
+        } else {
+            let native_tools = provider.supports_tools();
+            let filtered_registry = {
+                let registry_guard = self.tool_registry.read().await;
+                if native_tools {
+                    apply_runtime_tool_filters(
+                        &registry_guard,
+                        &persona.config,
+                        &discovered_skills,
+                        mcp_disabled,
+                    )
+                } else {
+                    registry_guard.clone_without(&[])
+                }
+            };
+            if native_tools {
+                build_system_prompt_with_session_runtime(
+                    &filtered_registry,
+                    native_tools,
+                    project_context.as_deref(),
+                    &discovered_skills,
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            } else {
+                build_system_prompt_minimal_runtime(
+                    project_context.as_deref(),
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            }
+        };
+
+        let estimated_prompt_input_tokens = estimate_prompt_input_tokens(&system_prompt, &messages);
+        let keep_start_idx = keep_window_start_idx(&messages, KEEP_LAST_USER_ROUNDS);
+        let estimated_keep_window_prompt_input_tokens =
+            estimate_prompt_input_tokens(&system_prompt, &messages[keep_start_idx..]);
 
         Ok(serde_json::json!({
             "session": session_info,
@@ -3205,6 +3404,18 @@ impl ChatService for LiveChatService {
                 "total": total_tokens,
                 "contextWindow": context_window,
             },
+            "budget": {
+                "keepLastUserRounds": KEEP_LAST_USER_ROUNDS,
+                "effectiveContextWindow": budget.effective_context_window,
+                "inputHardCap": budget.input_hard_cap,
+                "reservedOutputTokens": budget.reserved_output_tokens,
+                "reserveSafetyTokens": budget.reserve_safety_tokens,
+                "effectiveInputBudget": budget.effective_input_budget(),
+                "estimatedPromptInputTokens": estimated_prompt_input_tokens,
+                "estimatedKeepWindowPromptInputTokens": estimated_keep_window_prompt_input_tokens,
+                "highWatermark": budget.high_watermark,
+                "lowWatermark": budget.low_watermark,
+            }
         }))
     }
 
@@ -3988,6 +4199,10 @@ async fn run_with_tools(
         Some(chat_history)
     };
 
+    let retry_budget = CompactionBudget::for_provider(provider.as_ref());
+    let estimated_next_input_tokens =
+        estimate_next_input_tokens(&system_prompt, history_raw, user_content);
+
     // Inject session key, sandbox mode, and accept-language into tool call params so tools can
     // resolve per-session state and forward the user's locale to web requests.
     // The browser tool uses _sandbox to determine whether to run in a container.
@@ -4023,6 +4238,8 @@ async fn run_with_tools(
                 run_id,
                 session = session_key,
                 error = %msg,
+                estimated_next_input_tokens,
+                input_hard_cap = retry_budget.input_hard_cap,
                 "context window exceeded — compacting and retrying"
             );
 
@@ -4035,14 +4252,33 @@ async fn run_with_tools(
                     "state": "auto_compact",
                     "phase": "start",
                     "reason": "context_window_exceeded",
+                    "budget": {
+                        "effectiveContextWindow": retry_budget.effective_context_window,
+                        "inputHardCap": retry_budget.input_hard_cap,
+                        "reservedOutputTokens": retry_budget.reserved_output_tokens,
+                        "reserveSafetyTokens": retry_budget.reserve_safety_tokens,
+                        "effectiveInputBudget": retry_budget.effective_input_budget(),
+                        "estimatedNextInputTokens": estimated_next_input_tokens,
+                        "highWatermark": retry_budget.high_watermark,
+                        "lowWatermark": retry_budget.low_watermark,
+                    }
                 }),
                 BroadcastOpts::default(),
             )
             .await;
 
             // Inline compaction: summarize history, replace in store.
-            match compact_session(store, session_key, &provider_ref).await {
-                Ok(()) => {
+            match compact_session(
+                state,
+                hook_registry.clone(),
+                store,
+                session_key,
+                &provider_ref,
+                KEEP_LAST_USER_ROUNDS,
+            )
+            .await
+            {
+                Ok(_) => {
                     broadcast(
                         state,
                         "chat",
@@ -4205,52 +4441,145 @@ async fn run_with_tools(
     }
 }
 
-/// Compact a session's history by summarizing it with the given provider.
-///
-/// This is a standalone helper so `run_with_tools` can call it without
-/// requiring `&self` on `LiveChatService`.
-async fn compact_session(
-    store: &Arc<SessionStore>,
-    session_key: &str,
-    provider: &Arc<dyn moltis_agents::model::LlmProvider>,
-) -> Result<(), String> {
-    let history = store.read(session_key).await.map_err(|e| e.to_string())?;
-    if history.is_empty() {
-        return Err("nothing to compact".into());
-    }
+const KEEP_LAST_USER_ROUNDS: usize = 4;
+const SAFETY_MARGIN_TOKENS: u64 = 1024;
 
-    // Use structured ChatMessage objects so role boundaries are maintained via
-    // the API's message structure, preventing prompt injection where user content
-    // could mimic role prefixes in concatenated text.
-    let mut summary_messages = vec![ChatMessage::system(
-        "You are a conversation summarizer. The messages that follow are a conversation you must summarize. Preserve all key facts, decisions, and context. After the conversation, you will receive a final instruction.",
-    )];
-    summary_messages.extend(values_to_chat_messages(&history));
-    summary_messages.push(ChatMessage::user(
-        "Summarize the conversation above into a concise form. Output only the summary, no preamble.",
-    ));
+#[derive(Debug, Clone, Copy)]
+struct CompactionBudget {
+    effective_context_window: u64,
+    input_hard_cap: u64,
+    derived_input_cap: bool,
+    reserved_output_tokens: u64,
+    reserve_safety_tokens: u64,
+    high_watermark: u64,
+    low_watermark: u64,
+}
 
-    let mut stream = provider.stream(summary_messages);
-    let mut summary = String::new();
-    while let Some(event) = stream.next().await {
-        match event {
-            StreamEvent::Delta(delta) => summary.push_str(&delta),
-            StreamEvent::Done(_) => break,
-            StreamEvent::Error(e) => return Err(format!("compact summarization failed: {e}")),
-            // Tool events not expected in summarization stream.
-            StreamEvent::ToolCallStart { .. }
-            | StreamEvent::ToolCallArgumentsDelta { .. }
-            | StreamEvent::ToolCallComplete { .. } => {},
+impl CompactionBudget {
+    fn for_provider(provider: &dyn moltis_agents::model::LlmProvider) -> Self {
+        let effective_context_window = u64::from(provider.context_window());
+        let (input_hard_cap, derived_input_cap) = provider
+            .input_limit()
+            .map(|v| (u64::from(v), false))
+            .unwrap_or_else(|| ((effective_context_window * 80) / 100, true));
+        let reserved_output_tokens = provider
+            .output_limit()
+            .map(u64::from)
+            .unwrap_or_else(|| u64::min(16_384, effective_context_window / 5));
+        let reserve_safety_tokens = SAFETY_MARGIN_TOKENS;
+        let high_watermark = (input_hard_cap * 85) / 100;
+        let low_watermark = (input_hard_cap * 60) / 100;
+        Self {
+            effective_context_window,
+            input_hard_cap,
+            derived_input_cap,
+            reserved_output_tokens,
+            reserve_safety_tokens,
+            high_watermark,
+            low_watermark,
         }
     }
 
-    if summary.is_empty() {
-        return Err("compact produced empty summary".into());
+    fn effective_input_budget(&self) -> u64 {
+        self.input_hard_cap.saturating_sub(self.reserve_safety_tokens)
+    }
+}
+
+fn tokens_estimate_utf8_bytes_div_3(text: &str) -> u64 {
+    let bytes = text.as_bytes().len() as u64;
+    (bytes + 2) / 3
+}
+
+fn estimate_input_tokens_for_messages(messages: &[ChatMessage]) -> u64 {
+    let mut total = 0u64;
+    for msg in messages {
+        match msg {
+            ChatMessage::System { content } => total += tokens_estimate_utf8_bytes_div_3(content),
+            ChatMessage::User { content } => match content {
+                UserContent::Text(t) => total += tokens_estimate_utf8_bytes_div_3(t),
+                UserContent::Multimodal(parts) => {
+                    for p in parts {
+                        if let ContentPart::Text(t) = p {
+                            total += tokens_estimate_utf8_bytes_div_3(t);
+                        }
+                    }
+                }
+            },
+            ChatMessage::Assistant { content, tool_calls } => {
+                if let Some(t) = content {
+                    total += tokens_estimate_utf8_bytes_div_3(t);
+                }
+                for tc in tool_calls {
+                    total += tokens_estimate_utf8_bytes_div_3(&tc.name);
+                    total += tokens_estimate_utf8_bytes_div_3(&tc.arguments.to_string());
+                }
+            }
+            ChatMessage::Tool {
+                tool_call_id: _,
+                content,
+            } => total += tokens_estimate_utf8_bytes_div_3(content),
+        }
+    }
+    total
+}
+
+fn estimate_next_input_tokens(
+    system_prompt: &str,
+    history_raw: &[serde_json::Value],
+    user_content: &UserContent,
+) -> u64 {
+    let mut messages = Vec::with_capacity(history_raw.len() + 2);
+    messages.push(ChatMessage::system(system_prompt));
+    messages.extend(values_to_chat_messages(history_raw));
+    messages.push(ChatMessage::User {
+        content: user_content.clone(),
+    });
+    estimate_input_tokens_for_messages(&messages) + SAFETY_MARGIN_TOKENS
+}
+
+fn estimate_prompt_input_tokens(system_prompt: &str, history_raw: &[serde_json::Value]) -> u64 {
+    let mut messages = Vec::with_capacity(history_raw.len() + 1);
+    messages.push(ChatMessage::system(system_prompt));
+    messages.extend(values_to_chat_messages(history_raw));
+    estimate_input_tokens_for_messages(&messages) + SAFETY_MARGIN_TOKENS
+}
+
+fn keep_window_start_idx(history_raw: &[serde_json::Value], keep_last_user_rounds: usize) -> usize {
+    if keep_last_user_rounds == 0 {
+        return history_raw.len();
+    }
+    let user_indices: Vec<usize> = history_raw
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            m.get("role")
+                .and_then(|v| v.as_str())
+                .filter(|r| *r == "user")
+                .map(|_| i)
+        })
+        .collect();
+    if user_indices.len() <= keep_last_user_rounds {
+        return 0;
+    }
+    let keep_start_user = user_indices.len() - keep_last_user_rounds;
+    user_indices[keep_start_user]
+}
+
+fn build_compacted_history(
+    history_raw: &[serde_json::Value],
+    summary: &str,
+    keep_last_user_rounds: usize,
+    created_at: Option<u64>,
+) -> Result<(Vec<serde_json::Value>, usize, usize), String> {
+    let keep_start_idx = keep_window_start_idx(history_raw, keep_last_user_rounds);
+    if keep_start_idx == 0 {
+        return Err("nothing to compact".into());
     }
 
+    let keep_window = history_raw[keep_start_idx..].to_vec();
     let compacted_msg = PersistedMessage::Assistant {
         content: format!("[Conversation Summary]\n\n{summary}"),
-        created_at: Some(now_ms()),
+        created_at,
         model: None,
         provider: None,
         input_tokens: None,
@@ -4260,14 +4589,188 @@ async fn compact_session(
         seq: None,
         run_id: None,
     };
-    let compacted = vec![compacted_msg.to_value()];
+
+    let mut compacted = Vec::with_capacity(1 + keep_window.len());
+    compacted.push(compacted_msg.to_value());
+    compacted.extend(keep_window);
+    let kept_message_count = compacted.len().saturating_sub(1);
+    Ok((compacted, keep_start_idx, kept_message_count))
+}
+
+#[derive(Debug, Clone)]
+struct CompactionResult {
+    kept_message_count: usize,
+    summary_len: usize,
+    compacted: Vec<serde_json::Value>,
+}
+
+/// Compact a session's history by summarizing older turns and keeping the last N user rounds raw.
+///
+/// Standalone helper so proactive/retry compaction paths can share one implementation.
+async fn compact_session(
+    state: &Arc<GatewayState>,
+    hook_registry: Option<Arc<moltis_common::hooks::HookRegistry>>,
+    store: &Arc<SessionStore>,
+    session_key: &str,
+    provider: &Arc<dyn moltis_agents::model::LlmProvider>,
+    keep_last_user_rounds: usize,
+) -> Result<CompactionResult, String> {
+    let history = store.read(session_key).await.map_err(|e| e.to_string())?;
+    if history.is_empty() {
+        return Err("nothing to compact".into());
+    }
+
+    let pre_message_count = history.len();
+
+    if let Some(ref hooks) = hook_registry {
+        let payload = moltis_common::hooks::HookPayload::BeforeCompaction {
+            session_key: session_key.to_string(),
+            message_count: pre_message_count,
+        };
+        if let Err(e) = hooks.dispatch(&payload).await {
+            warn!(session = %session_key, error = %e, "BeforeCompaction hook failed");
+        }
+    }
+
+    // Best-effort silent memory flush before summarization.
+    if let Some(ref mm) = state.memory_manager {
+        let memory_dir = moltis_config::data_dir();
+        let chat_history_for_memory = values_to_chat_messages(&history);
+        match moltis_agents::silent_turn::run_silent_memory_turn(
+            Arc::clone(provider),
+            &chat_history_for_memory,
+            &memory_dir,
+            Some(session_key),
+        )
+        .await
+        {
+            Ok(paths) => {
+                for path in &paths {
+                    if let Err(e) = mm.sync_path(path).await {
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "compact: memory sync of written file failed"
+                        );
+                    }
+                }
+                if !paths.is_empty() {
+                    info!(files = paths.len(), "compact: silent memory turn wrote files");
+                }
+            }
+            Err(e) => warn!(error = %e, "compact: silent memory turn failed"),
+        }
+    }
+
+    let keep_start_idx = keep_window_start_idx(&history, keep_last_user_rounds);
+    if keep_start_idx == 0 {
+        return Err("nothing to compact".into());
+    }
+
+    let old_segment = &history[..keep_start_idx];
+
+    let mut summary_messages = vec![
+        ChatMessage::system(
+            "You are a conversation summarizer. Summarize the conversation messages you see.\n\
+\n\
+Output MUST be factual and concise. Use this fixed structure:\n\
+\n\
+## Context\n\
+- ...\n\
+\n\
+## Decisions\n\
+- ...\n\
+\n\
+## Plan\n\
+- ...\n\
+\n\
+## Open Questions\n\
+- ...\n\
+\n\
+## Artifacts\n\
+- ... (files, commands, links, identifiers)\n\
+\n\
+If something is unknown, write \"Unknown\" instead of guessing.",
+        ),
+    ];
+    summary_messages.extend(values_to_chat_messages(old_segment));
+    summary_messages.push(ChatMessage::user(
+        "Summarize the conversation above. Output only the summary, no preamble.",
+    ));
+
+    let llm_context = moltis_agents::model::LlmRequestContext {
+        session_key: Some(session_key.to_string()),
+    };
+    let mut stream =
+        provider.stream_with_tools_with_context(&llm_context, summary_messages, vec![]);
+    let mut summary = String::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            StreamEvent::Delta(delta) => summary.push_str(&delta),
+            StreamEvent::Done(_) => break,
+            StreamEvent::Error(e) => return Err(format!("compact summarization failed: {e}")),
+            StreamEvent::ToolCallStart { .. }
+            | StreamEvent::ToolCallArgumentsDelta { .. }
+            | StreamEvent::ToolCallComplete { .. } => {}
+        }
+    }
+
+    let summary = summary.trim().to_string();
+    if summary.is_empty() {
+        return Err("compact produced empty summary".into());
+    }
+    let created_at = Some(now_ms());
+    let (compacted, _keep_start_idx_2, kept_message_count) =
+        build_compacted_history(&history, &summary, keep_last_user_rounds, created_at)?;
 
     store
-        .replace_history(session_key, compacted)
+        .replace_history(session_key, compacted.clone())
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(())
+    // Save compaction summary to memory file and trigger sync (best-effort).
+    if let Some(ref mm) = state.memory_manager {
+        let memory_dir = moltis_config::data_dir().join("memory");
+        if let Err(e) = tokio::fs::create_dir_all(&memory_dir).await {
+            warn!(error = %e, "compact: failed to create memory dir");
+        } else {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let filename = format!("compaction-{}-{ts}.md", session_key);
+            let path = memory_dir.join(&filename);
+            let content = format!(
+                "# Compaction Summary\n\n- **Session**: {session_key}\n- **Timestamp**: {ts}\n\n{summary}"
+            );
+            if let Err(e) = tokio::fs::write(&path, &content).await {
+                warn!(error = %e, "compact: failed to write memory file");
+            } else {
+                let mm = Arc::clone(mm);
+                tokio::spawn(async move {
+                    if let Err(e) = mm.sync().await {
+                        tracing::warn!("compact: memory sync failed: {e}");
+                    }
+                });
+            }
+        }
+    }
+
+    if let Some(ref hooks) = hook_registry {
+        let payload = moltis_common::hooks::HookPayload::AfterCompaction {
+            session_key: session_key.to_string(),
+            summary_len: summary.len(),
+        };
+        if let Err(e) = hooks.dispatch(&payload).await {
+            warn!(session = %session_key, error = %e, "AfterCompaction hook failed");
+        }
+    }
+
+    Ok(CompactionResult {
+        kept_message_count,
+        summary_len: summary.len(),
+        compacted,
+    })
 }
 
 // ── Streaming mode (no tools) ───────────────────────────────────────────────
@@ -4320,7 +4823,12 @@ async fn run_streaming(
     #[cfg(feature = "metrics")]
     let stream_start = Instant::now();
 
-    let mut stream = provider.stream(messages);
+    let llm_context = moltis_agents::model::LlmRequestContext {
+        session_key: Some(session_key.to_string()),
+    };
+    // Stream-only mode still needs request context (e.g. prompt_cache_key bucketing
+    // for OpenAI Responses). Pass empty tools to preserve the no-tools behavior.
+    let mut stream = provider.stream_with_tools_with_context(&llm_context, messages, vec![]);
     let mut accumulated = String::new();
 
     while let Some(event) = stream.next().await {
@@ -5169,6 +5677,17 @@ mod tests {
         id: String,
     }
 
+    struct ContextStreamingProvider {
+        called: Arc<std::sync::atomic::AtomicUsize>,
+        expected_session_key: String,
+    }
+
+    struct BudgetProvider {
+        context_window: u32,
+        input_limit: Option<u32>,
+        output_limit: Option<u32>,
+    }
+
     #[async_trait]
     impl LlmProvider for StaticProvider {
         fn name(&self) -> &str {
@@ -5177,6 +5696,92 @@ mod tests {
 
         fn id(&self) -> &str {
             &self.id
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> anyhow::Result<moltis_agents::model::CompletionResponse> {
+            anyhow::bail!("not implemented for test")
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ContextStreamingProvider {
+        fn name(&self) -> &str {
+            "ctx-stream"
+        }
+
+        fn id(&self) -> &str {
+            "ctx-stream-model"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> anyhow::Result<moltis_agents::model::CompletionResponse> {
+            anyhow::bail!("not implemented for test")
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            panic!("run_streaming must not call provider.stream() directly")
+        }
+
+        fn stream_with_tools_with_context(
+            &self,
+            ctx: &moltis_agents::model::LlmRequestContext,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            assert_eq!(
+                ctx.session_key.as_deref(),
+                Some(self.expected_session_key.as_str())
+            );
+            self.called.fetch_add(1, Ordering::SeqCst);
+            Box::pin(tokio_stream::iter(vec![
+                StreamEvent::Delta("ok".to_string()),
+                StreamEvent::Done(moltis_agents::model::Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                }),
+            ]))
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for BudgetProvider {
+        fn name(&self) -> &str {
+            "budget"
+        }
+
+        fn id(&self) -> &str {
+            "budget-model"
+        }
+
+        fn context_window(&self) -> u32 {
+            self.context_window
+        }
+
+        fn input_limit(&self) -> Option<u32> {
+            self.input_limit
+        }
+
+        fn output_limit(&self) -> Option<u32> {
+            self.output_limit
         }
 
         async fn complete(
@@ -5284,6 +5889,105 @@ mod tests {
             "delivery should wait for outbound send completion"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_streaming_passes_session_key_via_llm_request_context() {
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop(),
+        );
+        let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
+
+        let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(
+            ContextStreamingProvider {
+                called: Arc::clone(&called),
+                expected_session_key: "main".to_string(),
+            },
+        );
+
+        let result = run_streaming(
+            &state,
+            &model_store,
+            "run-1",
+            provider,
+            "ctx-stream-model",
+            &UserContent::text("hi"),
+            "ctx-stream",
+            &[],
+            "main",
+            ReplyMedium::Text,
+            None,
+            0,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_some());
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_passes_session_key_via_llm_request_context() {
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop(),
+        );
+        let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
+
+        let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(
+            ContextStreamingProvider {
+                called: Arc::clone(&called),
+                expected_session_key: "main".to_string(),
+            },
+        );
+
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        tool_registry
+            .write()
+            .await
+            .register(Box::new(DummyTool { name: "noop".into() }));
+
+        let result = run_with_tools(
+            &state,
+            &model_store,
+            "run-1",
+            provider,
+            "ctx-stream-model",
+            &tool_registry,
+            &UserContent::text("hi"),
+            "ctx-stream",
+            &[],
+            "main",
+            ReplyMedium::Text,
+            None,
+            None,
+            0,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await;
+
+        assert!(result.is_some());
+        assert_eq!(called.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -6529,5 +7233,67 @@ mod tests {
             });
 
         assert!(extracted.is_none());
+    }
+
+    #[test]
+    fn keep_window_start_idx_keeps_last_4_user_rounds() {
+        let mut history = Vec::new();
+        for i in 0..6 {
+            history.push(serde_json::json!({"role":"user","content": format!("u{i}")}));
+            history.push(serde_json::json!({"role":"assistant","content": format!("a{i}")}));
+        }
+        // user indices: 0,2,4,6,8,10 -> keep last 4 starts at index 4
+        assert_eq!(keep_window_start_idx(&history, 4), 4);
+    }
+
+    #[test]
+    fn tokens_estimate_is_conservative_bytes_div_3() {
+        assert_eq!(tokens_estimate_utf8_bytes_div_3("abc"), 1);
+        assert_eq!(tokens_estimate_utf8_bytes_div_3("abcd"), 2);
+        assert_eq!(tokens_estimate_utf8_bytes_div_3(""), 0);
+    }
+
+    #[test]
+    fn build_compacted_history_preserves_keep_window_byte_for_byte() {
+        let history = vec![
+            serde_json::json!({"role":"user","content":"u0"}),
+            serde_json::json!({"role":"assistant","content":"a0"}),
+            serde_json::json!({"role":"user","content":"u1"}),
+            serde_json::json!({"role":"assistant","content":"a1"}),
+            serde_json::json!({"role":"user","content":"u2"}),
+            serde_json::json!({"role":"assistant","content":"a2"}),
+            serde_json::json!({"role":"user","content":"u3"}),
+            serde_json::json!({"role":"assistant","content":"a3"}),
+            serde_json::json!({"role":"user","content":"u4"}),
+            serde_json::json!({"role":"assistant","content":"a4"}),
+            serde_json::json!({"role":"tool_result","tool_name":"exec","tool_call_id":"t1","success":true,"result":{"stdout":"ok","stderr":"","exit_code":0}}),
+            serde_json::json!({"role":"user","content":"u5"}),
+            serde_json::json!({"role":"assistant","content":"a5"}),
+        ];
+
+        let (compacted, keep_start_idx, kept_count) =
+            build_compacted_history(&history, "SUMMARY", 4, Some(123)).unwrap();
+        assert_eq!(keep_start_idx, keep_window_start_idx(&history, 4));
+        assert_eq!(kept_count, history.len() - keep_start_idx);
+        assert_eq!(compacted.len(), 1 + (history.len() - keep_start_idx));
+        // Keep window is byte-for-byte preserved (including tool_result entries).
+        assert_eq!(&compacted[1..], &history[keep_start_idx..]);
+        assert_eq!(compacted[0]["role"].as_str(), Some("assistant"));
+        assert!(compacted[0]["content"].as_str().unwrap_or("").contains("SUMMARY"));
+    }
+
+    #[test]
+    fn compaction_budget_watermarks_match_spec() {
+        let provider = BudgetProvider {
+            context_window: 400_000,
+            input_limit: Some(272_000),
+            output_limit: Some(128_000),
+        };
+        let b = CompactionBudget::for_provider(&provider);
+        assert_eq!(b.input_hard_cap, 272_000);
+        assert_eq!(b.high_watermark, 231_200);
+        assert_eq!(b.low_watermark, 163_200);
+        assert_eq!(b.reserved_output_tokens, 128_000);
+        assert_eq!(b.reserve_safety_tokens, SAFETY_MARGIN_TOKENS);
     }
 }

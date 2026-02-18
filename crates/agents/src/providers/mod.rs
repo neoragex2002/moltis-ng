@@ -3,6 +3,8 @@ pub mod openai;
 pub mod openai_compat;
 pub mod openai_responses;
 
+mod models_dev;
+
 #[cfg(feature = "provider-genai")]
 pub mod genai_provider;
 
@@ -33,6 +35,8 @@ use std::{
 use {moltis_config::schema::ProvidersConfig, secrecy::ExposeSecret, tokio_stream::Stream};
 
 use crate::model::{ChatMessage, LlmProvider, StreamEvent};
+
+pub use models_dev::{cached_openai_model_limits, spawn_refresh_models_dev_cache, OpenAiModelLimits};
 
 /// A model discovered from a provider API (e.g. `/v1/models`).
 ///
@@ -265,12 +269,29 @@ impl LlmProvider for RegistryModelProvider {
         self.inner.complete(messages, tools).await
     }
 
+    async fn complete_with_context(
+        &self,
+        ctx: &crate::model::LlmRequestContext,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<crate::model::CompletionResponse> {
+        self.inner.complete_with_context(ctx, messages, tools).await
+    }
+
     fn supports_tools(&self) -> bool {
         self.inner.supports_tools()
     }
 
     fn context_window(&self) -> u32 {
         self.inner.context_window()
+    }
+
+    fn input_limit(&self) -> Option<u32> {
+        self.inner.input_limit()
+    }
+
+    fn output_limit(&self) -> Option<u32> {
+        self.inner.output_limit()
     }
 
     fn supports_vision(&self) -> bool {
@@ -290,6 +311,16 @@ impl LlmProvider for RegistryModelProvider {
         tools: Vec<serde_json::Value>,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         self.inner.stream_with_tools(messages, tools)
+    }
+
+    fn stream_with_tools_with_context(
+        &self,
+        ctx: &crate::model::LlmRequestContext,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.inner
+            .stream_with_tools_with_context(ctx, messages, tools)
     }
 }
 
@@ -318,7 +349,14 @@ fn resolve_api_key(
 /// Return the known context window size (in tokens) for a model ID.
 /// Falls back to 200,000 for unknown models.
 pub fn context_window_for_model(model_id: &str) -> u32 {
+    context_window_for_model_with_data_dir(&moltis_config::data_dir(), model_id)
+}
+
+fn context_window_for_model_with_data_dir(data_dir: &std::path::Path, model_id: &str) -> u32 {
     let model_id = raw_model_id(model_id);
+    if let Some(limits) = cached_openai_model_limits(data_dir, model_id) {
+        return limits.context;
+    }
     // Codestral has the largest window at 256k.
     if model_id.starts_with("codestral") {
         return 256_000;
@@ -349,6 +387,44 @@ pub fn context_window_for_model(model_id: &str) -> u32 {
     }
     // Default fallback.
     200_000
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedOpenAiLimits {
+    pub context: u32,
+    pub input: u32,
+    pub output: u32,
+}
+
+fn resolved_openai_limits_with_data_dir(
+    data_dir: &std::path::Path,
+    model_id: &str,
+) -> ResolvedOpenAiLimits {
+    let model_id = raw_model_id(model_id);
+
+    if let Some(limits) = cached_openai_model_limits(data_dir, model_id) {
+        let context = limits.context;
+        let input = limits.input.unwrap_or_else(|| (context / 5) * 4);
+        return ResolvedOpenAiLimits {
+            context,
+            input,
+            output: limits.output,
+        };
+    }
+
+    let context = context_window_for_model_with_data_dir(data_dir, model_id);
+    let input = (context / 5) * 4;
+    let output = u32::min(16_384, context / 5);
+
+    ResolvedOpenAiLimits {
+        context,
+        input,
+        output,
+    }
+}
+
+pub fn resolved_openai_limits(model_id: &str) -> ResolvedOpenAiLimits {
+    resolved_openai_limits_with_data_dir(&moltis_config::data_dir(), model_id)
 }
 
 /// Returns `false` for model IDs that are clearly not chat-completion models
@@ -1268,6 +1344,8 @@ impl ProviderRegistry {
         if config.is_enabled("openai")
             && let Some(key) = resolve_api_key(config, "openai", "OPENAI_API_KEY")
         {
+            spawn_refresh_models_dev_cache(moltis_config::data_dir());
+
             let base_url = config
                 .get("openai")
                 .and_then(|e| e.base_url.clone())
@@ -1319,6 +1397,8 @@ impl ProviderRegistry {
             && let Some(key) =
                 resolve_api_key(config, "openai-responses", "OPENAI_RESPONSES_API_KEY")
         {
+            spawn_refresh_models_dev_cache(moltis_config::data_dir());
+
             let base_url = config
                 .get("openai-responses")
                 .and_then(|e| e.base_url.clone())
@@ -1327,6 +1407,18 @@ impl ProviderRegistry {
 
             let alias = config.get("openai-responses").and_then(|e| e.alias.clone());
             let provider_label = alias.clone().unwrap_or_else(|| "openai-responses".into());
+
+            let builtin_web_search = config
+                .get("openai-responses")
+                .and_then(|e| e.builtin_web_search.clone());
+
+            let generation = config
+                .get("openai-responses")
+                .and_then(|e| e.generation.clone());
+
+            let prompt_cache = config
+                .get("openai-responses")
+                .and_then(|e| e.prompt_cache.clone());
 
             let preferred = configured_models_for_provider(config, "openai-responses");
             let discovered = if should_fetch_models(config, "openai-responses") {
@@ -1352,6 +1444,9 @@ impl ProviderRegistry {
                     model_id.clone(),
                     base_url.clone(),
                     provider_label.clone(),
+                    builtin_web_search.clone(),
+                    generation.clone(),
+                    prompt_cache.clone(),
                 ));
                 self.register(
                     ModelInfo {
@@ -1594,6 +1689,17 @@ impl ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{CompletionResponse, LlmRequestContext, Usage};
+    use async_trait::async_trait;
+    use std::{
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+    use tempfile::tempdir;
+    use tokio_stream::{Stream, StreamExt};
 
     fn secret(s: &str) -> secrecy::Secret<String> {
         secrecy::Secret::new(s.into())
@@ -1601,36 +1707,62 @@ mod tests {
 
     #[test]
     fn context_window_for_known_models() {
+        let tmp = tempdir().unwrap();
         assert_eq!(
-            super::context_window_for_model("claude-sonnet-4-20250514"),
+            super::context_window_for_model_with_data_dir(tmp.path(), "claude-sonnet-4-20250514"),
             200_000
         );
         assert_eq!(
-            super::context_window_for_model("claude-opus-4-5-20251101"),
+            super::context_window_for_model_with_data_dir(tmp.path(), "claude-opus-4-5-20251101"),
             200_000
         );
-        assert_eq!(super::context_window_for_model("gpt-4o"), 128_000);
-        assert_eq!(super::context_window_for_model("gpt-4o-mini"), 128_000);
-        assert_eq!(super::context_window_for_model("gpt-4-turbo"), 128_000);
-        assert_eq!(super::context_window_for_model("o3"), 200_000);
-        assert_eq!(super::context_window_for_model("o3-mini"), 200_000);
-        assert_eq!(super::context_window_for_model("o4-mini"), 200_000);
-        assert_eq!(super::context_window_for_model("codestral-latest"), 256_000);
         assert_eq!(
-            super::context_window_for_model("mistral-large-latest"),
+            super::context_window_for_model_with_data_dir(tmp.path(), "gpt-4o"),
             128_000
         );
         assert_eq!(
-            super::context_window_for_model("gemini-2.0-flash"),
+            super::context_window_for_model_with_data_dir(tmp.path(), "gpt-4o-mini"),
+            128_000
+        );
+        assert_eq!(
+            super::context_window_for_model_with_data_dir(tmp.path(), "gpt-4-turbo"),
+            128_000
+        );
+        assert_eq!(
+            super::context_window_for_model_with_data_dir(tmp.path(), "o3"),
+            200_000
+        );
+        assert_eq!(
+            super::context_window_for_model_with_data_dir(tmp.path(), "o3-mini"),
+            200_000
+        );
+        assert_eq!(
+            super::context_window_for_model_with_data_dir(tmp.path(), "o4-mini"),
+            200_000
+        );
+        assert_eq!(
+            super::context_window_for_model_with_data_dir(tmp.path(), "codestral-latest"),
+            256_000
+        );
+        assert_eq!(
+            super::context_window_for_model_with_data_dir(tmp.path(), "mistral-large-latest"),
+            128_000
+        );
+        assert_eq!(
+            super::context_window_for_model_with_data_dir(tmp.path(), "gemini-2.0-flash"),
             1_000_000
         );
-        assert_eq!(super::context_window_for_model("kimi-k2.5"), 128_000);
+        assert_eq!(
+            super::context_window_for_model_with_data_dir(tmp.path(), "kimi-k2.5"),
+            128_000
+        );
     }
 
     #[test]
     fn context_window_fallback_for_unknown_model() {
+        let tmp = tempdir().unwrap();
         assert_eq!(
-            super::context_window_for_model("some-unknown-model"),
+            super::context_window_for_model_with_data_dir(tmp.path(), "some-unknown-model"),
             200_000
         );
     }
@@ -1638,14 +1770,26 @@ mod tests {
     #[test]
     fn provider_context_window_uses_lookup() {
         let provider = openai::OpenAiProvider::new(secret("k"), "gpt-4o".into(), "u".into());
-        assert_eq!(provider.context_window(), 128_000);
+        assert_eq!(provider.context_window(), super::context_window_for_model("gpt-4o"));
 
         let anthropic = anthropic::AnthropicProvider::new(
             secret("k"),
             "claude-sonnet-4-20250514".into(),
             "u".into(),
         );
-        assert_eq!(anthropic.context_window(), 200_000);
+        assert_eq!(
+            anthropic.context_window(),
+            super::context_window_for_model("claude-sonnet-4-20250514")
+        );
+    }
+
+    #[test]
+    fn resolved_openai_limits_fallback_derives_input_and_output() {
+        let tmp = tempdir().unwrap();
+        let limits = super::resolved_openai_limits_with_data_dir(tmp.path(), "gpt-5.2");
+        assert_eq!(limits.context, 128_000);
+        assert_eq!(limits.input, 102_400);
+        assert_eq!(limits.output, 16_384);
     }
 
     #[test]
@@ -2476,5 +2620,118 @@ mod tests {
         assert!(!super::supports_vision_for_model("my-claude-model"));
         assert!(!super::supports_vision_for_model("custom-gpt-4o-wrapper"));
         assert!(!super::supports_vision_for_model("not-gemini-model"));
+    }
+
+    struct ContextProbeProvider {
+        saw_complete_ctx: Arc<AtomicBool>,
+        saw_stream_ctx: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ContextProbeProvider {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        fn id(&self) -> &str {
+            "probe-model"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> anyhow::Result<CompletionResponse> {
+            anyhow::bail!("complete() should not be used when ctx is provided")
+        }
+
+        async fn complete_with_context(
+            &self,
+            ctx: &LlmRequestContext,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> anyhow::Result<CompletionResponse> {
+            if ctx.session_key.as_deref() == Some("session:test") {
+                self.saw_complete_ctx.store(true, Ordering::SeqCst);
+            }
+            Ok(CompletionResponse {
+                text: Some("ok".into()),
+                tool_calls: vec![],
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    ..Default::default()
+                },
+            })
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+
+        fn stream_with_tools_with_context(
+            &self,
+            ctx: &LlmRequestContext,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            if ctx.session_key.as_deref() == Some("session:test") {
+                self.saw_stream_ctx.store(true, Ordering::SeqCst);
+            }
+            Box::pin(tokio_stream::iter(vec![StreamEvent::Done(Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            })]))
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_model_provider_forwards_complete_with_context() {
+        let saw = Arc::new(AtomicBool::new(false));
+        let inner: Arc<dyn LlmProvider> = Arc::new(ContextProbeProvider {
+            saw_complete_ctx: Arc::clone(&saw),
+            saw_stream_ctx: Arc::new(AtomicBool::new(false)),
+        });
+        let wrapped: Arc<dyn LlmProvider> = Arc::new(RegistryModelProvider {
+            model_id: "openai-responses::gpt-5.2".into(),
+            inner,
+        });
+
+        let ctx = LlmRequestContext {
+            session_key: Some("session:test".into()),
+        };
+        let _ = wrapped
+            .complete_with_context(&ctx, &[ChatMessage::user("ping")], &[])
+            .await;
+        assert!(saw.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn registry_model_provider_forwards_stream_with_tools_with_context() {
+        let saw = Arc::new(AtomicBool::new(false));
+        let inner: Arc<dyn LlmProvider> = Arc::new(ContextProbeProvider {
+            saw_complete_ctx: Arc::new(AtomicBool::new(false)),
+            saw_stream_ctx: Arc::clone(&saw),
+        });
+        let wrapped: Arc<dyn LlmProvider> = Arc::new(RegistryModelProvider {
+            model_id: "openai-responses::gpt-5.2".into(),
+            inner,
+        });
+
+        let ctx = LlmRequestContext {
+            session_key: Some("session:test".into()),
+        };
+        let mut stream =
+            wrapped.stream_with_tools_with_context(&ctx, vec![ChatMessage::user("ping")], vec![]);
+        while let Some(event) = stream.next().await {
+            if matches!(event, StreamEvent::Done(_)) {
+                break;
+            }
+        }
+        assert!(saw.load(Ordering::SeqCst));
     }
 }

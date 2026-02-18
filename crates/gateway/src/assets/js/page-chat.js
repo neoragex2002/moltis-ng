@@ -323,13 +323,27 @@ function renderContextSandboxSection(card, data) {
 
 function renderContextTokensSection(card, data) {
 	var tu = data.tokenUsage || {};
+	var b = data.budget || {};
 	var tokenSection = ctxSection("Token Usage");
 	tokenSection.appendChild(ctxRow("Input", formatTokens(tu.inputTokens || 0), true));
 	tokenSection.appendChild(ctxRow("Output", formatTokens(tu.outputTokens || 0), true));
 	tokenSection.appendChild(ctxRow("Total", formatTokens(tu.total || 0), true));
-	if (tu.contextWindow > 0) {
-		var pct = Math.max(0, 100 - Math.round(((tu.total || 0) / tu.contextWindow) * 100));
-		tokenSection.appendChild(ctxRow("Context left", `${pct}% of ${formatTokens(tu.contextWindow)}`, true));
+	if (b.estimatedPromptInputTokens) {
+		tokenSection.appendChild(ctxRow("Estimated prompt (input)", formatTokens(b.estimatedPromptInputTokens), true));
+	}
+	if (b.inputHardCap) {
+		tokenSection.appendChild(ctxRow("Input hard cap", formatTokens(b.inputHardCap), true));
+	}
+	if (b.highWatermark) {
+		tokenSection.appendChild(ctxRow("Auto-compact at", formatTokens(b.highWatermark), true));
+	}
+	if (b.highWatermark && b.estimatedPromptInputTokens) {
+		var pct = Math.max(0, 100 - Math.round((b.estimatedPromptInputTokens / b.highWatermark) * 100));
+		tokenSection.appendChild(ctxRow("Context left before auto-compact", `${pct}%`, true));
+	} else if (tu.contextWindow > 0) {
+		// Backward compat fallback (less accurate).
+		var pct2 = Math.max(0, 100 - Math.round(((tu.total || 0) / tu.contextWindow) * 100));
+		tokenSection.appendChild(ctxRow("Context left", `${pct2}% of ${formatTokens(tu.contextWindow)}`, true));
 	}
 	card.appendChild(tokenSection);
 }
@@ -388,16 +402,21 @@ export function renderCompactCard(data) {
 
 	var statsSection = ctxSection("Before compact");
 	statsSection.appendChild(ctxRow("Messages", String(data.messageCount || 0)));
-	statsSection.appendChild(ctxRow("Total tokens", formatTokens(data.totalTokens || 0)));
-	if (data.contextWindow) {
-		var pctUsed = Math.round(((data.totalTokens || 0) / data.contextWindow) * 100);
-		statsSection.appendChild(ctxRow("Context usage", `${pctUsed}% of ${formatTokens(data.contextWindow)}`));
+	if (data.budget?.estimatedNextInputTokens) {
+		statsSection.appendChild(ctxRow("Estimated next input", formatTokens(data.budget.estimatedNextInputTokens), true));
+	}
+	if (data.budget?.highWatermark) {
+		statsSection.appendChild(ctxRow("Auto-compact at", formatTokens(data.budget.highWatermark), true));
 	}
 	card.appendChild(statsSection);
 
 	var afterSection = ctxSection("After compact");
-	afterSection.appendChild(ctxRow("Messages", "1 (summary)"));
-	afterSection.appendChild(ctxRow("Status", "Conversation history replaced with a summary"));
+	var kept = data.keptMessageCount || 0;
+	afterSection.appendChild(ctxRow("Messages", `${1 + kept} (summary + recent window)`));
+	if (data.keepLastUserRounds) {
+		afterSection.appendChild(ctxRow("Recent window", `last ${data.keepLastUserRounds} user rounds kept raw`));
+	}
+	afterSection.appendChild(ctxRow("Status", "Older history summarized; recent window preserved"));
 	card.appendChild(afterSection);
 
 	S.chatMsgBox.appendChild(card);

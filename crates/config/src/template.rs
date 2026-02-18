@@ -121,6 +121,37 @@ models = ["gpt-5.2", "gpt-5.2-chat-latest", "gpt-5-mini"] # Preferred models sho
 # fetch_models = true
 # alias = "openai-responses"
 
+# Built-in Web Search (OpenAI-hosted; may increase cost and latency)
+# NOTE: This is distinct from Moltis' local tool `web_search` under `[tools.web.search]`.
+# [providers.openai-responses.builtin_web_search]
+# enabled = false
+# allowed_domains = ["openai.com", "docs.rs"]
+# search_context_size = "medium"              # low | medium | high
+# include_sources = false                      # Adds `include = ["web_search_call.action.sources"]`
+
+# Optional approximate location hint for search.
+# [providers.openai-responses.builtin_web_search.user_location]
+# type = "approximate"
+# country = "US"
+# region = "California"
+# city = "San Francisco"
+# timezone = "America/Los_Angeles"
+
+# Generation options (OpenAI Responses)
+# [providers.openai-responses.generation]
+# max_output_tokens = 128000               # If omitted, defaults to models.dev limit.output and will be sent
+# reasoning_effort = "none"               # none|minimal|low|medium|high|xhigh
+# text_verbosity = "medium"                # low|medium|high
+# temperature = 0.2                        # Only allowed when reasoning_effort="none"
+
+ # Prompt cache bucketing (OpenAI Responses)
+ # [providers.openai-responses.prompt_cache]
+ # enabled = true
+ # bucket_hash = "auto"                     # "auto" | true | false
+ #                                           # NOTE: "auto" only hashes when session_key is > 64 UTF-8 bytes.
+ #                                           # If you don't want short session keys (e.g. "main") sent verbatim,
+ #                                           # set bucket_hash = true.
+
 # ── Google Gemini ─────────────────────────────────────────────
 # [providers.gemini]
 # enabled = true
@@ -230,6 +261,14 @@ backend = "auto"                  # Container backend:
 no_network = true                 # Disable network access in sandbox (recommended)
 # image = "custom-image:tag"      # Custom Docker image (default: auto-built)
 # container_prefix = "moltis"     # Prefix for container names
+
+# Additional host directory mounts (deny-by-default; Docker backend only for v1).
+# External mounts require an allowlist of permitted host roots.
+# mount_allowlist = ["/mnt/c/dev"]  # Permit mounts under these roots (canonicalized)
+# mounts = [
+#   {{ host_dir = "/mnt/c/dev/myproj", guest_dir = "/mnt/host/myproj", mode = "ro" }},
+#   # {{ host_dir = "/mnt/c/dev/tmp",   guest_dir = "/mnt/host/tmp",   mode = "rw" }}, # Use with care
+# ]
 
 # Packages installed in sandbox containers via apt-get.
 # This list is used to build the sandbox image. Customize as needed.

@@ -407,6 +407,10 @@ impl moltis_agents::tool_registry::AgentTool for LocationTool {
 mod tests {
     use {super::*, moltis_agents::tool_registry::AgentTool};
 
+    fn can_bind_localhost() -> bool {
+        std::net::TcpListener::bind(("127.0.0.1", 0)).is_ok()
+    }
+
     /// Mock requester that returns a fixed response.
     struct MockRequester {
         cached: Option<GeoLocation>,
@@ -759,6 +763,13 @@ mod tests {
 
     #[tokio::test]
     async fn reverse_geocode_with_mock_server() {
+        if !can_bind_localhost() {
+            eprintln!(
+                "skipping reverse_geocode mock test — cannot bind localhost in this environment"
+            );
+            return;
+        }
+
         // Start a lightweight HTTP mock.
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -802,6 +813,13 @@ mod tests {
 
     #[tokio::test]
     async fn reverse_geocode_fallback_on_error() {
+        if !can_bind_localhost() {
+            eprintln!(
+                "skipping reverse_geocode mock test — cannot bind localhost in this environment"
+            );
+            return;
+        }
+
         // Start a mock that returns 500.
         let mut server = mockito::Server::new_async().await;
         let _mock = server

@@ -569,6 +569,10 @@ impl AgentTool for ShowMapTool {
 mod tests {
     use super::*;
 
+    fn can_bind_localhost() -> bool {
+        std::net::TcpListener::bind(("127.0.0.1", 0)).is_ok()
+    }
+
     #[test]
     fn build_links_with_label() {
         let links = build_map_links(37.7614, -122.4199, 15, Some("La Taqueria"));
@@ -806,6 +810,11 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_tile_with_mock() {
+        if !can_bind_localhost() {
+            eprintln!("skipping tile mock test — cannot bind localhost in this environment");
+            return;
+        }
+
         // Create a minimal valid 1x1 PNG.
         let mut img = RgbaImage::new(1, 1);
         img.put_pixel(0, 0, image::Rgba([128, 128, 128, 255]));
@@ -830,6 +839,11 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_tile_server_error() {
+        if !can_bind_localhost() {
+            eprintln!("skipping tile mock test — cannot bind localhost in this environment");
+            return;
+        }
+
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("GET", mockito::Matcher::Any)
@@ -845,6 +859,11 @@ mod tests {
 
     #[tokio::test]
     async fn compose_map_with_mock_tiles() {
+        if !can_bind_localhost() {
+            eprintln!("skipping tile mock test — cannot bind localhost in this environment");
+            return;
+        }
+
         // Create a 256x256 grey tile.
         let mut tile_img = RgbaImage::new(256, 256);
         for pixel in tile_img.pixels_mut() {
@@ -970,6 +989,11 @@ mod tests {
             .unwrap_or(false);
         if !magick_ok {
             eprintln!("skipping magick test — magick not installed");
+            return;
+        }
+
+        if !can_bind_localhost() {
+            eprintln!("skipping magick mock test — cannot bind localhost in this environment");
             return;
         }
 
