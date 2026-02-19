@@ -1061,6 +1061,11 @@ Helpful suggestion.
 This project uses **bd (beads)** for issue tracking.
 Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
 
+**Issue doc templates (required):**
+- Single issue: `issues/template/TEMPLATE-issue-single.md`
+- Multi-issue (overall/audit): `issues/template/TEMPLATE-overall-multi.md`
+- Incremental update guide: `issues/template/TEMPLATE-update-guide.md`
+
 **Quick reference:**
 - `bd ready` - Find unblocked work
 - `bd create "Title" --type task --priority 2` - Create issue

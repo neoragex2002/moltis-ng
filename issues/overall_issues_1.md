@@ -84,7 +84,7 @@
 - [TODO]（P3）重试/退避增强（429、jitter、尊重 `Retry-After`）。
   - 历史上下文：`crates/agents/src/runner.rs:45`。
 
-- [TODO] 仓库整理：当前改动仍未提交且在 `main` 上（需要按原子提交拆分并可选创建 PR）。
+- [DONE] 仓库整理：相关改动已按原子提交拆分并提交（commits：`ded833e`、`b782ebf`、`fe0d688`、`7f9ccb2`、`643a86a`；当前在工作分支；如需进入 `main` 再走 PR/merge 流程）。
 
 ### 已修复 / 已落地
 
@@ -124,7 +124,7 @@
 
 ### 仍需推进的工作
 
-- **仓库整理**：当前改动还未提交（uncommitted）且在 `main` 上。下一步应按原子提交拆分（本仓库 commit message 以 Conventional 风格为主），并可选创建 PR。
+- **仓库整理**：相关改动已按原子提交拆分并提交（commits：`ded833e`、`b782ebf`、`fe0d688`、`7f9ccb2`、`643a86a`；不再是 uncommitted 且不在 `main` 工作区上）。如需进入 `main`，再按需创建 PR/merge。
 - **可选后续（本轮未覆盖）**：retry/backoff（429 + jitter + `Retry-After`）、SSE parser 的 max-buffer 上限（防御性增强）。
 
 ## 执行摘要（优先级总览）
