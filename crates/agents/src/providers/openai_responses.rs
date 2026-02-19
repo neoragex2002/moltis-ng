@@ -1076,6 +1076,98 @@ impl LlmProvider for OpenAiResponsesProvider {
         self.stream_with_tools_impl(None, messages, tools)
     }
 
+    fn debug_request_overrides(&self, ctx: Option<&LlmRequestContext>) -> serde_json::Value {
+        let mut root = serde_json::Map::new();
+
+        if self.is_prompt_cache_enabled() {
+            let session_key = ctx
+                .and_then(|c| c.session_key.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let source = if session_key.is_some() {
+                "session_key"
+            } else {
+                "fallback"
+            };
+            let bucket_input = session_key.map_or_else(
+                || format!("moltis:{}:{}:no-session", self.provider_name, self.model),
+                ToString::to_string,
+            );
+            let hashed = match self.prompt_cache.as_ref().map(|c| c.bucket_hash) {
+                Some(PromptCacheBucketHashConfig::Bool(force)) => force,
+                Some(PromptCacheBucketHashConfig::Mode(_)) => bucket_input.as_bytes().len() > 64,
+                None => false,
+            };
+            root.insert(
+                "prompt_cache".to_string(),
+                serde_json::json!({
+                    "enabled": true,
+                    "source": source,
+                    "hashed": hashed,
+                }),
+            );
+        }
+
+        if let Some(prompt_cache_key) = self.prompt_cache_key_for_request(ctx) {
+            root.insert(
+                "prompt_cache_key".to_string(),
+                serde_json::json!(prompt_cache_key),
+            );
+        }
+
+        let mut generation = serde_json::Map::new();
+        if let Some(ref cfg) = self.generation {
+            let resolved_limits = super::resolved_openai_limits(&self.model);
+            let default_max = resolved_limits.output;
+            let configured = cfg.max_output_tokens.unwrap_or(default_max);
+            let mut effective = configured;
+            let mut clamped = false;
+            if effective > resolved_limits.output {
+                effective = resolved_limits.output;
+                clamped = true;
+            }
+            generation.insert(
+                "max_output_tokens".to_string(),
+                serde_json::json!({
+                    "configured": configured,
+                    "effective": effective,
+                    "limit": resolved_limits.output,
+                    "clamped": clamped,
+                }),
+            );
+
+            if let Some(reasoning_effort) = cfg.reasoning_effort {
+                let effort = match reasoning_effort {
+                    ReasoningEffort::None => "none",
+                    ReasoningEffort::Minimal => "minimal",
+                    ReasoningEffort::Low => "low",
+                    ReasoningEffort::Medium => "medium",
+                    ReasoningEffort::High => "high",
+                    ReasoningEffort::Xhigh => "xhigh",
+                };
+                generation.insert("reasoning_effort".to_string(), serde_json::json!(effort));
+            }
+
+            if let Some(text_verbosity) = cfg.text_verbosity {
+                let verbosity = match text_verbosity {
+                    TextVerbosity::Low => "low",
+                    TextVerbosity::Medium => "medium",
+                    TextVerbosity::High => "high",
+                };
+                generation.insert("text_verbosity".to_string(), serde_json::json!(verbosity));
+            }
+
+            if let Some(temperature) = cfg.temperature {
+                generation.insert("temperature".to_string(), serde_json::json!(temperature));
+            }
+        }
+        if !generation.is_empty() {
+            root.insert("generation".to_string(), serde_json::Value::Object(generation));
+        }
+
+        serde_json::Value::Object(root)
+    }
+
     fn stream_with_tools_with_context(
         &self,
         ctx: &LlmRequestContext,
@@ -1245,6 +1337,49 @@ mod tests {
         let provider = test_provider_with_generation("https://api.example.com/v1", cfg);
         let body = provider.build_responses_body_with_context(None, &[ChatMessage::user("ping")], &[], false);
         assert_eq!(body["max_output_tokens"].as_u64(), Some(limit as u64));
+    }
+
+    #[test]
+    fn debug_request_overrides_reports_generation_options() {
+        let mut cfg = OpenAiResponsesGenerationConfig::default();
+        cfg.max_output_tokens = Some(1024);
+        cfg.reasoning_effort = Some(ReasoningEffort::None);
+        cfg.text_verbosity = Some(TextVerbosity::High);
+        cfg.temperature = Some(0.2);
+
+        let provider = test_provider_with_generation("https://api.example.com/v1", cfg);
+        let dbg = provider.debug_request_overrides(None);
+        let generation = dbg["generation"].as_object().expect("expected generation object");
+        let max = generation["max_output_tokens"]
+            .as_object()
+            .expect("expected max_output_tokens object");
+        assert_eq!(max["configured"].as_u64(), Some(1024));
+        assert_eq!(max["effective"].as_u64(), Some(1024));
+        assert_eq!(max["clamped"].as_bool(), Some(false));
+        assert_eq!(generation["reasoning_effort"].as_str(), Some("none"));
+        assert_eq!(generation["text_verbosity"].as_str(), Some("high"));
+        let temp = generation["temperature"].as_f64().expect("expected temperature");
+        assert!((temp - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn debug_request_overrides_reports_prompt_cache_key() {
+        let mut cfg = OpenAiResponsesPromptCacheConfig::default();
+        cfg.enabled = true;
+        cfg.bucket_hash = PromptCacheBucketHashConfig::Bool(false);
+
+        let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
+        let ctx = LlmRequestContext {
+            session_key: Some("telegram:bot:123".to_string()),
+        };
+        let dbg = provider.debug_request_overrides(Some(&ctx));
+        assert_eq!(dbg["prompt_cache"]["enabled"].as_bool(), Some(true));
+        assert_eq!(dbg["prompt_cache"]["source"].as_str(), Some("session_key"));
+        assert_eq!(dbg["prompt_cache"]["hashed"].as_bool(), Some(false));
+        assert_eq!(
+            dbg["prompt_cache_key"].as_str(),
+            Some("telegram:bot:123")
+        );
     }
 
     #[test]

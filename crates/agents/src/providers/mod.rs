@@ -322,6 +322,10 @@ impl LlmProvider for RegistryModelProvider {
         self.inner
             .stream_with_tools_with_context(ctx, messages, tools)
     }
+
+    fn debug_request_overrides(&self, ctx: Option<&crate::model::LlmRequestContext>) -> serde_json::Value {
+        self.inner.debug_request_overrides(ctx)
+    }
 }
 
 /// Resolve an API key from config (Secret) or environment variable,
@@ -2687,6 +2691,13 @@ mod tests {
                 ..Default::default()
             })]))
         }
+
+        fn debug_request_overrides(&self, ctx: Option<&LlmRequestContext>) -> serde_json::Value {
+            serde_json::json!({
+                "session": ctx.and_then(|c| c.session_key.as_deref()),
+                "tag": "inner",
+            })
+        }
     }
 
     #[tokio::test]
@@ -2733,5 +2744,23 @@ mod tests {
             }
         }
         assert!(saw.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn registry_model_provider_forwards_debug_request_overrides() {
+        let inner: Arc<dyn LlmProvider> = Arc::new(ContextProbeProvider {
+            saw_complete_ctx: Arc::new(AtomicBool::new(false)),
+            saw_stream_ctx: Arc::new(AtomicBool::new(false)),
+        });
+        let wrapped: Arc<dyn LlmProvider> = Arc::new(RegistryModelProvider {
+            model_id: "openai-responses::gpt-5.2".into(),
+            inner,
+        });
+        let ctx = LlmRequestContext {
+            session_key: Some("session:test".into()),
+        };
+        let dbg = wrapped.debug_request_overrides(Some(&ctx));
+        assert_eq!(dbg["tag"].as_str(), Some("inner"));
+        assert_eq!(dbg["session"].as_str(), Some("session:test"));
     }
 }

@@ -700,6 +700,8 @@ pub async fn run_agent_loop_with_context(
     let mut total_tool_calls = 0;
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
+    let mut total_cache_read_tokens: u32 = 0;
+    let mut total_cache_write_tokens: u32 = 0;
     let mut retries_remaining: u8 = 1;
 
     loop {
@@ -795,6 +797,8 @@ pub async fn run_agent_loop_with_context(
 
         total_input_tokens = total_input_tokens.saturating_add(response.usage.input_tokens);
         total_output_tokens = total_output_tokens.saturating_add(response.usage.output_tokens);
+        total_cache_read_tokens = total_cache_read_tokens.saturating_add(response.usage.cache_read_tokens);
+        total_cache_write_tokens = total_cache_write_tokens.saturating_add(response.usage.cache_write_tokens);
 
         info!(
             iteration = iterations,
@@ -908,6 +912,8 @@ pub async fn run_agent_loop_with_context(
                 usage: Usage {
                     input_tokens: total_input_tokens,
                     output_tokens: total_output_tokens,
+                    cache_read_tokens: total_cache_read_tokens,
+                    cache_write_tokens: total_cache_write_tokens,
                     ..Default::default()
                 },
             });
@@ -1175,6 +1181,8 @@ pub async fn run_agent_loop_streaming(
     let mut total_tool_calls = 0;
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
+    let mut total_cache_read_tokens: u32 = 0;
+    let mut total_cache_write_tokens: u32 = 0;
     let mut retries_remaining: u8 = 1;
 
     loop {
@@ -1260,6 +1268,8 @@ pub async fn run_agent_loop_streaming(
             std::collections::HashMap::new();
         let mut input_tokens: u32 = 0;
         let mut output_tokens: u32 = 0;
+        let mut cache_read_tokens: u32 = 0;
+        let mut cache_write_tokens: u32 = 0;
         let mut stream_error: Option<String> = None;
 
         while let Some(event) = stream.next().await {
@@ -1294,7 +1304,9 @@ pub async fn run_agent_loop_streaming(
                 StreamEvent::Done(usage) => {
                     input_tokens = usage.input_tokens;
                     output_tokens = usage.output_tokens;
-                    debug!(input_tokens, output_tokens, "stream done");
+                    cache_read_tokens = usage.cache_read_tokens;
+                    cache_write_tokens = usage.cache_write_tokens;
+                    debug!(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "stream done");
 
                     #[cfg(feature = "metrics")]
                     {
@@ -1375,6 +1387,8 @@ pub async fn run_agent_loop_streaming(
 
         total_input_tokens = total_input_tokens.saturating_add(input_tokens);
         total_output_tokens = total_output_tokens.saturating_add(output_tokens);
+        total_cache_read_tokens = total_cache_read_tokens.saturating_add(cache_read_tokens);
+        total_cache_write_tokens = total_cache_write_tokens.saturating_add(cache_write_tokens);
 
         // Finalize tool call arguments from accumulated strings.
         // Use stream_idx_to_vec_pos to map streaming indices (which may not
@@ -1490,6 +1504,8 @@ pub async fn run_agent_loop_streaming(
                 usage: Usage {
                     input_tokens: total_input_tokens,
                     output_tokens: total_output_tokens,
+                    cache_read_tokens: total_cache_read_tokens,
+                    cache_write_tokens: total_cache_write_tokens,
                     ..Default::default()
                 },
             });
@@ -2044,6 +2060,85 @@ mod tests {
         assert_eq!(result.text, "Done!");
         assert_eq!(result.iterations, 2);
         assert_eq!(result.tool_calls_made, 1);
+    }
+
+    #[tokio::test]
+    async fn test_usage_accumulates_cache_read_tokens_across_iterations() {
+        struct CachedToolCallingProvider {
+            call_count: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl LlmProvider for CachedToolCallingProvider {
+            fn name(&self) -> &str {
+                "mock"
+            }
+
+            fn id(&self) -> &str {
+                "mock-model"
+            }
+
+            fn supports_tools(&self) -> bool {
+                true
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[serde_json::Value],
+            ) -> Result<CompletionResponse> {
+                let count = self
+                    .call_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count == 0 {
+                    Ok(CompletionResponse {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "call_1".into(),
+                            name: "echo_tool".into(),
+                            arguments: serde_json::json!({"text": "hi"}),
+                        }],
+                        usage: Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            cache_read_tokens: 3,
+                            ..Default::default()
+                        },
+                    })
+                } else {
+                    Ok(CompletionResponse {
+                        text: Some("Done!".into()),
+                        tool_calls: vec![],
+                        usage: Usage {
+                            input_tokens: 20,
+                            output_tokens: 10,
+                            cache_read_tokens: 4,
+                            ..Default::default()
+                        },
+                    })
+                }
+            }
+
+            fn stream(
+                &self,
+                _messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                Box::pin(tokio_stream::empty())
+            }
+        }
+
+        let provider = Arc::new(CachedToolCallingProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(EchoTool));
+        let uc = UserContent::text("Use the tool");
+        let result = run_agent_loop(provider, &tools, "You are a test bot.", &uc, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.iterations, 2);
+        assert_eq!(result.usage.cache_read_tokens, 7);
     }
 
     /// Mock provider that calls the "exec" tool (native) and verifies result fed back.

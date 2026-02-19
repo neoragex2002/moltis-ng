@@ -278,29 +278,27 @@ export function chatAutoResize() {
 export function updateTokenBar() {
 	var bar = S.$("tokenBar");
 	if (!bar) return;
-	var total = S.sessionTokens.input + S.sessionTokens.output;
-	if (total === 0) {
+
+	var b = S.sessionBudget || {};
+	var parts = [];
+	if (b.autoCompactToksThred && b.promptInputToksEst) {
+		var pct = Math.round((b.promptInputToksEst / b.autoCompactToksThred) * 100);
+		parts.push(`Compact: ${pct}%`);
+	}
+	if (b.promptInputToksEst) {
+		parts.push(`Next prompt est: ${formatTokens(b.promptInputToksEst)}`);
+	}
+	if (b.autoCompactToksThred) {
+		parts.push(`Threshold: ${formatTokens(b.autoCompactToksThred)}`);
+	}
+	if (!S.sessionToolsEnabled) {
+		parts.push("Tools: disabled");
+	}
+
+	if (parts.length === 0) {
 		bar.textContent = "";
 		return;
 	}
-	var text =
-		formatTokens(S.sessionTokens.input) +
-		" in / " +
-		formatTokens(S.sessionTokens.output) +
-		" out \u00b7 " +
-		formatTokens(total) +
-		" tokens";
-	var b = S.sessionBudget || {};
-	if (b.highWatermark && b.estimatedPromptInputTokens) {
-		var pct = Math.max(0, 100 - Math.round((b.estimatedPromptInputTokens / b.highWatermark) * 100));
-		text += ` \u00b7 Context left before auto-compact: ${pct}%`;
-	} else if (S.sessionContextWindow > 0) {
-		// Backward compat fallback (less accurate).
-		var pct2 = Math.max(0, 100 - Math.round((total / S.sessionContextWindow) * 100));
-		text += ` \u00b7 Context left: ${pct2}%`;
-	}
-	if (!S.sessionToolsEnabled) {
-		text += " \u00b7 Tools: disabled";
-	}
+	var text = parts.join(" \u00b7 ");
 	bar.textContent = text;
 }

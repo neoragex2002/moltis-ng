@@ -870,12 +870,23 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .and_then(|v| v.as_str())
                     .unwrap_or("default");
 
-                let tokens = res.get("tokenUsage").cloned().unwrap_or_default();
-                let total = tokens.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
-                let context_window = tokens
-                    .get("contextWindow")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let token_debug = res.get("tokenDebug").cloned().unwrap_or_default();
+                let last = token_debug.get("lastRequest").cloned().unwrap_or_default();
+                let next = token_debug.get("nextRequest").cloned().unwrap_or_default();
+
+                let last_in = last.get("inputTokens").and_then(|v| v.as_u64());
+                let last_out = last.get("outputTokens").and_then(|v| v.as_u64());
+                let last_cached = last.get("cachedTokens").and_then(|v| v.as_u64());
+
+                let context_window = next.get("contextWindow").and_then(|v| v.as_u64());
+                let prompt_est = next.get("promptInputToksEst").and_then(|v| v.as_u64());
+                let compact_thred = next
+                    .get("autoCompactToksThred")
+                    .and_then(|v| v.as_u64());
+                let compact_pct = match (prompt_est, compact_thred) {
+                    (Some(p), Some(t)) if t > 0 => Some(((p.saturating_mul(100)) + (t / 2)) / t),
+                    _ => None,
+                };
 
                 // Sandbox section
                 let sandbox = res.get("sandbox").cloned().unwrap_or_default();
@@ -909,8 +920,22 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     format!("**Plugins:** {}", names.join(", "))
                 };
 
+                let last_line = format!(
+                    "**Last:** in={} out={} cached={}",
+                    last_in.map_or("?".to_string(), |v| v.to_string()),
+                    last_out.map_or("?".to_string(), |v| v.to_string()),
+                    last_cached.map_or("?".to_string(), |v| v.to_string()),
+                );
+                let cw_suffix = context_window.map(|cw| format!(" (cw {cw})")).unwrap_or_default();
+                let next_line = format!(
+                    "**Next (est):** prompt={} · compact={}{}",
+                    prompt_est.map_or("?".to_string(), |v| v.to_string()),
+                    compact_pct.map_or("?".to_string(), |v| format!("{v}%")),
+                    compact_thred.map_or_else(|| "".to_string(), |t| format!(" of {t}{cw_suffix}")),
+                );
+
                 Ok(format!(
-                    "**Session:** `{session_key}`\n**Messages:** {msg_count}\n**Provider:** {provider}\n**Model:** `{model}`\n{sandbox_line}\n{skills_line}\n**Tokens:** ~{total}/{context_window}"
+                    "**Session:** `{session_key}`\n**Messages:** {msg_count}\n**Provider:** {provider}\n**Model:** `{model}`\n{sandbox_line}\n{skills_line}\n{last_line}\n{next_line}"
                 ))
             },
             "sessions" => {

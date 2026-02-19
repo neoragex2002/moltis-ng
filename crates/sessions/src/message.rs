@@ -45,6 +45,8 @@ pub enum PersistedMessage {
         input_tokens: Option<u32>,
         #[serde(rename = "outputTokens", skip_serializing_if = "Option::is_none")]
         output_tokens: Option<u32>,
+        #[serde(rename = "cachedTokens", skip_serializing_if = "Option::is_none")]
+        cached_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<PersistedToolCall>>,
         /// Relative media path for TTS audio (e.g. "media/main/run_abc.ogg").
@@ -176,6 +178,7 @@ impl PersistedMessage {
         provider: impl Into<String>,
         input_tokens: u32,
         output_tokens: u32,
+        cached_tokens: Option<u32>,
         audio: Option<String>,
     ) -> Self {
         Self::Assistant {
@@ -185,6 +188,7 @@ impl PersistedMessage {
             provider: Some(provider.into()),
             input_tokens: Some(input_tokens),
             output_tokens: Some(output_tokens),
+            cached_tokens,
             tool_calls: None,
             audio,
             seq: None,
@@ -319,6 +323,7 @@ mod tests {
             provider: Some("openai".to_string()),
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cached_tokens: Some(12),
             tool_calls: None,
             audio: None,
             seq: None,
@@ -331,6 +336,7 @@ mod tests {
         assert_eq!(json["provider"], "openai");
         assert_eq!(json["inputTokens"], 100);
         assert_eq!(json["outputTokens"], 50);
+        assert_eq!(json["cachedTokens"], 12);
         assert!(json.get("audio").is_none());
     }
 
@@ -386,7 +392,8 @@ mod tests {
 
     #[test]
     fn roundtrip_assistant() {
-        let original = PersistedMessage::assistant("response", "gpt-4o", "openai", 100, 50, None);
+        let original =
+            PersistedMessage::assistant("response", "gpt-4o", "openai", 100, 50, Some(12), None);
         let json = original.to_value();
         let parsed: PersistedMessage = serde_json::from_value(json).unwrap();
         match parsed {
@@ -396,6 +403,7 @@ mod tests {
                 provider,
                 input_tokens,
                 output_tokens,
+                cached_tokens,
                 audio,
                 ..
             } => {
@@ -404,6 +412,7 @@ mod tests {
                 assert_eq!(provider.as_deref(), Some("openai"));
                 assert_eq!(input_tokens, Some(100));
                 assert_eq!(output_tokens, Some(50));
+                assert_eq!(cached_tokens, Some(12));
                 assert!(audio.is_none());
             },
             _ => panic!("expected Assistant message"),
@@ -418,6 +427,7 @@ mod tests {
             "openai",
             80,
             20,
+            None,
             Some("media/main/run_abc.ogg".to_string()),
         );
         let json = original.to_value();

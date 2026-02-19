@@ -164,6 +164,15 @@ struct ChatFinalBroadcast {
     seq: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+struct ChatRunOutput {
+    text: String,
+    input_tokens: u32,
+    output_tokens: u32,
+    cached_tokens: u32,
+    audio_path: Option<String>,
+}
+
 /// Typed broadcast payload for the "error" chat event.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1772,6 +1781,80 @@ impl LiveChatService {
     }
 }
 
+fn build_compaction_debug_info(messages: &[Value]) -> Value {
+    const SUMMARY_PREFIX: &str = "[Conversation Summary]";
+
+    let mut is_compacted = false;
+    let mut summary_created_at = None;
+    let mut summary_len = None;
+    let kept_message_count = messages.len().saturating_sub(1);
+
+    if let Some(first) = messages.first()
+        && first.get("role").and_then(|v| v.as_str()) == Some("assistant")
+        && let Some(content) = first.get("content").and_then(|v| v.as_str())
+    {
+        let trimmed = content.trim_start();
+        if trimmed.starts_with(SUMMARY_PREFIX) {
+            is_compacted = true;
+            summary_created_at = first.get("created_at").and_then(|v| v.as_u64());
+            let rest = trimmed
+                .strip_prefix(SUMMARY_PREFIX)
+                .unwrap_or("")
+                .strip_prefix("\n\n")
+                .unwrap_or("")
+                .trim();
+            summary_len = Some(rest.len());
+        }
+    }
+
+    let kept_message_count = if is_compacted {
+        Some(kept_message_count)
+    } else {
+        None
+    };
+
+    serde_json::json!({
+        "isCompacted": is_compacted,
+        "summaryCreatedAt": summary_created_at,
+        "summaryLen": summary_len,
+        "keptMessageCount": kept_message_count,
+        "keepLastUserRounds": KEEP_LAST_USER_ROUNDS,
+    })
+}
+
+fn sandbox_mount_debug_info(
+    sandbox_cfg: &moltis_config::schema::SandboxConfig,
+    backend_name: Option<&str>,
+    router_available: bool,
+) -> (Vec<Value>, Vec<String>, &'static str) {
+    let mounts: Vec<Value> = sandbox_cfg
+        .mounts
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "hostDir": m.host_dir.as_str(),
+                "guestDir": m.guest_dir.as_str(),
+                "mode": m.mode.as_str(),
+            })
+        })
+        .collect();
+    let mount_allowlist = sandbox_cfg.mount_allowlist.clone();
+
+    let status = if mounts.is_empty() {
+        "none"
+    } else if !router_available {
+        "router_unavailable"
+    } else if backend_name != Some("docker") {
+        "unsupported_backend"
+    } else if mount_allowlist.is_empty() {
+        "deny_by_default"
+    } else {
+        "configured"
+    };
+
+    (mounts, mount_allowlist, status)
+}
+
 #[async_trait]
 impl ChatService for LiveChatService {
     async fn send(&self, params: Value) -> ServiceResult {
@@ -2553,16 +2636,17 @@ impl ChatService for LiveChatService {
             };
 
             // Persist assistant response (even empty ones — needed for LLM history coherence).
-            if let Some((response_text, input_tokens, output_tokens, audio_path)) = assistant_text {
+            if let Some(output) = assistant_text {
                 let assistant_msg = PersistedMessage::Assistant {
-                    content: response_text,
+                    content: output.text,
                     created_at: Some(now_ms()),
                     model: Some(model_id.clone()),
                     provider: Some(provider_name.clone()),
-                    input_tokens: Some(input_tokens),
-                    output_tokens: Some(output_tokens),
+                    input_tokens: Some(output.input_tokens),
+                    output_tokens: Some(output.output_tokens),
+                    cached_tokens: Some(output.cached_tokens),
                     tool_calls: None,
-                    audio: audio_path,
+                    audio: output.audio_path,
                     seq: client_seq,
                     run_id: Some(run_id_clone.clone()),
                 };
@@ -2894,16 +2978,17 @@ impl ChatService for LiveChatService {
         };
 
         // Persist assistant response (even empty ones — needed for LLM history coherence).
-        if let Some((ref response_text, input_tokens, output_tokens, ref audio_path)) = result {
+        if let Some(ref output) = result {
             let assistant_msg = PersistedMessage::Assistant {
-                content: response_text.clone(),
+                content: output.text.clone(),
                 created_at: Some(now_ms()),
                 model: Some(model_id.clone()),
                 provider: Some(provider_name.clone()),
-                input_tokens: Some(input_tokens),
-                output_tokens: Some(output_tokens),
+                input_tokens: Some(output.input_tokens),
+                output_tokens: Some(output.output_tokens),
+                cached_tokens: Some(output.cached_tokens),
                 tool_calls: None,
-                audio: audio_path.clone(),
+                audio: output.audio_path.clone(),
                 seq: None,
                 run_id: Some(run_id.clone()),
             };
@@ -2921,11 +3006,11 @@ impl ChatService for LiveChatService {
         }
 
         match result {
-            Some((response_text, input_tokens, output_tokens, _audio_path)) => {
+            Some(output) => {
                 Ok(serde_json::json!({
-                    "text": response_text,
-                    "inputTokens": input_tokens,
-                    "outputTokens": output_tokens,
+                    "text": output.text,
+                    "inputTokens": output.input_tokens,
+                    "outputTokens": output.output_tokens,
                 }))
             },
             None => {
@@ -3122,6 +3207,12 @@ impl ChatService for LiveChatService {
             self.session_key_for(conn_id.as_deref()).await
         };
 
+        // Optional: draft text from the web UI input box (not yet sent).
+        let draft_text = params
+            .get("draftText")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
         // Session info
         let message_count = self.session_store.count(&session_key).await.unwrap_or(0);
         let session_entry = self.session_metadata.get(&session_key).await;
@@ -3139,6 +3230,14 @@ impl ChatService for LiveChatService {
         };
         let provider_name = Some(provider.name().to_string());
         let supports_tools = provider.supports_tools();
+        let llm_context = moltis_agents::model::LlmRequestContext {
+            session_key: Some(session_key.clone()),
+        };
+        let llm_debug = serde_json::json!({
+            "provider": provider.name(),
+            "model": provider.id(),
+            "overrides": provider.debug_request_overrides(Some(&llm_context)),
+        });
         let session_info = serde_json::json!({
             "key": session_key,
             "messageCount": message_count,
@@ -3208,11 +3307,11 @@ impl ChatService for LiveChatService {
             .as_ref()
             .and_then(|e| e.mcp_disabled)
             .unwrap_or(false);
-        let config = moltis_config::discover_and_load();
+        let app_config = moltis_config::discover_and_load();
         let tools: Vec<serde_json::Value> = if supports_tools {
             let registry_guard = self.tool_registry.read().await;
             let effective_registry =
-                apply_runtime_tool_filters(&registry_guard, &config, &[], mcp_disabled);
+                apply_runtime_tool_filters(&registry_guard, &app_config, &[], mcp_disabled);
             effective_registry
                 .list_schemas()
                 .iter()
@@ -3227,24 +3326,15 @@ impl ChatService for LiveChatService {
             vec![]
         };
 
-        // Token usage from actual API-reported counts stored in messages.
+        // Load persisted history for debug/estimates.
         let messages = self
             .session_store
             .read(&session_key)
             .await
             .unwrap_or_default();
-        let total_input: u64 = messages
-            .iter()
-            .filter_map(|m| m.get("inputTokens").and_then(|v| v.as_u64()))
-            .sum();
-        let total_output: u64 = messages
-            .iter()
-            .filter_map(|m| m.get("outputTokens").and_then(|v| v.as_u64()))
-            .sum();
-        let total_tokens = total_input + total_output;
 
-        // Context window from the resolved provider (may come from models.dev cache).
-        let context_window = provider.context_window();
+        // Compaction state inferred from persisted history.
+        let compaction_info = build_compaction_debug_info(&messages);
 
         // Sandbox info
         let sandbox_info = if let Some(ref router) = self.state.sandbox_router {
@@ -3266,19 +3356,33 @@ impl ChatService for LiveChatService {
                     id.key
                 )
             };
+            let (mounts, mount_allowlist, external_mounts_status) = sandbox_mount_debug_info(
+                &app_config.tools.exec.sandbox,
+                Some(router.backend_name()),
+                true,
+            );
             serde_json::json!({
                 "enabled": is_sandboxed,
                 "backend": router.backend_name(),
                 "mode": config.mode,
                 "scope": config.scope,
                 "workspaceMount": config.workspace_mount,
+                "mountAllowlist": mount_allowlist,
+                "mounts": mounts,
+                "externalMountsStatus": external_mounts_status,
                 "image": effective_image,
                 "containerName": container_name,
             })
         } else {
+            let (mounts, mount_allowlist, external_mounts_status) =
+                sandbox_mount_debug_info(&app_config.tools.exec.sandbox, None, false);
             serde_json::json!({
                 "enabled": false,
                 "backend": null,
+                "workspaceMount": app_config.tools.exec.sandbox.workspace_mount.as_str(),
+                "mountAllowlist": mount_allowlist,
+                "mounts": mounts,
+                "externalMountsStatus": external_mounts_status,
             })
         };
 
@@ -3319,8 +3423,7 @@ impl ChatService for LiveChatService {
             serde_json::json!([])
         };
 
-        // Prompt budget estimation for auto-compaction (heuristic, conservative).
-        let budget = CompactionBudget::for_provider(provider.as_ref());
+        // Build the system prompt used for token estimates and debug displays.
         let stream_only = !self.has_tools_sync();
         let persona = load_prompt_persona();
         let project_context = self
@@ -3384,13 +3487,18 @@ impl ChatService for LiveChatService {
             }
         };
 
-        let estimated_prompt_input_tokens = estimate_prompt_input_tokens(&system_prompt, &messages);
-        let keep_start_idx = keep_window_start_idx(&messages, KEEP_LAST_USER_ROUNDS);
-        let estimated_keep_window_prompt_input_tokens =
-            estimate_prompt_input_tokens(&system_prompt, &messages[keep_start_idx..]);
+        let token_debug = build_token_debug_info(
+            provider.as_ref(),
+            &llm_debug,
+            &system_prompt,
+            &messages,
+            draft_text.as_deref(),
+            app_config.tools.max_tool_result_bytes,
+        );
 
         Ok(serde_json::json!({
             "session": session_info,
+            "llm": llm_debug,
             "project": project_info,
             "tools": tools,
             "skills": skills_list,
@@ -3398,24 +3506,8 @@ impl ChatService for LiveChatService {
             "mcpDisabled": mcp_disabled,
             "sandbox": sandbox_info,
             "supportsTools": supports_tools,
-            "tokenUsage": {
-                "inputTokens": total_input,
-                "outputTokens": total_output,
-                "total": total_tokens,
-                "contextWindow": context_window,
-            },
-            "budget": {
-                "keepLastUserRounds": KEEP_LAST_USER_ROUNDS,
-                "effectiveContextWindow": budget.effective_context_window,
-                "inputHardCap": budget.input_hard_cap,
-                "reservedOutputTokens": budget.reserved_output_tokens,
-                "reserveSafetyTokens": budget.reserve_safety_tokens,
-                "effectiveInputBudget": budget.effective_input_budget(),
-                "estimatedPromptInputTokens": estimated_prompt_input_tokens,
-                "estimatedKeepWindowPromptInputTokens": estimated_keep_window_prompt_input_tokens,
-                "highWatermark": budget.high_watermark,
-                "lowWatermark": budget.low_watermark,
-            }
+            "compaction": compaction_info,
+            "tokenDebug": token_debug
         }))
     }
 
@@ -3838,7 +3930,7 @@ async fn run_with_tools(
     session_store: Option<&Arc<SessionStore>>,
     mcp_disabled: bool,
     client_seq: Option<u64>,
-) -> Option<(String, u32, u32, Option<String>)> {
+) -> Option<ChatRunOutput> {
     let persona = load_prompt_persona();
 
     let native_tools = provider.supports_tools();
@@ -4413,12 +4505,13 @@ async fn run_with_tools(
                 deliver_channel_replies(state, session_key, &display_text, desired_reply_medium)
                     .await;
             }
-            Some((
-                display_text,
-                result.usage.input_tokens,
-                result.usage.output_tokens,
+            Some(ChatRunOutput {
+                text: display_text,
+                input_tokens: result.usage.input_tokens,
+                output_tokens: result.usage.output_tokens,
+                cached_tokens: result.usage.cache_read_tokens,
                 audio_path,
-            ))
+            })
         },
         Err(e) => {
             let error_str = e.to_string();
@@ -4523,6 +4616,163 @@ fn estimate_input_tokens_for_messages(messages: &[ChatMessage]) -> u64 {
     total
 }
 
+fn reconstruct_tool_history_for_prompt_estimate(
+    history_raw: &[serde_json::Value],
+    max_tool_result_bytes: usize,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::with_capacity(history_raw.len());
+    for val in history_raw {
+        if val.get("role").and_then(|r| r.as_str()) != Some("tool_result") {
+            out.push(val.clone());
+            continue;
+        }
+
+        let tool_call_id = val
+            .get("tool_call_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let tool_name = val
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let args_str = val
+            .get("arguments")
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "{}".to_string());
+
+        let output = if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
+            format!("Error: {err}")
+        } else if let Some(res) = val.get("result") {
+            res.to_string()
+        } else {
+            String::new()
+        };
+        let output = moltis_agents::runner::sanitize_tool_result(&output, max_tool_result_bytes);
+
+        // Reconstruct the call+output pair the LLM would typically see:
+        // assistant(tool_calls) -> tool(output).
+        out.push(serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": args_str,
+                }
+            }]
+        }));
+        out.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": val.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "content": output,
+        }));
+    }
+    out
+}
+
+fn extract_planned_max_output_toks(overrides: &serde_json::Value) -> Option<u64> {
+    overrides
+        .get("generation")
+        .and_then(|g| g.get("max_output_tokens"))
+        .and_then(|m| {
+            m.get("effective")
+                .and_then(|v| v.as_u64())
+                .or_else(|| m.as_u64())
+        })
+}
+
+fn build_token_debug_info(
+    provider: &dyn moltis_agents::model::LlmProvider,
+    llm_debug: &serde_json::Value,
+    system_prompt: &str,
+    history_raw: &[serde_json::Value],
+    draft_text: Option<&str>,
+    max_tool_result_bytes: usize,
+) -> serde_json::Value {
+    let last_request = {
+        let mut input_tokens: Option<u64> = None;
+        let mut output_tokens: Option<u64> = None;
+        let mut cached_tokens: Option<u64> = None;
+        for m in history_raw.iter().rev() {
+            if m.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+                continue;
+            }
+            input_tokens = m.get("inputTokens").and_then(|v| v.as_u64());
+            output_tokens = m.get("outputTokens").and_then(|v| v.as_u64());
+            cached_tokens = m.get("cachedTokens").and_then(|v| v.as_u64());
+            if input_tokens.is_some() || output_tokens.is_some() || cached_tokens.is_some() {
+                break;
+            }
+        }
+        serde_json::json!({
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "cachedTokens": cached_tokens,
+        })
+    };
+
+    let context_window = u64::from(provider.context_window());
+    let planned_max_output_toks = extract_planned_max_output_toks(
+        llm_debug.get("overrides").unwrap_or(&serde_json::Value::Null),
+    )
+    .or_else(|| provider.output_limit().map(u64::from))
+    .unwrap_or_else(|| u64::min(16_384, context_window / 5));
+
+    let max_input_toks = provider
+        .input_limit()
+        .map(u64::from)
+        .unwrap_or_else(|| (context_window * 80) / 100);
+    let auto_compact_toks_thred = (max_input_toks * 85) / 100;
+
+    let history_with_tools =
+        reconstruct_tool_history_for_prompt_estimate(history_raw, max_tool_result_bytes);
+    let mut msgs = Vec::with_capacity(1 + history_with_tools.len());
+    msgs.push(ChatMessage::system(system_prompt));
+    msgs.extend(values_to_chat_messages(&history_with_tools));
+    let history_input_toks_est = estimate_input_tokens_for_messages(&msgs);
+
+    let pending_user_toks_est = draft_text
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(tokens_estimate_utf8_bytes_div_3)
+        .unwrap_or(0);
+
+    let reserve_safety_toks = SAFETY_MARGIN_TOKENS;
+    let prompt_input_toks_est = history_input_toks_est
+        .saturating_add(pending_user_toks_est)
+        .saturating_add(reserve_safety_toks);
+
+    let compact_progress = if auto_compact_toks_thred == 0 {
+        None
+    } else {
+        Some(prompt_input_toks_est as f64 / auto_compact_toks_thred as f64)
+    };
+
+    serde_json::json!({
+        "lastRequest": last_request,
+        "nextRequest": {
+            "contextWindow": context_window,
+            "plannedMaxOutputToks": planned_max_output_toks,
+            "maxInputToks": max_input_toks,
+            "autoCompactToksThred": auto_compact_toks_thred,
+            "promptInputToksEst": prompt_input_toks_est,
+            "compactProgress": compact_progress,
+            "details": {
+                "method": "heuristic",
+                "historyInputToksEst": history_input_toks_est,
+                "pendingUserToksEst": pending_user_toks_est,
+                "reserveSafetyToks": reserve_safety_toks,
+                "draftProvided": draft_text.is_some(),
+                "maxInputDerived": provider.input_limit().is_none(),
+            }
+        }
+    })
+}
+
 fn estimate_next_input_tokens(
     system_prompt: &str,
     history_raw: &[serde_json::Value],
@@ -4534,13 +4784,6 @@ fn estimate_next_input_tokens(
     messages.push(ChatMessage::User {
         content: user_content.clone(),
     });
-    estimate_input_tokens_for_messages(&messages) + SAFETY_MARGIN_TOKENS
-}
-
-fn estimate_prompt_input_tokens(system_prompt: &str, history_raw: &[serde_json::Value]) -> u64 {
-    let mut messages = Vec::with_capacity(history_raw.len() + 1);
-    messages.push(ChatMessage::system(system_prompt));
-    messages.extend(values_to_chat_messages(history_raw));
     estimate_input_tokens_for_messages(&messages) + SAFETY_MARGIN_TOKENS
 }
 
@@ -4584,6 +4827,7 @@ fn build_compacted_history(
         provider: None,
         input_tokens: None,
         output_tokens: None,
+        cached_tokens: None,
         tool_calls: None,
         audio: None,
         seq: None,
@@ -4792,7 +5036,7 @@ async fn run_streaming(
     runtime_context: Option<&PromptRuntimeContext>,
     session_store: Option<&Arc<SessionStore>>,
     client_seq: Option<u64>,
-) -> Option<(String, u32, u32, Option<String>)> {
+) -> Option<ChatRunOutput> {
     let persona = load_prompt_persona();
 
     let system_prompt = build_system_prompt_minimal_runtime(
@@ -4958,12 +5202,13 @@ async fn run_streaming(
                     deliver_channel_replies(state, session_key, &accumulated, desired_reply_medium)
                         .await;
                 }
-                return Some((
-                    accumulated,
-                    usage.input_tokens,
-                    usage.output_tokens,
+                return Some(ChatRunOutput {
+                    text: accumulated,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cached_tokens: usage.cache_read_tokens,
                     audio_path,
-                ));
+                });
             },
             StreamEvent::Error(msg) => {
                 warn!(run_id, error = %msg, "chat stream error");
@@ -6022,10 +6267,126 @@ mod tests {
         Arc::new(RwLock::new(HashMap::new()))
     }
 
+    #[test]
+    fn compaction_debug_info_detects_summary_header_message() {
+        let messages = vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "[Conversation Summary]\n\nHello world",
+                "created_at": 123_u64,
+            }),
+            serde_json::json!({
+                "role": "user",
+                "content": "hi",
+            }),
+        ];
+        let info = super::build_compaction_debug_info(&messages);
+        assert_eq!(info["isCompacted"].as_bool(), Some(true));
+        assert_eq!(info["summaryCreatedAt"].as_u64(), Some(123));
+        assert_eq!(info["summaryLen"].as_u64(), Some("Hello world".len() as u64));
+        assert_eq!(info["keptMessageCount"].as_u64(), Some(1));
+        assert_eq!(
+            info["keepLastUserRounds"].as_u64(),
+            Some(super::KEEP_LAST_USER_ROUNDS as u64)
+        );
+    }
+
+    #[test]
+    fn sandbox_mount_debug_info_reports_expected_status() {
+        use moltis_config::schema::{SandboxConfig, SandboxMountConfig};
+
+        let mut cfg = SandboxConfig::default();
+        cfg.mounts = vec![SandboxMountConfig {
+            host_dir: "/mnt/c/dev".into(),
+            guest_dir: "/mnt/host/dev".into(),
+            mode: "ro".into(),
+        }];
+
+        let (_mounts, _allow, status) = super::sandbox_mount_debug_info(&cfg, None, false);
+        assert_eq!(status, "router_unavailable");
+
+        let (_mounts, _allow, status) =
+            super::sandbox_mount_debug_info(&cfg, Some("apple-container"), true);
+        assert_eq!(status, "unsupported_backend");
+
+        let (_mounts, allow, status) = super::sandbox_mount_debug_info(&cfg, Some("docker"), true);
+        assert!(allow.is_empty());
+        assert_eq!(status, "deny_by_default");
+
+        cfg.mount_allowlist = vec!["/mnt/c".into()];
+        let (_mounts, allow, status) = super::sandbox_mount_debug_info(&cfg, Some("docker"), true);
+        assert_eq!(allow, vec!["/mnt/c".to_string()]);
+        assert_eq!(status, "configured");
+    }
+
+    #[test]
+    fn token_debug_next_request_includes_draft_and_reconstructed_tool_chain_in_estimate() {
+        let provider = BudgetProvider {
+            context_window: 1_000,
+            input_limit: Some(500),
+            output_limit: Some(200),
+        };
+        let llm_debug = serde_json::json!({
+            "overrides": {
+                "generation": {
+                    "max_output_tokens": { "effective": 150 }
+                }
+            }
+        });
+
+        let system_prompt = "SYS";
+        let history = vec![
+            serde_json::json!({"role":"user","content":"hi"}),
+            serde_json::json!({
+                "role":"tool_result",
+                "tool_name":"exec",
+                "tool_call_id":"t1",
+                "arguments": {"command":"echo hi"},
+                "success": true,
+                "result": {"stdout":"ok"},
+            }),
+            serde_json::json!({
+                "role":"assistant",
+                "content":"done",
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "cachedTokens": 2,
+            }),
+        ];
+
+        let info = super::build_token_debug_info(
+            &provider,
+            &llm_debug,
+            system_prompt,
+            &history,
+            Some("draft"),
+            50_000,
+        );
+
+        assert_eq!(info["lastRequest"]["inputTokens"].as_u64(), Some(10));
+        assert_eq!(info["lastRequest"]["outputTokens"].as_u64(), Some(5));
+        assert_eq!(info["lastRequest"]["cachedTokens"].as_u64(), Some(2));
+
+        let next = &info["nextRequest"];
+        assert_eq!(next["contextWindow"].as_u64(), Some(1_000));
+        assert_eq!(next["plannedMaxOutputToks"].as_u64(), Some(150));
+        assert_eq!(next["maxInputToks"].as_u64(), Some(500));
+        assert_eq!(next["autoCompactToksThred"].as_u64(), Some(425));
+
+        let history_with_tools = super::reconstruct_tool_history_for_prompt_estimate(&history, 50_000);
+        let mut msgs = vec![ChatMessage::system(system_prompt)];
+        msgs.extend(values_to_chat_messages(&history_with_tools));
+        let history_est = super::estimate_input_tokens_for_messages(&msgs);
+        let pending_est = super::tokens_estimate_utf8_bytes_div_3("draft");
+        let expected = history_est + pending_est + super::SAFETY_MARGIN_TOKENS;
+
+        assert_eq!(next["promptInputToksEst"].as_u64(), Some(expected));
+    }
+
     async fn get_or_create_semaphore(
         locks: &Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
         key: &str,
-    ) -> Arc<Semaphore> {
+        ) -> Arc<Semaphore> {
         {
             let map = locks.read().await;
             if let Some(sem) = map.get(key) {

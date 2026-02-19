@@ -202,6 +202,93 @@ function renderContextSessionSection(card, data) {
 	card.appendChild(sessSection);
 }
 
+function renderContextLlmSection(card, data) {
+	var llm = data.llm || {};
+	var ov = llm.overrides || {};
+	var gen = ov.generation || {};
+	var pc = ov.prompt_cache || {};
+
+	var llmSection = ctxSection("LLM");
+
+	if (pc.enabled) {
+		var pcParts = [];
+		pcParts.push("enabled");
+		if (pc.source) pcParts.push(`source: ${pc.source}`);
+		if (pc.hashed !== undefined && pc.hashed !== null) pcParts.push(`hashed: ${pc.hashed ? "yes" : "no"}`);
+		llmSection.appendChild(ctxRow("Prompt cache", pcParts.join(" \xb7 "), true));
+	}
+	if (ov.prompt_cache_key) {
+		llmSection.appendChild(ctxRow("Prompt cache key", String(ov.prompt_cache_key), true));
+	}
+
+	if (gen.max_output_tokens) {
+		var m = gen.max_output_tokens || {};
+		var configured = m.configured;
+		var effective = m.effective;
+		var limit = m.limit;
+		var clamped = m.clamped;
+
+		var parts = [];
+		if (effective !== undefined) parts.push(`effective ${formatTokens(effective)}`);
+		if (configured !== undefined) parts.push(`configured ${formatTokens(configured)}`);
+		if (clamped) parts.push(`clamped to ${formatTokens(limit)}`);
+		llmSection.appendChild(ctxRow("Max output", parts.join(" \xb7 "), true));
+	}
+
+	if (gen.reasoning_effort) {
+		llmSection.appendChild(ctxRow("Reasoning effort", String(gen.reasoning_effort), true));
+	}
+	if (gen.text_verbosity) {
+		llmSection.appendChild(ctxRow("Text verbosity", String(gen.text_verbosity), true));
+	}
+	if (gen.temperature !== undefined && gen.temperature !== null) {
+		llmSection.appendChild(ctxRow("Temperature", String(gen.temperature), true));
+	}
+
+	if (
+		!ov.prompt_cache_key &&
+		!gen.max_output_tokens &&
+		!gen.reasoning_effort &&
+		!gen.text_verbosity &&
+		(gen.temperature === undefined || gen.temperature === null)
+	) {
+		llmSection.appendChild(ctxEl("div", "ctx-empty", "No provider overrides reported"));
+	}
+
+	card.appendChild(llmSection);
+}
+
+function renderContextCompactionSection(card, data) {
+	var c = data.compaction || {};
+	var compSection = ctxSection("Compaction");
+	var isCompacted = !!c.isCompacted;
+	compSection.appendChild(ctxRow("Compacted", isCompacted ? "yes" : "no", true));
+	if (isCompacted) {
+		if (c.summaryLen !== undefined && c.summaryLen !== null) {
+			compSection.appendChild(ctxRow("Summary", `${c.summaryLen.toLocaleString()} chars`, true));
+		}
+		if (c.keptMessageCount !== undefined && c.keptMessageCount !== null) {
+			compSection.appendChild(ctxRow("Kept messages", String(c.keptMessageCount), true));
+		}
+		if (c.keepLastUserRounds) {
+			compSection.appendChild(ctxRow("Keep window", `last ${c.keepLastUserRounds} user rounds`, true));
+		}
+		if (c.summaryCreatedAt) {
+			var dt = new Date(Number(c.summaryCreatedAt));
+			if (!isNaN(dt.getTime())) {
+				compSection.appendChild(ctxRow("Summary at", dt.toLocaleString(), true));
+			} else {
+				compSection.appendChild(ctxRow("Summary at", String(c.summaryCreatedAt), true));
+			}
+		}
+	} else {
+		if (c.keepLastUserRounds) {
+			compSection.appendChild(ctxRow("Keep window", `last ${c.keepLastUserRounds} user rounds`, true));
+		}
+	}
+	card.appendChild(compSection);
+}
+
 function renderContextProjectSection(card, data) {
 	var proj = data.project;
 	var projSection = ctxSection("Project");
@@ -318,34 +405,68 @@ function renderContextSandboxSection(card, data) {
 		if (sb.image) sandboxSection.appendChild(ctxRow("Image", sb.image, true));
 		if (sb.containerName) sandboxSection.appendChild(ctxRow("Container", sb.containerName));
 	}
+
+	if (sb.externalMountsStatus) {
+		sandboxSection.appendChild(ctxRow("External mounts", String(sb.externalMountsStatus), true));
+	}
+	var allowlist = sb.mountAllowlist || [];
+	if (allowlist.length > 0) {
+		var allowLabel = ctxEl("div", "ctx-section-title", `Mount allowlist (${allowlist.length})`);
+		allowLabel.classList.add("spaced");
+		sandboxSection.appendChild(allowLabel);
+		allowlist.forEach((p) => {
+			var row = ctxEl("div", "ctx-file");
+			row.appendChild(ctxEl("span", "ctx-file-path", String(p)));
+			sandboxSection.appendChild(row);
+		});
+	}
+	var mounts = sb.mounts || [];
+	if (mounts.length > 0) {
+		var mountsLabel = ctxEl("div", "ctx-section-title", `Mounts (${mounts.length})`);
+		mountsLabel.classList.add("spaced");
+		sandboxSection.appendChild(mountsLabel);
+		mounts.forEach((m) => {
+			var row = ctxEl("div", "ctx-file");
+			var lhs = `${m.hostDir || ""} \u2192 ${m.guestDir || ""}`;
+			row.appendChild(ctxEl("span", "ctx-file-path", lhs));
+			if (m.mode) row.appendChild(ctxEl("span", "ctx-file-size", String(m.mode)));
+			sandboxSection.appendChild(row);
+		});
+	}
 	card.appendChild(sandboxSection);
 }
 
 function renderContextTokensSection(card, data) {
-	var tu = data.tokenUsage || {};
-	var b = data.budget || {};
-	var tokenSection = ctxSection("Token Usage");
-	tokenSection.appendChild(ctxRow("Input", formatTokens(tu.inputTokens || 0), true));
-	tokenSection.appendChild(ctxRow("Output", formatTokens(tu.outputTokens || 0), true));
-	tokenSection.appendChild(ctxRow("Total", formatTokens(tu.total || 0), true));
-	if (b.estimatedPromptInputTokens) {
-		tokenSection.appendChild(ctxRow("Estimated prompt (input)", formatTokens(b.estimatedPromptInputTokens), true));
+	var td = data.tokenDebug || {};
+	var last = td.lastRequest || {};
+	var next = td.nextRequest || {};
+
+	function formatMaybeTokens(v) {
+		if (v === null || v === undefined) return "—";
+		return formatTokens(v);
 	}
-	if (b.inputHardCap) {
-		tokenSection.appendChild(ctxRow("Input hard cap", formatTokens(b.inputHardCap), true));
+
+	var lastSection = ctxSection("Last request (authoritative)");
+	lastSection.appendChild(ctxRow("Input tokens", formatMaybeTokens(last.inputTokens), true));
+	lastSection.appendChild(ctxRow("Output tokens", formatMaybeTokens(last.outputTokens), true));
+	lastSection.appendChild(ctxRow("Cached tokens", formatMaybeTokens(last.cachedTokens), true));
+	card.appendChild(lastSection);
+
+	var nextSection = ctxSection("Next request (compact risk)");
+	if (next.contextWindow !== undefined) nextSection.appendChild(ctxRow("Context window", formatMaybeTokens(next.contextWindow), true));
+	if (next.plannedMaxOutputToks !== undefined) nextSection.appendChild(ctxRow("Planned max output", formatMaybeTokens(next.plannedMaxOutputToks), true));
+	if (next.maxInputToks !== undefined) {
+		var derived = next.details && next.details.maxInputDerived;
+		var label = derived ? `${formatMaybeTokens(next.maxInputToks)} (derived)` : formatMaybeTokens(next.maxInputToks);
+		nextSection.appendChild(ctxRow("Max input tokens", label, true));
 	}
-	if (b.highWatermark) {
-		tokenSection.appendChild(ctxRow("Auto-compact at", formatTokens(b.highWatermark), true));
+	if (next.autoCompactToksThred !== undefined) nextSection.appendChild(ctxRow("Auto-compact threshold", formatMaybeTokens(next.autoCompactToksThred), true));
+	if (next.promptInputToksEst !== undefined) nextSection.appendChild(ctxRow("Prompt input (est, heuristic)", formatMaybeTokens(next.promptInputToksEst), true));
+	if (next.compactProgress !== null && next.compactProgress !== undefined) {
+		var pct = Math.round(next.compactProgress * 100);
+		nextSection.appendChild(ctxRow("Compact progress", `${pct}%`, true));
 	}
-	if (b.highWatermark && b.estimatedPromptInputTokens) {
-		var pct = Math.max(0, 100 - Math.round((b.estimatedPromptInputTokens / b.highWatermark) * 100));
-		tokenSection.appendChild(ctxRow("Context left before auto-compact", `${pct}%`, true));
-	} else if (tu.contextWindow > 0) {
-		// Backward compat fallback (less accurate).
-		var pct2 = Math.max(0, 100 - Math.round(((tu.total || 0) / tu.contextWindow) * 100));
-		tokenSection.appendChild(ctxRow("Context left", `${pct2}% of ${formatTokens(tu.contextWindow)}`, true));
-	}
-	card.appendChild(tokenSection);
+	card.appendChild(nextSection);
 }
 
 function renderContextCard(data) {
@@ -376,6 +497,8 @@ function renderContextCard(data) {
 	}
 
 	renderContextSessionSection(card, data);
+	renderContextLlmSection(card, data);
+	renderContextCompactionSection(card, data);
 	renderContextProjectSection(card, data);
 	renderContextSkillsSection(card, data);
 	renderContextMcpSection(card, data);
@@ -432,19 +555,21 @@ function refreshDebugPanel() {
 	var loading = ctxEl("div", "text-xs text-[var(--muted)]", "Loading context\u2026");
 	panel.appendChild(loading);
 
-	sendRpc("chat.context", {}).then((res) => {
+	sendRpc("chat.context", { draftText: S.chatInput ? S.chatInput.value : "" }).then((res) => {
 		panel.textContent = "";
 		if (!(res?.ok && res.payload)) {
 			panel.appendChild(ctxEl("div", "text-xs text-[var(--error)]", "Failed to load context"));
 			return;
 		}
-		slashInjectStyles();
-		renderContextSessionSection(panel, res.payload);
-		renderContextProjectSection(panel, res.payload);
-		renderContextSkillsSection(panel, res.payload);
-		renderContextMcpSection(panel, res.payload);
-		renderContextToolsSection(panel, res.payload);
-		renderContextSandboxSection(panel, res.payload);
+			slashInjectStyles();
+			renderContextSessionSection(panel, res.payload);
+			renderContextLlmSection(panel, res.payload);
+			renderContextCompactionSection(panel, res.payload);
+			renderContextProjectSection(panel, res.payload);
+			renderContextSkillsSection(panel, res.payload);
+			renderContextMcpSection(panel, res.payload);
+			renderContextToolsSection(panel, res.payload);
+			renderContextSandboxSection(panel, res.payload);
 		renderContextTokensSection(panel, res.payload);
 	});
 }
@@ -680,7 +805,7 @@ function handleSlashCommand(cmdName) {
 	}
 	if (cmdName === "context") {
 		chatAddMsg("system", "Loading context\u2026");
-		sendRpc("chat.context", {}).then((res) => {
+		sendRpc("chat.context", { draftText: S.chatInput ? S.chatInput.value : "" }).then((res) => {
 			if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
 			if (res?.ok && res.payload) {
 				try {

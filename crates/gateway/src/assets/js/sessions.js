@@ -430,16 +430,15 @@ function makeThinkingDots() {
 }
 
 function postHistoryLoadActions(key, searchContext, msgEls) {
-		sendRpc("chat.context", {}).then((ctxRes) => {
-			if (ctxRes?.ok && ctxRes.payload) {
-				if (ctxRes.payload.tokenUsage) {
-					S.setSessionContextWindow(ctxRes.payload.tokenUsage.contextWindow || 0);
+			sendRpc("chat.context", { draftText: S.chatInput ? S.chatInput.value : "" }).then((ctxRes) => {
+				if (ctxRes?.ok && ctxRes.payload) {
+					var next = ctxRes.payload.tokenDebug ? ctxRes.payload.tokenDebug.nextRequest : null;
+					S.setSessionContextWindow(next && next.contextWindow !== undefined ? next.contextWindow || 0 : 0);
+					S.setSessionBudget(next || null);
+					S.setSessionToolsEnabled(ctxRes.payload.supportsTools !== false);
 				}
-				S.setSessionBudget(ctxRes.payload.budget || null);
-				S.setSessionToolsEnabled(ctxRes.payload.supportsTools !== false);
-			}
-			updateTokenBar();
-		});
+				updateTokenBar();
+			});
 	updateTokenBar();
 
 	if (searchContext?.query && S.chatMsgBox) {

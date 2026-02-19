@@ -88,9 +88,14 @@
 
 ### SHOULD-FIX（提升可控性/成本/体验）
 
-3) **[DONE] Compaction 预算与可解释性（models.dev limit.input/limit.output → budget → UI/事件）**
-   - `chat.context` 返回 `budget` 字段（estimated prompt input / keep window prompt input / watermarks / caps）：`crates/gateway/src/chat.rs:3401`
-   - Web UI 显示预算与 token bar：`crates/gateway/src/assets/js/page-chat.js:331` / `crates/gateway/src/assets/js/chat-ui.js:293`
+3) **[DONE] Compaction 风险可解释性（models.dev limit.* → caps → UI/事件）**
+   - `chat.context` 返回 `tokenDebug`：
+     - `lastRequest`（authoritative）：`inputTokens/outputTokens/cachedTokens`
+     - `nextRequest`（compact risk）：`contextWindow/plannedMaxOutputToks/maxInputToks/autoCompactToksThred/promptInputToksEst(compactProgress)`
+     - 实现：`crates/gateway/src/chat.rs:3490`（`build_token_debug_info`）
+   - Web UI：
+     - Debug/Context 面板展示 Last/Next：`crates/gateway/src/assets/js/page-chat.js:439`
+     - token bar 展示 compact progress + next prompt estimate：`crates/gateway/src/assets/js/chat-ui.js:278`
 
 ### Survey-only（仅记录/调研）
 

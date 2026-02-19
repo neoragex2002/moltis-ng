@@ -400,6 +400,15 @@ pub trait LlmProvider: Send + Sync {
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         self.stream_with_tools(messages, tools)
     }
+
+    /// Optional debug helper: returns request-scoped overrides/settings the provider
+    /// will apply when sending LLM API requests (e.g. prompt cache key, generation options).
+    ///
+    /// Intended for observability surfaces like `chat.context` debug panels.
+    /// Default implementation returns an empty object.
+    fn debug_request_overrides(&self, _ctx: Option<&LlmRequestContext>) -> serde_json::Value {
+        serde_json::json!({})
+    }
 }
 
 /// Response from an LLM completion call.
