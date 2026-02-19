@@ -41,6 +41,7 @@ pub async fn start_polling(
     // Verify credentials and get bot username.
     let me = bot.get_me().await?;
     let bot_username = me.username.clone();
+    let bot_user_id = Some(me.id);
 
     // Delete any existing webhook so long polling works.
     bot.delete_webhook().send().await?;
@@ -75,6 +76,7 @@ pub async fn start_polling(
     let otp_cooldown = config.otp_cooldown_secs;
     let state = AccountState {
         bot: bot.clone(),
+        bot_user_id,
         bot_username,
         account_id: account_id.clone(),
         config,

@@ -14,6 +14,14 @@ pub struct PromptHostRuntimeContext {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub session_key: Option<String>,
+    /// Channel type for channel-bound sessions (e.g. "telegram").
+    pub channel: Option<String>,
+    /// Channel account ID (e.g. Telegram account key like "fluffy").
+    pub channel_account_id: Option<String>,
+    /// Human-friendly channel handle (e.g. Telegram `@my_bot`).
+    pub channel_account_handle: Option<String>,
+    /// Channel chat ID (e.g. Telegram chat_id).
+    pub channel_chat_id: Option<String>,
     pub sudo_non_interactive: Option<bool>,
     pub sudo_status: Option<String>,
     pub timezone: Option<String>,
@@ -356,6 +364,18 @@ fn format_host_runtime_line(host: &PromptHostRuntimeContext) -> Option<String> {
     push_str(&mut parts, "provider", host.provider.as_deref());
     push_str(&mut parts, "model", host.model.as_deref());
     push_str(&mut parts, "session", host.session_key.as_deref());
+    push_str(&mut parts, "channel", host.channel.as_deref());
+    push_str(
+        &mut parts,
+        "channel_account_id",
+        host.channel_account_id.as_deref(),
+    );
+    push_str(
+        &mut parts,
+        "channel_account_handle",
+        host.channel_account_handle.as_deref(),
+    );
+    push_str(&mut parts, "channel_chat_id", host.channel_chat_id.as_deref());
     if let Some(v) = host.sudo_non_interactive {
         parts.push(format!("sudo_non_interactive={v}"));
     }
@@ -657,6 +677,10 @@ mod tests {
                 provider: Some("openai".into()),
                 model: Some("gpt-5".into()),
                 session_key: Some("main".into()),
+                channel: None,
+                channel_account_id: None,
+                channel_account_handle: None,
+                channel_chat_id: None,
                 sudo_non_interactive: Some(true),
                 sudo_status: Some("passwordless".into()),
                 timezone: Some("Europe/Paris".into()),

@@ -6,7 +6,7 @@ use {
         prelude::*,
         types::{
             CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MessageKind,
-            ParseMode,
+            MessageEntity, MessageEntityKind, MessageEntityRef, ParseMode, UserId,
         },
     },
     tracing::{debug, info, warn},
@@ -25,6 +25,7 @@ use moltis_metrics::{counter, histogram, telegram as tg_metrics};
 
 use crate::{
     access::{self, AccessDenied},
+    config::GroupIngestMode,
     otp::{OtpInitResult, OtpVerifyResult},
     state::AccountStateMap,
 };
@@ -65,7 +66,7 @@ pub async fn handle_message_direct(
         return Ok(());
     }
 
-    let (config, bot_username, outbound, message_log, event_sink) = {
+    let (config, bot_user_id, bot_username, outbound, message_log, event_sink) = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
         let state = match accts.get(account_id) {
             Some(s) => s,
@@ -76,12 +77,14 @@ pub async fn handle_message_direct(
         };
         (
             state.config.clone(),
+            state.bot_user_id,
             state.bot_username.clone(),
             Arc::clone(&state.outbound),
             state.message_log.clone(),
             state.event_sink.clone(),
         )
     };
+    let account_handle = bot_username.as_deref().map(|u| format!("@{u}"));
 
     let (chat_type, group_id) = classify_chat(&msg);
     let peer_id = msg
@@ -100,7 +103,7 @@ pub async fn handle_message_direct(
         }
     });
 
-    let bot_mentioned = check_bot_mentioned(&msg, bot_username.as_deref());
+    let bot_mentioned = check_bot_mentioned(&msg, bot_user_id, bot_username.as_deref());
 
     debug!(
         account_id,
@@ -182,7 +185,44 @@ pub async fn handle_message_direct(
     }
 
     if let Err(reason) = access_result {
-        warn!(account_id, %reason, peer_id, username = ?username, "handler: access denied");
+        if reason == AccessDenied::NotMentioned {
+            let (entities_count, caption_entities_count) = match &msg.kind {
+                MessageKind::Common(common) => match &common.media_kind {
+                    MediaKind::Text(t) => (t.entities.len(), 0),
+                    MediaKind::Animation(a) => (0, a.caption_entities.len()),
+                    MediaKind::Audio(a) => (0, a.caption_entities.len()),
+                    MediaKind::Document(d) => (0, d.caption_entities.len()),
+                    MediaKind::Photo(p) => (0, p.caption_entities.len()),
+                    MediaKind::Video(v) => (0, v.caption_entities.len()),
+                    MediaKind::Voice(v) => (0, v.caption_entities.len()),
+                    _ => (0, 0),
+                },
+                _ => (0, 0),
+            };
+            let is_reply = msg.reply_to_message().is_some();
+            let reply_from = msg.reply_to_message().and_then(|m| m.from.as_ref()).map(|u| u.id.0);
+            let text_has_at_sign = extract_text(&msg).is_some_and(|t| t.contains('@'));
+
+            warn!(
+                account_id,
+                %reason,
+                peer_id,
+                username = ?username,
+                chat_id = msg.chat.id.0,
+                message_id = msg.id.0,
+                ?chat_type,
+                bot_username = ?bot_username,
+                bot_user_id = ?bot_user_id.map(|id| id.0),
+                entities_count,
+                caption_entities_count,
+                is_reply,
+                reply_from,
+                text_has_at_sign,
+                "handler: access denied"
+            );
+        } else {
+            warn!(account_id, %reason, peer_id, username = ?username, "handler: access denied");
+        }
         #[cfg(feature = "metrics")]
         counter!(tg_metrics::ACCESS_CONTROL_DENIALS_TOTAL).increment(1);
 
@@ -204,13 +244,54 @@ pub async fn handle_message_direct(
             .await;
         }
 
+        // Group listen/sidecar mode: ingest unaddressed messages into session
+        // history without replying or triggering an LLM run.
+        if chat_type == ChatType::Group
+            && matches!(reason, AccessDenied::NotMentioned | AccessDenied::MentionModeNone)
+            && config.group_ingest_mode == GroupIngestMode::AllMessages
+            && let Some(ref sink) = event_sink
+        {
+            let mut body = text.clone().unwrap_or_default();
+            if let Some(ref bot_username) = bot_username {
+                let (rewritten, stripped) =
+                    strip_self_mention_from_message(&msg, &body, bot_user_id, bot_username);
+                if stripped {
+                    body = rewritten;
+                }
+            }
+            if !body.trim().is_empty() {
+                let reply_target = ChannelReplyTarget {
+                    channel_type: ChannelType::Telegram,
+                    account_id: account_id.to_string(),
+                    account_handle: account_handle.clone(),
+                    chat_id: msg.chat.id.0.to_string(),
+                    message_id: Some(msg.id.0.to_string()),
+                };
+                let meta = ChannelMessageMeta {
+                    channel_type: ChannelType::Telegram,
+                    sender_name: sender_name.clone(),
+                    username: username.clone(),
+                    message_kind: message_kind(&msg),
+                    model: config.model.clone(),
+                };
+                info!(
+                    account_id,
+                    chat_id = %reply_target.chat_id,
+                    message_id = ?reply_target.message_id,
+                    body_len = body.len(),
+                    "telegram inbound ingested (listen-only)"
+                );
+                sink.ingest_only(&body, reply_target, meta).await;
+            }
+        }
+
         return Ok(());
     }
 
     debug!(account_id, "handler: access granted");
 
     // Check for voice/audio messages and transcribe them
-    let (body, attachments) = if let Some(voice_file) = extract_voice_file(&msg) {
+    let (mut body, attachments) = if let Some(voice_file) = extract_voice_file(&msg) {
         // If STT is not configured, reply with guidance and do not dispatch to the LLM.
         if let Some(ref sink) = event_sink
             && !sink.voice_stt_available().await
@@ -346,6 +427,7 @@ pub async fn handle_message_direct(
             let reply_target = ChannelReplyTarget {
                 channel_type: ChannelType::Telegram,
                 account_id: account_id.to_string(),
+                account_handle: account_handle.clone(),
                 chat_id: msg.chat.id.0.to_string(),
                 message_id: Some(msg.id.0.to_string()),
             };
@@ -420,6 +502,7 @@ pub async fn handle_message_direct(
         let reply_target = ChannelReplyTarget {
             channel_type: ChannelType::Telegram,
             account_id: account_id.to_string(),
+            account_handle: account_handle.clone(),
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
         };
@@ -435,15 +518,49 @@ pub async fn handle_message_direct(
         );
 
         // Intercept slash commands before dispatching to the LLM.
-        if body.starts_with('/') {
-            let cmd_text = body.trim_start_matches('/');
-            let cmd = cmd_text.split_whitespace().next().unwrap_or("");
+        //
+        // NOTE: Telegram supports addressed commands in groups: `/context@MyBot`.
+        // We treat unaddressed commands in Group/Channel as ambiguous and ignore them
+        // (avoid multi-bot spam), even if the account is configured with a permissive
+        // `mention_mode`.
+        if body.trim_start().starts_with('/') {
+            let body_trim = body.trim_start();
+            let cmd_text_full = body_trim.trim_start_matches('/').trim();
+            let first = cmd_text_full.split_whitespace().next().unwrap_or("");
+            let (cmd_name_raw, addressed_raw) =
+                first.split_once('@').map_or((first, None), |(a, b)| (a, Some(b)));
+
+            let cmd_name = cmd_name_raw.to_lowercase();
+            let bot_username_norm = bot_username.as_deref().map(normalize_username);
+            let addressed_norm = addressed_raw.map(normalize_username);
+
+            // Group/Channel: only handle addressed commands (`/cmd@this_bot`).
+            if chat_type != ChatType::Dm {
+                match (&addressed_norm, &bot_username_norm) {
+                    (Some(target), Some(me)) if target == me => {}
+                    (Some(_), _) => return Ok(()),
+                    (None, _) => return Ok(()),
+                }
+            } else if let (Some(target), Some(me)) = (&addressed_norm, &bot_username_norm) {
+                // DM: if the user explicitly addressed another bot, ignore.
+                if target != me {
+                    return Ok(());
+                }
+            }
+
+            let args = cmd_text_full[first.len()..].trim();
+            let cmd_text = if args.is_empty() {
+                cmd_name.clone()
+            } else {
+                format!("{cmd_name} {args}")
+            };
+
             if matches!(
-                cmd,
+                cmd_name.as_str(),
                 "new" | "clear" | "compact" | "context" | "model" | "sandbox" | "sessions" | "help"
             ) {
                 // For /context, send a formatted card with inline keyboard.
-                if cmd == "context" {
+                if cmd_name == "context" {
                     let context_result =
                         sink.dispatch_command("context", reply_target.clone()).await;
                     let bot = {
@@ -453,8 +570,8 @@ pub async fn handle_message_direct(
                     if let Some(bot) = bot {
                         match context_result {
                             Ok(text) => {
-                                send_context_card(&bot, &reply_target.chat_id, &text).await;
-                            },
+                                send_context_card(&bot, &reply_target.chat_id, &text, &config, chat_type).await;
+                            }
                             Err(e) => {
                                 let _ = bot
                                     .send_message(
@@ -462,14 +579,14 @@ pub async fn handle_message_direct(
                                         format!("Error: {e}"),
                                     )
                                     .await;
-                            },
+                            }
                         }
                     }
                     return Ok(());
                 }
 
                 // For /model without args, send an inline keyboard to pick a model.
-                if cmd == "model" && cmd_text.trim() == "model" {
+                if cmd_name == "model" && args.is_empty() {
                     let list_result = sink.dispatch_command("model", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
@@ -479,7 +596,7 @@ pub async fn handle_message_direct(
                         match list_result {
                             Ok(text) => {
                                 send_model_keyboard(&bot, &reply_target.chat_id, &text).await;
-                            },
+                            }
                             Err(e) => {
                                 let _ = bot
                                     .send_message(
@@ -487,14 +604,14 @@ pub async fn handle_message_direct(
                                         format!("Error: {e}"),
                                     )
                                     .await;
-                            },
+                            }
                         }
                     }
                     return Ok(());
                 }
 
                 // For /sandbox without args, send toggle + image keyboard.
-                if cmd == "sandbox" && cmd_text.trim() == "sandbox" {
+                if cmd_name == "sandbox" && args.is_empty() {
                     let list_result = sink.dispatch_command("sandbox", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
@@ -504,7 +621,7 @@ pub async fn handle_message_direct(
                         match list_result {
                             Ok(text) => {
                                 send_sandbox_keyboard(&bot, &reply_target.chat_id, &text).await;
-                            },
+                            }
                             Err(e) => {
                                 let _ = bot
                                     .send_message(
@@ -512,14 +629,14 @@ pub async fn handle_message_direct(
                                         format!("Error: {e}"),
                                     )
                                     .await;
-                            },
+                            }
                         }
                     }
                     return Ok(());
                 }
 
                 // For /sessions without args, send an inline keyboard instead of plain text.
-                if cmd == "sessions" && cmd_text.trim() == "sessions" {
+                if cmd_name == "sessions" && args.is_empty() {
                     let list_result = sink
                         .dispatch_command("sessions", reply_target.clone())
                         .await;
@@ -531,7 +648,7 @@ pub async fn handle_message_direct(
                         match list_result {
                             Ok(text) => {
                                 send_sessions_keyboard(&bot, &reply_target.chat_id, &text).await;
-                            },
+                            }
                             Err(e) => {
                                 let _ = bot
                                     .send_message(
@@ -539,16 +656,16 @@ pub async fn handle_message_direct(
                                         format!("Error: {e}"),
                                     )
                                     .await;
-                            },
+                            }
                         }
                     }
                     return Ok(());
                 }
 
-                let response = if cmd == "help" {
+                let response = if cmd_name == "help" {
                     "Available commands:\n/new — Start a new session\n/sessions — List and switch sessions\n/model — Switch provider/model\n/sandbox — Toggle sandbox and choose image\n/clear — Clear session history\n/compact — Compact session (summarize)\n/context — Show session context info\n/help — Show this help".to_string()
                 } else {
-                    match sink.dispatch_command(cmd_text, reply_target.clone()).await {
+                    match sink.dispatch_command(&cmd_text, reply_target.clone()).await {
                         Ok(msg) => msg,
                         Err(e) => format!("Error: {e}"),
                     }
@@ -560,12 +677,78 @@ pub async fn handle_message_direct(
                 };
                 if let Some(outbound) = outbound
                     && let Err(e) = outbound
-                        .send_text(account_id, &reply_target.chat_id, &response, None)
+                        .send_text(
+                            account_id,
+                            &reply_target.chat_id,
+                            &response,
+                            reply_target.message_id.as_deref(),
+                        )
                         .await
                 {
                     warn!(account_id, "failed to send command response: {e}");
                 }
                 return Ok(());
+            }
+
+            // Unknown addressed command: reply with help (DM or addressed group).
+            let help_hint = if let Some(me) = bot_username.as_deref().filter(|s| !s.is_empty()) {
+                format!("Use /help@{me}.")
+            } else {
+                "Use /help.".to_string()
+            };
+            let response = format!("Unknown command: /{cmd_name_raw}. {help_hint}");
+            let outbound = {
+                let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
+                accts.get(account_id).map(|s| Arc::clone(&s.outbound))
+            };
+            if let Some(outbound) = outbound
+                && let Err(e) = outbound
+                    .send_text(
+                        account_id,
+                        &reply_target.chat_id,
+                        &response,
+                        reply_target.message_id.as_deref(),
+                    )
+                    .await
+            {
+                warn!(account_id, "failed to send command response: {e}");
+            }
+            return Ok(());
+        }
+
+        // Strip self-mentions from the user text before it is persisted / sent to the LLM.
+        if let Some(ref bot_username) = bot_username {
+            let (rewritten, stripped) =
+                strip_self_mention_from_message(&msg, &body, bot_user_id, bot_username);
+            if stripped {
+                debug!(
+                    account_id,
+                    before_len = body.len(),
+                    after_len = rewritten.len(),
+                    "telegram: stripped self-mention from user text"
+                );
+                body = rewritten;
+
+                // User only sent "@this_bot" (after stripping): reply fixed short phrase, no LLM.
+                if body.trim().is_empty() && attachments.is_empty() {
+                    let outbound = {
+                        let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
+                        accts.get(account_id).map(|s| Arc::clone(&s.outbound))
+                    };
+                    if let Some(outbound) = outbound
+                        && let Err(e) = outbound
+                            .send_text(
+                                account_id,
+                                &reply_target.chat_id,
+                                "我在。",
+                                reply_target.message_id.as_deref(),
+                            )
+                            .await
+                    {
+                        warn!(account_id, "failed to send presence reply: {e}");
+                    }
+                    return Ok(());
+                }
             }
         }
 
@@ -844,15 +1027,19 @@ pub async fn handle_edited_location(
         "telegram live location update received"
     );
 
-    let event_sink = {
+    let (event_sink, account_handle) = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-        accts.get(account_id).and_then(|s| s.event_sink.clone())
+        let handle = accts
+            .get(account_id)
+            .and_then(|s| s.bot_username.as_deref().map(|u| format!("@{u}")));
+        (accts.get(account_id).and_then(|s| s.event_sink.clone()), handle)
     };
 
     if let Some(ref sink) = event_sink {
         let reply_target = ChannelReplyTarget {
             channel_type: ChannelType::Telegram,
             account_id: account_id.to_string(),
+            account_handle,
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
         };
@@ -919,12 +1106,18 @@ async fn send_sessions_keyboard(bot: &Bot, chat_id: &str, sessions_text: &str) {
 ///
 /// Parses the markdown context response from `dispatch_command("context")`
 /// and renders it as a structured Telegram HTML message.
-async fn send_context_card(bot: &Bot, chat_id: &str, context_text: &str) {
+async fn send_context_card(
+    bot: &Bot,
+    chat_id: &str,
+    context_text: &str,
+    config: &crate::config::TelegramAccountConfig,
+    chat_type: ChatType,
+) {
     let chat = ChatId(chat_id.parse().unwrap_or(0));
 
     // Preferred path: context.v1 JSON contract emitted by the gateway.
     if let Some(payload) = parse_context_v1_payload(context_text) {
-        let html = render_context_card_v1(&payload);
+        let html = render_context_card_v1(&payload, config, chat_type);
         let _ = bot
             .send_message(chat, html)
             .parse_mode(ParseMode::Html)
@@ -1072,7 +1265,11 @@ fn clamp_html_len(html: String, max_chars: usize, fallback_html: String) -> Stri
     fallback_html
 }
 
-fn render_context_card_v1(payload: &serde_json::Value) -> String {
+fn render_context_card_v1(
+    payload: &serde_json::Value,
+    config: &crate::config::TelegramAccountConfig,
+    chat_type: ChatType,
+) -> String {
     // Telegram message cap is 4096 chars; leave margin for HTML tags.
     const MAX_HTML_LEN: usize = 3600;
     const MAX_LIST_LINES: usize = 8;
@@ -1315,6 +1512,31 @@ Next (estimate, method={}): prompt={} · threshold={} · progress={}%
         "off".to_string()
     };
 
+    let group_reply_mode = match config.mention_mode {
+        moltis_channels::gating::MentionMode::Mention => "mention_only",
+        moltis_channels::gating::MentionMode::Always => "always",
+        moltis_channels::gating::MentionMode::None => "never",
+    };
+    let group_ingest_mode = match config.group_ingest_mode {
+        crate::config::GroupIngestMode::MentionedOnly => "mentioned_only",
+        crate::config::GroupIngestMode::AllMessages => "all_messages",
+        crate::config::GroupIngestMode::None => "none",
+    };
+    let group_policy = match config.group_policy {
+        moltis_channels::gating::GroupPolicy::Open => "open",
+        moltis_channels::gating::GroupPolicy::Allowlist => "allowlist",
+        moltis_channels::gating::GroupPolicy::Disabled => "disabled",
+    };
+    let group_scope_note = match chat_type {
+        ChatType::Group => format!(
+            "reply=<code>{}</code> · ingest=<code>{}</code> · policy=<code>{}</code>",
+            escape_html_simple(group_reply_mode),
+            escape_html_simple(group_ingest_mode),
+            escape_html_simple(group_policy),
+        ),
+        _ => "<i>(n/a)</i>".to_string(),
+    };
+
     let html_full = format!(
         "\
 <b>📋 Session Context</b>
@@ -1325,6 +1547,9 @@ messages: {}
 
 <b>🤖 Model</b>
 {} · <code>{}</code>
+
+<b>👥 Group</b>
+{}
 
 <b>🧩 Plugins</b>
 {}
@@ -1347,6 +1572,7 @@ allowlist: {} · mounts: {}
         escape_html_simple(&format_opt_u64(msg_count)),
         escape_html_simple(provider),
         escape_html_simple(model),
+        group_scope_note,
         skills_line,
         overrides_block,
         escape_html_simple(format_bool(is_compacted)),
@@ -1548,18 +1774,23 @@ pub async fn handle_callback_query(
         return Ok(());
     }
 
-    let (event_sink, outbound) = {
+    let (event_sink, outbound, account_handle) = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
         let state = match accts.get(account_id) {
             Some(s) => s,
             None => return Ok(()),
         };
-        (state.event_sink.clone(), Arc::clone(&state.outbound))
+        (
+            state.event_sink.clone(),
+            Arc::clone(&state.outbound),
+            state.bot_username.as_deref().map(|u| format!("@{u}")),
+        )
     };
 
     let reply_target = moltis_channels::ChannelReplyTarget {
         channel_type: ChannelType::Telegram,
         account_id: account_id.to_string(),
+        account_handle,
         chat_id: chat_id.clone(),
         message_id: None, // Callback queries don't have a message to reply-thread to.
     };
@@ -1840,13 +2071,427 @@ fn classify_chat(msg: &Message) -> (ChatType, Option<String>) {
 }
 
 /// Check if the bot was @mentioned in the message.
-fn check_bot_mentioned(msg: &Message, bot_username: Option<&str>) -> bool {
-    let text = extract_text(msg).unwrap_or_default();
-    if let Some(username) = bot_username {
-        text.contains(&format!("@{username}"))
-    } else {
-        false
+fn normalize_username(username: &str) -> String {
+    username.trim().trim_start_matches('@').to_lowercase()
+}
+
+fn is_tg_username_byte(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'_')
+}
+
+fn is_addressed_command_to_bot(command_entity_text: &str, bot_username_norm: &str) -> bool {
+    // Examples:
+    // - "/context" -> not addressed
+    // - "/context@MyBot" -> addressed to MyBot
+    // - "/context@MyBot123" -> addressed, but not to MyBot
+    let text = command_entity_text.trim();
+    if !text.starts_with('/') {
+        return false;
     }
+    let Some((_, suffix)) = text.split_once('@') else {
+        return false;
+    };
+    let target = normalize_username(suffix);
+    !target.is_empty() && target == bot_username_norm
+}
+
+fn entities_trigger_wakeup(
+    text: &str,
+    entities: &[MessageEntity],
+    bot_user_id: Option<UserId>,
+    bot_username_norm: &str,
+) -> bool {
+    if entities.is_empty() {
+        return false;
+    }
+    for ent in MessageEntityRef::parse(text, entities) {
+        match ent.kind() {
+            MessageEntityKind::Mention => {
+                let mention = ent.text();
+                if let Some(stripped) = mention.strip_prefix('@') {
+                    if normalize_username(stripped) == bot_username_norm {
+                        return true;
+                    }
+                }
+            }
+            MessageEntityKind::TextMention { user } => {
+                if bot_user_id.is_some_and(|id| user.id == id) {
+                    return true;
+                }
+                if user
+                    .username
+                    .as_deref()
+                    .is_some_and(|u| normalize_username(u) == bot_username_norm)
+                {
+                    return true;
+                }
+            }
+            MessageEntityKind::BotCommand => {
+                if is_addressed_command_to_bot(ent.text(), bot_username_norm) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn fallback_contains_at_username(text: &str, bot_username_norm: &str) -> bool {
+    let needle = bot_username_norm.as_bytes();
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'@' && bytes.len() >= i + 1 + needle.len() {
+            let start = i + 1;
+            let end = start + needle.len();
+            if bytes[start..end]
+                .iter()
+                .zip(needle.iter())
+                .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+            {
+                if end == bytes.len() || !is_tg_username_byte(bytes[end]) {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Check if the bot was @mentioned (or otherwise explicitly activated) in the message.
+fn check_bot_mentioned(msg: &Message, bot_user_id: Option<UserId>, bot_username: Option<&str>) -> bool {
+    let Some(bot_username) = bot_username else {
+        return false;
+    };
+    let bot_username_norm = normalize_username(bot_username);
+    if bot_username_norm.is_empty() {
+        return false;
+    }
+
+    // Reply-to-bot activation (optional but recommended for group usability).
+    if let Some(bot_id) = bot_user_id
+        && msg
+            .reply_to_message()
+            .and_then(|m| m.from.as_ref())
+            .is_some_and(|u| u.id == bot_id)
+    {
+        return true;
+    }
+
+    // Prefer structured entities (text + caption).
+    if let MessageKind::Common(common) = &msg.kind {
+        match &common.media_kind {
+            MediaKind::Text(t) => {
+                if entities_trigger_wakeup(&t.text, &t.entities, bot_user_id, &bot_username_norm) {
+                    return true;
+                }
+                if t.entities.is_empty() {
+                    return fallback_contains_at_username(&t.text, &bot_username_norm);
+                }
+                return false;
+            }
+            MediaKind::Animation(a) => {
+                if let Some(caption) = a.caption.as_deref()
+                    && entities_trigger_wakeup(
+                        caption,
+                        &a.caption_entities,
+                        bot_user_id,
+                        &bot_username_norm,
+                    )
+                {
+                    return true;
+                }
+                if a.caption_entities.is_empty() {
+                    return a
+                        .caption
+                        .as_deref()
+                        .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
+                }
+                return false;
+            }
+            MediaKind::Audio(a) => {
+                if let Some(caption) = a.caption.as_deref()
+                    && entities_trigger_wakeup(
+                        caption,
+                        &a.caption_entities,
+                        bot_user_id,
+                        &bot_username_norm,
+                    )
+                {
+                    return true;
+                }
+                if a.caption_entities.is_empty() {
+                    return a
+                        .caption
+                        .as_deref()
+                        .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
+                }
+                return false;
+            }
+            MediaKind::Document(d) => {
+                if let Some(caption) = d.caption.as_deref()
+                    && entities_trigger_wakeup(
+                        caption,
+                        &d.caption_entities,
+                        bot_user_id,
+                        &bot_username_norm,
+                    )
+                {
+                    return true;
+                }
+                if d.caption_entities.is_empty() {
+                    return d
+                        .caption
+                        .as_deref()
+                        .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
+                }
+                return false;
+            }
+            MediaKind::Photo(p) => {
+                if let Some(caption) = p.caption.as_deref()
+                    && entities_trigger_wakeup(
+                        caption,
+                        &p.caption_entities,
+                        bot_user_id,
+                        &bot_username_norm,
+                    )
+                {
+                    return true;
+                }
+                if p.caption_entities.is_empty() {
+                    return p
+                        .caption
+                        .as_deref()
+                        .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
+                }
+                return false;
+            }
+            MediaKind::Video(v) => {
+                if let Some(caption) = v.caption.as_deref()
+                    && entities_trigger_wakeup(
+                        caption,
+                        &v.caption_entities,
+                        bot_user_id,
+                        &bot_username_norm,
+                    )
+                {
+                    return true;
+                }
+                if v.caption_entities.is_empty() {
+                    return v
+                        .caption
+                        .as_deref()
+                        .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
+                }
+                return false;
+            }
+            MediaKind::Voice(v) => {
+                if let Some(caption) = v.caption.as_deref()
+                    && entities_trigger_wakeup(
+                        caption,
+                        &v.caption_entities,
+                        bot_user_id,
+                        &bot_username_norm,
+                    )
+                {
+                    return true;
+                }
+                if v.caption_entities.is_empty() {
+                    return v
+                        .caption
+                        .as_deref()
+                        .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
+                }
+                return false;
+            }
+            _ => {
+                // Fallback for kinds we don't parse entities for.
+                let text = extract_text(msg).unwrap_or_default();
+                return fallback_contains_at_username(&text, &bot_username_norm);
+            }
+        }
+    }
+
+    false
+}
+
+fn strip_self_mentions_from_text(
+    text: &str,
+    entities: &[MessageEntity],
+    bot_user_id: Option<UserId>,
+    bot_username_norm: &str,
+) -> (String, bool) {
+    if text.is_empty() || bot_username_norm.is_empty() {
+        return (text.to_string(), false);
+    }
+
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+
+    if !entities.is_empty() {
+        for ent in MessageEntityRef::parse(text, entities) {
+            match ent.kind() {
+                MessageEntityKind::Mention => {
+                    let mention = ent.text();
+                    if let Some(stripped) = mention.strip_prefix('@') {
+                        if normalize_username(stripped) == bot_username_norm {
+                            ranges.push(ent.range());
+                        }
+                    }
+                }
+                MessageEntityKind::TextMention { user } => {
+                    if bot_user_id.is_some_and(|id| user.id == id)
+                        || user
+                            .username
+                            .as_deref()
+                            .is_some_and(|u| normalize_username(u) == bot_username_norm)
+                    {
+                        ranges.push(ent.range());
+                    }
+                }
+                MessageEntityKind::BotCommand => {
+                    let cmd = ent.text();
+                    if is_addressed_command_to_bot(cmd, bot_username_norm)
+                        && let Some(at_idx) = cmd.find('@')
+                    {
+                        let r = ent.range();
+                        let start = r.start.saturating_add(at_idx);
+                        if start < r.end {
+                            ranges.push(start..r.end);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        // Fallback only when Telegram provided no entities: boundary-safe match with a
+        // stricter prefix check to avoid stripping email addresses.
+        let needle = bot_username_norm.as_bytes();
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'@' && bytes.len() >= i + 1 + needle.len() {
+                if i > 0 && is_tg_username_byte(bytes[i - 1]) {
+                    i += 1;
+                    continue;
+                }
+                let start = i + 1;
+                let end = start + needle.len();
+                if bytes[start..end]
+                    .iter()
+                    .zip(needle.iter())
+                    .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+                {
+                    if end == bytes.len() || !is_tg_username_byte(bytes[end]) {
+                        ranges.push(i..end);
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    if ranges.is_empty() {
+        return (text.to_string(), false);
+    }
+
+    ranges.sort_by_key(|r| r.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for r in ranges {
+        if let Some(last) = merged.last_mut() {
+            if r.start <= last.end {
+                last.end = last.end.max(r.end);
+                continue;
+            }
+        }
+        merged.push(r);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for r in merged {
+        if r.start > cursor {
+            out.push_str(&text[cursor..r.start]);
+        }
+        cursor = r.end.min(text.len());
+    }
+    if cursor < text.len() {
+        out.push_str(&text[cursor..]);
+    }
+
+    let normalized = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    (normalized, true)
+}
+
+fn strip_self_mention_from_message(
+    msg: &Message,
+    body: &str,
+    bot_user_id: Option<UserId>,
+    bot_username: &str,
+) -> (String, bool) {
+    let bot_username_norm = normalize_username(bot_username);
+    if bot_username_norm.is_empty() || body.is_empty() {
+        return (body.to_string(), false);
+    }
+
+    let (source_text, source_entities): (&str, &[MessageEntity]) = match &msg.kind {
+        MessageKind::Common(common) => match &common.media_kind {
+            MediaKind::Text(t) => (&t.text, &t.entities),
+            MediaKind::Animation(a) => (
+                a.caption.as_deref().unwrap_or_default(),
+                &a.caption_entities,
+            ),
+            MediaKind::Audio(a) => (
+                a.caption.as_deref().unwrap_or_default(),
+                &a.caption_entities,
+            ),
+            MediaKind::Document(d) => (
+                d.caption.as_deref().unwrap_or_default(),
+                &d.caption_entities,
+            ),
+            MediaKind::Photo(p) => (
+                p.caption.as_deref().unwrap_or_default(),
+                &p.caption_entities,
+            ),
+            MediaKind::Video(v) => (
+                v.caption.as_deref().unwrap_or_default(),
+                &v.caption_entities,
+            ),
+            MediaKind::Voice(v) => (
+                v.caption.as_deref().unwrap_or_default(),
+                &v.caption_entities,
+            ),
+            _ => ("", &[]),
+        },
+        _ => ("", &[]),
+    };
+
+    if source_text.is_empty() || !body.starts_with(source_text) {
+        return (body.to_string(), false);
+    }
+
+    let (stripped_prefix, stripped_any) = strip_self_mentions_from_text(
+        source_text,
+        source_entities,
+        bot_user_id,
+        &bot_username_norm,
+    );
+    if !stripped_any {
+        return (body.to_string(), false);
+    }
+
+    let rest = &body[source_text.len()..];
+    if stripped_prefix.is_empty() {
+        return (rest.trim_start().to_string(), true);
+    }
+    (format!("{stripped_prefix}{rest}"), true)
 }
 
 /// Build a session key.
@@ -2022,6 +2667,11 @@ mod tests {
     #[derive(Default)]
     struct MockSink {
         dispatch_calls: std::sync::atomic::AtomicUsize,
+        ingest_calls: std::sync::atomic::AtomicUsize,
+        command_calls: std::sync::atomic::AtomicUsize,
+        last_dispatch_text: Mutex<Option<String>>,
+        last_ingest_text: Mutex<Option<String>>,
+        last_command: Mutex<Option<String>>,
     }
 
     #[async_trait]
@@ -2030,19 +2680,39 @@ mod tests {
 
         async fn dispatch_to_chat(
             &self,
-            _text: &str,
+            text: &str,
             _reply_to: ChannelReplyTarget,
             _meta: ChannelMessageMeta,
         ) {
+            let mut last = self.last_dispatch_text.lock().unwrap();
+            *last = Some(text.to_string());
             self.dispatch_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        async fn ingest_only(
+            &self,
+            text: &str,
+            _reply_to: ChannelReplyTarget,
+            _meta: ChannelMessageMeta,
+        ) {
+            let mut last = self.last_ingest_text.lock().unwrap();
+            *last = Some(text.to_string());
+            self.ingest_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         async fn dispatch_command(
             &self,
-            _command: &str,
+            command: &str,
             _reply_to: ChannelReplyTarget,
         ) -> anyhow::Result<String> {
+            {
+                let mut last = self.last_command.lock().unwrap();
+                *last = Some(command.to_string());
+            }
+            self.command_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(String::new())
         }
 
@@ -2182,6 +2852,7 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             map.insert(account_id.to_string(), AccountState {
                 bot: bot.clone(),
+                bot_user_id: None,
                 bot_username: Some("test_bot".into()),
                 account_id: account_id.to_string(),
                 config: TelegramAccountConfig {
@@ -2273,6 +2944,499 @@ mod tests {
 
         let _ = shutdown_tx.send(());
         server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn self_mention_is_stripped_before_dispatch_to_chat() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_id = "test-account";
+        let bot = teloxide::Bot::new("test-token");
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_id.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_id: account_id.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "@test_bot hello",
+            "entities": [
+                { "type": "mention", "offset": 0, "length": 9 }
+            ]
+        }))
+        .expect("deserialize message");
+
+        handle_message_direct(msg, &bot, account_id, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let last = sink.last_dispatch_text.lock().unwrap().clone();
+        assert_eq!(last.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn self_mention_only_replies_presence_and_skips_dispatch() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route("/{*path}", post(telegram_api_handler))
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            }
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_id = "test-account";
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(account_id.to_string(), AccountState {
+                bot: bot.clone(),
+                bot_user_id: None,
+                bot_username: Some("test_bot".into()),
+                account_id: account_id.to_string(),
+                config: TelegramAccountConfig {
+                    token: Secret::new("test-token".to_string()),
+                    ..Default::default()
+                },
+                outbound: Arc::clone(&outbound),
+                cancel: CancellationToken::new(),
+                message_log: None,
+                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                otp: std::sync::Mutex::new(OtpState::new(300)),
+            });
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "@test_bot",
+            "entities": [
+                { "type": "mention", "offset": 0, "length": 9 }
+            ]
+        }))
+        .expect("deserialize message");
+
+        handle_message_direct(msg, &bot, account_id, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        {
+            let requests = recorded_requests.lock().expect("requests lock");
+            assert!(
+                requests.iter().any(|request| {
+                    if let CapturedTelegramRequest::SendMessage(body) = request {
+                        body.chat_id == 42 && body.text.contains("我在")
+                    } else {
+                        false
+                    }
+                }),
+                "expected presence reply to be sent"
+            );
+        }
+
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn group_not_mentioned_ingests_when_listen_mode_enabled() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_id = "test-account";
+        let bot = teloxide::Bot::new("test-token");
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            let mut cfg = TelegramAccountConfig {
+                token: Secret::new("test-token".to_string()),
+                ..Default::default()
+            };
+            cfg.group_ingest_mode = GroupIngestMode::AllMessages;
+            map.insert(
+                account_id.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_id: account_id.to_string(),
+                    config: cfg,
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": -1001, "type": "supergroup", "title": "Test Group" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "hello everyone"
+        }))
+        .expect("deserialize message");
+
+        handle_message_direct(msg, &bot, account_id, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "listen-only ingest must not dispatch to chat/LLM"
+        );
+        assert_eq!(
+            sink.ingest_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let last = sink.last_ingest_text.lock().unwrap().clone();
+        assert_eq!(last.as_deref(), Some("hello everyone"));
+    }
+
+    #[tokio::test]
+    async fn group_ingest_all_messages_works_even_when_reply_mode_is_never() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_id = "test-account";
+        let bot = teloxide::Bot::new("test-token");
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            let mut cfg = TelegramAccountConfig {
+                token: Secret::new("test-token".to_string()),
+                ..Default::default()
+            };
+            cfg.mention_mode = moltis_channels::gating::MentionMode::None;
+            cfg.group_ingest_mode = GroupIngestMode::AllMessages;
+            map.insert(
+                account_id.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_id: account_id.to_string(),
+                    config: cfg,
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": -1001, "type": "supergroup", "title": "Test Group" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "@test_bot hi",
+            "entities": [
+                { "type": "mention", "offset": 0, "length": 9 }
+            ]
+        }))
+        .expect("deserialize message");
+
+        handle_message_direct(msg, &bot, account_id, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            sink.ingest_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let last = sink.last_ingest_text.lock().unwrap().clone();
+        // Self-mention is stripped even in ingest-only path.
+        assert_eq!(last.as_deref(), Some("hi"));
+    }
+
+    #[tokio::test]
+    async fn addressed_slash_command_in_dm_is_intercepted() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route("/{*path}", post(telegram_api_handler))
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            }
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_id = "test-account";
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(account_id.to_string(), AccountState {
+                bot: bot.clone(),
+                bot_user_id: None,
+                bot_username: Some("test_bot".into()),
+                account_id: account_id.to_string(),
+                config: TelegramAccountConfig {
+                    token: Secret::new("test-token".to_string()),
+                    ..Default::default()
+                },
+                outbound: Arc::clone(&outbound),
+                cancel: CancellationToken::new(),
+                message_log: None,
+                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                otp: std::sync::Mutex::new(OtpState::new(300)),
+            });
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "/help@test_bot"
+        }))
+        .expect("deserialize message");
+
+        handle_message_direct(msg, &bot, account_id, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        {
+            let requests = recorded_requests.lock().expect("requests lock");
+            assert!(
+                requests.iter().any(|request| {
+                    if let CapturedTelegramRequest::SendMessage(body) = request {
+                        body.chat_id == 42 && body.text.contains("Available commands:")
+                    } else {
+                        false
+                    }
+                }),
+                "expected /help response to be sent"
+            );
+        }
+
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn addressed_slash_command_to_other_bot_in_dm_is_ignored() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route("/{*path}", post(telegram_api_handler))
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            }
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_id = "test-account";
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(account_id.to_string(), AccountState {
+                bot: bot.clone(),
+                bot_user_id: None,
+                bot_username: Some("test_bot".into()),
+                account_id: account_id.to_string(),
+                config: TelegramAccountConfig {
+                    token: Secret::new("test-token".to_string()),
+                    ..Default::default()
+                },
+                outbound: Arc::clone(&outbound),
+                cancel: CancellationToken::new(),
+                message_log: None,
+                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                otp: std::sync::Mutex::new(OtpState::new(300)),
+            });
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "/help@other_bot"
+        }))
+        .expect("deserialize message");
+
+        handle_message_direct(msg, &bot, account_id, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(
+            recorded_requests.lock().expect("requests lock").is_empty(),
+            "expected no outbound send for other bot command"
+        );
+
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
     }
 
     #[test]
@@ -2449,7 +3613,8 @@ mod tests {
             }
         });
 
-        let html = render_context_card_v1(&payload);
+        let cfg = crate::config::TelegramAccountConfig::default();
+        let html = render_context_card_v1(&payload, &cfg, ChatType::Group);
         assert!(html.contains("Session Context"));
         assert!(html.contains("telegram:bot:group:123"));
         if html.contains("Output too long for Telegram") {
@@ -2465,5 +3630,126 @@ mod tests {
             assert!(html.contains("Telegram has no draftText"));
         }
         assert!(html.chars().count() <= 3700, "should stay within a safe size for Telegram");
+    }
+
+    #[test]
+    fn normalize_username_strips_at_and_lowercases() {
+        assert_eq!(normalize_username("@MyBot "), "mybot");
+        assert_eq!(normalize_username("MyBot"), "mybot");
+        assert_eq!(normalize_username("@mybot"), "mybot");
+    }
+
+    #[test]
+    fn fallback_contains_at_username_is_boundary_safe() {
+        let bot = "mybot";
+        assert!(fallback_contains_at_username("@MyBot hi", bot));
+        assert!(fallback_contains_at_username("hi @mybot", bot));
+        assert!(!fallback_contains_at_username("@MyBot123 hi", bot));
+    }
+
+    #[test]
+    fn entities_trigger_wakeup_recognizes_mention_case_insensitive() {
+        let bot = "mybot";
+        let text = "@MyBot hello";
+        let entities = vec![MessageEntity::new(MessageEntityKind::Mention, 0, 6)];
+        assert!(entities_trigger_wakeup(text, &entities, None, bot));
+    }
+
+    #[test]
+    fn entities_trigger_wakeup_recognizes_only_addressed_bot_command() {
+        let bot = "mybot";
+        let addressed = "/context@MyBot";
+        let entities = vec![MessageEntity::new(
+            MessageEntityKind::BotCommand,
+            0,
+            addressed.len(),
+        )];
+        assert!(entities_trigger_wakeup(addressed, &entities, None, bot));
+
+        let plain = "/context";
+        let entities = vec![MessageEntity::new(MessageEntityKind::BotCommand, 0, plain.len())];
+        assert!(!entities_trigger_wakeup(plain, &entities, None, bot));
+    }
+
+    #[test]
+    fn strip_self_mentions_strips_addressed_bot_command_suffix() {
+        let bot = "mybot";
+        let cmd = "/context@MyBot";
+        let text = format!("{cmd} hi");
+        let entities = vec![MessageEntity::new(MessageEntityKind::BotCommand, 0, cmd.len())];
+        let (out, stripped) = strip_self_mentions_from_text(&text, &entities, None, bot);
+        assert!(stripped);
+        assert_eq!(out, "/context hi");
+
+        let cmd_other = "/context@OtherBot";
+        let text_other = format!("{cmd_other} hi");
+        let entities = vec![MessageEntity::new(
+            MessageEntityKind::BotCommand,
+            0,
+            cmd_other.len(),
+        )];
+        let (out, stripped) = strip_self_mentions_from_text(&text_other, &entities, None, bot);
+        assert!(!stripped);
+        assert_eq!(out, text_other);
+    }
+
+    #[test]
+    fn entities_trigger_wakeup_recognizes_text_mention_by_user_id() {
+        let bot_username_norm = "mybot";
+        let bot_id = UserId(4242);
+        let user = teloxide::types::User {
+            id: bot_id,
+            is_bot: true,
+            first_name: "MyBot".into(),
+            last_name: None,
+            username: Some("MyBot".into()),
+            language_code: None,
+            is_premium: false,
+            added_to_attachment_menu: false,
+        };
+        let text = "MyBot";
+        let entities = vec![MessageEntity::new(
+            MessageEntityKind::TextMention { user },
+            0,
+            5,
+        )];
+        assert!(entities_trigger_wakeup(
+            text,
+            &entities,
+            Some(bot_id),
+            bot_username_norm
+        ));
+    }
+
+    #[test]
+    fn check_bot_mentioned_is_true_when_replying_to_bot_message() {
+        let bot_id = 4242;
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 2,
+            "date": 1,
+            "chat": { "id": -1001, "type": "supergroup", "title": "Test Group" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "ok",
+            "reply_to_message": {
+                "message_id": 1,
+                "date": 1,
+                "chat": { "id": -1001, "type": "supergroup", "title": "Test Group" },
+                "from": {
+                    "id": bot_id,
+                    "is_bot": true,
+                    "first_name": "MyBot",
+                    "username": "MyBot"
+                },
+                "text": "previous"
+            }
+        }))
+        .expect("deserialize reply message");
+
+        assert!(check_bot_mentioned(&msg, Some(UserId(bot_id)), Some("MyBot")));
     }
 }

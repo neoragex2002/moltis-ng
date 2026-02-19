@@ -806,6 +806,10 @@ async fn build_prompt_runtime_context(
         .as_ref()
         .map(|loc| loc.to_string());
 
+    let channel_target = session_entry
+        .and_then(|entry| entry.channel_binding.as_deref())
+        .and_then(|binding| serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding).ok());
+
     let host_ctx = PromptHostRuntimeContext {
         host: Some(state.hostname.clone()),
         os: Some(std::env::consts::OS.to_string()),
@@ -814,6 +818,12 @@ async fn build_prompt_runtime_context(
         provider: Some(provider.name().to_string()),
         model: Some(provider.id().to_string()),
         session_key: Some(session_key.to_string()),
+        channel: channel_target
+            .as_ref()
+            .map(|t| t.channel_type.as_str().to_string()),
+        channel_account_id: channel_target.as_ref().map(|t| t.account_id.clone()),
+        channel_account_handle: channel_target.as_ref().and_then(|t| t.account_handle.clone()),
+        channel_chat_id: channel_target.as_ref().map(|t| t.chat_id.clone()),
         sudo_non_interactive,
         sudo_status,
         timezone,
@@ -6105,6 +6115,7 @@ mod tests {
         let targets = vec![moltis_channels::ChannelReplyTarget {
             channel_type: moltis_channels::ChannelType::Telegram,
             account_id: "acct".to_string(),
+            account_handle: None,
             chat_id: "123".to_string(),
             message_id: None,
         }];

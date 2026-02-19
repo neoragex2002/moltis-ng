@@ -265,12 +265,13 @@ function AddChannelModal() {
 		}
 		error.value = "";
 		saving.value = true;
-		var addConfig = {
-			token: token,
-			dm_policy: form.querySelector("[data-field=dmPolicy]").value,
-			mention_mode: form.querySelector("[data-field=mentionMode]").value,
-			allowlist: allowlistItems.value,
-		};
+			var addConfig = {
+				token: token,
+				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
+				mention_mode: form.querySelector("[data-field=mentionMode]").value,
+				group_ingest_mode: form.querySelector("[data-field=groupIngestMode]").value,
+				allowlist: allowlistItems.value,
+			};
 		if (addModel.value) {
 			addConfig.model = addModel.value;
 			var found = modelsSig.value.find((x) => x.id === addModel.value);
@@ -329,15 +330,21 @@ function AddChannelModal() {
         <option value="allowlist">Allowlist only</option>
         <option value="disabled">Disabled</option>
       </select>
-      <label class="text-xs text-[var(--muted)]">Group Mention Mode</label>
-      <select data-field="mentionMode" style=${selectStyle}>
-        <option value="mention">Must @mention bot</option>
-        <option value="always">Always respond</option>
-        <option value="none">Don't respond in groups</option>
-      </select>
-      <label class="text-xs text-[var(--muted)]">Default Model</label>
-      <${ModelSelect} models=${modelsSig.value} value=${addModel.value}
-        onChange=${(v) => {
+	      <label class="text-xs text-[var(--muted)]">Group Mention Mode</label>
+	      <select data-field="mentionMode" style=${selectStyle}>
+	        <option value="mention">Must @mention bot</option>
+	        <option value="always">Always respond</option>
+	        <option value="none">Don't respond in groups</option>
+	      </select>
+	      <label class="text-xs text-[var(--muted)]">Group Ingest Mode</label>
+	      <select data-field="groupIngestMode" style=${selectStyle}>
+	        <option value="mentioned_only">Mentioned only (default)</option>
+	        <option value="all_messages">Listen (ingest all)</option>
+	        <option value="none">Off (ingest none)</option>
+	      </select>
+	      <label class="text-xs text-[var(--muted)]">Default Model</label>
+	      <${ModelSelect} models=${modelsSig.value} value=${addModel.value}
+	        onChange=${(v) => {
 					addModel.value = v;
 				}}
         placeholder=${defaultPlaceholder} />
@@ -373,12 +380,13 @@ function EditChannelModal() {
 		var form = e.target.closest(".channel-form");
 		error.value = "";
 		saving.value = true;
-		var updateConfig = {
-			token: cfg.token || "",
-			dm_policy: form.querySelector("[data-field=dmPolicy]").value,
-			mention_mode: form.querySelector("[data-field=mentionMode]").value,
-			allowlist: allowlistItems.value,
-		};
+			var updateConfig = {
+				token: cfg.token || "",
+				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
+				mention_mode: form.querySelector("[data-field=mentionMode]").value,
+				group_ingest_mode: form.querySelector("[data-field=groupIngestMode]").value,
+				allowlist: allowlistItems.value,
+			};
 		if (editModel.value) {
 			updateConfig.model = editModel.value;
 			var found = modelsSig.value.find((x) => x.id === editModel.value);
@@ -417,15 +425,21 @@ function EditChannelModal() {
         <option value="allowlist">Allowlist only</option>
         <option value="disabled">Disabled</option>
       </select>
-      <label class="text-xs text-[var(--muted)]">Group Mention Mode</label>
-      <select data-field="mentionMode" style=${selectStyle} value=${cfg.mention_mode || "mention"}>
-        <option value="mention">Must @mention bot</option>
-        <option value="always">Always respond</option>
-        <option value="none">Don't respond in groups</option>
-      </select>
-      <label class="text-xs text-[var(--muted)]">Default Model</label>
-      <${ModelSelect} models=${modelsSig.value} value=${editModel.value}
-        onChange=${(v) => {
+	      <label class="text-xs text-[var(--muted)]">Group Mention Mode</label>
+	      <select data-field="mentionMode" style=${selectStyle} value=${cfg.mention_mode || "mention"}>
+	        <option value="mention">Must @mention bot</option>
+	        <option value="always">Always respond</option>
+	        <option value="none">Don't respond in groups</option>
+	      </select>
+	      <label class="text-xs text-[var(--muted)]">Group Ingest Mode</label>
+	      <select data-field="groupIngestMode" style=${selectStyle} value=${cfg.group_ingest_mode || "mentioned_only"}>
+	        <option value="mentioned_only">Mentioned only (default)</option>
+	        <option value="all_messages">Listen (ingest all)</option>
+	        <option value="none">Off (ingest none)</option>
+	      </select>
+	      <label class="text-xs text-[var(--muted)]">Default Model</label>
+	      <${ModelSelect} models=${modelsSig.value} value=${editModel.value}
+	        onChange=${(v) => {
 					editModel.value = v;
 				}}
         placeholder=${defaultPlaceholder} />

@@ -16,6 +16,7 @@ use {
 
 use crate::{
     broadcast::{BroadcastOpts, broadcast},
+    session::extract_preview_from_value,
     state::GatewayState,
 };
 
@@ -307,6 +308,116 @@ impl ChannelEventSink for GatewayChannelEventSink {
             }
         } else {
             warn!("channel dispatch_to_chat: gateway not ready");
+        }
+    }
+
+    async fn ingest_only(
+        &self,
+        text: &str,
+        reply_to: ChannelReplyTarget,
+        meta: ChannelMessageMeta,
+    ) {
+        let Some(state) = self.state.get() else {
+            warn!("channel ingest_only: gateway not ready");
+            return;
+        };
+
+        let session_key = if let Some(ref sm) = state.services.session_metadata {
+            resolve_channel_session(&reply_to, sm).await
+        } else {
+            default_channel_session_key(&reply_to)
+        };
+
+        // Real-time UI: show the inbound message as "channel_user", but mark it ingest-only.
+        let msg_index = if let Some(ref store) = state.services.session_store {
+            store.count(&session_key).await.unwrap_or(0)
+        } else {
+            0
+        };
+        let payload = serde_json::json!({
+            "state": "channel_user",
+            "text": text,
+            "channel": &meta,
+            "sessionKey": &session_key,
+            "messageIndex": msg_index,
+            "ingestOnly": true,
+        });
+        broadcast(state, "chat", payload, BroadcastOpts {
+            drop_if_slow: true,
+            ..Default::default()
+        })
+        .await;
+
+        // Persist channel binding so the session is treated as channel-bound.
+        if let Ok(binding_json) = serde_json::to_string(&reply_to)
+            && let Some(ref session_meta) = state.services.session_metadata
+        {
+            // Ensure the session row exists and label it on first use.
+            let entry = session_meta.get(&session_key).await;
+            if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
+                let existing = session_meta
+                    .list_channel_sessions(
+                        reply_to.channel_type.as_str(),
+                        &reply_to.account_id,
+                        &reply_to.chat_id,
+                    )
+                    .await;
+                let n = existing.len() + 1;
+                let _ = session_meta
+                    .upsert(&session_key, Some(format!("Telegram {n}")))
+                    .await;
+            }
+            session_meta
+                .set_channel_binding(&session_key, Some(binding_json))
+                .await;
+        }
+
+        // If a channel default model is configured, persist it on first use so that
+        // the next addressed message uses the expected model.
+        if let Some(ref model) = meta.model {
+            let session_has_model = if let Some(ref sm) = state.services.session_metadata {
+                sm.get(&session_key).await.and_then(|e| e.model).is_some()
+            } else {
+                false
+            };
+            if !session_has_model {
+                let _ = state
+                    .services
+                    .session
+                    .patch(serde_json::json!({
+                        "key": &session_key,
+                        "model": model,
+                    }))
+                    .await;
+            }
+        }
+
+        let Some(store) = state.services.session_store.as_ref() else {
+            warn!(session_key, "channel ingest_only: session store not available");
+            return;
+        };
+
+        let channel_meta = match serde_json::to_value(&meta) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(session_key, error = %e, "channel ingest_only: failed to serialize channel meta");
+                return;
+            }
+        };
+        let user_msg = moltis_sessions::PersistedMessage::user_with_channel(text, channel_meta);
+
+        if let Err(e) = store.append(&session_key, &user_msg.to_value()).await {
+            warn!(session_key, error = %e, "channel ingest_only: failed to append message");
+            return;
+        }
+
+        // Update session metadata counters/preview (best-effort).
+        if let Some(ref sm) = state.services.session_metadata {
+            sm.touch(&session_key, (msg_index + 1) as u32).await;
+            if msg_index == 0 {
+                let preview = extract_preview_from_value(&user_msg.to_value());
+                sm.set_preview(&session_key, preview.as_deref()).await;
+            }
         }
     }
 
@@ -1378,6 +1489,7 @@ mod tests {
         let target = ChannelReplyTarget {
             channel_type: ChannelType::Telegram,
             account_id: "bot1".into(),
+            account_handle: None,
             chat_id: "12345".into(),
             message_id: None,
         };
@@ -1389,6 +1501,7 @@ mod tests {
         let target = ChannelReplyTarget {
             channel_type: ChannelType::Telegram,
             account_id: "bot1".into(),
+            account_handle: None,
             chat_id: "-100999".into(),
             message_id: None,
         };

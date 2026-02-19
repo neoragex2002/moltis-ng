@@ -4,6 +4,20 @@ use {
     serde::{Deserialize, Serialize},
 };
 
+/// Whether inbound Group/Supergroup messages should be written into the bot's
+/// session history (for later context), independent of whether the bot replies.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupIngestMode {
+    /// Only ingest messages that are addressed to this bot (the current behavior).
+    #[default]
+    MentionedOnly,
+    /// Ingest every group message the bot receives (listen/sidecar mode).
+    AllMessages,
+    /// Do not ingest group messages.
+    None,
+}
+
 /// How streaming responses are delivered.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +45,11 @@ pub struct TelegramAccountConfig {
 
     /// Mention activation mode for groups.
     pub mention_mode: MentionMode,
+
+    /// Whether to ingest group messages into session history.
+    ///
+    /// Scope: **Group/Supergroup only**. Channel semantics are handled separately.
+    pub group_ingest_mode: GroupIngestMode,
 
     /// User/peer allowlist for DMs.
     pub allowlist: Vec<String>,
@@ -66,6 +85,28 @@ pub struct TelegramAccountConfig {
     pub reply_to_message: bool,
 }
 
+impl TelegramAccountConfig {
+    /// Normalize a config for runtime behavior, preserving backward compatibility.
+    ///
+    /// Rules (frozen by issue docs):
+    /// - `mention_mode=always` implies `group_ingest_mode=all_messages`
+    /// - `mention_mode=none` forbids `group_ingest_mode=mentioned_only` (clamp to `none`)
+    pub fn normalize_in_place(&mut self) {
+        // Keep reply/ingest combinations coherent.
+        match self.mention_mode {
+            MentionMode::Always => {
+                self.group_ingest_mode = GroupIngestMode::AllMessages;
+            }
+            MentionMode::None => {
+                if self.group_ingest_mode == GroupIngestMode::MentionedOnly {
+                    self.group_ingest_mode = GroupIngestMode::None;
+                }
+            }
+            MentionMode::Mention => {}
+        }
+    }
+}
+
 impl std::fmt::Debug for TelegramAccountConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TelegramAccountConfig")
@@ -90,6 +131,7 @@ impl Default for TelegramAccountConfig {
             dm_policy: DmPolicy::default(),
             group_policy: GroupPolicy::default(),
             mention_mode: MentionMode::default(),
+            group_ingest_mode: GroupIngestMode::default(),
             allowlist: Vec::new(),
             group_allowlist: Vec::new(),
             stream_mode: StreamMode::default(),
@@ -114,6 +156,7 @@ mod tests {
         assert_eq!(cfg.dm_policy, DmPolicy::Open);
         assert_eq!(cfg.group_policy, GroupPolicy::Open);
         assert_eq!(cfg.mention_mode, MentionMode::Mention);
+        assert_eq!(cfg.group_ingest_mode, GroupIngestMode::MentionedOnly);
         assert_eq!(cfg.stream_mode, StreamMode::EditInPlace);
         assert_eq!(cfg.edit_throttle_ms, 300);
     }
@@ -133,6 +176,25 @@ mod tests {
         assert_eq!(cfg.allowlist, vec!["user1", "user2"]);
         // defaults for unspecified fields
         assert_eq!(cfg.group_policy, GroupPolicy::Open);
+        assert_eq!(cfg.group_ingest_mode, GroupIngestMode::MentionedOnly);
+    }
+
+    #[test]
+    fn normalize_clamps_incompatible_group_ingest_modes() {
+        // Backward-compat: old configs can set `mention_mode=none` without any
+        // group ingest setting; default mentioned_only would be invalid.
+        let mut cfg = TelegramAccountConfig::default();
+        cfg.mention_mode = MentionMode::None;
+        cfg.group_ingest_mode = GroupIngestMode::MentionedOnly;
+        cfg.normalize_in_place();
+        assert_eq!(cfg.group_ingest_mode, GroupIngestMode::None);
+
+        // Coherence: `always` implies `all_messages`.
+        let mut cfg = TelegramAccountConfig::default();
+        cfg.mention_mode = MentionMode::Always;
+        cfg.group_ingest_mode = GroupIngestMode::None;
+        cfg.normalize_in_place();
+        assert_eq!(cfg.group_ingest_mode, GroupIngestMode::AllMessages);
     }
 
     #[test]

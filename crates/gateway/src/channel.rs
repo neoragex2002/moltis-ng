@@ -3,6 +3,7 @@ use std::sync::Arc;
 use {
     async_trait::async_trait,
     serde_json::Value,
+    secrecy::ExposeSecret,
     tokio::sync::RwLock,
     tracing::{error, info, warn},
 };
@@ -24,6 +25,33 @@ fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn merge_json_in_place(base: &mut Value, patch: &Value) {
+    let Value::Object(patch_obj) = patch else {
+        *base = patch.clone();
+        return;
+    };
+
+    let Value::Object(base_obj) = base else {
+        *base = patch.clone();
+        return;
+    };
+
+    for (key, patch_val) in patch_obj {
+        match (base_obj.get_mut(key), patch_val) {
+            (Some(base_val), Value::Object(_)) if base_val.is_object() => {
+                merge_json_in_place(base_val, patch_val);
+            }
+            // Explicit `null` overwrites to null (does not delete).
+            (Some(base_val), _) => {
+                *base_val = patch_val.clone();
+            }
+            (None, _) => {
+                base_obj.insert(key.clone(), patch_val.clone());
+            }
+        }
+    }
 }
 
 /// Live channel service backed by `TelegramPlugin`.
@@ -194,12 +222,35 @@ impl ChannelService for LiveChannelService {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "missing 'account_id'".to_string())?;
 
-        let config = params
+        let patch = params
             .get("config")
             .cloned()
             .ok_or_else(|| "missing 'config'".to_string())?;
 
         info!(account_id, "updating telegram channel account");
+
+        // Merge patch into stored config so UI updates don't reset unseen fields (token, etc).
+        let stored = self
+            .store
+            .get(account_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("channel '{account_id}' not found in store"))?;
+
+        if !patch.is_object() {
+            return Err("config patch must be an object".into());
+        }
+        let mut merged = stored.config.clone();
+        merge_json_in_place(&mut merged, &patch);
+
+        // Validate and normalize before stopping the bot (avoid downtime on invalid patches).
+        let mut tg_cfg: moltis_telegram::TelegramAccountConfig =
+            serde_json::from_value(merged.clone()).map_err(|e| e.to_string())?;
+        tg_cfg.normalize_in_place();
+        if tg_cfg.token.expose_secret().is_empty() {
+            return Err("telegram bot token is required".into());
+        }
+        let merged = serde_json::to_value(tg_cfg).map_err(|e| e.to_string())?;
 
         let mut tg = self.telegram.write().await;
 
@@ -209,7 +260,7 @@ impl ChannelService for LiveChannelService {
             e.to_string()
         })?;
 
-        tg.start_account(account_id, config.clone())
+        tg.start_account(account_id, merged.clone())
             .await
             .map_err(|e| {
                 error!(error = %e, account_id, "failed to restart telegram account after update");
@@ -222,8 +273,8 @@ impl ChannelService for LiveChannelService {
             .upsert(StoredChannel {
                 account_id: account_id.to_string(),
                 channel_type: "telegram".into(),
-                config,
-                created_at: now,
+                config: merged,
+                created_at: stored.created_at,
                 updated_at: now,
             })
             .await
@@ -418,5 +469,75 @@ impl ChannelService for LiveChannelService {
 
         info!(account_id, identifier, "sender denied");
         Ok(serde_json::json!({ "denied": identifier }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_preserves_unseen_fields_and_overwrites_known() {
+        let mut base = serde_json::json!({
+            "token": "123:ABC",
+            "dm_policy": "open",
+            "allowlist": ["user1"]
+        });
+        let patch = serde_json::json!({
+            "dm_policy": "allowlist"
+        });
+        merge_json_in_place(&mut base, &patch);
+
+        assert_eq!(base["token"], "123:ABC");
+        assert_eq!(base["dm_policy"], "allowlist");
+        assert_eq!(base["allowlist"], serde_json::json!(["user1"]));
+    }
+
+    #[test]
+    fn merge_null_overwrites_to_null() {
+        let mut base = serde_json::json!({
+            "model": "gpt-5.2",
+            "model_provider": "openai-responses"
+        });
+        let patch = serde_json::json!({
+            "model_provider": null
+        });
+        merge_json_in_place(&mut base, &patch);
+
+        assert_eq!(base["model"], "gpt-5.2");
+        assert!(base.get("model_provider").is_some());
+        assert!(base["model_provider"].is_null());
+    }
+
+    #[test]
+    fn merge_recurses_into_child_objects() {
+        let mut base = serde_json::json!({
+            "a": { "b": 1, "c": 2 },
+            "x": 1
+        });
+        let patch = serde_json::json!({
+            "a": { "b": 3 }
+        });
+        merge_json_in_place(&mut base, &patch);
+
+        assert_eq!(base, serde_json::json!({ "a": { "b": 3, "c": 2 }, "x": 1 }));
+    }
+
+    #[test]
+    fn merge_replaces_non_object_values() {
+        let mut base = serde_json::json!({
+            "a": 1,
+            "b": { "x": 1 }
+        });
+        let patch = serde_json::json!({
+            "a": { "y": 2 },
+            "b": "nope",
+            "c": [1,2,3]
+        });
+        merge_json_in_place(&mut base, &patch);
+
+        assert_eq!(base["a"], serde_json::json!({ "y": 2 }));
+        assert_eq!(base["b"], "nope");
+        assert_eq!(base["c"], serde_json::json!([1, 2, 3]));
     }
 }

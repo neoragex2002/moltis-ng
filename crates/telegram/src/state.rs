@@ -15,6 +15,8 @@ pub type AccountStateMap = Arc<RwLock<HashMap<String, AccountState>>>;
 /// Per-account runtime state.
 pub struct AccountState {
     pub bot: teloxide::Bot,
+    /// Bot user id returned by `get_me()` (used for stable reply-to-bot checks).
+    pub bot_user_id: Option<teloxide::types::UserId>,
     pub bot_username: Option<String>,
     pub account_id: String,
     pub config: TelegramAccountConfig,

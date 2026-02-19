@@ -95,6 +95,19 @@ pub trait ChannelEventSink: Send + Sync {
         meta: ChannelMessageMeta,
     );
 
+    /// Ingest an inbound message into the chat session history without
+    /// triggering an LLM run or sending any outbound reply.
+    ///
+    /// This enables "listen/sidecar" group modes where only addressed
+    /// messages generate replies, but all messages can still be recorded
+    /// as context.
+    async fn ingest_only(
+        &self,
+        text: &str,
+        reply_to: ChannelReplyTarget,
+        meta: ChannelMessageMeta,
+    );
+
     /// Dispatch a slash command (e.g. "new", "clear", "compact", "context")
     /// and return a text result to send back to the channel.
     async fn dispatch_command(
@@ -207,6 +220,10 @@ pub struct ChannelAttachment {
 pub struct ChannelReplyTarget {
     pub channel_type: ChannelType,
     pub account_id: String,
+    /// Optional human-friendly handle for this channel account (e.g. Telegram `@my_bot`).
+    /// Used for debugging and prompt runtime context; not required for routing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_handle: Option<String>,
     /// Chat/peer ID to send the reply to.
     pub chat_id: String,
     /// Platform-specific message ID of the inbound message.
@@ -363,6 +380,14 @@ mod tests {
         ) {
         }
 
+        async fn ingest_only(
+            &self,
+            _text: &str,
+            _reply_to: ChannelReplyTarget,
+            _meta: ChannelMessageMeta,
+        ) {
+        }
+
         async fn dispatch_command(
             &self,
             _command: &str,
@@ -392,6 +417,7 @@ mod tests {
         let target = ChannelReplyTarget {
             channel_type: ChannelType::Telegram,
             account_id: "bot1".into(),
+            account_handle: None,
             chat_id: "42".into(),
             message_id: None,
         };

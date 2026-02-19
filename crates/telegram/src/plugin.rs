@@ -84,7 +84,8 @@ impl TelegramPlugin {
     /// polling loop.  Use for allowlist changes that don't need
     /// re-authentication or bot restart.
     pub fn update_account_config(&self, account_id: &str, config: serde_json::Value) -> Result<()> {
-        let tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
+        let mut tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
+        tg_config.normalize_in_place();
         let mut accounts = self.accounts.write().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = accounts.get_mut(account_id) {
             state.config = tg_config;
@@ -124,7 +125,8 @@ impl ChannelPlugin for TelegramPlugin {
     }
 
     async fn start_account(&mut self, account_id: &str, config: serde_json::Value) -> Result<()> {
-        let tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
+        let mut tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
+        tg_config.normalize_in_place();
 
         if tg_config.token.expose_secret().is_empty() {
             return Err(anyhow::anyhow!("telegram bot token is required"));
@@ -233,6 +235,7 @@ mod tests {
     fn test_account_state(accounts: &AccountStateMap, cancel: CancellationToken) -> AccountState {
         AccountState {
             bot: teloxide::Bot::new("test:fake_token_for_unit_tests"),
+            bot_user_id: None,
             bot_username: Some("test_bot".into()),
             account_id: "test".into(),
             config: TelegramAccountConfig {

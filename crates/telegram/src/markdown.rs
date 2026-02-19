@@ -237,6 +237,26 @@ pub const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
 /// Telegram caption size limit for media messages (voice, photo, document).
 pub const TELEGRAM_CAPTION_LIMIT: usize = 1024;
 
+fn floor_char_boundary(text: &str, idx: usize) -> usize {
+    let idx = idx.min(text.len());
+    if text.is_char_boundary(idx) {
+        return idx;
+    }
+    let mut i = idx;
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+pub fn truncate_utf8(text: &str, max_len: usize) -> &str {
+    if text.len() <= max_len {
+        return text;
+    }
+    let end = floor_char_boundary(text, max_len);
+    &text[..end]
+}
+
 /// Split text into chunks that fit within Telegram's message limit.
 /// Tries to split at newlines or spaces to avoid breaking words.
 pub fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
@@ -253,24 +273,27 @@ pub fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
+        // Work within a char boundary slice to avoid panics on UTF-8.
+        let hard_end = floor_char_boundary(remaining, max_len);
+        let slice = &remaining[..hard_end];
+
         // Try to split at a newline
-        let slice = &remaining[..max_len];
         let split_at = slice
             .rfind('\n')
             .or_else(|| slice.rfind(' '))
-            .unwrap_or(max_len);
+            .unwrap_or(hard_end);
 
         let split_at = if split_at == 0 {
-            max_len
+            hard_end
         } else {
             split_at
         };
 
+        let split_at = floor_char_boundary(remaining, split_at);
         chunks.push(remaining[..split_at].to_string());
-        remaining = remaining[split_at..].trim_start_matches('\n');
-        if remaining.starts_with(' ') {
-            remaining = &remaining[1..];
-        }
+        remaining = &remaining[split_at..];
+        remaining = remaining.trim_start_matches('\n');
+        remaining = remaining.trim_start_matches(' ');
     }
 
     chunks
@@ -331,5 +354,29 @@ mod tests {
         assert_eq!(chunks[0], "hello");
         assert_eq!(chunks[1], "world foo");
         assert_eq!(chunks[2], "bar");
+    }
+
+    #[test]
+    fn chunk_unicode_does_not_panic_and_roundtrips() {
+        let text = "按".repeat(5000);
+        let chunks = chunk_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
+        assert!(chunks.len() > 1);
+        for c in &chunks {
+            assert!(
+                c.len() <= TELEGRAM_MAX_MESSAGE_LEN,
+                "chunk too large: {}",
+                c.len()
+            );
+        }
+        let joined = chunks.concat();
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn truncate_utf8_respects_char_boundaries() {
+        let text = "a按b";
+        // UTF-8: '按' is 3 bytes; truncating in the middle must not panic.
+        assert_eq!(truncate_utf8(text, 2), "a");
+        assert_eq!(truncate_utf8(text, 4), "a按");
     }
 }
