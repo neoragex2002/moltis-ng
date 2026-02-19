@@ -19,6 +19,14 @@ use crate::{
     state::GatewayState,
 };
 
+fn format_context_v1_payload(payload: serde_json::Value) -> String {
+    serde_json::json!({
+        "format": "context.v1",
+        "payload": payload,
+    })
+    .to_string()
+}
+
 /// Default (deterministic) session key for a channel chat.
 fn default_channel_session_key(target: &ChannelReplyTarget) -> String {
     format!(
@@ -856,6 +864,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 let params = serde_json::json!({ "_session_key": &session_key });
                 let res = chat.context(params).await.map_err(|e| anyhow!("{e}"))?;
 
+                // Telegram renders /context via a structured HTML card. Returning a stable,
+                // versioned JSON contract avoids brittle markdown label parsing.
+                //
+                // Other channels may still expect plain text; for now we only switch Telegram.
+                if reply_to.channel_type.as_str() == "telegram" {
+                    return Ok(format_context_v1_payload(res));
+                }
+
                 let session_info = res.get("session").cloned().unwrap_or_default();
                 let msg_count = session_info
                     .get("messageCount")
@@ -1322,6 +1338,18 @@ fn format_model_list(
 #[cfg(test)]
 mod tests {
     use {super::*, moltis_channels::ChannelType};
+
+    #[test]
+    fn format_context_v1_payload_wraps_payload_with_versioned_contract() {
+        let payload = serde_json::json!({
+            "session": { "key": "telegram:bot:chat", "messageCount": 3 },
+            "tokenDebug": { "lastRequest": { "inputTokens": 1 } }
+        });
+        let out = format_context_v1_payload(payload.clone());
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed.get("format").and_then(|v| v.as_str()), Some("context.v1"));
+        assert_eq!(parsed.get("payload"), Some(&payload));
+    }
 
     #[test]
     fn channel_event_serialization() {

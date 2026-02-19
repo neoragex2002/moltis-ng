@@ -922,6 +922,21 @@ async fn send_sessions_keyboard(bot: &Bot, chat_id: &str, sessions_text: &str) {
 async fn send_context_card(bot: &Bot, chat_id: &str, context_text: &str) {
     let chat = ChatId(chat_id.parse().unwrap_or(0));
 
+    // Preferred path: context.v1 JSON contract emitted by the gateway.
+    if let Some(payload) = parse_context_v1_payload(context_text) {
+        let html = render_context_card_v1(&payload);
+        let _ = bot
+            .send_message(chat, html)
+            .parse_mode(ParseMode::Html)
+            .await;
+        return;
+    } else if context_text.trim_start().starts_with('{') {
+        warn!(
+            len = context_text.len(),
+            "telegram /context: failed to parse context.v1 JSON, falling back to markdown"
+        );
+    }
+
     // Parse "**Key:** value" lines from the markdown response into a map.
     let mut fields: Vec<(&str, String)> = Vec::new();
     for line in context_text.lines() {
@@ -951,7 +966,27 @@ async fn send_context_card(bot: &Bot, chat_id: &str, context_text: &str) {
     let model = get("Model:");
     let sandbox = get("Sandbox:");
     let plugins_raw = get("Plugins:");
-    let tokens = get("Tokens:");
+    let tokens = {
+        let explicit = get("Tokens:");
+        if !explicit.is_empty() {
+            explicit
+        } else {
+            let last = get("Last:");
+            let next = get("Next (est):");
+            let mut parts = Vec::new();
+            if !last.is_empty() {
+                parts.push(format!("Last {last}"));
+            }
+            if !next.is_empty() {
+                parts.push(format!("Next {next}"));
+            }
+            if parts.is_empty() {
+                "".to_string()
+            } else {
+                parts.join(" · ")
+            }
+        }
+    };
 
     // Format plugins as individual lines
     let plugins_section = if plugins_raw == "none" || plugins_raw.is_empty() {
@@ -993,6 +1028,354 @@ Tokens    {tokens}</code>"
         .send_message(chat, html)
         .parse_mode(ParseMode::Html)
         .await;
+}
+
+fn parse_context_v1_payload(context_text: &str) -> Option<serde_json::Value> {
+    let trimmed = context_text.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let root: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    if root.get("format")?.as_str()? != "context.v1" {
+        return None;
+    }
+    Some(root.get("payload")?.clone())
+}
+
+fn truncate_middle(s: &str, max_chars: usize) -> String {
+    let total = s.chars().count();
+    if max_chars == 0 || total <= max_chars {
+        return s.to_string();
+    }
+    if max_chars <= 3 {
+        return "…".to_string();
+    }
+    let keep_head = (max_chars - 1) / 2;
+    let keep_tail = max_chars - 1 - keep_head;
+    let head: String = s.chars().take(keep_head).collect();
+    let tail: String = s.chars().skip(total.saturating_sub(keep_tail)).collect();
+    format!("{head}…{tail}")
+}
+
+fn format_bool(v: bool) -> &'static str {
+    if v { "yes" } else { "no" }
+}
+
+fn format_opt_u64(v: Option<u64>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string())
+}
+
+fn clamp_html_len(html: String, max_chars: usize, fallback_html: String) -> String {
+    if html.chars().count() <= max_chars {
+        return html;
+    }
+    fallback_html
+}
+
+fn render_context_card_v1(payload: &serde_json::Value) -> String {
+    // Telegram message cap is 4096 chars; leave margin for HTML tags.
+    const MAX_HTML_LEN: usize = 3600;
+    const MAX_LIST_LINES: usize = 8;
+
+    let session = payload.get("session").cloned().unwrap_or_default();
+    let llm = payload.get("llm").cloned().unwrap_or_default();
+    let sandbox = payload.get("sandbox").cloned().unwrap_or_default();
+    let compaction = payload.get("compaction").cloned().unwrap_or_default();
+    let token_debug = payload.get("tokenDebug").cloned().unwrap_or_default();
+
+    let session_key = session
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let msg_count = session.get("messageCount").and_then(|v| v.as_u64());
+
+    let provider = llm
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .or_else(|| session.get("provider").and_then(|v| v.as_str()))
+        .unwrap_or("unknown");
+    let model = llm
+        .get("model")
+        .and_then(|v| v.as_str())
+        .or_else(|| session.get("model").and_then(|v| v.as_str()))
+        .unwrap_or("default");
+
+    // LLM overrides (best-effort, may be provider-specific).
+    let overrides = llm.get("overrides").cloned().unwrap_or_default();
+    let prompt_cache_key = overrides
+        .get("prompt_cache_key")
+        .and_then(|v| v.as_str())
+        .map(|s| truncate_middle(s, 64));
+    let generation = overrides.get("generation").cloned().unwrap_or_default();
+    let max_out_effective = generation
+        .get("max_output_tokens")
+        .and_then(|v| v.get("effective"))
+        .and_then(|v| v.as_u64());
+    let max_out_configured = generation
+        .get("max_output_tokens")
+        .and_then(|v| v.get("configured"))
+        .and_then(|v| v.as_u64());
+    let reasoning_effort = generation
+        .get("reasoning_effort")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let text_verbosity = generation
+        .get("text_verbosity")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let temperature = generation.get("temperature").and_then(|v| v.as_f64());
+
+    let overrides_lines: Vec<String> = {
+        let mut lines = Vec::new();
+        if let Some(k) = prompt_cache_key {
+            lines.push(format!("prompt_cache_key: <code>{}</code>", escape_html_simple(&k)));
+        }
+        if max_out_effective.is_some() || max_out_configured.is_some() {
+            lines.push(format!(
+                "max_output_tokens: {}{}",
+                escape_html_simple(&format_opt_u64(max_out_effective)),
+                max_out_configured
+                    .map(|c| format!(" (configured {})", c))
+                    .unwrap_or_default()
+            ));
+        }
+        if let Some(e) = reasoning_effort {
+            lines.push(format!("reasoning_effort: <code>{}</code>", escape_html_simple(&e)));
+        }
+        if let Some(v) = text_verbosity {
+            lines.push(format!("text_verbosity: <code>{}</code>", escape_html_simple(&v)));
+        }
+        if let Some(t) = temperature {
+            lines.push(format!("temperature: <code>{:.2}</code>", t));
+        }
+        if lines.is_empty() && !overrides.is_null() {
+            let raw = serde_json::to_string(&overrides).unwrap_or_default();
+            lines.push(format!(
+                "overrides: <code>{}</code>",
+                escape_html_simple(&truncate_middle(&raw, 220))
+            ));
+        }
+        lines
+    };
+
+    // Compaction.
+    let is_compacted = compaction
+        .get("isCompacted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let summary_len = compaction.get("summaryLen").and_then(|v| v.as_u64());
+    let kept_count = compaction.get("keptMessageCount").and_then(|v| v.as_u64());
+    let keep_rounds = compaction.get("keepLastUserRounds").and_then(|v| v.as_u64());
+
+    // Sandbox / mounts.
+    let sandbox_enabled = sandbox.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let sandbox_backend = sandbox.get("backend").and_then(|v| v.as_str()).unwrap_or("");
+    let sandbox_image = sandbox.get("image").and_then(|v| v.as_str()).unwrap_or("");
+    let external_mounts_status = sandbox
+        .get("externalMountsStatus")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let mounts = sandbox
+        .get("mounts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let allowlist = sandbox
+        .get("mountAllowlist")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut mount_lines: Vec<String> = Vec::new();
+    for m in mounts.iter().take(MAX_LIST_LINES) {
+        let host = m.get("hostDir").and_then(|v| v.as_str()).unwrap_or("");
+        let guest = m.get("guestDir").and_then(|v| v.as_str()).unwrap_or("");
+        let mode = m.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+        let lhs = truncate_middle(host, 42);
+        let rhs = truncate_middle(guest, 36);
+        let line = if mode.is_empty() {
+            format!("▸ <code>{}</code> → <code>{}</code>", escape_html_simple(&lhs), escape_html_simple(&rhs))
+        } else {
+            format!(
+                "▸ <code>{}</code> → <code>{}</code> <i>({})</i>",
+                escape_html_simple(&lhs),
+                escape_html_simple(&rhs),
+                escape_html_simple(mode)
+            )
+        };
+        mount_lines.push(line);
+    }
+    if mounts.len() > MAX_LIST_LINES {
+        mount_lines.push(format!("<i>… (+{} more)</i>", mounts.len() - MAX_LIST_LINES));
+    }
+    if mount_lines.is_empty() {
+        mount_lines.push("<i>none</i>".to_string());
+    }
+
+    // Tokens.
+    let last = token_debug.get("lastRequest").cloned().unwrap_or_default();
+    let next = token_debug.get("nextRequest").cloned().unwrap_or_default();
+
+    let last_in = last.get("inputTokens").and_then(|v| v.as_u64());
+    let last_out = last.get("outputTokens").and_then(|v| v.as_u64());
+    let last_cached = last.get("cachedTokens").and_then(|v| v.as_u64());
+
+    let cw = next.get("contextWindow").and_then(|v| v.as_u64());
+    let planned_out = next.get("plannedMaxOutputToks").and_then(|v| v.as_u64());
+    let max_in = next.get("maxInputToks").and_then(|v| v.as_u64());
+    let compact_thred = next.get("autoCompactToksThred").and_then(|v| v.as_u64());
+    let prompt_est = next.get("promptInputToksEst").and_then(|v| v.as_u64());
+    let compact_progress = next.get("compactProgress").and_then(|v| v.as_f64());
+    let method = next
+        .get("details")
+        .and_then(|v| v.get("method"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("heuristic");
+
+    let pct = compact_progress
+        .map(|p| (p * 100.0).round() as i64)
+        .filter(|p| *p >= 0);
+
+    let tokens_html = format!(
+        "\
+<b>🧮 Tokens</b>
+Last (authoritative): in={} out={} cached={}
+Next (estimate, method={}): prompt={} · threshold={} · progress={}%
+<i>Note: Telegram has no draftText, so pending user tokens are assumed 0.</i>",
+        escape_html_simple(&format_opt_u64(last_in)),
+        escape_html_simple(&format_opt_u64(last_out)),
+        escape_html_simple(&format_opt_u64(last_cached)),
+        escape_html_simple(method),
+        escape_html_simple(&format_opt_u64(prompt_est)),
+        escape_html_simple(&format_opt_u64(compact_thred)),
+        pct.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string()),
+    );
+
+    let limits_line = format!(
+        "<i>Limits:</i> cw={} planned_max_output={} max_input={}",
+        escape_html_simple(&format_opt_u64(cw)),
+        escape_html_simple(&format_opt_u64(planned_out)),
+        escape_html_simple(&format_opt_u64(max_in)),
+    );
+
+    // Skills/plugins: list only names (avoid huge payloads).
+    let skills = payload
+        .get("skills")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut skill_names: Vec<String> = skills
+        .iter()
+        .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(|n| n.to_string()))
+        .collect();
+    skill_names.sort();
+    let skills_line = if skill_names.is_empty() {
+        "<i>none</i>".to_string()
+    } else {
+        let shown: Vec<String> = skill_names
+            .iter()
+            .take(MAX_LIST_LINES)
+            .map(|s| escape_html_simple(s))
+            .collect();
+        let mut out = shown.join(", ");
+        if skill_names.len() > MAX_LIST_LINES {
+            out.push_str(&format!(" <i>(+{} more)</i>", skill_names.len() - MAX_LIST_LINES));
+        }
+        out
+    };
+
+    let overrides_block = if overrides_lines.is_empty() {
+        "<i>none</i>".to_string()
+    } else {
+        overrides_lines
+            .into_iter()
+            .map(|l| format!("▸ {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let sandbox_icon = if sandbox_enabled { "🟢" } else { "⚫" };
+    let sandbox_details = if sandbox_enabled {
+        let mut parts = Vec::new();
+        if !sandbox_backend.is_empty() {
+            parts.push(escape_html_simple(sandbox_backend));
+        }
+        if !sandbox_image.is_empty() {
+            parts.push(format!("<code>{}</code>", escape_html_simple(&truncate_middle(sandbox_image, 48))));
+        }
+        if !external_mounts_status.is_empty() {
+            parts.push(format!("externalMounts=<code>{}</code>", escape_html_simple(external_mounts_status)));
+        }
+        if parts.is_empty() {
+            "on".to_string()
+        } else {
+            format!("on · {}", parts.join(" · "))
+        }
+    } else {
+        "off".to_string()
+    };
+
+    let html_full = format!(
+        "\
+<b>📋 Session Context</b>
+
+<blockquote><b>Session</b>
+<code>{}</code>
+messages: {}
+
+<b>🤖 Model</b>
+{} · <code>{}</code>
+
+<b>🧩 Plugins</b>
+{}
+
+<b>🧠 LLM overrides</b>
+{}
+
+<b>🧱 Compaction</b>
+compacted: {} · summary_len: {} · kept_msgs: {} · keep_last_user_rounds: {}
+
+<b>{} Sandbox</b>
+{}
+allowlist: {} · mounts: {}
+{}
+</blockquote>
+
+<blockquote>{}
+{}</blockquote>",
+        escape_html_simple(session_key),
+        escape_html_simple(&format_opt_u64(msg_count)),
+        escape_html_simple(provider),
+        escape_html_simple(model),
+        skills_line,
+        overrides_block,
+        escape_html_simple(format_bool(is_compacted)),
+        escape_html_simple(&format_opt_u64(summary_len)),
+        escape_html_simple(&format_opt_u64(kept_count)),
+        escape_html_simple(&format_opt_u64(keep_rounds)),
+        sandbox_icon,
+        sandbox_details,
+        escape_html_simple(&allowlist.len().to_string()),
+        escape_html_simple(&mounts.len().to_string()),
+        mount_lines.join("\n"),
+        tokens_html,
+        limits_line,
+    );
+
+    let html_fallback = format!(
+        "\
+<b>📋 Session Context</b>
+
+<code>{}</code>
+{} · <code>{}</code>
+
+<i>Output too long for Telegram. Use the Web UI /context for full details.</i>",
+        escape_html_simple(session_key),
+        escape_html_simple(provider),
+        escape_html_simple(model),
+    );
+
+    clamp_html_len(html_full, MAX_HTML_LEN, html_fallback)
 }
 
 /// Send model selection as an inline keyboard.
@@ -1763,9 +2146,16 @@ mod tests {
             .route("/{*path}", post(telegram_api_handler))
             .with_state(mock_api);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                // Some sandboxed CI environments disallow binding sockets.
+                // Skipping keeps the test suite runnable while still exercising
+                // the logic in environments where local binds are permitted.
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            }
+        };
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let server = tokio::spawn(async move {
@@ -1976,5 +2366,104 @@ mod tests {
         let info = extract_location(&msg).expect("should extract live location");
         assert!(info.is_live, "location with live_period should be live");
         assert!((info.latitude - 48.8566).abs() < 1e-4);
+    }
+
+    #[test]
+    fn parse_context_v1_payload_extracts_payload() {
+        let payload = json!({ "session": { "key": "session:1" } });
+        let wrapped = json!({ "format": "context.v1", "payload": payload });
+        let text = wrapped.to_string();
+        let out = parse_context_v1_payload(&text).expect("should parse context.v1");
+        assert_eq!(out.get("session").and_then(|v| v.get("key")).and_then(|v| v.as_str()), Some("session:1"));
+    }
+
+    #[test]
+    fn truncate_middle_is_unicode_safe() {
+        let s = "你好，世界，这是一个很长的字符串";
+        let t = truncate_middle(s, 6);
+        assert!(t.contains('…'));
+        assert!(t.chars().count() <= 6);
+    }
+
+    #[test]
+    fn render_context_card_v1_includes_key_fields_and_truncates_lists() {
+        let mounts: Vec<serde_json::Value> = (0..12)
+            .map(|i| {
+                json!({
+                    "hostDir": format!("/very/long/host/path/that/should/be/truncated/{i}/subdir"),
+                    "guestDir": format!("/mnt/{i}/subdir"),
+                    "mode": "ro",
+                })
+            })
+            .collect();
+        let skills: Vec<serde_json::Value> = (0..10)
+            .map(|i| json!({"name": format!("skill_{i}")}))
+            .collect();
+
+        let payload = json!({
+            "session": {
+                "key": "telegram:bot:group:123",
+                "messageCount": 42,
+                "provider": "openai-responses",
+                "model": "openai-responses::gpt-5.2"
+            },
+            "llm": {
+                "provider": "openai-responses",
+                "model": "openai-responses::gpt-5.2",
+                "overrides": {
+                    "prompt_cache_key": "moltis:openai-responses:gpt-5.2:telegram:bot:group:123:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "generation": {
+                        "max_output_tokens": { "configured": 2048, "effective": 2048, "limit": 8192, "clamped": false },
+                        "reasoning_effort": "medium",
+                        "text_verbosity": "low",
+                        "temperature": 0.0
+                    }
+                }
+            },
+            "compaction": {
+                "isCompacted": true,
+                "summaryLen": 123,
+                "keptMessageCount": 9,
+                "keepLastUserRounds": 4
+            },
+            "sandbox": {
+                "enabled": true,
+                "backend": "docker",
+                "image": "ubuntu:22.04",
+                "externalMountsStatus": "configured",
+                "mountAllowlist": ["/a", "/b", "/c"],
+                "mounts": mounts
+            },
+            "skills": skills,
+            "tokenDebug": {
+                "lastRequest": { "inputTokens": 100, "outputTokens": 50, "cachedTokens": 25 },
+                "nextRequest": {
+                    "contextWindow": 128000,
+                    "plannedMaxOutputToks": 4096,
+                    "maxInputToks": 96000,
+                    "autoCompactToksThred": 81600,
+                    "promptInputToksEst": 6500,
+                    "compactProgress": 0.079656,
+                    "details": { "method": "heuristic" }
+                }
+            }
+        });
+
+        let html = render_context_card_v1(&payload);
+        assert!(html.contains("Session Context"));
+        assert!(html.contains("telegram:bot:group:123"));
+        if html.contains("Output too long for Telegram") {
+            // Fallback path should still provide a minimal, valid summary.
+            assert!(html.contains("openai-responses"));
+            assert!(html.contains("gpt-5.2"));
+        } else {
+            assert!(html.contains("prompt_cache_key"));
+            assert!(html.contains("max_output_tokens"));
+            assert!(html.contains("Compaction"));
+            assert!(html.contains("Sandbox"));
+            assert!(html.contains("(+"), "should indicate truncated lists when large");
+            assert!(html.contains("Telegram has no draftText"));
+        }
+        assert!(html.chars().count() <= 3700, "should stay within a safe size for Telegram");
     }
 }

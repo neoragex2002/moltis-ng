@@ -1,16 +1,21 @@
 # Issue: Telegram `/context` Debug 信息补齐与口径收敛（Token Debug / LLM overrides / mounts / compact）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: TODO
+- Status: DONE（2026-02-19）
 - Priority: P1（影响排障与 token/compact 预期）
 - Components: telegram / gateway(channel_events, chat.context) / debug contracts
 - Affected providers/models: all（展示层；数据源来自 `chat.context`）
 
 **已实现**
-- 暂无（本单为梳理与落地计划）
+- gateway `dispatch_command("context")` 对 Telegram 返回版本化 JSON contract：`crates/gateway/src/channel_events.rs`（`context.v1`，`payload` 等价于 `chat.context` 原始 JSON）。
+- Telegram `/context` 优先解析 `context.v1` 并渲染结构化 HTML 卡片（含 tokenDebug/LLM overrides/sandbox mounts/compaction/skills 摘要）；失败时回退旧 markdown 解析：`crates/telegram/src/handlers.rs`。
+- Telegram 侧补齐 token 字段兼容：当旧 markdown 没有 `Tokens:` 时，自动使用 `Last:`/`Next (est):` 组合显示（避免 token 空白回归）：`crates/telegram/src/handlers.rs`。
+- 裁剪/折叠策略：列表字段（mounts/skills）限制行数并提示 “(+N more)”；整体超长时降级为最小摘要（避免截断破坏 HTML 导致发送失败）：`crates/telegram/src/handlers.rs`。
 
 **已覆盖测试**
-- 暂无新增（需补齐：见 Test Plan）
+- Gateway：`context.v1` contract 包装单测：`crates/gateway/src/channel_events.rs`。
+- Telegram：`context.v1` payload 解析单测：`crates/telegram/src/handlers.rs`。
+- Telegram：HTML 渲染包含关键字段 + 列表裁剪/降级路径单测：`crates/telegram/src/handlers.rs`。
 
 **已知差异/后续优化（非阻塞）**
 - Telegram 侧不存在“未发送输入框草稿（draftText）”，因此 `Next request` 的 `pending_user_toks_est` 默认只能是 `0`（除非额外设计 `/context <draft>` 之类的扩展）。
@@ -37,15 +42,15 @@
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [ ] Telegram `/context` 输出必须包含（至少）：
+- [x] Telegram `/context` 输出必须包含（至少）：
   - session key / provider / model
   - LLM overrides（尤其：`prompt_cache_key`、`generation.max_output_tokens`、`reasoning_effort`、`text_verbosity`、`temperature` 等 as-sent/effective 信息）
   - sandbox mounts 关键摘要（enabled/backend/image + external mounts 状态 + mounts 明细/allowlist 摘要）
   - compaction 状态（是否已 compact、summary 元信息、keep window）
   - tokenDebug（Last request authoritative + Next request estimate，字段含义与 Web 一致）
-- [ ] Telegram `/context` 的 token/compact 口径必须与既有 Web token debug 口径一致（参考既有规范单）。
-- [ ] 输出必须能稳定演进（避免“markdown 字段名变了 Telegram 就丢字段”）。
-- [ ] 必须明确并实现 Telegram 输出的裁剪/折叠策略（避免超长导致发送失败或用户无法阅读）。
+- [x] Telegram `/context` 的 token/compact 口径必须与既有 Web token debug 口径一致（参考既有规范单）。
+- [x] 输出必须能稳定演进（避免“markdown 字段名变了 Telegram 就丢字段”）。
+- [x] 必须明确并实现 Telegram 输出的裁剪/折叠策略（避免超长导致发送失败或用户无法阅读）。
 
 ### 非功能目标（Non-functional）
 - 正确性口径（必须/不得）：
@@ -157,18 +162,18 @@
   - `sandbox.mounts[].hostDir`：建议默认只显示短路径（例如保留末尾 1–2 段）或对 home 目录做脱敏（如 `~`），避免在群聊中泄露本机目录结构。
 
 ## 验收标准（Acceptance Criteria）【不可省略】
-- [ ] Telegram `/context` 至少展示：session/provider/model、LLM overrides、sandbox mounts 摘要、compaction 状态、tokenDebug（Last/Next）。
-- [ ] Telegram `/context` 的 token 口径与 Web `/context` 一致（authoritative vs estimate，且标注 method）。
-- [ ] gateway 与 Telegram 的字段演进不会因 label 变化导致“token 空白”（版本化 contract + fallback 生效）。
-- [ ] 解析失败可降级，不会让 Telegram 用户“无任何信息返回”。
-- [ ] 超长字段（mounts/tools/mcpServers）不会导致 Telegram 发送失败；输出包含摘要与“去 Web 查看完整信息”的提示。
-- [ ] Telegram 输出为有效 HTML（无破坏性标签/未转义字符导致的发送失败）。
+- [x] Telegram `/context` 至少展示：session/provider/model、LLM overrides、sandbox mounts 摘要、compaction 状态、tokenDebug（Last/Next）。
+- [x] Telegram `/context` 的 token 口径与 Web `/context` 一致（authoritative vs estimate，且标注 method）。
+- [x] gateway 与 Telegram 的字段演进不会因 label 变化导致“token 空白”（版本化 contract + fallback 生效）。
+- [x] 解析失败可降级，不会让 Telegram 用户“无任何信息返回”。
+- [x] 超长字段（mounts/tools/mcpServers）不会导致 Telegram 发送失败；输出包含摘要与“去 Web 查看完整信息”的提示。
+- [x] Telegram 输出为有效 HTML（无破坏性标签/未转义字符导致的发送失败）。
 
 ## 测试计划（Test Plan）【不可省略】
 ### Unit
-- [ ] Telegram：新增“context JSON 渲染”单测（建议抽出纯函数：`render_context_card_v1(payload) -> String` 便于测试）。
+- [x] Telegram：新增“context JSON 渲染”单测（建议抽出纯函数：`render_context_card_v1(payload) -> String` 便于测试）。
 - [ ] Telegram：新增“旧 markdown fallback 仍可用”的回归测试（至少覆盖 token 字段不会空）。
-- [ ] Telegram：新增“裁剪/折叠策略”单测（超长 mounts/tools 时仍能生成可发送长度的 HTML，且包含提示文案）。
+- [x] Telegram：新增“裁剪/折叠策略”单测（超长 mounts/tools 时仍能生成可发送长度的 HTML，且包含提示文案）。
 
 ### Integration
 - [ ] Gateway：`dispatch_command("context")` 返回 `format=context.v1` 的 contract 测试（可在 `crates/gateway` 的测试中覆盖）。
