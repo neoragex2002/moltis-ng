@@ -34,8 +34,7 @@
 - `crates/agents/src/providers/openai_compat.rs`
 - `crates/agents/src/providers/openai_responses.rs`
 - `crates/agents/src/runner.rs`
-- `overall-issues.md`
-- `overall-issues.zh.md`
+- `issues/overall_issues_2.md`（总体问题文档已合并迁移至 `issues/`）
 
 ## 当前工作现状（修复后快照）
 

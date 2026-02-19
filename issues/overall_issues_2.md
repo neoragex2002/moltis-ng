@@ -33,8 +33,39 @@
      - validation：`crates/config/src/validate.rs:902`
      - request body 注入：`crates/agents/src/providers/openai_responses.rs:623`
      - 单测：`crates/agents/src/providers/openai_responses.rs:930`
-   - 设计与字段解释详见：`openai-responses-builtin-web-search.md`
-    - 官方字段名/取值证据（避免拼错，便于后续 UI/日志可解释）：见 Appendix C
+	   - 语义与规则（已合并，独立文档可删）：
+	     - **启用条件**：仅当 `[providers.openai-responses.builtin_web_search]` 存在且 `enabled=true` 时才会在 `/v1/responses` body 注入 built-in `{"type":"web_search"}`。
+	     - **字段语义（最小集）**：
+	       - `allowed_domains` → `tools[].filters.allowed_domains`（域名白名单；不配则不限制）
+	       - `search_context_size` → `tools[].search_context_size`（控制检索上下文规模）
+	       - `user_location`（如配置）→ `tools[].user_location`（`type=approximate` + 可选 `city/country/region/timezone`，用于提升本地化相关性）
+	       - `include_sources=true` → body 增加 `include: ["web_search_call.action.sources"]`（便于取回 sources/citations）
+	     - **最小可用配置示例**（TOML）：
+	       ```toml
+	       [providers.openai-responses.builtin_web_search]
+	       enabled = true
+	       # allowed_domains = ["openai.com", "docs.rs"]
+	       # search_context_size = "medium" # low|medium|high
+	       # include_sources = true
+	
+	       # 可选：本地化提示（不含经纬度；仅 approximate）
+	       # [providers.openai-responses.builtin_web_search.user_location]
+	       # type = "approximate"
+	       # city = "San Francisco"
+	       # region = "CA"
+	       # country = "US"
+	       # timezone = "America/Los_Angeles"
+	       ```
+	     - **工具互斥处理**：built-in 开启时，provider 会从 function tools 中过滤掉本地同名 `web_search` function tool（避免歧义/误用外部 KEY）。
+	     - **与 tools/function calling 的关系**：built-in `web_search` 会与其它 function tools 并存；`tool_choice` 仍为 `"auto"`（模型自行决定是否搜索）。
+	     - **成本/延迟提示**：开启后通常会增加延迟与可能的工具成本；若希望“必须先搜再答”，需要在 system/user prompt 中明确要求。
+	     - **校验规则（避免“以为开了但没开/误配”）**：
+	       - 若 builtin_web_search block 未开启（`enabled=false` 或默认），但同时填写了其它 builtin_web_search 字段（如 `allowed_domains`/`search_context_size`/`user_location`/`include_sources`）→ 配置校验应报错（当前实现已覆盖）。
+	     - **兼容性/限制**：
+       - 必须走 Responses API（`openai-responses` provider / `/responses`）。
+       - `base_url` 指向的服务端必须支持 built-in web_search；不支持时会返回 4xx（unknown tool type / unsupported include 等）。
+       - 流式事件会出现 `response.web_search_call.*`，但不影响最终 `output_text` 拼接（collector 可忽略这些事件）。
+   - 官方字段名/取值证据（避免拼错，便于后续 UI/日志可解释）：见 Appendix C
 
 1) **[DONE] OpenAI Responses generation options（max_output_tokens / reasoning_effort / text_verbosity / temperature）**
    - 目标：为 `openai-responses` provider 提供最小集的生成参数控制，并保持默认行为可预测。
