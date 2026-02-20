@@ -90,7 +90,7 @@
   - `crates/gateway/src/chat.rs:3199`：`chat.context` 已返回 `tokenDebug`、`llm.overrides`、`sandbox.mounts`、`compaction` 等结构化信息。
   - `crates/gateway/src/chat.rs:4688`：`build_token_debug_info()` 已按“Last authoritative + Next estimate(heuristic)”产出字段（并包含 `details.method=heuristic`）。
 - 当前测试覆盖：
-  - 已有：Web token debug 相关单测（见 `issues/issue-chat-debug-panel-llm-session-sandbox-compaction.md` 的“已覆盖测试”清单）。
+  - 已有：Web token debug 相关单测（见 `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md` 的“已覆盖测试”清单）。
   - 缺口：无 Telegram `/context` 输出的自动化测试；且 Telegram `/context` 仍依赖 markdown 字段名契约，易回归。
 
 ## 根因分析（Root Cause）
@@ -203,7 +203,7 @@
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
-  - `issues/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（Web `/context` 的口径与 token debug 收敛规范）
+  - `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（Web `/context` 的口径与 token debug 收敛规范）
   - `issues/done/issue-telegram-channel-no-error-reply-on-llm-failure.md`（Telegram 渠道体验/一致性相关）
 
 ## 未决问题（Open Questions）

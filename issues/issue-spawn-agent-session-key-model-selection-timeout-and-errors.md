@@ -206,7 +206,7 @@
   - `issues/issue-error-handling-taxonomy-single-egress.md`
   - `issues/done/issue-telegram-channel-no-error-reply-on-llm-failure.md`
   - `issues/issue-named-personas-and-per-session-agent-profiles.md`（更广义的 per-session persona/agent 配置能力）
-  - `issues/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（run/debug 可观测性口径先例）
+  - `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（run/debug 可观测性口径先例）
 
 ## Close Checklist（关单清单）【不可省略】
 - [ ] 行为已按 Spec 实现（model/session_key/timeout 语义明确）

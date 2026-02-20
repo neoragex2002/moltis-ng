@@ -81,7 +81,7 @@
 - [DONE]（JS 健壮性）skills UI 的错误解析不再使用空 catch 块。
   - 证据：`crates/gateway/src/assets/js/page-skills.js:133`。
 
-- [TODO]（P3）重试/退避增强（429、jitter、尊重 `Retry-After`）。
+- [TODO]（P3）重试/退避增强（429、jitter、尊重 `Retry-After`）：已拆分为独立单子 `issues/issue-runner-retry-backoff-retry-after-jitter.md`（以该单为准）。
   - 历史上下文：`crates/agents/src/runner.rs:45`。
 
 - [DONE] 仓库整理：相关改动已按原子提交拆分并提交（commits：`ded833e`、`b782ebf`、`fe0d688`、`7f9ccb2`、`643a86a`；当前在工作分支；如需进入 `main` 再走 PR/merge 流程）。

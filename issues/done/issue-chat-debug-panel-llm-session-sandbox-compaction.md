@@ -1,6 +1,11 @@
 # Issue: 在 Web Chat Debug/Context 中打印关键运行态信息（模型参数 / session key / mounts / compact）
 
 ## 实施现状（Status）
+- Status: DONE（2026-02-18）
+- Priority: P1
+- Components: gateway / agents / web-ui
+- Affected providers/models: all（展示层 + request overrides）
+
 **已实现（2026-02-18）**：Web Chat 的 `/context` 卡片与 Debug panel 现在会展示 LLM overrides、compaction 状态、以及 sandbox 外部 mounts 明细。
 
 - Provider debug hook：`crates/agents/src/model.rs`（新增 `LlmProvider::debug_request_overrides()`）
