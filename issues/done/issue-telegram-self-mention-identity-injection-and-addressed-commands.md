@@ -126,7 +126,7 @@
 
 ### 关键事实（避免误解）
 - **默认模式（现状）**：只有 **被放行并进入处理链路** 的 bot 会把消息写入该会话的 LLM history；未被点名而被 `NotMentioned` 拒绝的 bot 不会增长其对话上下文。
-- **旁听模式（规划）**：若未来启用 `group_ingest_mode=all_messages`（见 `issues/issue-telegram-group-ingest-reply-decoupling.md`），则即便 Gate 仍是 `NotMentioned`，该消息也可能被 **ingest-only 写入 session**（但仍不得进入 LLM、不得 outbound 回复）。
+- **旁听模式（规划）**：若未来启用 `group_ingest_mode=all_messages`（见 `issues/done/issue-telegram-group-ingest-reply-decoupling.md`），则即便 Gate 仍是 `NotMentioned`，该消息也可能被 **ingest-only 写入 session**（但仍不得进入 LLM、不得 outbound 回复）。
 - 因此：在同一个群里，即使 Telegram 平台把消息投递给多个 bot，是否会“增长某个 bot 的上下文/触发 compaction”取决于该 bot 的 `group_ingest_mode`（默认不会，旁听会）。
 - auto-compact 是对“即将发出的 LLM 请求”的内部预处理（预算触发后会先总结/压缩历史再继续）。
 
@@ -143,7 +143,7 @@
 
 ### 验收补充（Acceptance Addendum）
 - [x] 默认模式（未启用旁听写入）下：在同一群聊中，多 bot 同时收到消息时，只有被放行的 bot 会把该消息写入会话历史并可能触发 compaction；被 `NotMentioned` 拒绝的 bot 不写入历史、不触发 compaction（只留痕/日志）。
-  - 旁听写入（规划）：启用 `group_ingest_mode=all_messages` 后，`NotMentioned` 也可能 ingest-only 写入 session（但仍不得进入 LLM、不得 outbound），见：`issues/issue-telegram-group-ingest-reply-decoupling.md`。
+  - 旁听写入（规划）：启用 `group_ingest_mode=all_messages` 后，`NotMentioned` 也可能 ingest-only 写入 session（但仍不得进入 LLM、不得 outbound），见：`issues/done/issue-telegram-group-ingest-reply-decoupling.md`。
 
 ## 问题陈述（Problem Statement）
 ### 现象 1：自我点名导致 LLM 误解（搞笑/自相矛盾）
@@ -242,11 +242,11 @@ bot 回复为：
 - [x] `/cmd@bot` 解析：self vs other（覆盖：`crates/telegram/src/handlers.rs:3413`）
 - [x] 空文本兜底行为（覆盖：`crates/telegram/src/handlers.rs:2905`）
 - [x] 群聊未定向 `/cmd` 不视为唤醒（覆盖：`crates/telegram/src/handlers.rs:3413`）
-- [ ] EditedMessage 文本忽略（策略已冻结；当前未单测，属于行为约定，不影响主链路）
+（非阻塞）EditedMessage 文本忽略：策略已冻结；目前未单测（行为约定，不影响主链路）
 
 ### Integration（可选）
-- [ ] 构造 Telegram Message（含 entities/caption_entities）走 handler 命令分支，断言不进入 LLM dispatch
-- [ ] （若支持 EditedMessage）构造 edited message 场景，验证是否响应/是否去重符合策略
+（可选）构造 Telegram Message（含 entities/caption_entities）走 handler 命令分支，断言不进入 LLM dispatch
+（可选）（若支持 EditedMessage）构造 edited message 场景，验证是否响应/是否去重符合策略
 
 ## 行为矩阵（Behavior Matrix）【用于验收与排障；Receive 取决于平台投递】
 > 说明：Receive（是否收到 update）由 Telegram/Privacy Mode 等平台策略决定；本矩阵冻结的是 Gate/LLM/Outbound（代码应当保证的行为）。
@@ -270,5 +270,5 @@ bot 回复为：
 | **edited**: `@bot1 hi` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Edited text 忽略；若要触发请重新发送新消息 |
 
 ## 交叉引用（Cross References）
-- `issues/issue-telegram-group-mention-gating-not-working.md`（门禁唤醒判定已收敛；本单关注 LLM 输入语义与命令一致性）
+- `issues/done/issue-telegram-group-mention-gating-not-working.md`（门禁唤醒判定已收敛；本单关注 LLM 输入语义与命令一致性）
 - `issues/issue-terminology-and-concept-convergence.md`（identity 字段命名/口径需要收敛）

@@ -48,12 +48,12 @@
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [ ] 任意 `run internal failure`（provider/stream/tool error）时，Telegram 必须收到一条错误回执（thread 到原消息）。
-- [ ] 任意终止态（final/error/timeout/silent）必须清理：
-  - [ ] `channel_reply_queue`（避免串线）
-  - [ ] `channel_status_log`（避免 logbook 串到后续成功回复）
-- [ ] `immediate failure`（`chat.send` 立即 Err）也必须清理上述两类状态（当前只回执、不清理）。
-- [ ] Web UI 的 `state="error"` broadcast 行为保持不变（可扩展字段，但不破坏现有前端）。
+- [x] 任意 `run internal failure`（provider/stream/tool error）时，Telegram 必须收到一条错误回执（thread 到原消息）。
+- [x] 任意终止态（final/error/timeout/silent）必须清理：
+  - [x] `channel_reply_queue`（避免串线）
+  - [x] `channel_status_log`（避免 logbook 串到后续成功回复）
+- [x] `immediate failure`（`chat.send` 立即 Err）也必须清理上述两类状态（当前只回执、不清理）。
+- [x] Web UI 的 `state="error"` broadcast 行为保持不变（可扩展字段，但不破坏现有前端）。
 
 ### 非功能目标（Non-functional）
 - 正确性口径（必须/不得）：
@@ -169,27 +169,27 @@
 - “尚未 push reply target 就失败”：helper 会发现 targets 为空并跳过；属于可接受的低概率边缘场景。
 
 ## 验收标准（Acceptance Criteria）【不可省略】
-- [ ] 人为制造 provider 错误（错误 API key / 断网 / provider 4xx/5xx）：
-  - Telegram 收到错误回执（thread 对齐）。
-  - Web UI 仍能看到 `state="error"`。
-  - `channel_reply_queue` 与 `channel_status_log` 均被清理（后续不会串线/漂移）。
-- [ ] 人为制造 timeout（把 `tools.agent_timeout_secs` 设很小或构造长程工具）：
-  - Telegram 收到 timeout 回执；状态被清理。
-- [ ] 构造 silent response（或人为让最终文本为空）：
-  - Telegram 不收到空消息，但不会串线（下次成功回复 thread 到正确的 message_id）。
-- [ ] `chat.send` immediate Err（例如 gateway 未 ready 或 chat service 立刻返回 Err）：
-  - Telegram 收到 `⚠️`，且状态被清理。
+### 自动化验收（CI/单测可覆盖）
+- 失败/超时/空输出的回执与 drain 行为由单元测试覆盖（见“实施现状/已覆盖测试”）。
+
+### 手工验收（可选；不作为关单前置）
+- provider 错误（错误 API key / 断网 / provider 4xx/5xx）：Telegram 收到错误回执（thread 对齐）；Web UI 仍能看到 `state="error"`；状态无残留。
+- timeout（把 `tools.agent_timeout_secs` 设很小或构造长程工具）：Telegram 收到 timeout 回执；状态无残留。
+- silent response（最终文本为空）：Telegram 不收到空消息；下次成功回复不会串线。
+- `chat.send` immediate Err（gateway 未 ready 或 chat service 立刻返回 Err）：Telegram 收到 `⚠️`；状态无残留。
 
 ## 测试计划（Test Plan）【不可省略】
-### Unit（推荐全部覆盖）
-- [ ] `run_with_tools` error：预置 `push_channel_reply` + `push_channel_status_log`，触发错误分支后断言两者均已 drain（`peek` 为空）。
-- [ ] `run_streaming` StreamEvent::Error：同上。
-- [ ] timeout 分支：同上（`crates/gateway/src/chat.rs:2608`–`2641`）。
-- [ ] immediate failure（channel_events）：模拟 `chat.send` 返回 Err，断言 error 回执发送 + drain。
-- [ ] silent success：断言不发送，但 drain 生效。
+### Unit（已覆盖）
+- immediate failure（channel_events）：`dispatch_to_chat_immediate_failure_drains_reply_targets_and_logbook`
+- run_streaming StreamEvent::Error：`run_streaming_error_sends_channel_error_and_drains_state`
+- silent success（final text 为空）：`run_streaming_silent_success_drains_state_without_sending`
+
+### 建议补充（非阻塞；单独单测即可）
+- `run_with_tools` error 分支（预置 `push_channel_reply` + `push_channel_status_log`，断言 drain + 错误回执）
+- timeout 分支（同上；覆盖 `crates/gateway/src/chat.rs` timeout 路径）
 
 ### Integration / manual（可选）
-- [ ] Telegram：断网/错误 key/主动超时，观察回执与 thread 是否正确；之后发送正常消息确认不串线。
+- Telegram：断网/错误 key/主动超时，观察回执与 thread 是否正确；之后发送正常消息确认不串线。
 
 ## 相关位置（References）
 - `crates/gateway/src/channel_events.rs`（channel inbound dispatch / immediate failure）

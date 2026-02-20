@@ -97,7 +97,6 @@
 - [ ] 代码层：关键边界（gateway<->channels<->sessions）术语一致，减少同名复用。
 
 ## 交叉引用（Cross References）
-- `issues/issue-telegram-group-mention-gating-not-working.md`（多 bot 群聊时“收到/处理/留痕”三层口径）
-- `issues/issue-telegram-context-debug-parity.md`（/context debug 口径与字段命名）
+- `issues/done/issue-telegram-group-mention-gating-not-working.md`（多 bot 群聊时“收到/处理/留痕”三层口径）
+- `issues/done/issue-telegram-context-debug-parity.md`（/context debug 口径与字段命名）
 - `issues/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（debug 面板字段口径收敛）
-

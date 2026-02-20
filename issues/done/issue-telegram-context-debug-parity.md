@@ -172,11 +172,11 @@
 ## 测试计划（Test Plan）【不可省略】
 ### Unit
 - [x] Telegram：新增“context JSON 渲染”单测（建议抽出纯函数：`render_context_card_v1(payload) -> String` 便于测试）。
-- [ ] Telegram：新增“旧 markdown fallback 仍可用”的回归测试（至少覆盖 token 字段不会空）。
+- [x] Telegram：新增“旧 markdown fallback 仍可用”的回归测试（至少覆盖 token 字段不会空）。
 - [x] Telegram：新增“裁剪/折叠策略”单测（超长 mounts/tools 时仍能生成可发送长度的 HTML，且包含提示文案）。
 
 ### Integration
-- [ ] Gateway：`dispatch_command("context")` 返回 `format=context.v1` 的 contract 测试（可在 `crates/gateway` 的测试中覆盖）。
+- [x] Gateway：`dispatch_command("context")` 返回 `format=context.v1` 的 contract 测试（可在 `crates/gateway` 的测试中覆盖）。
 
 ### UI E2E（Playwright，如适用）
 - N/A（本单为 Telegram 命令；Web E2E 不覆盖 Telegram）。
@@ -204,7 +204,7 @@
 ## 交叉引用（Cross References）
 - Related issues/docs：
   - `issues/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（Web `/context` 的口径与 token debug 收敛规范）
-  - `issues/issue-telegram-channel-no-error-reply-on-llm-failure.md`（Telegram 渠道体验/一致性相关）
+  - `issues/done/issue-telegram-channel-no-error-reply-on-llm-failure.md`（Telegram 渠道体验/一致性相关）
 
 ## 未决问题（Open Questions）
 - Q1: Telegram `/context` 是否需要展示 `prompt_cache_key` 的明文？是否默认脱敏？
@@ -212,10 +212,10 @@
 - Q3: Telegram 输出对 mounts/tools/mcpServers 的默认展示上限是多少（条数/字符数）？（建议先给 conservative 默认值并可配置）
 
 ## Close Checklist（关单清单）【不可省略】
-- [ ] 行为已按 Spec 实现（口径一致）
-- [ ] authoritative vs estimate 边界清晰（且 UI/日志标注 method/source）
-- [ ] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
-- [ ] 文档/配置示例已同步更新（避免断链）
-- [ ] 兼容性/迁移说明已写清（如涉及持久化/字段变更）
-- [ ] 安全隐私检查通过（敏感字段不泄露）
-- [ ] 回滚策略明确
+- [x] 行为已按 Spec 实现（口径一致）
+- [x] authoritative vs estimate 边界清晰（且 UI/日志标注 method/source）
+- [x] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
+- [x] 文档/配置示例已同步更新（避免断链）
+- [x] 兼容性/迁移说明已写清（如涉及持久化/字段变更）
+- [x] 安全隐私检查通过（敏感字段不泄露）
+- [x] 回滚策略明确

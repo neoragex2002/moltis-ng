@@ -14,7 +14,7 @@
   - reply-to-bot：回复 bot 的消息视为唤醒（通过 bot user_id 稳定判定）
 - `NotMentioned` 拒绝日志增强：在不泄露正文的前提下输出必要定位字段（chat/message id、entities count、reply 信息等）。
 - 说明：本单只保证“门禁不误拒绝”（Gate/Process 放行）。`/command@bot_username` 的 **slash command 拦截与执行一致性**（例如 `/context@bot` 应走 command 分支而非进入 LLM）已在单独 issue 落地并 DONE：
-  - `issues/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`
+  - `issues/done/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`
  - 备注：群聊会话更容易触发 auto-compact；compaction 的渠道体验规范（静默 auto-compact、定向命令 `/compact@bot` 等）也在上述 issue 中补充冻结。
 
 **已覆盖测试**
@@ -53,7 +53,7 @@
     - `https://core.telegram.org/bots/faq#what-messages-will-my-bot-get` / `https://core.telegram.org/bots/faq#why-doesnt-my-bot-see-messages-from-other-bots`
 
 补充：本单只修复 **Gate/唤醒判定**。是否“旁听写入 session 历史”（Ingest）属于另一个维度，见：
-- `issues/issue-telegram-group-ingest-reply-decoupling.md`
+- `issues/done/issue-telegram-group-ingest-reply-decoupling.md`
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
@@ -218,7 +218,7 @@
   - [x] reply-to-bot 命中
 
 ### Integration
-- [ ] （可选）在 Telegram handler 的现有 tests 模块中构造 `Message`（或 mock）覆盖 access deny/allow 路径，断言 `AccessDenied::NotMentioned` 不再在 mention 场景触发。
+（可选）在 Telegram handler 的现有 tests 模块中构造 `Message`（或 mock）覆盖 access deny/allow 路径，断言 `AccessDenied::NotMentioned` 不再在 mention 场景触发。
 
 ## 发布与回滚（Rollout & Rollback）
 - 发布策略：默认启用新判定逻辑（不改变 mention_mode 的默认值）。
@@ -233,7 +233,7 @@
 ## 交叉引用（Cross References）
 - Related docs：
   - `issues/overall_issues_2.md`（Survey: 群聊默认 mention 模式）
-  - `issues/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`（self-mention 语义、/cmd@bot、identity injection 与 Privacy Mode 排障口径）
+  - `issues/done/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`（self-mention 语义、/cmd@bot、identity injection 与 Privacy Mode 排障口径）
 - Related code：
   - `crates/telegram/src/handlers.rs:2167`（`check_bot_mentioned` / mention 判定主入口）
   - `crates/telegram/src/access.rs:72`（门禁判定）

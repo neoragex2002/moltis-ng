@@ -204,7 +204,7 @@
 ## 交叉引用（Cross References）
 - Related issues/docs：
   - `issues/issue-error-handling-taxonomy-single-egress.md`
-  - `issues/issue-telegram-channel-no-error-reply-on-llm-failure.md`
+  - `issues/done/issue-telegram-channel-no-error-reply-on-llm-failure.md`
   - `issues/issue-named-personas-and-per-session-agent-profiles.md`（更广义的 per-session persona/agent 配置能力）
   - `issues/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（run/debug 可观测性口径先例）
 

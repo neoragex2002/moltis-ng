@@ -88,9 +88,9 @@ Out of scope：
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [ ] 在群聊中支持“点名才回复，但未点名消息也写入 session”（最常见模式）。
-- [ ] 支持 listen-only：群聊不回复，但可选择写入 session（用于纯旁观/审计/后续问答）。
-- [ ] 继续支持现有三档行为（Must mention / Always / None），默认行为不变（兼容）。
+- [x] 在群聊中支持“点名才回复，但未点名消息也写入 session”（最常见模式）。
+- [x] 支持 listen-only：群聊不回复，但可选择写入 session（用于纯旁观/审计/后续问答）。
+- [x] 继续支持现有三档行为（Must mention / Always / None），默认行为不变（兼容）。
 
 ### 非功能目标（Non-functional）
 - 正确性口径（必须/不得）：
@@ -232,7 +232,7 @@ Out of scope：
 - [x] `channels.update` merge/patch 语义（缺省字段保留、显式 null 覆盖）：`crates/gateway/src/channel.rs` tests
 
 ### Integration
-- [ ] （可选）构造端到端群聊序列：先旁听写入，再点名提问，验证上下文包含旁听内容（需要运行态 Telegram 环境，非 CI 必需）
+（可选）端到端群聊序列：先旁听写入，再点名提问，验证上下文包含旁听内容（需要运行态 Telegram 环境，非 CI 必需）
 
 ## 发布与回滚（Rollout & Rollback）
 - 发布策略：默认关闭（即默认 `group_ingest_mode=mentioned_only`，行为与现状一致）；仅当用户显式选择 “Listen/ingest all” 时启用旁听写入。
@@ -252,8 +252,8 @@ Out of scope：
 - Q3: 当旁听写入导致 session 快速膨胀并触发 compact 时，是否需要在 `/context`/debug 中给出明确提示（例如“旁听模式导致上下文增长更快”）？
 
 ## 交叉引用（Cross References）
-- `issues/issue-telegram-group-mention-gating-not-working.md`（门禁唤醒判定）
-- `issues/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`（自我点名剥离、/cmd@bot 行为冻结）
+- `issues/done/issue-telegram-group-mention-gating-not-working.md`（门禁唤醒判定）
+- `issues/done/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`（自我点名剥离、/cmd@bot 行为冻结）
 - `issues/issue-terminology-and-concept-convergence.md`（reply/ingest/session/scope 概念收敛）
 
 ## Close Checklist（关单清单）【不可省略】

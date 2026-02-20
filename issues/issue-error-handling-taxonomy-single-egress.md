@@ -5,7 +5,7 @@
 - Priority: P1（架构收敛；P0 止血见 Telegram 单子）
 - Components: `crates/agents` / `crates/gateway` / channels delivery / Web UI debug
 - Cross-ref:
-  - 渠道止血（Telegram 无回执 + drain targets）：`issues/issue-telegram-channel-no-error-reply-on-llm-failure.md`
+  - 渠道止血（Telegram 无回执 + drain targets）：`issues/done/issue-telegram-channel-no-error-reply-on-llm-failure.md`
 
 **已实现**
 - 暂无（本单为收敛设计与逐步迁移计划）
@@ -160,7 +160,7 @@
 - 回滚策略：保留旧 broadcast 结构兼容；若渠道回执引发误报，可通过配置开关降级（是否需要开关：见 Open Questions）。
 
 ## 交叉引用（Cross References）
-- 渠道止血：`issues/issue-telegram-channel-no-error-reply-on-llm-failure.md`
+  - 渠道止血：`issues/done/issue-telegram-channel-no-error-reply-on-llm-failure.md`
 - 现有 UI 结构化错误：`crates/gateway/src/chat_error.rs:10`
 - agents 错误分类：`crates/agents/src/provider_chain.rs:73`
 - gateway 错误分支（run_with_tools / stream-only）：`crates/gateway/src/chat.rs:4516` / `crates/gateway/src/chat.rs:5213`

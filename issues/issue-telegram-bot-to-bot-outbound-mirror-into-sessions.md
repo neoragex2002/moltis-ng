@@ -7,9 +7,11 @@
 - Components: telegram / gateway / sessions / ui / config
 
 **已实现（相关前置）**
-- 群聊 reply vs ingest 二维解耦（`group_ingest_mode` + ingest-only 写入）：`issues/issue-telegram-group-ingest-reply-decoupling.md`
-- 自我点名剥离与 `/cmd@bot` 规则冻结：`issues/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`
-- 官方平台约束（Bot API 不投递 other bots messages）已写入上述两单及 mention gating 单：`issues/issue-telegram-group-mention-gating-not-working.md`
+- 群聊 reply vs ingest 二维解耦（`group_ingest_mode` + ingest-only 写入）：`issues/done/issue-telegram-group-ingest-reply-decoupling.md`
+- 自我点名剥离与 `/cmd@bot` 规则冻结：`issues/done/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`
+- 官方平台约束（Bot API 不投递 other bots messages）已写入上述两单及 mention gating 单：`issues/done/issue-telegram-group-mention-gating-not-working.md`
+ 
+> 注：上述 3 张前置单已关单并移入 `issues/done/`，引用路径见下文已同步更新。
 
 **已知差异/后续优化（非阻塞）**
 - 本单聚焦 “bot1 的最终回复正文” 的镜像；是否同步 tool 输出摘要属于可选扩展（见 Open Questions）。
@@ -78,7 +80,7 @@
 ## 现状核查与证据（As-is / Evidence）【不可省略】
 - 平台证据（官方 FAQ）：见 Background（原文 + 链接）。
 - 代码证据：
-  - `group_ingest_mode=all_messages` 只旁听“bot 实际收到的 update”，无法覆盖 other bots messages（平台不投递）：`issues/issue-telegram-group-ingest-reply-decoupling.md`
+  - `group_ingest_mode=all_messages` 只旁听“bot 实际收到的 update”，无法覆盖 other bots messages（平台不投递）：`issues/done/issue-telegram-group-ingest-reply-decoupling.md`
   - 现有 ingest-only 接口只写入 user inbound（channel_user），不会写入“assistant outbound”到其他 session：`crates/gateway/src/channel_events.rs`
 - 当前测试覆盖：
   - 已有：listen-only ingest 的 handler 分支、channels.update merge/patch 等（见相关 issue）。
@@ -225,9 +227,9 @@
   - `crates/gateway/src/assets/js/page-channels.js`（可选）
 
 ## 交叉引用（Cross References）
-- `issues/issue-telegram-group-ingest-reply-decoupling.md`
-- `issues/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`
-- `issues/issue-telegram-group-mention-gating-not-working.md`
+- `issues/done/issue-telegram-group-ingest-reply-decoupling.md`
+- `issues/done/issue-telegram-self-mention-identity-injection-and-addressed-commands.md`
+- `issues/done/issue-telegram-group-mention-gating-not-working.md`
 
 ## 未决问题（Open Questions）
 - Q1: mirror 写入的 role/格式最终冻结为哪种？（User+prefix+metadata vs 更复杂的专用 role）

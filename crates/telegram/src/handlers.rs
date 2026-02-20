@@ -1130,6 +1130,15 @@ async fn send_context_card(
         );
     }
 
+    let html = render_context_card_markdown_fallback(context_text);
+
+    let _ = bot
+        .send_message(chat, html)
+        .parse_mode(ParseMode::Html)
+        .await;
+}
+
+fn render_context_card_markdown_fallback(context_text: &str) -> String {
     // Parse "**Key:** value" lines from the markdown response into a map.
     let mut fields: Vec<(&str, String)> = Vec::new();
     for line in context_text.lines() {
@@ -1193,13 +1202,9 @@ async fn send_context_card(
     };
 
     // Sandbox indicator
-    let sandbox_icon = if sandbox.starts_with("on") {
-        "🟢"
-    } else {
-        "⚫"
-    };
+    let sandbox_icon = if sandbox.starts_with("on") { "🟢" } else { "⚫" };
 
-    let html = format!(
+    format!(
         "\
 <b>📋 Session Context</b>
 
@@ -1215,12 +1220,7 @@ async fn send_context_card(
 <code>Session   {session}
 Messages  {messages}
 Tokens    {tokens}</code>"
-    );
-
-    let _ = bot
-        .send_message(chat, html)
-        .parse_mode(ParseMode::Html)
-        .await;
+    )
 }
 
 fn parse_context_v1_payload(context_text: &str) -> Option<serde_json::Value> {
@@ -3539,6 +3539,27 @@ mod tests {
         let text = wrapped.to_string();
         let out = parse_context_v1_payload(&text).expect("should parse context.v1");
         assert_eq!(out.get("session").and_then(|v| v.get("key")).and_then(|v| v.as_str()), Some("session:1"));
+    }
+
+    #[test]
+    fn render_context_card_markdown_fallback_uses_last_next_when_tokens_missing() {
+        let markdown = "\
+**Session:** `telegram:bot:123`\n\
+**Messages:** `3`\n\
+**Provider:** `openai-responses`\n\
+**Model:** `openai-responses::gpt-5.2`\n\
+**Sandbox:** `on (docker)`\n\
+**Plugins:** `none`\n\
+**Last:** `in=10 out=20 cached=0`\n\
+**Next (est):** `prompt=6500`\n";
+
+        let html = render_context_card_markdown_fallback(markdown);
+        assert!(html.contains("📋 Session Context"));
+        assert!(html.contains("telegram:bot:123"));
+        assert!(
+            html.contains("Tokens    Last in=10 out=20 cached=0 · Next prompt=6500"),
+            "should synthesize Tokens from Last/Next when Tokens is missing"
+        );
     }
 
     #[test]
