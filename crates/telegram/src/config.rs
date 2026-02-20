@@ -51,6 +51,14 @@ pub struct TelegramAccountConfig {
     /// Scope: **Group/Supergroup only**. Channel semantics are handled separately.
     pub group_ingest_mode: GroupIngestMode,
 
+    /// Mirror this bot's **successful group replies** into other Telegram bot
+    /// sessions on the Moltis side (ingest-only), so they can "know" what this
+    /// bot said even though Telegram does not deliver bot-to-bot updates.
+    ///
+    /// Scope: **Group/Supergroup only** (V1 gating uses `chat_id < 0`).
+    /// Default: false.
+    pub group_outbound_mirror_enabled: bool,
+
     /// User/peer allowlist for DMs.
     pub allowlist: Vec<String>,
 
@@ -96,13 +104,13 @@ impl TelegramAccountConfig {
         match self.mention_mode {
             MentionMode::Always => {
                 self.group_ingest_mode = GroupIngestMode::AllMessages;
-            }
+            },
             MentionMode::None => {
                 if self.group_ingest_mode == GroupIngestMode::MentionedOnly {
                     self.group_ingest_mode = GroupIngestMode::None;
                 }
-            }
-            MentionMode::Mention => {}
+            },
+            MentionMode::Mention => {},
         }
     }
 }
@@ -132,6 +140,7 @@ impl Default for TelegramAccountConfig {
             group_policy: GroupPolicy::default(),
             mention_mode: MentionMode::default(),
             group_ingest_mode: GroupIngestMode::default(),
+            group_outbound_mirror_enabled: false,
             allowlist: Vec::new(),
             group_allowlist: Vec::new(),
             stream_mode: StreamMode::default(),
@@ -143,6 +152,13 @@ impl Default for TelegramAccountConfig {
             reply_to_message: false,
         }
     }
+}
+
+/// Safe, non-secret snapshot of a Telegram account's mirror-related config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TelegramMirrorConfigSnapshot {
+    pub group_outbound_mirror_enabled: bool,
+    pub group_allowlist: Vec<String>,
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]

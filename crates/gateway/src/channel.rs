@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use {
     async_trait::async_trait,
-    serde_json::Value,
     secrecy::ExposeSecret,
+    serde_json::Value,
     tokio::sync::RwLock,
     tracing::{error, info, warn},
 };
@@ -42,14 +42,14 @@ fn merge_json_in_place(base: &mut Value, patch: &Value) {
         match (base_obj.get_mut(key), patch_val) {
             (Some(base_val), Value::Object(_)) if base_val.is_object() => {
                 merge_json_in_place(base_val, patch_val);
-            }
+            },
             // Explicit `null` overwrites to null (does not delete).
             (Some(base_val), _) => {
                 *base_val = patch_val.clone();
-            }
+            },
             (None, _) => {
                 base_obj.insert(key.clone(), patch_val.clone());
-            }
+            },
         }
     }
 }
@@ -469,6 +469,19 @@ impl ChannelService for LiveChannelService {
 
         info!(account_id, identifier, "sender denied");
         Ok(serde_json::json!({ "denied": identifier }))
+    }
+
+    async fn list_telegram_accounts(&self) -> Vec<String> {
+        let tg = self.telegram.read().await;
+        tg.account_ids()
+    }
+
+    async fn telegram_mirror_snapshot(
+        &self,
+        account_id: &str,
+    ) -> Option<moltis_telegram::config::TelegramMirrorConfigSnapshot> {
+        let tg = self.telegram.read().await;
+        tg.account_mirror_snapshot(account_id)
     }
 }
 

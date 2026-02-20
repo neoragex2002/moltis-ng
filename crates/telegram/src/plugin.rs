@@ -19,7 +19,10 @@ use moltis_channels::{
 };
 
 use crate::{
-    bot, config::TelegramAccountConfig, outbound::TelegramOutbound, state::AccountStateMap,
+    bot,
+    config::{TelegramAccountConfig, TelegramMirrorConfigSnapshot},
+    outbound::TelegramOutbound,
+    state::AccountStateMap,
 };
 
 /// Cache TTL for probe results (30 seconds).
@@ -78,6 +81,23 @@ impl TelegramPlugin {
         accounts
             .get(account_id)
             .and_then(|s| serde_json::to_value(&s.config).ok())
+    }
+
+    /// Get a safe snapshot of mirror-related config for a specific account.
+    ///
+    /// This intentionally excludes the bot token and other sensitive fields so
+    /// it can be used in gateway hot paths without risking accidental leakage.
+    pub fn account_mirror_snapshot(
+        &self,
+        account_id: &str,
+    ) -> Option<TelegramMirrorConfigSnapshot> {
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+        accounts
+            .get(account_id)
+            .map(|s| TelegramMirrorConfigSnapshot {
+                group_outbound_mirror_enabled: s.config.group_outbound_mirror_enabled,
+                group_allowlist: s.config.group_allowlist.clone(),
+            })
     }
 
     /// Update the in-memory config for an account without restarting the

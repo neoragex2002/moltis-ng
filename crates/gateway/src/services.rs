@@ -188,7 +188,10 @@ fn is_safe_markdown_url(url: &str) -> bool {
         return true;
     }
 
-    if lower.starts_with("javascript:") || lower.starts_with("data:") || lower.starts_with("vbscript:") {
+    if lower.starts_with("javascript:")
+        || lower.starts_with("data:")
+        || lower.starts_with("vbscript:")
+    {
         return false;
     }
 
@@ -363,6 +366,23 @@ pub trait ChannelService: Send + Sync {
     async fn senders_list(&self, params: Value) -> ServiceResult;
     async fn sender_approve(&self, params: Value) -> ServiceResult;
     async fn sender_deny(&self, params: Value) -> ServiceResult;
+
+    /// List active Telegram account IDs started on this Moltis instance.
+    ///
+    /// Default implementation returns an empty list for non-live/noop services.
+    async fn list_telegram_accounts(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Return a safe snapshot of mirror-related config for a Telegram account.
+    ///
+    /// Default implementation returns None for non-live/noop services.
+    async fn telegram_mirror_snapshot(
+        &self,
+        _account_id: &str,
+    ) -> Option<moltis_telegram::config::TelegramMirrorConfigSnapshot> {
+        None
+    }
 }
 
 pub struct NoopChannelService;

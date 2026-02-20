@@ -385,6 +385,7 @@ function EditChannelModal() {
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
 				mention_mode: form.querySelector("[data-field=mentionMode]").value,
 				group_ingest_mode: form.querySelector("[data-field=groupIngestMode]").value,
+				group_outbound_mirror_enabled: form.querySelector("[data-field=groupOutboundMirrorEnabled]").checked,
 				allowlist: allowlistItems.value,
 			};
 		if (editModel.value) {
@@ -437,6 +438,11 @@ function EditChannelModal() {
 	        <option value="all_messages">Listen (ingest all)</option>
 	        <option value="none">Off (ingest none)</option>
 	      </select>
+	      <label class="text-xs text-[var(--muted)]">Group Outbound Mirror</label>
+	      <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+	        <input type="checkbox" data-field="groupOutboundMirrorEnabled" checked=${!!cfg.group_outbound_mirror_enabled} />
+	        Mirror this bot’s successful group replies into other bots’ sessions (ingest-only)
+	      </label>
 	      <label class="text-xs text-[var(--muted)]">Default Model</label>
 	      <${ModelSelect} models=${modelsSig.value} value=${editModel.value}
 	        onChange=${(v) => {

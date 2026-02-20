@@ -1,10 +1,17 @@
 # Issue: Telegram 多 Bot 群聊 “bot2 要知情 bot1 回复/工具结果” 无法旁听（需 Moltis 侧出站复制到会话）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: TODO
+- Status: DONE
 - Priority: P1
 - Owners: <TBD>
 - Components: telegram / gateway / sessions / ui / config
+ 
+**本单已冻结的关键口径（V1 Spec Frozen）**
+- mirror 目标范围：本实例“所有 Telegram bot accounts”（排除 source），并对配置了 `group_allowlist` 的 target 做 `chat_id ∈ allowlist` 过滤。
+- mirror 语义：写入为 `role=user` 的“转述上下文输入”，带固定前缀 `[@source_bot mirror]` + `channel.mirror` metadata。
+- mirror 内容范围：仅最终正文 text；不镜像 logbook/suffix/debug；媒体仅写占位（不镜像媒体本体）。
+- 触发/安全：仅出站成功后写入；去重 key 使用 `source_account_id + chat_id + inbound_trigger_message_id + hash(text)`；mirror 写入不得触发 LLM/不得出站。
+- “所有 bot”的工程定义（V1）：以“本 Moltis 实例中已启动的 Telegram accounts 列表”为准（不尝试从 Telegram 平台枚举群成员 bot）。
 
 **已实现（相关前置）**
 - 群聊 reply vs ingest 二维解耦（`group_ingest_mode` + ingest-only 写入）：`issues/done/issue-telegram-group-ingest-reply-decoupling.md`
@@ -14,7 +21,17 @@
 > 注：上述 3 张前置单已关单并移入 `issues/done/`，引用路径见下文已同步更新。
 
 **已知差异/后续优化（非阻塞）**
-- 本单聚焦 “bot1 的最终回复正文” 的镜像；是否同步 tool 输出摘要属于可选扩展（见 Open Questions）。
+- 本单聚焦 “bot1 的最终回复正文” 的镜像；是否同步 tool 输出摘要属于可选扩展（见 Q5）。
+
+**本轮已实现（Implementation Done）**
+- 新增配置：`group_outbound_mirror_enabled`（默认 `false`）。
+- gateway 出站成功后 mirror：将 source bot 的最终回复文本以 ingest-only 方式写入其他 bot 的 session（`role=user` 转述 + `[@source_bot mirror]` 前缀 + `channel.mirror/mirror_key/source_*` metadata）。
+- V1 媒体占位：当发送 screenshot（image/png）到群里成功后，会 mirror 一条短占位文本 `（发送了一张图片）` 到其他 bot sessions（不镜像媒体本体/URL）。
+- “all bots”集合：以本实例已启动的 Telegram accounts 列表为准，并对配置了 `group_allowlist` 的 target 做 `chat_id ∈ allowlist` 过滤。
+- 去重：`mirror_key`（sha256）+ 扫描 target session 最近 200 条（尾部扫描），避免重试/并发重复写入。
+- SessionStore 增补：`tail_contains_channel_field_value(...)` 用于尾部查重（避免反序列化大量 JSON）。
+- UI：Channels -> Edit Telegram Bot 增加 Group Outbound Mirror toggle（可视化开启/关闭）。
+- 自动化测试：已增补 gateway 单测覆盖 mirror 写入、去重、`chat_id` 非负不触发，以及 screenshot 占位 mirror。
 
 ---
 
@@ -39,14 +56,16 @@
 - **source bot / target bot**：触发出站的 bot（source）与接收镜像写入的 bot（target）。
 - **chat scope**：同一个 Telegram 群/超级群的 `chat_id`（本仓库当前按 `(account_id, chat_id)` 做会话分桶；topic/thread 先不纳入）。
 - **ingest-only**：仅写入 session，不触发 LLM，不产生任何 Telegram 出站。
+- **转述写入（role=user）**：mirror 写入在 target bot 的 session 中以 `role=user` 形式出现，语义是“target bot 收到的一段上下文输入（转述）”，而不是“target bot 自己说过的话”。
+  - Why：避免 target bot 把 mirror 内容误判成自己的 assistant 历史输出，引发身份串线/模板化“我在/我不知道别的 bot…”等话术。
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [ ] 在同一群聊内，当 source bot 成功发送回复后，按配置把该回复镜像写入 target bot 的 session 历史（ingest-only）。
-- [ ] 镜像写入不得触发 target bot 的 LLM run，不得导致任何 Telegram 出站（避免回环/刷屏）。
-- [ ] 镜像必须可配置、默认关闭；并且仅限 Group/Supergroup（DM/私聊不涉及，保持原样）。
-- [ ] 镜像写入内容必须可区分来源（例如前缀 `[@lovely_apple_bot] ...` 或 metadata 标记），避免 target bot 误以为那是自己说的。
-- [ ] （V1）当 source bot 出站包含媒体（图片/文件/语音等）时，mirror 至少写入“文本占位 + 来源标记”（不镜像媒体本体）。
+- [x] 在同一群聊内，当 source bot 成功发送回复后，把该回复镜像写入 target bot 的 session 历史（ingest-only），使其“知情” source bot 的最终输出。
+- [x] 镜像写入不得触发 target bot 的 LLM run，不得导致任何 Telegram 出站（避免回环/刷屏）。
+- [x] 镜像必须可配置、默认关闭；并且仅限 Telegram 群聊（V1：group/supergroup；topic/thread/channel 先不纳入，DM/私聊不涉及保持原样）。
+- [x] 镜像写入内容必须可区分来源（例如前缀 `[@lovely_apple_bot] ...` 或 metadata 标记），避免 target bot 误以为那是自己说的。
+- [x] （V1）当 source bot 出站包含媒体（图片/文件/语音等）时，mirror 至少写入“文本占位 + 来源标记”（不镜像媒体本体）。
 
 ### 非功能目标（Non-functional）
 - 正确性口径（必须/不得）：
@@ -55,8 +74,9 @@
   - 不得：不得把镜像再次触发“镜像”（防止多 bot 互镜像形成爆炸）。
   - 不得：不得让 mirror 绕过既有 access control（例如写入到错误 chat_id/session）。
 - 兼容性：默认关闭；旧配置不受影响。
+- UI 兼容性：mirror 只做“新增字段/新增消息”的增量变更，不改 JSONL schema；Web Sessions UI 必须可正常渲染（无需美化，但不得崩溃）。
 - 可观测性：
-  - 需在日志与 `/context`（可选）暴露：mirror 配置是否启用、最近一次 mirror 的 source/target/chat_id。
+- 需在日志与 `/context`（可选）暴露：mirror 配置是否启用、最近一次 mirror 的 source/target/chat_id。
 - 安全与隐私：
   - 默认不镜像 DMs。
   - 镜像写入不应记录 bot token、敏感凭据等；日志只打印必要定位字段（account_id/chat_id/message_id/hashed ids）。
@@ -122,16 +142,25 @@
 
 #### 行为规范（Normative Rules）
 - R1（触发点）：仅在 source bot 的 Telegram 出站发送 **成功**后触发镜像（拿到最终文本）。
-- R2（范围）：仅 Group/Supergroup；DM 不镜像。
-- R3（目标）：仅镜像到显式配置的 target bot 列表（allowlist），且目标必须是“同一 chat_id”。
+- R2（范围）：仅 Telegram 群聊；DM 不镜像。V1 使用 `chat_id < 0` 作为“群聊判定”的近似（覆盖 group/supergroup；channel/topic/thread 先不细分）。
+- R3（目标范围定义 / “所有 bot”）：镜像到“本 Moltis 实例中配置启用的所有 Telegram bot accounts（排除 source 自己）”。
+- R3.1（可选过滤，避免污染）：若 target bot 配置了 `group_allowlist`（非空），则只有当 `chat_id ∈ group_allowlist` 时才对该 target 生效（用于精确表达“这个 bot 确实在这个群里”）。
 - R4（写入）：写入为 ingest-only；不得触发 LLM，不得产生 Telegram 出站。
-- R5（去重）：同一条 source outbound 只镜像一次（建议 key：`(source_account_id, chat_id, telegram_sent_message_id|hash(text))`）。
+- R4.1（与 ingest-only/门禁解耦）：mirror 是否写入 target session **不依赖** target 的 `group_ingest_mode`（mirror 是“网关内部补偿写入”，不是“旁听收消息”）。
+- R5（去重）：同一条 source outbound 只镜像一次。V1 去重 key 使用：
+  - `source_account_id + chat_id + inbound_trigger_message_id + hash(text)`
+  - 说明：当前 Telegram outbound 接口不返回“sent message id”，因此 V1 不依赖 `telegram_sent_message_id`。
 - R6（循环保护）：镜像写入的记录应携带 metadata `mirror=true`（或前缀），并在 mirror pipeline 中明确 “mirror messages 不再触发 mirror”。
+- R7（正文范围）：V1 只 mirror “最终回复正文 text”，不 mirror logbook/suffix/debug 尾巴（避免 token 膨胀与调试污染）。
+- R8（会话创建）：target `(bot, chat)` session 若不存在，允许按需创建并 append（lazy create），无需提前点名或提前建空会话。
+- R9（持久化去重细则）：mirror 写入会携带 `channel.mirror_key=<hash>`；写入前会在 target session 的最近 N 条消息中查找同 key，命中则跳过（避免重试/并发导致重复）。
+  - V1 约定：`mirror_key = sha256_hex(source_account_id + \"|\" + chat_id + \"|\" + inbound_trigger_message_id + \"|\" + text)`；`N=200`。
 
 #### 接口与数据结构（Contracts）
-- 配置（建议新增 TelegramAccountConfig 字段，默认空）：
-  - `group_outbound_mirror_to_accounts: ["fluffy", "another_bot"]`
-  - 仅对 Group/Supergroup 生效。
+- 配置（建议新增 TelegramAccountConfig 字段，默认关闭）：
+  - `group_outbound_mirror_enabled: bool`（默认 `false`）
+  - 仅对 Telegram 群聊生效（见 R2）。
+  - 说明：V1 采用“all bots（本实例所有 bot accounts）”而非 per-target 列表，避免配置爆炸、收敛语义；更细粒度过滤由 `group_allowlist` 承担（见 R3.1）。
 - 写入格式（建议其一，需冻结口径）：
   - 选项 A（推荐，最小侵入）：写入 `PersistedMessage::User`，文本前缀 `[@<source_bot_username>] <reply>`，并在 `channel` metadata 标记 `{ "mirror": true, "source_account_id": "...", "source_bot_handle": "@..." }`，避免 UI/LLM 混淆。
   - 选项 B：新增专用 message role（需要跨模块改动更大，不作为第一版）。
@@ -146,10 +175,11 @@
         "channel_type": "telegram",
         "message_kind": "text",
         "mirror": true,
+        "mirror_key": "sha256:1f7c...（示例）",
         "source_account_id": "lovely",
         "source_bot_handle": "@lovely_apple_bot",
         "source_chat_id": "-5288040422",
-        "source_message_id": "184"
+        "source_inbound_trigger_message_id": "184"
       }
     }
     ```
@@ -164,10 +194,11 @@
         "channel_type": "telegram",
         "message_kind": "text",
         "mirror": true,
+        "mirror_key": "sha256:9a01...（示例）",
         "source_account_id": "lovely",
         "source_bot_handle": "@lovely_apple_bot",
         "source_chat_id": "-5288040422",
-        "source_message_id": "184",
+        "source_inbound_trigger_message_id": "184",
         "media": { "kind": "photo" }
       }
     }
@@ -184,7 +215,7 @@
 
 #### 失败模式与降级（Failure modes & Degrade）
 - 如果 mirror 写入失败（session store 不可用/序列化失败）：仅 warn 日志，不影响 source bot 正常出站回复。
-- 如果 target session 未初始化：允许创建/append（与 channel-bound session 同类规则），或选择仅在存在 active session 时写入（需明确）。
+- 如果 target session 未初始化：V1 允许创建/append（lazy create），与现有 channel-bound session 行为一致。
 
 #### 安全与隐私（Security/Privacy）
 - 默认关闭；开启需显式配置。
@@ -192,19 +223,51 @@
 - 只在同 chat_id 内镜像（不跨群/跨 chat）。
 
 ## 验收标准（Acceptance Criteria）【不可省略】
-- [ ] 在同一群中：仅 @bot1 触发 bot1 干活并回复后，用户 @bot2 询问“bot1 刚才说了什么”，bot2 能引用 bot1 的最终回复（无需手动粘贴）。
-- [ ] bot2 不会因为 mirror 写入而主动出站回复（无额外 Telegram 消息）。
-- [ ] mirror 默认关闭；开启后只影响配置的 bot 对/目标列表。
-- [ ] 官方平台限制已在文档与 debug 口径中明确（避免误解 “旁听能拿到 bot 回复”）。
+- [ ] 在同一群中（人工验收）：仅 @bot1 触发 bot1 干活并回复后，用户 @bot2 询问“bot1 刚才说了什么”，bot2 能引用 bot1 的最终回复（无需手动粘贴）。
+- [x] bot2 不会因为 mirror 写入而主动出站回复（无额外 Telegram 消息）。
+- [x] mirror 默认关闭；开启后会把 source bot 的群聊最终回复镜像写入“本实例其他 bot accounts”的同 chat session（并受 `group_allowlist` 过滤约束）。
+- [x] 官方平台限制已在文档与 debug 口径中明确（避免误解 “旁听能拿到 bot 回复”）。
 
 ## 测试计划（Test Plan）【不可省略】
 ### Unit
-- [ ] mirror 去重 key 逻辑（同一 outbound 不重复写入）
-- [ ] mirror 写入为 ingest-only（不触发 chat.send / 不 enqueue channel replies）
-- [ ] mirror 消息标记（metadata/prefix）能被 UI 与 prompt 重建路径正确保留
+- [x] mirror 去重 key 逻辑（同一 outbound 不重复写入）
+- [x] mirror 写入为 ingest-only（不触发 chat.send / 不 enqueue channel replies）
+- [x] mirror 消息标记（metadata/prefix）能被 UI 与 prompt 重建路径正确保留
 
 ### Integration
-- [ ] 端到端：两个 Telegram bot + 同群，开启 mirror；验证 bot2 session 历史出现 bot1 回复的镜像条目（可用 `/context`/debug 或 session store 读取验证）。
+- [ ] 端到端（人工验收）：两个 Telegram bot + 同群，开启 mirror；验证 bot2 session 历史出现 bot1 回复的镜像条目（可用 Web UI 或读取 session store 验证）。
+
+#### 人工验收步骤（Manual E2E）
+**前置条件**
+- 同一个 Moltis 实例中至少启动两个 Telegram bot accounts（例如 `lovely` 与 `fluffy`），并且都在同一个 Telegram 群里。
+- Telegram 平台侧 Privacy Mode 是否 OFF 不影响本特性（本特性是 Moltis 侧补偿）；建议保持你现有配置不变。
+
+**UI 配置（必须）**
+1) 打开 Web UI → `Channels`
+2) 选择要作为 source 的 bot（例如 `lovely`）→ `Edit`
+3) 勾选 `Group Outbound Mirror`（`group_outbound_mirror_enabled=true`）→ `Save Changes`
+
+**可选：target allowlist 过滤（避免污染）**
+- 如果某个 target bot 配置了 `group_allowlist`（非空），则它只会在 `chat_id ∈ group_allowlist` 的群里接收 mirror。
+- 备注：当前 UI 暂未提供 `group_allowlist` 编辑入口；如你已在配置文件/DB 中设置过该字段，按该字段生效即可。
+
+**交互验收（Telegram 群内）**
+1) 在群里只点名 source bot：`@lovely_apple_bot 帮我查下当前挂载了哪些目录`
+2) 等 source bot 在群里成功回复一条最终答案（文本）
+3) 然后点名另一个 bot：`@fluffy_tomato_bot 你看得到刚才 @lovely_apple_bot 的结果吗？复述一下`
+4) 期望：
+   - `fluffy` 能引用/复述 `lovely` 的最终回复内容（因为其 session 已写入 `[@lovely_apple_bot mirror] ...` 的转述记录）
+   - `fluffy` 不会因为 mirror 写入而自动“额外出站”刷屏（mirror 是 ingest-only）
+
+**媒体占位验收（可选）**
+1) 触发 source bot 发送一张截图/图片（例如让其调用工具返回 screenshot 或直接发送图片）
+2) 期望：target bot session 中出现一条 `[@source_bot mirror] （发送了一张图片）` 的占位转述记录（不包含媒体本体/URL）
+
+**落盘验证（Web UI）**
+- 打开 `fluffy` 对应的 session（通常为 `telegram:fluffy:<chat_id>`），应能看到一条 `role=user` 的记录，正文前缀形如：`[@lovely_apple_bot mirror] ...`，并在 `channel` metadata 中包含：
+  - `mirror=true`
+  - `mirror_key=sha256:...`
+  - `source_account_id/source_bot_handle/source_chat_id/source_inbound_trigger_message_id`
 
 ### 自动化缺口（如有，必须写手工验收）
 - 若 CI 无 Telegram 环境：记录手工验收步骤（2 bots、同群、配置、预期日志关键词）。
@@ -215,9 +278,15 @@
 - 上线观测：统计 mirror 成功/失败计数；日志关键词 `telegram outbound mirror`.
 
 ## 实施拆分（Implementation Outline）
-- Step 1: 定义并落地配置字段（serde default 空列表），并确保 `channels.update` merge/patch 能保留该字段。
-- Step 2: 在 gateway 的 Telegram 出站成功回调处增加 mirror pipeline（拿到最终文本 → resolve target sessions → append mirror message）。
-- Step 3: 增补去重与循环保护（metadata 标记 + guard）。
+- Step 0（已冻结，V1）：在 gateway 内扩展 `ChannelService` 提供轻量读取接口：
+  - `list_telegram_accounts()`：返回“本实例已启动的 Telegram accounts 列表”
+  - `telegram_mirror_snapshot(account_id)`：返回该 account 的必要配置快照（至少包含 `group_outbound_mirror_enabled`、`group_allowlist`），且不得包含/暴露 token。
+- Step 1: 定义并落地配置字段（serde default：`group_outbound_mirror_enabled=false`），并确保 `channels.update` merge/patch 能保留该字段。
+- Step 2: 在 gateway 的 Telegram 出站成功回调处增加 mirror pipeline：
+  - 仅在 `chat_id < 0` 且 `group_outbound_mirror_enabled=true` 时生效
+  - 遍历“本实例所有 Telegram bot accounts”（排除 source），按 target 的 `group_allowlist` 过滤（若配置非空）
+  - 生成 `role=user` 的 mirror message（前缀 + metadata），append 到 target session
+- Step 3: 增补去重与循环保护（`channel.mirror_key` + 最近 N 条查重 + `channel.mirror=true` guard）。
 - Step 4: 增补测试（unit + 手工验收指引）。
 - Step 5: 文档与 UI（可选）：在 Channels UI 增加 mirror 配置（或先仅支持配置文件/JSON patch）。
 - 受影响文件（预估）：
@@ -232,16 +301,16 @@
 - `issues/done/issue-telegram-group-mention-gating-not-working.md`
 
 ## 未决问题（Open Questions）
-- Q1: mirror 写入的 role/格式最终冻结为哪种？（User+prefix+metadata vs 更复杂的专用 role）
-- Q2: 是否需要镜像 tool 输出摘要？如果需要，摘要口径是什么、上限是多少、是否脱敏？
-- Q3: target session 不存在时是否自动创建/命名？命名策略如何避免污染（例如 “Telegram Mirror 1/2”）？
-- Q4: mirror 是否只对 `group_ingest_mode=all_messages` 的 target 生效，还是独立开关？（建议独立，避免强耦合）
-- Q5: V2 媒体 mirror 若要支持，是否需要统一的媒体落盘/引用协议（避免 Telegram/exec screenshot 各自为政）？
+- Q1（已冻结）：mirror 写入角色与格式：V1 固定为 `role=user + 前缀 + channel.mirror metadata`（见 Contracts）。
+- Q2（已冻结）：V1 不镜像 tool 输出摘要与 logbook/suffix（仅 mirror 最终正文 text）。
+- Q3（已冻结）：target session 不存在时允许 lazy create + append（无需提前点名/提前创建）。
+- Q4（已冻结）：V1 使用 ChannelService 轻量读取接口获取 “all bots list + config snapshot”。
+- Q5（后续增强）：V2 媒体 mirror 若要支持，是否需要统一的媒体落盘/引用协议（避免 Telegram/exec screenshot 各自为政）？
 
 ## Close Checklist（关单清单）【不可省略】
-- [ ] 行为已按 Spec 实现（口径一致）
-- [ ] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
-- [ ] 文档已明确 Telegram 平台限制与 Moltis 侧补偿机制（避免误解）
-- [ ] 默认关闭且可回滚（不影响现网）
-- [ ] 安全隐私检查通过（不镜像 DM；日志不泄露敏感字段）
-- [ ] 回滚策略明确
+- [x] 行为已按 Spec 实现（口径一致）
+- [x] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
+- [x] 文档已明确 Telegram 平台限制与 Moltis 侧补偿机制（避免误解）
+- [x] 默认关闭且可回滚（不影响现网）
+- [x] 安全隐私检查通过（不镜像 DM；日志不泄露敏感字段）
+- [x] 回滚策略明确

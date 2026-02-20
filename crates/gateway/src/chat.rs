@@ -11,6 +11,7 @@ use {
     async_trait::async_trait,
     serde::{Deserialize, Serialize},
     serde_json::Value,
+    sha2::{Digest, Sha256},
     tokio::{
         sync::{OnceCell, OwnedSemaphorePermit, RwLock, Semaphore, mpsc},
         task::AbortHandle,
@@ -808,7 +809,9 @@ async fn build_prompt_runtime_context(
 
     let channel_target = session_entry
         .and_then(|entry| entry.channel_binding.as_deref())
-        .and_then(|binding| serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding).ok());
+        .and_then(|binding| {
+            serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding).ok()
+        });
 
     let host_ctx = PromptHostRuntimeContext {
         host: Some(state.hostname.clone()),
@@ -822,7 +825,9 @@ async fn build_prompt_runtime_context(
             .as_ref()
             .map(|t| t.channel_type.as_str().to_string()),
         channel_account_id: channel_target.as_ref().map(|t| t.account_id.clone()),
-        channel_account_handle: channel_target.as_ref().and_then(|t| t.account_handle.clone()),
+        channel_account_handle: channel_target
+            .as_ref()
+            .and_then(|t| t.account_handle.clone()),
         channel_chat_id: channel_target.as_ref().map(|t| t.chat_id.clone()),
         sudo_non_interactive,
         sudo_status,
@@ -2488,7 +2493,7 @@ impl ChatService for LiveChatService {
                         BroadcastOpts::default(),
                     )
                     .await;
-                }
+                },
                 Err(e) => {
                     warn!(
                         session = %session_key,
@@ -2509,7 +2514,7 @@ impl ChatService for LiveChatService {
                         BroadcastOpts::default(),
                     )
                     .await;
-                }
+                },
             }
         }
 
@@ -3044,13 +3049,11 @@ impl ChatService for LiveChatService {
         }
 
         match result {
-            Some(output) => {
-                Ok(serde_json::json!({
-                    "text": output.text,
-                    "inputTokens": output.input_tokens,
-                    "outputTokens": output.output_tokens,
-                }))
-            },
+            Some(output) => Ok(serde_json::json!({
+                "text": output.text,
+                "inputTokens": output.input_tokens,
+                "outputTokens": output.output_tokens,
+            })),
             None => {
                 // Check the last broadcast for this run to get the actual error message.
                 let error_msg = state
@@ -3433,7 +3436,7 @@ impl ChatService for LiveChatService {
                 Err(e) => {
                     warn!("failed to discover skills: {e}");
                     Vec::new()
-                }
+                },
             }
         } else {
             Vec::new()
@@ -4617,7 +4620,8 @@ impl CompactionBudget {
     }
 
     fn effective_input_budget(&self) -> u64 {
-        self.input_hard_cap.saturating_sub(self.reserve_safety_tokens)
+        self.input_hard_cap
+            .saturating_sub(self.reserve_safety_tokens)
     }
 }
 
@@ -4639,9 +4643,12 @@ fn estimate_input_tokens_for_messages(messages: &[ChatMessage]) -> u64 {
                             total += tokens_estimate_utf8_bytes_div_3(t);
                         }
                     }
-                }
+                },
             },
-            ChatMessage::Assistant { content, tool_calls } => {
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+            } => {
                 if let Some(t) = content {
                     total += tokens_estimate_utf8_bytes_div_3(t);
                 }
@@ -4649,7 +4656,7 @@ fn estimate_input_tokens_for_messages(messages: &[ChatMessage]) -> u64 {
                     total += tokens_estimate_utf8_bytes_div_3(&tc.name);
                     total += tokens_estimate_utf8_bytes_div_3(&tc.arguments.to_string());
                 }
-            }
+            },
             ChatMessage::Tool {
                 tool_call_id: _,
                 content,
@@ -4760,7 +4767,9 @@ fn build_token_debug_info(
 
     let context_window = u64::from(provider.context_window());
     let planned_max_output_toks = extract_planned_max_output_toks(
-        llm_debug.get("overrides").unwrap_or(&serde_json::Value::Null),
+        llm_debug
+            .get("overrides")
+            .unwrap_or(&serde_json::Value::Null),
     )
     .or_else(|| provider.output_limit().map(u64::from))
     .unwrap_or_else(|| u64::min(16_384, context_window / 5));
@@ -4942,9 +4951,12 @@ async fn compact_session(
                     }
                 }
                 if !paths.is_empty() {
-                    info!(files = paths.len(), "compact: silent memory turn wrote files");
+                    info!(
+                        files = paths.len(),
+                        "compact: silent memory turn wrote files"
+                    );
                 }
-            }
+            },
             Err(e) => warn!(error = %e, "compact: silent memory turn failed"),
         }
     }
@@ -4956,9 +4968,8 @@ async fn compact_session(
 
     let old_segment = &history[..keep_start_idx];
 
-    let mut summary_messages = vec![
-        ChatMessage::system(
-            "You are a conversation summarizer. Summarize the conversation messages you see.\n\
+    let mut summary_messages = vec![ChatMessage::system(
+        "You are a conversation summarizer. Summarize the conversation messages you see.\n\
 \n\
 Output MUST be factual and concise. Use this fixed structure:\n\
 \n\
@@ -4978,8 +4989,7 @@ Output MUST be factual and concise. Use this fixed structure:\n\
 - ... (files, commands, links, identifiers)\n\
 \n\
 If something is unknown, write \"Unknown\" instead of guessing.",
-        ),
-    ];
+    )];
     summary_messages.extend(values_to_chat_messages(old_segment));
     summary_messages.push(ChatMessage::user(
         "Summarize the conversation above. Output only the summary, no preamble.",
@@ -4998,7 +5008,7 @@ If something is unknown, write \"Unknown\" instead of guessing.",
             StreamEvent::Error(e) => return Err(format!("compact summarization failed: {e}")),
             StreamEvent::ToolCallStart { .. }
             | StreamEvent::ToolCallArgumentsDelta { .. }
-            | StreamEvent::ToolCallComplete { .. } => {}
+            | StreamEvent::ToolCallComplete { .. } => {},
         }
     }
 
@@ -5420,7 +5430,10 @@ fn sanitize_channel_error_text(text: &str, max_chars: usize) -> String {
         return s;
     }
     if s.chars().count() > max_chars {
-        s = s.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+        s = s
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
         s.push('…');
     }
     s
@@ -5438,7 +5451,10 @@ fn format_channel_error_reply(error_obj: &serde_json::Value) -> String {
         .get("title")
         .and_then(|v| v.as_str())
         .unwrap_or("Error");
-    let detail = error_obj.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+    let detail = error_obj
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let title = sanitize_channel_error_text(title, 120);
     let detail = sanitize_channel_error_text(detail, 360);
@@ -5505,6 +5521,207 @@ fn format_logbook_html(entries: &[String]) -> String {
     html
 }
 
+fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let bytes = hasher.finalize();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+async fn ensure_channel_bound_session(
+    state: &Arc<GatewayState>,
+    session_key: &str,
+    account_id: &str,
+    chat_id: &str,
+) {
+    let Some(ref session_meta) = state.services.session_metadata else {
+        return;
+    };
+
+    let binding = moltis_channels::ChannelReplyTarget {
+        channel_type: moltis_channels::ChannelType::Telegram,
+        account_id: account_id.to_string(),
+        account_handle: None,
+        chat_id: chat_id.to_string(),
+        message_id: None,
+    };
+
+    let Ok(binding_json) = serde_json::to_string(&binding) else {
+        return;
+    };
+
+    let entry = session_meta.get(session_key).await;
+    let has_binding = entry.as_ref().is_some_and(|e| e.channel_binding.is_some());
+    if !has_binding {
+        let existing = session_meta
+            .list_channel_sessions("telegram", account_id, chat_id)
+            .await;
+        let n = existing.len() + 1;
+        let _ = session_meta
+            .upsert(session_key, Some(format!("Telegram {n}")))
+            .await;
+        session_meta
+            .set_channel_binding(session_key, Some(binding_json))
+            .await;
+    }
+}
+
+async fn resolve_telegram_session_key(
+    state: &Arc<GatewayState>,
+    account_id: &str,
+    chat_id: &str,
+) -> String {
+    if let Some(ref sm) = state.services.session_metadata
+        && let Some(key) = sm.get_active_session("telegram", account_id, chat_id).await
+    {
+        return key;
+    }
+    format!("telegram:{account_id}:{chat_id}")
+}
+
+async fn maybe_mirror_telegram_group_reply(
+    state: &Arc<GatewayState>,
+    source_account_id: &str,
+    source_account_handle: Option<&str>,
+    chat_id: &str,
+    inbound_trigger_message_id: Option<&str>,
+    text: &str,
+) {
+    let Ok(chat_i64) = chat_id.parse::<i64>() else {
+        return;
+    };
+    if chat_i64 >= 0 {
+        return;
+    }
+
+    let Some(ref store) = state.services.session_store else {
+        return;
+    };
+
+    let Some(src_snap) = state
+        .services
+        .channel
+        .telegram_mirror_snapshot(source_account_id)
+        .await
+    else {
+        return;
+    };
+    if !src_snap.group_outbound_mirror_enabled {
+        return;
+    }
+
+    let accounts = state.services.channel.list_telegram_accounts().await;
+    if accounts.is_empty() {
+        return;
+    }
+
+    let source_bot_handle = source_account_handle
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("@{source_account_id}"));
+    let inbound_id = inbound_trigger_message_id.unwrap_or("");
+    let dedupe_seed = format!("{source_account_id}|{chat_id}|{inbound_id}|{text}");
+    let mirror_key = format!("sha256:{}", sha256_hex(&dedupe_seed));
+
+    let source_username = source_bot_handle
+        .strip_prefix('@')
+        .unwrap_or(&source_bot_handle);
+    let mirrored_content = format!("[{source_bot_handle} mirror] {text}");
+
+    let channel_meta = serde_json::json!({
+        "channel_type": "telegram",
+        "message_kind": "text",
+        "username": source_username,
+        "sender_name": source_username,
+        "mirror": true,
+        "mirror_key": mirror_key,
+        "source_account_id": source_account_id,
+        "source_bot_handle": source_bot_handle,
+        "source_chat_id": chat_id,
+        "source_inbound_trigger_message_id": inbound_id,
+    });
+
+    let mirror_key_str = channel_meta
+        .get("mirror_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    for target_account_id in accounts {
+        if target_account_id == source_account_id {
+            continue;
+        }
+
+        if let Some(target_snap) = state
+            .services
+            .channel
+            .telegram_mirror_snapshot(&target_account_id)
+            .await
+        {
+            if !target_snap.group_allowlist.is_empty()
+                && !target_snap.group_allowlist.iter().any(|id| id == chat_id)
+            {
+                continue;
+            }
+        }
+
+        let target_session_key =
+            resolve_telegram_session_key(state, &target_account_id, chat_id).await;
+        ensure_channel_bound_session(state, &target_session_key, &target_account_id, chat_id).await;
+
+        if let Ok(found) = store
+            .tail_contains_channel_field_value(
+                &target_session_key,
+                "mirror_key",
+                mirror_key_str,
+                200,
+            )
+            .await
+        {
+            if found {
+                continue;
+            }
+        }
+
+        let msg_index = if let Some(ref sm) = state.services.session_metadata {
+            sm.get(&target_session_key)
+                .await
+                .map(|e| e.message_count)
+                .unwrap_or(0) as usize
+        } else {
+            store.count(&target_session_key).await.unwrap_or(0) as usize
+        };
+        let user_msg =
+            PersistedMessage::user_with_channel(mirrored_content.clone(), channel_meta.clone());
+        let user_val = user_msg.to_value();
+        if let Err(e) = store.append(&target_session_key, &user_val).await {
+            warn!(
+                source_account_id,
+                target_account_id,
+                chat_id,
+                error = %e,
+                "telegram outbound mirror: failed to append mirror message"
+            );
+            continue;
+        }
+
+        if let Some(ref sm) = state.services.session_metadata {
+            sm.touch(&target_session_key, (msg_index + 1) as u32).await;
+            if msg_index == 0 {
+                let preview = extract_preview_from_value(&user_val);
+                sm.set_preview(&target_session_key, preview.as_deref())
+                    .await;
+            }
+        }
+
+        debug!(
+            source_account_id,
+            target_account_id,
+            chat_id,
+            mirror_key = mirror_key_str,
+            "telegram outbound mirror: appended"
+        );
+    }
+}
+
 async fn deliver_channel_replies_to_targets(
     outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound>,
     targets: Vec<moltis_channels::ChannelReplyTarget>,
@@ -5538,15 +5755,25 @@ async fn deliver_channel_replies_to_targets(
                         // Short transcript fits as a caption on the voice message.
                         if transcript.len() <= moltis_telegram::markdown::TELEGRAM_CAPTION_LIMIT {
                             payload.text = transcript;
-                            if let Err(e) = outbound
+                            let send_res = outbound
                                 .send_media(&target.account_id, &target.chat_id, &payload, reply_to)
-                                .await
-                            {
+                                .await;
+                            if let Err(e) = send_res {
                                 warn!(
                                     account_id = target.account_id,
                                     chat_id = target.chat_id,
                                     "failed to send channel voice reply: {e}"
                                 );
+                            } else {
+                                maybe_mirror_telegram_group_reply(
+                                    &state,
+                                    &target.account_id,
+                                    target.account_handle.as_deref(),
+                                    &target.chat_id,
+                                    reply_to,
+                                    &payload.text,
+                                )
+                                .await;
                             }
                             // Send logbook as a follow-up if present.
                             if !logbook_html.is_empty()
@@ -5577,6 +5804,16 @@ async fn deliver_channel_replies_to_targets(
                                     chat_id = target.chat_id,
                                     "failed to send channel voice reply: {e}"
                                 );
+                            } else {
+                                maybe_mirror_telegram_group_reply(
+                                    &state,
+                                    &target.account_id,
+                                    target.account_handle.as_deref(),
+                                    &target.chat_id,
+                                    reply_to,
+                                    &transcript,
+                                )
+                                .await;
                             }
                             let text_result = if logbook_html.is_empty() {
                                 outbound
@@ -5629,6 +5866,16 @@ async fn deliver_channel_replies_to_targets(
                                 chat_id = target.chat_id,
                                 "failed to send channel reply: {e}"
                             );
+                        } else {
+                            maybe_mirror_telegram_group_reply(
+                                &state,
+                                &target.account_id,
+                                target.account_handle.as_deref(),
+                                &target.chat_id,
+                                reply_to,
+                                &text,
+                            )
+                            .await;
                         }
                     },
                 },
@@ -5924,6 +6171,7 @@ async fn send_screenshot_to_channels(
     let mut tasks = Vec::with_capacity(targets.len());
     for target in targets {
         let outbound = Arc::clone(&outbound);
+        let state = Arc::clone(state);
         let payload = payload.clone();
         tasks.push(tokio::spawn(async move {
             match target.channel_type {
@@ -5949,6 +6197,18 @@ async fn send_screenshot_to_channels(
                             chat_id = target.chat_id,
                             "sent screenshot to telegram"
                         );
+
+                        // V1 media mirror: write a compact placeholder into other bots' sessions
+                        // (do not mirror media bytes/URLs).
+                        maybe_mirror_telegram_group_reply(
+                            &state,
+                            &target.account_id,
+                            target.account_handle.as_deref(),
+                            &target.chat_id,
+                            reply_to,
+                            "（发送了一张图片）",
+                        )
+                        .await;
                     }
                 },
             }
@@ -6030,6 +6290,7 @@ mod tests {
         anyhow::Result,
         moltis_agents::{model::LlmProvider, tool_registry::AgentTool},
         moltis_common::types::ReplyPayload,
+        moltis_telegram::config::TelegramMirrorConfigSnapshot,
         std::{
             pin::Pin,
             sync::{
@@ -6305,6 +6566,313 @@ mod tests {
         }
     }
 
+    struct MirrorChannelService {
+        accounts: Vec<String>,
+        snaps: std::collections::HashMap<String, TelegramMirrorConfigSnapshot>,
+    }
+
+    #[async_trait]
+    impl crate::services::ChannelService for MirrorChannelService {
+        async fn status(&self) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn logout(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn send(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn add(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn remove(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn update(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn senders_list(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn sender_approve(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn sender_deny(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+
+        async fn list_telegram_accounts(&self) -> Vec<String> {
+            self.accounts.clone()
+        }
+
+        async fn telegram_mirror_snapshot(
+            &self,
+            account_id: &str,
+        ) -> Option<TelegramMirrorConfigSnapshot> {
+            self.snaps.get(account_id).cloned()
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_outbound_mirror_appends_to_other_bot_sessions_and_dedupes() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = rec.clone();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_channel_outbound(Arc::clone(&outbound))
+            .with_session_store(Arc::clone(&store));
+
+        let mut snaps = std::collections::HashMap::new();
+        snaps.insert(
+            "lovely".to_string(),
+            TelegramMirrorConfigSnapshot {
+                group_outbound_mirror_enabled: true,
+                group_allowlist: vec!["-100".to_string()],
+            },
+        );
+        snaps.insert(
+            "fluffy".to_string(),
+            TelegramMirrorConfigSnapshot {
+                group_outbound_mirror_enabled: false,
+                group_allowlist: vec!["-100".to_string()],
+            },
+        );
+        // alpha is "not in the group" (allowlist excludes) — should not receive mirrors.
+        snaps.insert(
+            "alpha".to_string(),
+            TelegramMirrorConfigSnapshot {
+                group_outbound_mirror_enabled: false,
+                group_allowlist: vec!["-999".to_string()],
+            },
+        );
+
+        services.channel = Arc::new(MirrorChannelService {
+            accounts: vec![
+                "lovely".to_string(),
+                "fluffy".to_string(),
+                "alpha".to_string(),
+            ],
+            snaps,
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let targets = vec![moltis_channels::ChannelReplyTarget {
+            channel_type: moltis_channels::ChannelType::Telegram,
+            account_id: "lovely".to_string(),
+            account_handle: Some("@lovely_apple_bot".to_string()),
+            chat_id: "-100".to_string(),
+            message_id: Some("184".to_string()),
+        }];
+
+        // First delivery should mirror once.
+        deliver_channel_replies_to_targets(
+            Arc::clone(&outbound),
+            targets.clone(),
+            "telegram:lovely:-100",
+            "hello",
+            Arc::clone(&state),
+            ReplyMedium::Text,
+            Vec::new(),
+        )
+        .await;
+
+        // Second delivery should dedupe (no additional mirror writes).
+        deliver_channel_replies_to_targets(
+            Arc::clone(&outbound),
+            targets,
+            "telegram:lovely:-100",
+            "hello",
+            Arc::clone(&state),
+            ReplyMedium::Text,
+            Vec::new(),
+        )
+        .await;
+
+        let texts = rec.texts.lock().await;
+        assert_eq!(texts.len(), 2, "two outbound sends (two deliveries)");
+
+        let fluffy_key = "telegram:fluffy:-100";
+        let alpha_key = "telegram:alpha:-100";
+
+        let fluffy = store.read(fluffy_key).await.unwrap();
+        assert_eq!(fluffy.len(), 1, "mirror should be deduped");
+        assert_eq!(fluffy[0].get("role").and_then(|v| v.as_str()), Some("user"));
+        let content = fluffy[0]
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            content.starts_with("[@lovely_apple_bot mirror] "),
+            "unexpected mirror prefix: {content}"
+        );
+        let mirror_key = fluffy[0]
+            .get("channel")
+            .and_then(|c| c.get("mirror_key"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(mirror_key.starts_with("sha256:"), "missing mirror_key");
+
+        let alpha = store.read(alpha_key).await.unwrap();
+        assert!(
+            alpha.is_empty(),
+            "alpha should not receive mirror when allowlist excludes the chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_outbound_mirror_does_not_run_for_non_group_chat_ids() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = rec.clone();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_channel_outbound(Arc::clone(&outbound))
+            .with_session_store(Arc::clone(&store));
+
+        let mut snaps = std::collections::HashMap::new();
+        snaps.insert(
+            "lovely".to_string(),
+            TelegramMirrorConfigSnapshot {
+                group_outbound_mirror_enabled: true,
+                group_allowlist: vec![],
+            },
+        );
+        snaps.insert(
+            "fluffy".to_string(),
+            TelegramMirrorConfigSnapshot {
+                group_outbound_mirror_enabled: false,
+                group_allowlist: vec![],
+            },
+        );
+
+        services.channel = Arc::new(MirrorChannelService {
+            accounts: vec!["lovely".to_string(), "fluffy".to_string()],
+            snaps,
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let targets = vec![moltis_channels::ChannelReplyTarget {
+            channel_type: moltis_channels::ChannelType::Telegram,
+            account_id: "lovely".to_string(),
+            account_handle: Some("@lovely_apple_bot".to_string()),
+            chat_id: "123".to_string(), // non-group
+            message_id: Some("1".to_string()),
+        }];
+
+        deliver_channel_replies_to_targets(
+            Arc::clone(&outbound),
+            targets,
+            "telegram:lovely:123",
+            "hello",
+            Arc::clone(&state),
+            ReplyMedium::Text,
+            Vec::new(),
+        )
+        .await;
+
+        let fluffy = store.read("telegram:fluffy:123").await.unwrap();
+        assert!(
+            fluffy.is_empty(),
+            "should not mirror for non-group chat ids"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_outbound_mirror_screenshot_writes_placeholder() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = rec.clone();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_channel_outbound(Arc::clone(&outbound))
+            .with_session_store(Arc::clone(&store));
+
+        let mut snaps = std::collections::HashMap::new();
+        snaps.insert(
+            "lovely".to_string(),
+            TelegramMirrorConfigSnapshot {
+                group_outbound_mirror_enabled: true,
+                group_allowlist: vec!["-100".to_string()],
+            },
+        );
+        snaps.insert(
+            "fluffy".to_string(),
+            TelegramMirrorConfigSnapshot {
+                group_outbound_mirror_enabled: false,
+                group_allowlist: vec!["-100".to_string()],
+            },
+        );
+        services.channel = Arc::new(MirrorChannelService {
+            accounts: vec!["lovely".to_string(), "fluffy".to_string()],
+            snaps,
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        // Pending reply target for this session (so screenshot sender has a target).
+        let session_key = "telegram:lovely:-100";
+        state
+            .push_channel_reply(
+                session_key,
+                moltis_channels::ChannelReplyTarget {
+                    channel_type: moltis_channels::ChannelType::Telegram,
+                    account_id: "lovely".to_string(),
+                    account_handle: Some("@lovely_apple_bot".to_string()),
+                    chat_id: "-100".to_string(),
+                    message_id: Some("184".to_string()),
+                },
+            )
+            .await;
+
+        // Send a dummy data URI screenshot.
+        send_screenshot_to_channels(&state, session_key, "data:image/png;base64,AAAA").await;
+
+        let fluffy = store.read("telegram:fluffy:-100").await.unwrap();
+        assert_eq!(fluffy.len(), 1);
+        let content = fluffy[0]
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            content.contains("（发送了一张图片）"),
+            "expected placeholder, got: {content}"
+        );
+        assert!(
+            content.starts_with("[@lovely_apple_bot mirror] "),
+            "unexpected prefix: {content}"
+        );
+    }
+
     struct ErrorStreamProvider;
 
     #[async_trait]
@@ -6511,12 +7079,11 @@ mod tests {
         let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
 
         let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(
-            ContextStreamingProvider {
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(ContextStreamingProvider {
                 called: Arc::clone(&called),
                 expected_session_key: "main".to_string(),
-            },
-        );
+            });
 
         let result = run_streaming(
             &state,
@@ -6555,18 +7122,16 @@ mod tests {
         let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
 
         let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(
-            ContextStreamingProvider {
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(ContextStreamingProvider {
                 called: Arc::clone(&called),
                 expected_session_key: "main".to_string(),
-            },
-        );
+            });
 
         let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
-        tool_registry
-            .write()
-            .await
-            .register(Box::new(DummyTool { name: "noop".into() }));
+        tool_registry.write().await.register(Box::new(DummyTool {
+            name: "noop".into(),
+        }));
 
         let result = run_with_tools(
             &state,
@@ -6645,7 +7210,10 @@ mod tests {
         let info = super::build_compaction_debug_info(&messages);
         assert_eq!(info["isCompacted"].as_bool(), Some(true));
         assert_eq!(info["summaryCreatedAt"].as_u64(), Some(123));
-        assert_eq!(info["summaryLen"].as_u64(), Some("Hello world".len() as u64));
+        assert_eq!(
+            info["summaryLen"].as_u64(),
+            Some("Hello world".len() as u64)
+        );
         assert_eq!(info["keptMessageCount"].as_u64(), Some(1));
         assert_eq!(
             info["keepLastUserRounds"].as_u64(),
@@ -6735,7 +7303,8 @@ mod tests {
         assert_eq!(next["maxInputToks"].as_u64(), Some(500));
         assert_eq!(next["autoCompactToksThred"].as_u64(), Some(425));
 
-        let history_with_tools = super::reconstruct_tool_history_for_prompt_estimate(&history, 50_000);
+        let history_with_tools =
+            super::reconstruct_tool_history_for_prompt_estimate(&history, 50_000);
         let mut msgs = vec![ChatMessage::system(system_prompt)];
         msgs.extend(values_to_chat_messages(&history_with_tools));
         let history_est = super::estimate_input_tokens_for_messages(&msgs);
@@ -6748,7 +7317,7 @@ mod tests {
     async fn get_or_create_semaphore(
         locks: &Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
         key: &str,
-        ) -> Arc<Semaphore> {
+    ) -> Arc<Semaphore> {
         {
             let map = locks.read().await;
             if let Some(sem) = map.get(key) {
@@ -8002,7 +8571,12 @@ mod tests {
         // Keep window is byte-for-byte preserved (including tool_result entries).
         assert_eq!(&compacted[1..], &history[keep_start_idx..]);
         assert_eq!(compacted[0]["role"].as_str(), Some("assistant"));
-        assert!(compacted[0]["content"].as_str().unwrap_or("").contains("SUMMARY"));
+        assert!(
+            compacted[0]["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("SUMMARY")
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::PathBuf,
@@ -146,6 +147,67 @@ impl SessionStore {
             }
             let start = all.len().saturating_sub(n);
             Ok(all[start..].to_vec())
+        })
+        .await?
+    }
+
+    /// Check whether the last N messages contain a specific channel metadata field value.
+    ///
+    /// This is designed for lightweight deduplication on append-only JSONL logs without
+    /// parsing the entire session history into memory.
+    ///
+    /// Notes:
+    /// - Only examines the last `n` non-empty JSONL lines.
+    /// - Malformed JSON lines are ignored (consistent with `read()` behavior).
+    pub async fn tail_contains_channel_field_value(
+        &self,
+        key: &str,
+        field: &str,
+        expected: &str,
+        n: usize,
+    ) -> Result<bool> {
+        let path = self.path_for(key);
+        let field = field.to_string();
+        let expected = expected.to_string();
+
+        tokio::task::spawn_blocking(move || -> Result<bool> {
+            if !path.exists() {
+                return Ok(false);
+            }
+            let file = File::open(&path)?;
+            let reader = BufReader::new(file);
+
+            let mut tail: VecDeque<String> = VecDeque::with_capacity(n.min(1024));
+            for line in reader.lines() {
+                let line = line?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if n == 0 {
+                    continue;
+                }
+                if tail.len() == n {
+                    tail.pop_front();
+                }
+                tail.push_back(trimmed.to_string());
+            }
+
+            for raw in tail {
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    continue;
+                };
+                let found = val
+                    .get("channel")
+                    .and_then(|c| c.get(&field))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == expected);
+                if found {
+                    return Ok(true);
+                }
+            }
+
+            Ok(false)
         })
         .await?
     }
@@ -595,5 +657,38 @@ mod tests {
 
         assert!(!media_dir.exists());
         assert!(store.read("main").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tail_contains_channel_field_value_finds_recent_entries() {
+        let (store, _dir) = temp_store();
+
+        store
+            .append(
+                "s1",
+                &json!({"role":"user","content":"a","channel":{"mirror_key":"sha256:aaa"}}),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "s1",
+                &json!({"role":"user","content":"b","channel":{"mirror_key":"sha256:bbb"}}),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .tail_contains_channel_field_value("s1", "mirror_key", "sha256:bbb", 200)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .tail_contains_channel_field_value("s1", "mirror_key", "sha256:ccc", 200)
+                .await
+                .unwrap()
+        );
     }
 }
