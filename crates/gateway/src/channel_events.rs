@@ -305,6 +305,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         warn!("failed to send error back to channel: {send_err}");
                     }
                 }
+                // Drain any pending channel delivery state (reply targets + logbook)
+                // so later replies can't get cross-wired to this failed trigger.
+                let _ = state.drain_channel_replies(&session_key).await;
+                let _ = state.drain_channel_status_log(&session_key).await;
             }
         } else {
             warn!("channel dispatch_to_chat: gateway not ready");
@@ -806,6 +810,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     warn!("failed to send error back to channel: {send_err}");
                 }
             }
+            // Drain any pending channel delivery state (reply targets + logbook)
+            // so later replies can't get cross-wired to this failed trigger.
+            let _ = state.drain_channel_replies(&session_key).await;
+            let _ = state.drain_channel_status_log(&session_key).await;
         }
     }
 
@@ -1448,7 +1456,19 @@ fn format_model_list(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use {super::*, moltis_channels::ChannelType};
+    use {
+        super::*,
+        async_trait::async_trait,
+        moltis_channels::{ChannelType, plugin::ChannelOutbound},
+        moltis_common::types::ReplyPayload,
+        std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc,
+            },
+        },
+        tokio::sync::OnceCell,
+    };
 
     #[test]
     fn format_context_v1_payload_wraps_payload_with_versioned_contract() {
@@ -1526,5 +1546,149 @@ mod tests {
         assert_eq!(json["kind"], "inbound_message");
         assert!(json["username"].is_null());
         assert_eq!(json["access_granted"], false);
+    }
+
+    struct ErrChatService;
+
+    #[async_trait]
+    impl crate::services::ChatService for ErrChatService {
+        async fn send(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("boom".into())
+        }
+
+        async fn abort(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn cancel_queued(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "cleared": 0 }))
+        }
+
+        async fn history(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+
+        async fn inject(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn clear(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        async fn compact(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        async fn context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn raw_prompt(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn full_context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingOutbound {
+        texts: tokio::sync::Mutex<Vec<(String, String, String, Option<String>)>>,
+        typings: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChannelOutbound for RecordingOutbound {
+        async fn send_text(
+            &self,
+            account_id: &str,
+            to: &str,
+            text: &str,
+            reply_to: Option<&str>,
+        ) -> anyhow::Result<()> {
+            self.texts.lock().await.push((
+                account_id.to_string(),
+                to.to_string(),
+                text.to_string(),
+                reply_to.map(|s| s.to_string()),
+            ));
+            Ok(())
+        }
+
+        async fn send_media(
+            &self,
+            _account_id: &str,
+            _to: &str,
+            _payload: &ReplyPayload,
+            _reply_to: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn send_typing(&self, _account_id: &str, _to: &str) -> anyhow::Result<()> {
+            self.typings.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_immediate_failure_drains_reply_targets_and_logbook() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn ChannelOutbound> = rec.clone();
+
+        let services = crate::services::GatewayServices::noop()
+            .with_chat(Arc::new(ErrChatService))
+            .with_channel_outbound(outbound);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        // Pre-seed a log line to ensure it's drained on failure.
+        let session_key = "telegram:acct:123";
+        state
+            .push_channel_status_log(session_key, "tool status".to_string())
+            .await;
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = GatewayChannelEventSink::new(Arc::clone(&cell));
+
+        sink.dispatch_to_chat(
+            "hi",
+            ChannelReplyTarget {
+                channel_type: ChannelType::Telegram,
+                account_id: "acct".into(),
+                account_handle: None,
+                chat_id: "123".into(),
+                message_id: Some("1".into()),
+            },
+            ChannelMessageMeta {
+                channel_type: ChannelType::Telegram,
+                sender_name: None,
+                username: None,
+                message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                model: None,
+            },
+        )
+        .await;
+
+        assert!(state.peek_channel_replies(session_key).await.is_empty());
+        assert!(state.drain_channel_status_log(session_key).await.is_empty());
+
+        let texts = rec.texts.lock().await;
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, "acct");
+        assert_eq!(texts[0].1, "123");
+        assert_eq!(texts[0].3.as_deref(), Some("1"));
+        assert!(texts[0].2.starts_with("⚠️"));
     }
 }

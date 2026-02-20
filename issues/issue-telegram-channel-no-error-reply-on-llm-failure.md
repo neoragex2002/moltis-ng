@@ -1,100 +1,197 @@
-# Issue: LLM 请求失败时 Telegram 会话无错误回执（且可能积压 reply targets 导致后续串线）
+# Issue: LLM 请求失败时 Telegram 会话无错误回执（且 reply targets / logbook 可能残留导致后续串线）
 
-## 背景
-当前 Telegram inbound 消息会被 gateway 作为 channel session 触发 `chat.send()` 异步执行，真正的 Telegram 回复通过 `deliver_channel_replies()` 在 LLM 成功完成后再发送回渠道。
+## 实施现状（Status）【增量更新主入口】
+- Status: DONE（2026-02-20）
+- Priority: P0（渠道可靠性止血）
+- Owners: <TBD>
+- Components: gateway/chat / gateway/channel_events / channels delivery / telegram outbound
+- Affected providers/models: all（只要是 channel session 都受影响）
+- Cross-ref：
+  - 全局错误语义收敛（taxonomy + single egress）：`issues/issue-error-handling-taxonomy-single-egress.md`（本单不做大收敛，先止血）
 
-在 OpenAI Responses 等 provider 调用失败/流式中断/返回错误时，Web UI 能收到 `state="error"` 的广播，但 Telegram 用户侧往往收不到任何提示，表现为“机器人无响应”。此外，channel reply target 队列在 error 分支没有被 drain，可能导致后续成功回复被发到旧的 Telegram message_id（串线/错回复风险）。
+**已实现（2026-02-20）**
+- run internal failure / stream error：失败时发送错误回执（text）并 drain（targets + logbook）：`crates/gateway/src/chat.rs:4569` / `crates/gateway/src/chat.rs:5271`
+- timeout：发送 timeout 回执并 drain（targets + logbook）：`crates/gateway/src/chat.rs:2608`
+- silent success：不发空消息但仍 drain（targets + logbook）：`crates/gateway/src/chat.rs:4543` / `crates/gateway/src/chat.rs:5245`
+- immediate failure（`chat.send` 立刻 Err）：回执 `⚠️` 且 drain（targets + logbook）：`crates/gateway/src/channel_events.rs:310` / `crates/gateway/src/channel_events.rs:815`
+- 修复 logbook 串线：`deliver_channel_replies()` 在任何早退前就 drain status log：`crates/gateway/src/chat.rs:5347`
+- V1 队列降级：failed/timeout/**silent** run 后丢弃 queued messages（避免 replay 成功但无回执的黑洞）：`crates/gateway/src/chat.rs:2708`
 
-## 现象（Symptoms）
-1) Telegram 侧无错误回执：
-   - 触发后：Telegram 用户看见长时间 typing（如有），然后没有任何回复消息。
-2) 可能的串线：
-   - 同一 session 后续再次发送消息并成功返回时，成功回复可能会回到“之前那条失败消息”的 `reply_to`（或重复发送到多个历史 target）。
+**已覆盖测试**
+- immediate failure drain：`dispatch_to_chat_immediate_failure_drains_reply_targets_and_logbook`：`crates/gateway/src/channel_events.rs:1637`
+- run_streaming error 回执 + drain：`run_streaming_error_sends_channel_error_and_drains_state`：`crates/gateway/src/chat.rs:6366`
+- run_streaming silent drain（不发送）：`run_streaming_silent_success_drains_state_without_sending`：`crates/gateway/src/chat.rs:6435`
+
+**已知差异/后续优化（非阻塞）**
+- 错误回执目前基于 `parse_chat_error()` 的 `title/detail`，并做了“单行化 + 截断”以避免把大段 raw dump 发到 Telegram；更彻底的 taxonomy/去敏策略仍建议按 cross-ref 收敛。
+- `message_queue_mode` 与 `channel_reply_queue` 的一条消息↔一条回执绑定目前不完备（见 Root Cause F）；本单给出 **V1 明确降级策略**，避免出现“queued 消息被重放但永远不回执”的隐蔽故障。
+
+---
+
+## 背景（Background）
+- 场景：Telegram inbound 作为 channel event 触发 `chat.send()` 异步执行；成功时由 `deliver_channel_replies()` 把最终文本回发 Telegram。
+- 约束：Telegram 用户侧必须能看到失败回执（否则体验是“typing → 无任何消息”）；同时必须清理 reply targets/logbook 状态，避免后续串线。
+- Out of scope：本单不做全局 error taxonomy；只保证 Telegram（以及 channel 机制整体）在失败/超时/空输出时**行为一致且可解释**。
+
+## 概念与口径（Glossary & Semantics）【概念收敛/避免歧义】
+- **reply targets / `channel_reply_queue`**：每个 session 的待回执目标列表（含 `chat_id` + `message_id` threading），由 `GatewayState.push_channel_reply()` 写入、`GatewayState.drain_channel_replies()` 清空。
+  - Why：决定“这次 LLM 输出回到哪个 Telegram 消息下”；若残留会导致后续串线。
+  - Evidence：`crates/gateway/src/state.rs:531` / `crates/gateway/src/state.rs:542`
+- **status log / logbook / `channel_status_log`**：工具执行/模型选择等状态日志缓冲，最终作为 Telegram “Activity log” suffix 发送。
+  - Evidence：`crates/gateway/src/state.rs:577` / `crates/gateway/src/chat.rs:5357`
+- **immediate failure**：`chat.send(params).await` 直接返回 `Err`（在 channel_events 层可见）
+- **run internal failure**：`chat.send()` 返回 `Ok({runId})` 后，后台 agent loop 在 provider/stream/tool 执行中失败（channel_events 层不可见）。
+- **terminal state（终止态）**：对“需要回渠道的一次触发”来说，最终只能是：
+  - `final(text != "")`
+  - `final(text == "")`（silent）
+  - `error`（包含 timeout）
+
+## 需求与目标（Requirements & Goals）
+### 功能目标（Functional）
+- [ ] 任意 `run internal failure`（provider/stream/tool error）时，Telegram 必须收到一条错误回执（thread 到原消息）。
+- [ ] 任意终止态（final/error/timeout/silent）必须清理：
+  - [ ] `channel_reply_queue`（避免串线）
+  - [ ] `channel_status_log`（避免 logbook 串到后续成功回复）
+- [ ] `immediate failure`（`chat.send` 立即 Err）也必须清理上述两类状态（当前只回执、不清理）。
+- [ ] Web UI 的 `state="error"` broadcast 行为保持不变（可扩展字段，但不破坏现有前端）。
+
+### 非功能目标（Non-functional）
+- 正确性口径（必须/不得）：
+  - 必须：错误回执**脱敏 + 截断**（避免把 raw error/body/token/路径直接发到 Telegram）。
+  - 不得：失败时遗留 reply targets/status log，导致后续串线或“莫名其妙多出一段 Activity log”。
+- 可观测性：
+  - 日志应能区分：immediate failure vs run internal failure vs timeout，并打印 `session_key/run_id/target_count` 等最小定位信息。
+
+## 问题陈述（Problem Statement）
+### 现象（Symptoms）
+1) Telegram 侧无错误回执（run 内部失败、stream error、timeout 时尤甚）：
+   - 用户看到长时间 typing（如有），然后无任何消息。
+2) 串线/错回复风险：
+   - 失败后未 drain 的 reply targets 会把后续成功回复 thread 到旧 `message_id`，甚至对多个历史 target 重复回复。
+3) logbook 串线风险：
+   - status log 未被 drain 时，后续某次成功回复可能会带上上一轮残留的 Activity log。
+
+### 影响（Impact）
+- 用户体验：Telegram 端“失败不可见”，误以为机器人宕机/无响应。
+- 可靠性：reply targets/status log 残留导致串线、重复回复、logbook 漂移。
+- 排障成本：用户只能翻服务器日志；UI/Telegram 不一致更难定位。
+
+## 现状核查与证据（As-is / Evidence）【不可省略】
+- 代码证据：
+  - channel_events 在调用 `chat.send` 之前就 push reply target（因此即便后续 `chat.send` 失败/排队，也会残留 target）：
+    - `crates/gateway/src/channel_events.rs:126`–`crates/gateway/src/channel_events.rs:130`
+    - multimodal 同理：`crates/gateway/src/channel_events.rs:669`–`crates/gateway/src/channel_events.rs:672`
+  - immediate failure 仅回 `⚠️ {e}`，但 **不 drain**：
+    - `crates/gateway/src/channel_events.rs:290`–`crates/gateway/src/channel_events.rs:308`
+  - tools 模式 run internal failure：只 broadcast error，不 deliver / 不 drain：
+    - `crates/gateway/src/chat.rs:4526`–`crates/gateway/src/chat.rs:4542`
+  - stream-only failure：只 broadcast error，不 deliver / 不 drain：
+    - `crates/gateway/src/chat.rs:5223`–`crates/gateway/src/chat.rs:5239`
+  - timeout failure：只 broadcast error，不 deliver / 不 drain：
+    - `crates/gateway/src/chat.rs:2608`–`crates/gateway/src/chat.rs:2641`
+  - silent success：成功分支只有 `if !is_silent` 才 deliver，因此 silent 会遗留 reply targets/status log：
+    - `crates/gateway/src/chat.rs:4508`–`crates/gateway/src/chat.rs:4517`
+    - `crates/gateway/src/chat.rs:5205`–`crates/gateway/src/chat.rs:5214`
+  - `deliver_channel_replies()` 会 drain targets，但 status log 只有在拿到 outbound 且非空文本时才会 drain；早退会导致 logbook 残留：
+    - drain targets：`crates/gateway/src/chat.rs:5313`
+    - targets empty / text empty 早退：`crates/gateway/src/chat.rs:5315`–`crates/gateway/src/chat.rs:5334`
+    - outbound unavailable 早退：`crates/gateway/src/chat.rs:5344`–`crates/gateway/src/chat.rs:5355`
+    - drain status log（仅此处）：`crates/gateway/src/chat.rs:5357`–`crates/gateway/src/chat.rs:5359`
 
 ## 根因分析（Root Cause）
-### A. Channel 层只处理“chat.send 立即失败”，不处理“run 内部失败”
-`channel_events` 里会在 `chat.send(params).await` 返回 `Err` 时回 Telegram 发 `⚠️ {e}`。
+- A. **channel_events 层错误处理只覆盖 immediate failure**，并且没有清理 reply targets/status log。
+  - 结果：即便给用户发了 `⚠️ {e}`，也可能遗留 target → 后续串线。
+- B. **gateway run_with_tools / run_streaming 的 error 分支没有“渠道终止态回执”**（只做 UI broadcast）。
+  - 结果：Web UI 能看到 error，但 Telegram 无任何消息。
+- C. **timeout 也是一种 run internal failure**，目前同样只 broadcast，不回渠道、不清理状态。
+- D. **silent success 缺少终止态清理**：`if !is_silent` 才 deliver，导致 reply targets/status log 残留。
+- E. **logbook（status log）与 reply targets 的 drain 绑定不完整**：
+  - `deliver_channel_replies()` 先 drain targets，再在较后位置 drain status log；targets/text/outbound 任一早退都会让 status log 残留并串到后续成功回复。
+- F. **（关键复杂点）`message_queue_mode` 与 reply targets 的耦合不明确**：
+  - 当前 reply targets 是“按 session 聚合的 Vec”，并且在 `chat.send()` 可能返回 `queued=true` 时也已被提前 push（见 Evidence）。
+  - 如果本单在 error 分支“直接 drain 全部 targets”，可能会把“已排队但尚未 replay 的消息”的回执目标一起清掉，造成后续 replay run “成功但永远不回 Telegram”。
+  - 因此本单需要冻结一个 V1 规则：**error/timeout 视为本 session 当前所有 pending 触发都失败（统一回执并清理），并丢弃 queued messages**；更精细的 per-message 绑定留给后续（若需要）。
 
-但通常 `chat.send()` 会快速返回 `Ok({runId})` 并异步跑 agent loop；LLM 真正失败发生在 run 过程中（stream error / tool error / provider error），此时 channel_events 看不到 error，也不会发送 Telegram 错误提示。
+## 期望行为（Desired Behavior / Spec）【尽量冻结】
+- 必须：
+  - 任何 `run internal failure` / `timeout`：对所有 pending reply targets 发送 **一次**错误回执，并清理 `channel_reply_queue` 与 `channel_status_log`。
+  - 任何 `final(text != "")`：发送最终文本回执，并清理 `channel_reply_queue` 与 `channel_status_log`。
+  - 任何 `final(text == "")`：不发送 Telegram 消息，但仍必须清理 `channel_reply_queue` 与 `channel_status_log`（避免串线）。
+  - `immediate failure`：除发送 `⚠️` 外，也必须清理 `channel_reply_queue` 与 `channel_status_log`。
+- 不得：
+  - 不得在 error/timeout 后遗留 targets/logbook，导致后续串线/漂移。
+  - 不得把明显敏感的 raw error（Authorization、完整 body、路径）原样发到 Telegram（必须脱敏/截断）。
+- 应当：
+  - 错误回执使用纯文本（`ReplyMedium::Text`），避免触发 TTS。
 
-### B. gateway 的 error 分支未调用 deliver_channel_replies（未 drain targets）
-目前只有成功完成时才会调用 `deliver_channel_replies()`：
+## 方案（Proposed Solution）
+### 方案对比（Options）
+#### 方案 1（推荐，V1 止血）：统一“渠道终止态处理”并强制 drain（含 timeout/silent/immediate）
+- 核心思路：
+  - 抽一个 helper（例如 `deliver_channel_terminal(...)`），作为 channel session 的**唯一终止态出口**：
+    - 先 drain `channel_reply_queue` + drain `channel_status_log`（无论成功/失败/空文本/outbound 是否可用）
+    - 再按终止态决定是否发 Telegram：
+      - final(text!=empty) → 发文本/语音（现有逻辑）
+      - error/timeout → 发短错误文本（固定 ReplyMedium::Text）
+      - silent → 不发送
+  - 在 run_with_tools error、stream error、timeout、silent success、channel_events immediate Err 等处统一调用。
+- 优点：
+  - 改动点集中、可测、可回滚；能同时解决“无回执 + 串线 + logbook 串线”。
+  - 与更大的 taxonomy/single-egress 方案兼容（未来只需替换 error_text 构造与去重）。
+- 风险/缺点：
+  - 需要冻结 V1 对 queued messages 的处理（见 Root Cause F）。
 
-- tools 模式成功：`crates/gateway/src/chat.rs`（`deliver_channel_replies(...)` 在 final 分支）
-- stream-only 模式成功：`crates/gateway/src/chat.rs`（`deliver_channel_replies(...)` 在 Done 分支）
+#### 方案 2（后续更精细）：reply targets 绑定 run_id / queued message（per-message/per-run queue）
+- 核心思路：把 `channel_reply_queue` 从 `Vec<Target>` 升级为 `Vec<{run_id, target}>`（或与 message_queue 合并），deliver 时只处理本 run 的 targets，避免 queued 被误伤。
+- 不做为本单 V1：改动面更大，且需要同步调整 channel_events 与 chat.send 的 contract。
 
-错误分支仅做：
-- 记录 run_error
-- WebSocket broadcast `state="error"`
-- 标记不支持模型等
+### 最终方案（Chosen Approach）
+采用 **方案 1（V1 止血）**，并冻结以下行为规范：
 
-**没有**向 Telegram 发送任何消息，且未 drain `channel_reply_queue`。
+#### 行为规范（Normative Rules）
+1) **所有终止态都必须 drain**：`channel_reply_queue` 与 `channel_status_log` 不得跨终止态残留。
+2) **error/timeout 回执必须脱敏 + 截断**：
+   - 来源：优先使用 `parse_chat_error(...)` 的 `title/detail`，再做二次清理（unknown/raw 需截断）。
+   - 格式建议：`⚠️ <title>: <detail>`（detail 为空则省略冒号）。
+3) **silent success 不回 Telegram，但必须清理状态**（避免串线）。
+4) **queued messages 的 V1 降级**：
+   - 当某次 run 进入 error/timeout，视为该 session 当前所有 pending 触发都失败：统一回执并清理；随后丢弃/取消该 session 的 queued messages（避免出现“queued replay 成功但无回执”的隐蔽故障）。
 
-### C. reply targets 队列语义（drain on send）
-`deliver_channel_replies()` 会调用 `state.drain_channel_replies(session_key)` 移除并返回所有 pending reply targets。
-若 error 不 drain，targets 将残留在内存队列中，可能影响后续回复路由。
+#### 接口与数据结构（Contracts）
+- 现有 `deliver_channel_replies_to_targets(...)` 可复用（threading/suffix/tts 的实现集中在这里）。
+- 需要新增/调整的 helper：
+  - `deliver_channel_terminal_success(text, desired_reply_medium)`
+  - `deliver_channel_terminal_error(error_text)`（强制 `ReplyMedium::Text`）
+  - `drain_channel_terminal_state()`（无论是否发送都要 drain：targets + status_log）
 
-## 影响（Impact）
-- Telegram 用户体验差：失败时看不到原因，误以为机器人宕机/无响应。
-- 可靠性风险：targets 残留导致后续回复串线，出现“回复错消息/重复回复”的错误行为。
-- 排障困难：只能看服务器日志才知道 provider 失败。
+#### 失败模式与降级（Failure modes & Degrade）
+- outbound 不可用：仍必须 drain（避免串线），但无法发回 Telegram；需日志明确记录 `outbound unavailable`。
+- “尚未 push reply target 就失败”：helper 会发现 targets 为空并跳过；属于可接受的低概率边缘场景。
 
-## 期望行为（Desired Behavior）
-当某个 channel session 的 LLM run 在生成阶段失败时：
-1) Telegram 必须收到一条错误回执（尽量简短、可读、无敏感信息）。
-2) 该 session 的 pending reply targets 必须被及时 drain，避免后续串线。
-3) Web UI 保持现有 error 广播行为不变。
-
-## 方案（Proposed Fix）
-### 方案 1（推荐）：在 run 的 error 分支也走一次 deliver_channel_replies
-在以下错误分支中补充调用：
-
-- `run_with_tools`：agent loop `Err(e)` 分支（broadcast error 后）
-- `run_streaming`：`StreamEvent::Error(msg)` 分支（broadcast error 后）
-
-行为：
-- 构造一个“用户可见”的错误文本（`ReplyMedium::Text`），例如：
-  - `⚠️ Request failed: <detail>`
-  - `<detail>` 建议来自 `parse_chat_error()` 的 `detail` 字段（避免直接暴露原始堆栈/内部错误）。
-- 调用 `deliver_channel_replies(state, session_key, &error_text, ReplyMedium::Text).await;`
-  - 这会 drain targets，并把错误文本发回 Telegram（含 reply_to threading）。
-
-优点：
-- 最接近真实生命周期：错误发生在哪里就在哪里处理。
-- 不需要在 channel_events 里做复杂的 run 状态订阅。
-- 同时解决“无回执”和“targets 残留”两类问题。
-
-注意：
-- 如果 error 出现在“尚未 push reply target”之前（理论上可能），`deliver_channel_replies` 会发现 targets 为空并返回；不影响。
-
-### 方案 2（备选）：出错时单独 drain + 显式 outbound 发送
-在 error 分支里：
-- 先 `state.drain_channel_replies(session_key)` 获取 targets
-- 对 targets 逐个调用 outbound 发送错误
-
-不推荐：重复逻辑（tts/logbook/suffix/threading）且易与 `deliver_channel_replies_to_targets` 变更脱节。
-
-## 文案与安全（Error Message Policy）
-建议对 Telegram 返回的信息：
-- 只包含“用户可操作/可理解”的 detail。
-- 不包含完整 HTTP body、token、路径等敏感信息。
-- 可以提示重试/换模型（如果已有 failover/模型切换能力）。
-
-## 验收标准（Acceptance Criteria）
-- 人为制造 provider 错误（例如错误 API key / 断网 / gateway 返回 400）：
-  - Telegram 收到错误回执消息（与触发消息 thread 对齐）。
+## 验收标准（Acceptance Criteria）【不可省略】
+- [ ] 人为制造 provider 错误（错误 API key / 断网 / provider 4xx/5xx）：
+  - Telegram 收到错误回执（thread 对齐）。
   - Web UI 仍能看到 `state="error"`。
-  - 随后再次发送正常消息成功时，不会发生“回复到旧消息/重复回复”的串线。
+  - `channel_reply_queue` 与 `channel_status_log` 均被清理（后续不会串线/漂移）。
+- [ ] 人为制造 timeout（把 `tools.agent_timeout_secs` 设很小或构造长程工具）：
+  - Telegram 收到 timeout 回执；状态被清理。
+- [ ] 构造 silent response（或人为让最终文本为空）：
+  - Telegram 不收到空消息，但不会串线（下次成功回复 thread 到正确的 message_id）。
+- [ ] `chat.send` immediate Err（例如 gateway 未 ready 或 chat service 立刻返回 Err）：
+  - Telegram 收到 `⚠️`，且状态被清理。
 
-## 测试计划（Test Plan）
-建议新增单测/集成测试：
-1) 单测：模拟 `state.push_channel_reply` 后触发 run error 分支，断言 `state.peek_channel_replies(session_key)` 为空（targets 已 drain）。
-2) 单测：用 mock outbound 捕获发送内容，断言错误文本发送一次且带正确 `reply_to`。
+## 测试计划（Test Plan）【不可省略】
+### Unit（推荐全部覆盖）
+- [ ] `run_with_tools` error：预置 `push_channel_reply` + `push_channel_status_log`，触发错误分支后断言两者均已 drain（`peek` 为空）。
+- [ ] `run_streaming` StreamEvent::Error：同上。
+- [ ] timeout 分支：同上（`crates/gateway/src/chat.rs:2608`–`2641`）。
+- [ ] immediate failure（channel_events）：模拟 `chat.send` 返回 Err，断言 error 回执发送 + drain。
+- [ ] silent success：断言不发送，但 drain 生效。
 
-如果当前架构不便 mock outbound，可至少测试 drain 行为，另用手工验证覆盖发送行为。
+### Integration / manual（可选）
+- [ ] Telegram：断网/错误 key/主动超时，观察回执与 thread 是否正确；之后发送正常消息确认不串线。
 
 ## 相关位置（References）
-- channel dispatch error only on immediate `chat.send` Err：`crates/gateway/src/channel_events.rs`
-- deliver_channel_replies drains targets：`crates/gateway/src/chat.rs`（`deliver_channel_replies`）
-- run_with_tools / run_streaming error branches broadcast but do not deliver to channel：`crates/gateway/src/chat.rs`
-
+- `crates/gateway/src/channel_events.rs`（channel inbound dispatch / immediate failure）
+- `crates/gateway/src/chat.rs`（run_with_tools/run_streaming/timeout/deliver_channel_replies）
+- `crates/gateway/src/state.rs`（reply targets + status log queue）

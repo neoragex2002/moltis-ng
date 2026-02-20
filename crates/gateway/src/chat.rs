@@ -2638,12 +2638,28 @@ impl ChatService for LiveChatService {
                             BroadcastOpts::default(),
                         )
                         .await;
+                        // Channel stopgap: send a minimal error reply and drain any pending
+                        // reply targets/logbook so later replies don't get cross-wired.
+                        let channel_error = serde_json::json!({
+                            "icon": "\u{23F1}\u{FE0F}",
+                            "title": "Timed out",
+                            "detail": format!("Agent run timed out after {agent_timeout_secs}s."),
+                        });
+                        deliver_channel_error_replies(&state, &session_key_clone, &channel_error)
+                            .await;
                         None
                     },
                 }
             } else {
                 agent_fut.await
             };
+
+            // Treat "silent" output as non-success for channel delivery semantics:
+            // channel reply targets were drained in the silent path, so queued
+            // messages cannot be safely replayed in V1 (they would have no targets).
+            let run_succeeded = assistant_text
+                .as_ref()
+                .is_some_and(|out| !out.text.trim().is_empty());
 
             // Persist assistant response (even empty ones — needed for LLM history coherence).
             if let Some(output) = assistant_text {
@@ -2686,6 +2702,18 @@ impl ChatService for LiveChatService {
                 .remove(&session_key_clone)
                 .unwrap_or_default();
             if !queued.is_empty() {
+                if !run_succeeded {
+                    // V1 behavior: a failed/timeout run is treated as a terminal failure
+                    // for all pending triggers in this session. We drop queued messages
+                    // instead of replaying them, because channel reply targets were
+                    // already drained during error handling.
+                    info!(
+                        session = %session_key_clone,
+                        count = queued.len(),
+                        "dropping queued messages after failed run"
+                    );
+                    return;
+                }
                 let queue_mode = moltis_config::discover_and_load().chat.message_queue_mode;
                 let chat = state_for_drain.chat().await;
                 match queue_mode {
@@ -4514,6 +4542,10 @@ async fn run_with_tools(
                 }
                 deliver_channel_replies(state, session_key, &display_text, desired_reply_medium)
                     .await;
+            } else {
+                // Silent responses must still clear pending channel delivery state
+                // (reply targets + logbook) to avoid later reply "cross-wiring".
+                deliver_channel_replies(state, session_key, "", desired_reply_medium).await;
             }
             Some(ChatRunOutput {
                 text: display_text,
@@ -4533,12 +4565,13 @@ async fn run_with_tools(
                 run_id: run_id.to_string(),
                 session_key: session_key.to_string(),
                 state: "error",
-                error: error_obj,
+                error: error_obj.clone(),
                 seq: client_seq,
             };
             #[allow(clippy::unwrap_used)] // serializing known-valid struct
             let payload_val = serde_json::to_value(&error_payload).unwrap();
             broadcast(state, "chat", payload_val, BroadcastOpts::default()).await;
+            deliver_channel_error_replies(state, session_key, &error_obj).await;
             None
         },
     }
@@ -5211,6 +5244,10 @@ async fn run_streaming(
                     }
                     deliver_channel_replies(state, session_key, &accumulated, desired_reply_medium)
                         .await;
+                } else {
+                    // Silent responses must still clear pending channel delivery state
+                    // (reply targets + logbook) to avoid later reply "cross-wiring".
+                    deliver_channel_replies(state, session_key, "", desired_reply_medium).await;
                 }
                 return Some(ChatRunOutput {
                     text: accumulated,
@@ -5230,12 +5267,13 @@ async fn run_streaming(
                     run_id: run_id.to_string(),
                     session_key: session_key.to_string(),
                     state: "error",
-                    error: error_obj,
+                    error: error_obj.clone(),
                     seq: client_seq,
                 };
                 #[allow(clippy::unwrap_used)] // serializing known-valid struct
                 let payload_val = serde_json::to_value(&error_payload).unwrap();
                 broadcast(state, "chat", payload_val, BroadcastOpts::default()).await;
+                deliver_channel_error_replies(state, session_key, &error_obj).await;
                 return None;
             },
             // Tool events not expected in stream-only mode.
@@ -5311,6 +5349,10 @@ async fn deliver_channel_replies(
     desired_reply_medium: ReplyMedium,
 ) {
     let targets = state.drain_channel_replies(session_key).await;
+    // Always drain buffered status logs when closing out a channel delivery attempt.
+    // Otherwise, early returns (empty text, outbound unavailable, etc.) can cause
+    // logbook entries to leak into later successful replies.
+    let status_log = state.drain_channel_status_log(session_key).await;
     let is_telegram_session = session_key.starts_with("telegram:");
     if targets.is_empty() {
         if is_telegram_session {
@@ -5354,8 +5396,6 @@ async fn deliver_channel_replies(
             return;
         },
     };
-    // Drain buffered status log entries to build a logbook suffix.
-    let status_log = state.drain_channel_status_log(session_key).await;
     deliver_channel_replies_to_targets(
         outbound,
         targets,
@@ -5364,6 +5404,84 @@ async fn deliver_channel_replies(
         Arc::clone(state),
         desired_reply_medium,
         status_log,
+    )
+    .await;
+}
+
+fn sanitize_channel_error_text(text: &str, max_chars: usize) -> String {
+    // Remove newlines/tabs and trim so error replies are compact and don't
+    // accidentally include structured dumps.
+    let mut s = text
+        .replace(['\r', '\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if s.is_empty() {
+        return s;
+    }
+    if s.chars().count() > max_chars {
+        s = s.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+        s.push('…');
+    }
+    s
+}
+
+fn format_channel_error_reply(error_obj: &serde_json::Value) -> String {
+    let mut icon = error_obj
+        .get("icon")
+        .and_then(|v| v.as_str())
+        .unwrap_or("\u{26A0}\u{FE0F}");
+    if icon.trim().is_empty() {
+        icon = "\u{26A0}\u{FE0F}";
+    }
+    let title = error_obj
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Error");
+    let detail = error_obj.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+
+    let title = sanitize_channel_error_text(title, 120);
+    let detail = sanitize_channel_error_text(detail, 360);
+
+    if detail.is_empty() {
+        format!("{icon} {title}")
+    } else {
+        format!("{icon} {title}: {detail}")
+    }
+}
+
+async fn deliver_channel_error_replies(
+    state: &Arc<GatewayState>,
+    session_key: &str,
+    error_obj: &serde_json::Value,
+) {
+    let targets = state.drain_channel_replies(session_key).await;
+    // Always drain status logs on error so they don't leak to later replies.
+    let _ = state.drain_channel_status_log(session_key).await;
+
+    if targets.is_empty() {
+        return;
+    }
+
+    let text = format_channel_error_reply(error_obj);
+    if text.is_empty() {
+        return;
+    }
+
+    let outbound = match state.services.channel_outbound_arc() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Error replies are always text (no TTS/logbook suffix).
+    deliver_channel_replies_to_targets(
+        outbound,
+        targets,
+        session_key,
+        &text,
+        Arc::clone(state),
+        ReplyMedium::Text,
+        Vec::new(),
     )
     .await;
 }
@@ -6145,6 +6263,239 @@ mod tests {
             "delivery should wait for outbound send completion"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Default)]
+    struct RecordingOutbound {
+        texts: tokio::sync::Mutex<Vec<(String, String, String, Option<String>)>>,
+        typings: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl moltis_channels::plugin::ChannelOutbound for RecordingOutbound {
+        async fn send_text(
+            &self,
+            account_id: &str,
+            to: &str,
+            text: &str,
+            reply_to: Option<&str>,
+        ) -> Result<()> {
+            self.texts.lock().await.push((
+                account_id.to_string(),
+                to.to_string(),
+                text.to_string(),
+                reply_to.map(|s| s.to_string()),
+            ));
+            Ok(())
+        }
+
+        async fn send_media(
+            &self,
+            _account_id: &str,
+            _to: &str,
+            _payload: &ReplyPayload,
+            _reply_to: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_typing(&self, _account_id: &str, _to: &str) -> Result<()> {
+            self.typings.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct ErrorStreamProvider;
+
+    #[async_trait]
+    impl LlmProvider for ErrorStreamProvider {
+        fn name(&self) -> &str {
+            "err"
+        }
+
+        fn id(&self) -> &str {
+            "err-model"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> anyhow::Result<moltis_agents::model::CompletionResponse> {
+            anyhow::bail!("not implemented for test")
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::iter(vec![StreamEvent::Error(
+                "boom".to_string(),
+            )]))
+        }
+    }
+
+    struct SilentDoneProvider;
+
+    #[async_trait]
+    impl LlmProvider for SilentDoneProvider {
+        fn name(&self) -> &str {
+            "silent"
+        }
+
+        fn id(&self) -> &str {
+            "silent-model"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> anyhow::Result<moltis_agents::model::CompletionResponse> {
+            anyhow::bail!("not implemented for test")
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::iter(vec![StreamEvent::Done(
+                moltis_agents::model::Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+            )]))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_streaming_error_sends_channel_error_and_drains_state() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = rec.clone();
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
+
+        let session_key = "telegram:acct:123";
+        state
+            .push_channel_reply(
+                session_key,
+                moltis_channels::ChannelReplyTarget {
+                    channel_type: moltis_channels::ChannelType::Telegram,
+                    account_id: "acct".to_string(),
+                    account_handle: None,
+                    chat_id: "123".to_string(),
+                    message_id: Some("7".to_string()),
+                },
+            )
+            .await;
+        state
+            .push_channel_status_log(session_key, "tool status".to_string())
+            .await;
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(ErrorStreamProvider);
+        let out = run_streaming(
+            &state,
+            &model_store,
+            "run1",
+            provider,
+            "err-model",
+            &UserContent::text("hi"),
+            "openai-responses",
+            &[],
+            session_key,
+            ReplyMedium::Text,
+            None,
+            0,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(out.is_none());
+        assert!(state.peek_channel_replies(session_key).await.is_empty());
+        assert!(state.drain_channel_status_log(session_key).await.is_empty());
+
+        let texts = rec.texts.lock().await;
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, "acct");
+        assert_eq!(texts[0].1, "123");
+        assert_eq!(texts[0].3.as_deref(), Some("7"));
+        assert!(
+            texts[0].2.contains("Error") || texts[0].2.contains("⚠️"),
+            "expected a user-visible error reply, got: {}",
+            texts[0].2
+        );
+    }
+
+    #[tokio::test]
+    async fn run_streaming_silent_success_drains_state_without_sending() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = rec.clone();
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
+
+        let session_key = "telegram:acct:123";
+        state
+            .push_channel_reply(
+                session_key,
+                moltis_channels::ChannelReplyTarget {
+                    channel_type: moltis_channels::ChannelType::Telegram,
+                    account_id: "acct".to_string(),
+                    account_handle: None,
+                    chat_id: "123".to_string(),
+                    message_id: Some("9".to_string()),
+                },
+            )
+            .await;
+        state
+            .push_channel_status_log(session_key, "tool status".to_string())
+            .await;
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(SilentDoneProvider);
+        let out = run_streaming(
+            &state,
+            &model_store,
+            "run2",
+            provider,
+            "silent-model",
+            &UserContent::text("hi"),
+            "openai-responses",
+            &[],
+            session_key,
+            ReplyMedium::Text,
+            None,
+            0,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(out.is_some());
+        assert!(state.peek_channel_replies(session_key).await.is_empty());
+        assert!(state.drain_channel_status_log(session_key).await.is_empty());
+        assert!(rec.texts.lock().await.is_empty());
     }
 
     #[tokio::test]
