@@ -167,6 +167,7 @@ fn build_schema_map() -> KnownKeys {
         Struct(HashMap::from([
             ("mode", Leaf),
             ("scope", Leaf),
+            ("idle_ttl_secs", Leaf),
             ("workspace_mount", Leaf),
             (
                 "mounts",
@@ -902,6 +903,21 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
                 "unknown sandbox backend \"{}\"; expected one of: {}",
                 config.tools.exec.sandbox.backend,
                 valid_sandbox_backends.join(", ")
+            ),
+        });
+    }
+
+    // Unknown sandbox scope
+    let valid_sandbox_scopes = ["session", "chat", "bot", "global"];
+    let scope = config.tools.exec.sandbox.scope.as_str();
+    if !valid_sandbox_scopes.contains(&scope) {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "unknown-field",
+            path: "tools.exec.sandbox.scope".into(),
+            message: format!(
+                "invalid sandbox scope \"{scope}\"; expected one of: {}",
+                valid_sandbox_scopes.join(", ")
             ),
         });
     }

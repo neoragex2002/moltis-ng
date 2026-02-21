@@ -1266,6 +1266,12 @@ pub struct ResourceLimitsConfig {
 pub struct SandboxConfig {
     pub mode: String,
     pub scope: String,
+    /// Idle TTL for sandbox containers (seconds).
+    ///
+    /// - `>0`: idle containers may be reclaimed after TTL.
+    /// - `=0`: disable TTL (containers persist until explicit cleanup policy).
+    #[serde(default)]
+    pub idle_ttl_secs: u64,
     pub workspace_mount: String,
     /// Additional host directory mounts exposed inside the sandbox container.
     ///
@@ -1473,6 +1479,7 @@ impl Default for SandboxConfig {
         Self {
             mode: "all".into(),
             scope: "session".into(),
+            idle_ttl_secs: 0,
             workspace_mount: "ro".into(),
             mounts: Vec::new(),
             mount_allowlist: Vec::new(),

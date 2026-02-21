@@ -369,6 +369,8 @@ impl AgentTool for ExecTool {
         let result = if let Some(ref router) = self.sandbox_router {
             let sk = session_key.unwrap_or("main");
             if is_sandboxed {
+                let _lease = router.acquire_lease(sk);
+                router.touch(sk);
                 let id = router.sandbox_id_for(sk);
                 let image = router.resolve_image(sk, None).await;
                 let backend = router.backend();
@@ -388,6 +390,7 @@ impl AgentTool for ExecTool {
                     backend.ensure_ready(&id, Some(&image)).await?;
                     sandbox_result = backend.exec(&id, command, &opts).await?;
                 }
+                router.touch(sk);
                 sandbox_result
             } else {
                 debug!(session = sk, command, "running unsandboxed");

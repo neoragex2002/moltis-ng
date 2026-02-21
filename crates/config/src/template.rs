@@ -247,9 +247,13 @@ mode = "all"                      # Which commands to sandbox:
                                   #   "non-main" - Sandbox all except main session
                                   #   "all"      - Sandbox everything (recommended)
 scope = "session"                 # Container lifecycle:
-                                  #   "command" - New container per command
                                   #   "session" - Container per session (recommended)
+                                  #   "chat"    - Container per chat (e.g. Telegram group)
+                                  #   "bot"     - Container per bot/account
                                   #   "global"  - Single shared container
+idle_ttl_secs = 0                 # Idle container TTL (seconds):
+                                  #   0   - Disable TTL (default)
+                                  #   >0  - Auto-cleanup when idle for TTL
 workspace_mount = "ro"            # How to mount workspace in sandbox:
                                   #   "ro"   - Read-only (safe)
                                   #   "rw"   - Read-write (can modify files)

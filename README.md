@@ -340,10 +340,11 @@ image (`ubuntu:25.10` by default) and the package list in `moltis.toml`. The
 image tag is a hash of the base image + sorted packages — if you add or remove
 a package, the tag changes and a rebuild is triggered automatically.
 
-Each command invocation gets a per-session container. Environment variables
-configured for the agent are injected into the container, but their values are
-redacted from any output the LLM sees (plain text, base64, and hex forms) to
-prevent leaking secrets through tool results.
+By default, Moltis uses one sandbox container per **session**, but you can
+change the reuse boundary via `tools.exec.sandbox.scope` (`session|chat|bot|global`).
+Environment variables configured for the agent are injected into the container,
+but their values are redacted from any output the LLM sees (plain text, base64,
+and hex forms) to prevent leaking secrets through tool results.
 
 ## Getting Started
 

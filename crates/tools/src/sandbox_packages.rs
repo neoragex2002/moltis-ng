@@ -245,6 +245,8 @@ fn categorize_packages(packages: &[String]) -> Vec<(&'static str, Vec<&str>)> {
 ///
 /// Returns `None` if the container is not reachable (not running, etc.).
 async fn query_sandbox_packages(router: &SandboxRouter, session_key: &str) -> Option<Vec<String>> {
+    let _lease = router.acquire_lease(session_key);
+    router.touch(session_key);
     let id = router.sandbox_id_for(session_key);
     let opts = ExecOpts {
         timeout: std::time::Duration::from_secs(5),
@@ -254,7 +256,10 @@ async fn query_sandbox_packages(router: &SandboxRouter, session_key: &str) -> Op
     // dpkg-query with a format string to get one package name per line.
     let cmd = "dpkg-query -W -f='${Package}\n'";
 
-    match router.backend().exec(&id, cmd, &opts).await {
+    let result = router.backend().exec(&id, cmd, &opts).await;
+    router.touch(session_key);
+
+    match result {
         Ok(result) if result.exit_code == 0 => {
             let packages: Vec<String> = result
                 .stdout

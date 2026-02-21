@@ -333,6 +333,14 @@ impl SessionService for LiveSessionService {
 
         // Update sandbox_image if provided.
         if params.get("sandbox_image").is_some() {
+            if let Some(ref router) = self.sandbox_router {
+                if router.config().scope != moltis_tools::sandbox::SandboxScope::Session {
+                    return Err(
+                        "sandbox_image override is not supported when tools.exec.sandbox.scope != \"session\""
+                            .to_string(),
+                    );
+                }
+            }
             let sandbox_image = params
                 .get("sandbox_image")
                 .and_then(|v| v.as_str())
@@ -459,10 +467,22 @@ impl SessionService for LiveSessionService {
         self.store.clear(key).await.map_err(|e| e.to_string())?;
 
         // Clean up sandbox resources for this session.
-        if let Some(ref router) = self.sandbox_router
-            && let Err(e) = router.cleanup_session(key).await
-        {
-            tracing::warn!("sandbox cleanup for session {key}: {e}");
+        let deleted_effective_sandbox_key = self
+            .sandbox_router
+            .as_ref()
+            .map(|r| r.effective_sandbox_key(key));
+        if let Some(ref router) = self.sandbox_router {
+            match router.config().scope {
+                moltis_tools::sandbox::SandboxScope::Session => {
+                    if let Err(e) = router.cleanup_session(key).await {
+                        tracing::warn!("sandbox cleanup for session {key}: {e}");
+                    }
+                },
+                _ => {
+                    // Shared scopes: only clean up per-session override state here.
+                    router.cleanup_session_state(key).await;
+                },
+            }
         }
 
         // Cascade-delete session state.
@@ -473,6 +493,34 @@ impl SessionService for LiveSessionService {
         }
 
         self.metadata.remove(key).await;
+
+        // Shared scopes: if TTL is disabled, cleanup the shared sandbox when no remaining
+        // sandboxed sessions reference this effective key.
+        if let Some(ref router) = self.sandbox_router
+            && router.config().scope != moltis_tools::sandbox::SandboxScope::Session
+            && router.config().idle_ttl_secs == 0
+            && let Some(ref deleted_key) = deleted_effective_sandbox_key
+        {
+            let remaining_entries = self.metadata.list().await;
+            let mut remaining_refs = 0usize;
+            for entry in remaining_entries {
+                if router.effective_sandbox_key(&entry.key) != *deleted_key {
+                    continue;
+                }
+                if router.is_sandboxed(&entry.key).await {
+                    remaining_refs += 1;
+                }
+            }
+            if remaining_refs == 0 {
+                if let Err(e) = router.cleanup_effective_key(deleted_key).await {
+                    tracing::warn!(
+                        effective_key = %deleted_key,
+                        error = %e,
+                        "sandbox cleanup for effective key failed"
+                    );
+                }
+            }
+        }
 
         // Dispatch SessionEnd hook (read-only).
         if let Some(ref hooks) = self.hook_registry {

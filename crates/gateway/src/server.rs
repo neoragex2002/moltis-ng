@@ -1459,6 +1459,22 @@ pub async fn start_gateway(
         .map(|tz| tz.name().to_string());
     let sandbox_router = Arc::new(moltis_tools::sandbox::SandboxRouter::new(sandbox_config));
 
+    // Spawn a best-effort idle sandbox pruner when TTL is enabled.
+    {
+        let ttl = sandbox_router.config().idle_ttl_secs;
+        if ttl > 0 {
+            let router = Arc::clone(&sandbox_router);
+            let period = std::cmp::max(30, std::cmp::min(ttl, 300));
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(period));
+                loop {
+                    interval.tick().await;
+                    router.prune_idle().await;
+                }
+            });
+        }
+    }
+
     // Spawn background image pre-build. This bakes configured packages into a
     // container image so container creation is instant. Backends that don't
     // support image building return Ok(None) and the spawn is harmless.
@@ -3620,6 +3636,8 @@ struct GonData {
 struct SandboxGonInfo {
     backend: String,
     os: &'static str,
+    scope: String,
+    idle_ttl_secs: u64,
     default_image: String,
 }
 
@@ -3741,12 +3759,16 @@ async fn build_gon_data(gw: &GatewayState) -> GonData {
         SandboxGonInfo {
             backend: router.backend_name().to_owned(),
             os: std::env::consts::OS,
+            scope: router.config().scope.to_string(),
+            idle_ttl_secs: router.config().idle_ttl_secs,
             default_image: router.default_image().await,
         }
     } else {
         SandboxGonInfo {
             backend: "none".to_owned(),
             os: std::env::consts::OS,
+            scope: "off".to_owned(),
+            idle_ttl_secs: 0,
             default_image: moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_owned(),
         }
     };

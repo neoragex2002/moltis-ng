@@ -10,6 +10,14 @@ function sandboxRuntimeAvailable() {
 	return (S.sandboxInfo?.backend || "none") !== "none";
 }
 
+function sandboxScope() {
+	return S.sandboxInfo?.scope || "session";
+}
+
+function perSessionImageSupported() {
+	return sandboxScope() === "session";
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: UI state management with multiple controls
 function applySandboxControlAvailability() {
 	var available = sandboxRuntimeAvailable();
@@ -27,17 +35,24 @@ function applySandboxControlAvailability() {
 	}
 
 	if (S.sandboxImageBtn) {
-		S.sandboxImageBtn.disabled = !available;
-		S.sandboxImageBtn.style.opacity = available ? "" : "0.55";
-		S.sandboxImageBtn.style.cursor = available ? "pointer" : "not-allowed";
+		var perSession = perSessionImageSupported();
+		var enabled = available && perSession;
+		S.sandboxImageBtn.disabled = !enabled;
+		S.sandboxImageBtn.style.opacity = enabled ? "" : "0.55";
+		S.sandboxImageBtn.style.cursor = enabled ? "pointer" : "not-allowed";
 		if (title) {
 			S.sandboxImageBtn.title = title;
+		} else if (!perSession) {
+			S.sandboxImageBtn.title = `Sandbox image is managed by tools.exec.sandbox.scope=${sandboxScope()}`;
 		} else {
 			S.sandboxImageBtn.title = "Sandbox image";
 		}
 	}
 
 	if (!available && S.sandboxImageDropdown) {
+		S.sandboxImageDropdown.classList.add("hidden");
+	}
+	if (available && !perSessionImageSupported() && S.sandboxImageDropdown) {
 		S.sandboxImageDropdown.classList.add("hidden");
 	}
 
@@ -91,6 +106,10 @@ var DEFAULT_IMAGE = "ubuntu:25.10";
 export function updateSandboxImageUI(image) {
 	S.setSessionSandboxImage(image || null);
 	if (!S.sandboxImageLabel) return;
+	if (!perSessionImageSupported()) {
+		S.sandboxImageLabel.textContent = "managed by config";
+		return;
+	}
 	if (!applySandboxControlAvailability()) {
 		S.sandboxImageLabel.textContent = "unavailable";
 		return;
@@ -176,6 +195,7 @@ function addImageOption(tag, isActive, subtitle) {
 }
 
 function selectImage(tag) {
+	if (!perSessionImageSupported()) return;
 	var value = tag || "";
 	sendRpc("sessions.patch", {
 		key: S.activeSessionKey,
