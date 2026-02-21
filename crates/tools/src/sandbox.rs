@@ -2177,6 +2177,10 @@ impl Drop for SandboxLease {
 pub struct SandboxRouter {
     config: SandboxConfig,
     backend: Arc<dyn Sandbox>,
+    /// Serialize `ensure_ready` per effective sandbox key to avoid concurrent
+    /// container creation races when multiple sessions share the same sandbox
+    /// (e.g. multiple bots in one Telegram group with `scope=chat`).
+    ensure_ready_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-session overrides: true = sandboxed, false = direct execution.
     overrides: RwLock<HashMap<String, bool>>,
     /// Per-session image overrides.
@@ -2200,6 +2204,7 @@ impl SandboxRouter {
         Self {
             config,
             backend,
+            ensure_ready_locks: tokio::sync::Mutex::new(HashMap::new()),
             overrides: RwLock::new(HashMap::new()),
             image_overrides: RwLock::new(HashMap::new()),
             global_image_override: RwLock::new(None),
@@ -2215,6 +2220,7 @@ impl SandboxRouter {
         Self {
             config,
             backend,
+            ensure_ready_locks: tokio::sync::Mutex::new(HashMap::new()),
             overrides: RwLock::new(HashMap::new()),
             image_overrides: RwLock::new(HashMap::new()),
             global_image_override: RwLock::new(None),
@@ -2269,6 +2275,29 @@ impl SandboxRouter {
             scope: self.config.scope.clone(),
             key: sanitized,
         }
+    }
+
+    /// Ensure the sandbox container for a session is ready.
+    ///
+    /// Serialized per effective sandbox key to avoid races when multiple
+    /// sessions map to the same container (shared scopes like `chat|bot|global`).
+    pub async fn ensure_ready_for_session(
+        &self,
+        session_key: &str,
+        image_override: Option<&str>,
+    ) -> Result<SandboxId> {
+        let effective_key = self.effective_sandbox_key(session_key);
+        let lock = {
+            let mut locks = self.ensure_ready_locks.lock().await;
+            locks
+                .entry(effective_key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+        let id = self.sandbox_id_for(session_key);
+        self.backend.ensure_ready(&id, image_override).await?;
+        Ok(id)
     }
 
     /// Compute the effective (unsanitized) sandbox key for a session.
@@ -2376,6 +2405,10 @@ impl SandboxRouter {
             let mut last = self.last_used_ms.lock().unwrap_or_else(|e| e.into_inner());
             last.remove(effective_key);
         }
+        {
+            let mut locks = self.ensure_ready_locks.lock().await;
+            locks.remove(effective_key);
+        }
         Ok(())
     }
 
@@ -2385,6 +2418,11 @@ impl SandboxRouter {
         self.backend.cleanup(&id).await?;
         self.remove_override(session_key).await;
         self.remove_image_override(session_key).await;
+        {
+            let effective_key = self.effective_sandbox_key(session_key);
+            let mut locks = self.ensure_ready_locks.lock().await;
+            locks.remove(&effective_key);
+        }
         Ok(())
     }
 
@@ -2877,6 +2915,80 @@ mod tests {
         // Plain alphanumeric keys pass through unchanged.
         let id2 = router.sandbox_id_for("main");
         assert_eq!(id2.key, "main");
+    }
+
+    struct ConcurrencyDetectSandbox {
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Sandbox for ConcurrencyDetectSandbox {
+        fn backend_name(&self) -> &'static str {
+            "detect"
+        }
+
+        async fn ensure_ready(&self, _id: &SandboxId, _image_override: Option<&str>) -> Result<()> {
+            use std::sync::atomic::Ordering;
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut prev = self.max_in_flight.load(Ordering::SeqCst);
+            while now > prev {
+                match self.max_in_flight.compare_exchange(
+                    prev,
+                    now,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(p) => prev = p,
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn exec(
+            &self,
+            _id: &SandboxId,
+            _command: &str,
+            _opts: &ExecOpts,
+        ) -> Result<ExecResult> {
+            anyhow::bail!("not implemented for test")
+        }
+
+        async fn cleanup(&self, _id: &SandboxId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_router_ensure_ready_serialized_for_shared_scope() {
+        let detect = Arc::new(ConcurrencyDetectSandbox {
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let backend: Arc<dyn Sandbox> = detect.clone();
+
+        let config = SandboxConfig {
+            scope: SandboxScope::Chat,
+            ..Default::default()
+        };
+        let router = SandboxRouter::with_backend(config, backend);
+
+        // Different sessions that map to the same effective key when scope=chat.
+        let s1 = "telegram:bot1:-100";
+        let s2 = "telegram:bot2:-100";
+
+        let (r1, r2) = tokio::join!(
+            router.ensure_ready_for_session(s1, Some("ubuntu:25.10")),
+            router.ensure_ready_for_session(s2, Some("ubuntu:25.10")),
+        );
+        r1.unwrap();
+        r2.unwrap();
+
+        use std::sync::atomic::Ordering;
+        assert_eq!(detect.max_in_flight.load(Ordering::SeqCst), 1);
     }
 
     #[test]

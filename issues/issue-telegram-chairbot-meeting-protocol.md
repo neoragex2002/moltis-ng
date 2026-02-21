@@ -51,7 +51,7 @@
 ### D) 已有相关 issue（本单实现时需要参考/可能复用）
 - `issues/issue-named-personas-and-per-session-agent-profiles.md`：per-agent profile/capabilities（本单要求“按 agent 能力集”最终要靠这张落地；V1 可先按 Telegram account 作为 agent 身份，能力集先沿用全局或 channel 默认）
 - `issues/issue-terminology-and-concept-convergence.md`：术语收敛（agent/account/session/scope）
-- `issues/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md`：非会议场景也要跨 bot 可见性时再做（本单会议场景优先走“会议派生 session 的全量 fan-out”，不依赖 Telegram bot-to-bot update）
+- `issues/done/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md`：非会议场景也要跨 bot 可见性时再做（本单会议场景优先走“会议派生 session 的全量 fan-out”，不依赖 Telegram bot-to-bot update）
 
 ## 背景（Background）
 你希望在 Telegram 群里做复杂协作：
@@ -226,6 +226,6 @@ chairbot 行为冻结：
 - 回滚策略：禁用 chairbot meeting 功能即可；不影响普通聊天与现有会话格式。
 
 ## 交叉引用（Cross References）
-- `issues/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md`（若后续需要“非会议”场景的 bot-to-bot 可见性补偿）
+- `issues/done/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md`（若后续需要“非会议”场景的 bot-to-bot 可见性补偿）
 - `issues/issue-terminology-and-concept-convergence.md`（术语收敛：agent/account/session）
 - `issues/issue-named-personas-and-per-session-agent-profiles.md`（按“agent”口径重写为内部 profile/capabilities 实现细节）

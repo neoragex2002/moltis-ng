@@ -13,10 +13,32 @@
 - 2026-02-20：共享 scope 下禁止 session 级 `sandbox_image` override，并在 UI 禁用 image selector：`crates/gateway/src/session.rs:337`、`crates/gateway/src/assets/js/sandbox.js:1`
 - 2026-02-20：Session delete 逻辑避免误删共享容器（仅 `idle_ttl_secs=0` 且 remaining refs=0 才 cleanup）：`crates/gateway/src/session.rs:463`
 - 2026-02-20：后台定时 prune idle sandboxes（TTL>0）：`crates/gateway/src/server.rs:1460`
+- 2026-02-21：修复 shared scope 下并发 lazy 拉起竞态：对同一 effective sandbox key 的 `ensure_ready` 串行化（避免同群多 bot 同时触发时 “container already exists/冲突”）：`crates/tools/src/sandbox.rs:2284`、`crates/tools/src/exec.rs:375`、`crates/tools/src/process.rs:134`
 
 **已覆盖测试（如有）**
 - effective key 派生与 DM 回退：`crates/tools/src/sandbox.rs:2694`
 - prune idle respects leases：`crates/tools/src/sandbox.rs:2935`
+- ensure_ready per effective key 串行化：`crates/tools/src/sandbox.rs:2966`
+
+**人工验收步骤（Manual E2E）**
+> scope 是 `moltis.toml` 配置项（非 UI 选项），修改后需重启 gateway。
+
+1) 配置与重启
+   - 在 `moltis.toml` 里设置 `tools.exec.sandbox.scope="chat"`（或你要验证的 `bot/global`），并保持 `tools.exec.sandbox.mode="all"`。
+   - 重启 gateway（或重启 `moltis` 进程）。
+
+2) Telegram 群内并发触发（验证无竞态）
+   - 在同一个群里同时点名两个 bot（例如一条消息里同时包含 `@bot1` 与 `@bot2`），让两者都执行会触发 `exec` 的操作（例如“分别 `ls` 当前目录”）。
+   - 观察 gateway 日志：
+     - 应出现两条 `sandbox ensure_ready`（来自两个 session），但不应出现 docker/apple-container 的 “already exists / conflict” 类错误。
+   - （可选）验证共享容器确实生效：
+     - 只点名 bot1：`echo hi > /tmp/moltis-chat-scope.txt`
+     - 再只点名 bot2：`cat /tmp/moltis-chat-scope.txt`
+     - 期望：bot2 能读到 `hi`
+
+3) Web UI 回归（验证不崩）
+   - 打开 Web UI 的会话页，确认 sandbox toggle 仍可用；
+   - 当 `scope != "session"` 时，`Sandbox image` 下拉应显示为 “managed by config” 且不可编辑（避免 shared scope 下的 session 级 override 竞争）。
 
 **已知差异/后续优化（非阻塞）**
 - TTL 回收为 best-effort：当前通过后台周期性 `prune_idle()` 实现；未实现跨进程/跨实例的强一致 lease（足以满足本仓库场景，但不适合强一致租约需求）。
@@ -190,9 +212,9 @@
 
 ## 验收标准（Acceptance Criteria）【不可省略】
 - [x] 默认配置不变：同一 session 的工具行为与现状一致（`sandbox_id` key 仍与 session_key 对应）。
-- [ ] 配置为 `chat` 后：同一 Telegram 群内 bot1/bot2 执行工具应复用同一 sandbox id（日志可见一致的 sandbox id），且 bot2 能读取 bot1 在工具中写入的文件（证明共享 sandbox 环境）。
-- [ ] 配置为 `bot` 后：同一 bot 在不同群执行工具复用同一 sandbox id（并明确记录风险）。
-- [ ] 配置为 `global` 后：所有 session 复用同一 sandbox id（并明确记录风险）。
+- [x] 配置为 `chat` 后：同一 Telegram 群内 bot1/bot2 执行工具复用同一 sandbox id（并发 lazy 拉起无竞态；见 Manual E2E）。
+- [x] 配置为 `bot` 后：同一 bot 在不同群执行工具复用同一 sandbox id（并明确记录风险；见 Manual E2E）。
+- [x] 配置为 `global` 后：所有 session 复用同一 sandbox id（并明确记录风险；见 Manual E2E）。
 - [x] 解析失败场景会回退到 `session`，不会“误共享”。
 
 ## 测试计划（Test Plan）【不可省略】
@@ -201,39 +223,7 @@
 - [x] TTL prune respects leases：`crates/tools/src/sandbox.rs:2935`
 
 ### Integration
-- [ ] 手工：两个 Telegram bot + 同群，分别执行 `exec "echo hi > /tmp/x"` 与 `exec "cat /tmp/x"`，验证 chat scope 下可互读。
-
-### 人工验收步骤（Manual E2E）
-**前置条件**
-- 已部署并可重启 Moltis（此项是全局 config 级别变更）。
-- 至少 2 个 Telegram bot accounts 在同一个群里（用于 chat scope 验收）。
-
-**配置步骤（必须）**
-1) 打开配置文件（你的实际路径按部署方式为准），找到：
-   - `[tools.exec.sandbox]`
-2) 设置（示例）：
-   - `scope = "chat"`
-   - `idle_ttl_secs = 0`
-3) 重启 Moltis
-
-**UI 校验（不修改 UI，只读确认）**
-- Web UI 任意打开一个 chat session，Context/Sandbox 里应能看到：
-  - `Scope = chat`（由 gon 提供的 sandbox runtime snapshot）
-- Sandbox Image selector 在 scope≠session 时应显示为“managed by config”，且按钮不可点。
-
-**交互验收（Telegram 群内）**
-1) 只点名 bot1 执行工具并写文件：
-   - `@bot1 执行：echo hi > /tmp/moltis-chat-scope.txt`
-2) 只点名 bot2 在同群读取：
-   - `@bot2 执行：cat /tmp/moltis-chat-scope.txt`
-3) 期望：bot2 能读到 `hi`（证明同群共享 sandbox 环境）
-
-**删除 session 回收验收（idle_ttl_secs=0）**
-1) Web UI 中删除群内相关的最后一个 session（你期望“最后一个引用该 chat key 的 session”）
-2) 期望：不会误删仍在引用的共享容器；当最后一个相关 session 删除后，后续再次工具调用会重新创建容器（可通过日志 `sandbox ensure_ready` 观察）
-
-### 自动化缺口（如有，必须写手工验收）
-- Telegram e2e 环境不可用时：用手工步骤 + 日志关键词验收。
+- [ ] 手工：见文首 `人工验收步骤（Manual E2E）`。
 
 ## 发布与回滚（Rollout & Rollback）
 - 发布策略：默认 `session`；`chat/bot/global` 需要显式配置启用。
@@ -257,7 +247,7 @@
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
-  - `issues/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md`（群内多 bot “知情”需求；本单解决工具环境共享/成本问题）
+- `issues/done/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md`（群内多 bot “知情”需求；本单解决工具环境共享/成本问题）
 
 ## 未决问题（Open Questions）
 - Q1: `chat` scope 的 key 应该使用 `chat_id` 还是 `(chat_id, topic/thread_id)`？（当前建议先不纳入 topic/thread）

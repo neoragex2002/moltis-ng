@@ -1,102 +1,137 @@
-# Issue: Terminology / Concept Convergence（命名与概念收敛不一致导致理解与实现成本过高）
+# Issue: Terminology / Concept Convergence（概念与术语收敛：两域分离、核心键冻结、呈现口径统一）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: TODO（记录在案，暂缓处理）
+- Status: TODO（记录在案，尚未系统推进）
 - Priority: P2（长期质量/可维护性问题；会放大后续需求与排障成本）
 - Components: gateway / sessions / channels / telegram / ui-debug / docs
 
 ---
 
 ## 背景（Background）
-当前代码库中存在多套“会话/作用域/身份/渠道”相关概念，且在不同模块中使用相同或相近的术语（例如 `session_key`、`account_id`、`group_id`、`channel`、`scope`）表达不同语义，导致：
-- 新功能设计难以对齐口径（容易“各做各的”）
-- 日志与 debug 信息难以解读（同名字段含义不一致）
-- 排障时容易把“平台投递问题”与“本地门禁/会话绑定问题”混在一起
+当前仓库中，“Telegram 域概念”和 “Moltis 域概念”在代码/日志/UI/issue 文档里混用，且出现同名字段跨层复用（尤其 `session_key`/`account_id`/`chat`/`scope`），导致：
+- 讨论需求必须先解释名词，沟通与实现成本高；
+- 同一条链路的日志很难读懂、很难串起来排障；
+- 一旦引入多 agent / 多 loop / admin 工具，这种混乱会指数级放大（安全边界也会变脆弱）。
 
-该问题已在 Telegram mention、session routing、prompt cache key 分桶、/context debug 等议题中反复出现。
+本 Issue 的目标不是“解释更多”，而是**冻结一套极简、准确、可执行的术语体系**，并把它落实到可观测性与命名规范里。
 
-## 问题陈述（Problem Statement）
-### 现象（Symptoms）
-1) 同一个词在不同层含义不同：
-   - `session_key` 既被用于“渠道 chat 的确定性键”（如 `telegram:<account_id>:<chat_id>`），又被用于“持久会话 key”（如 `session:<uuid>`）。
-2) 不同词却指同一件事或强相关对象：
-   - Telegram：`group_id`/`chat_id` 在某些地方混用，容易误导“group == group_id”的语义边界。
-3) 身份相关字段命名不收敛：
-   - `account_id`（配置中的频道账号标识） vs `bot_username`（Telegram `@handle`）经常在日志/UI 中混用，导致用户误解“我到底在跟谁说话”。
-4) `scope` / `channel` / `group` / `dm` 的层级关系缺乏统一词汇表与图示。
+---
 
-### 影响（Impact）
-- 设计沟通成本高：需要大量“先解释名词”才能讨论需求。
-- 实现容易偏航：不同模块可能各自做“合理但不一致”的假设。
-- Debug 难：同一条链路里出现多个 `session_key`，但无法快速判断“这是 chat scope 还是 conversation session”。
+## 需求（Requirements）【必须满足】
+1) **两域严格隔离**：Telegram 域术语与 Moltis 域术语不得混用；同名词不允许跨域复用语义。
+2) **核心概念极简且冻结**：参与路由/分桶/落盘/鉴权的核心字段必须最少、语义固定、全仓统一。
+3) **跨域桥只保留一个主键**：从 Telegram 的 chat/thread 唯一定位到 Moltis 的“会话桶”，必须通过同一个核心键（避免到处隐式推导）。
+4) **核心 vs 呈现严格区分**：`@username`、display name、chat title、container name 等只允许用于“呈现”，不得用于分桶/鉴权/存储主键。
+5) **呈现字段也要收敛**：默认日志/UI 只展示 2–3 个稳定字段，其余只在“展开详情”里提供。
 
-## 概念与口径（Glossary & Semantics）【建议冻结为统一词汇表】
-> 本节是本 Issue 的核心交付之一：冻结术语，后续所有 issue/doc/debug/UI 统一使用。
-
-### 1) Channel / Connector（渠道）
-例如 `telegram` / `web` / `discord`。用于描述消息来源。
-
-### 2) Channel Account（渠道账号）
-例如 Telegram 中的一套 bot token 实例。在配置中通常以 `account_id` 作为标识（建议术语：`channel_account_id`）。
-
-### 3) Chat（对话入口）
-渠道内的一个 chat（Telegram `chat_id` / Web 的连接或房间等）。同一个 chat 通常对应“群级上下文”。
-
-### 4) Chat Scope Key（建议新增统一术语）
-稳定标识“某渠道账号 + 某 chat”的键，建议口径：
-`<channel_type>:<channel_account_id>:<chat_id>`
-示例：`telegram:fluffy:-5288040422`
-
-### 5) Conversation Session（持久会话）
-真正承载 LLM history/compaction/sandbox override/tool `_session_key` 的持久会话，示例：
-`session:<uuid>`
-
-### 6) Active Session Binding（chat → active session 映射）
-`ChatScopeKey -> ConversationSessionKey` 的映射关系（例如 `channel_sessions` 表的含义）。
-
-## 现状证据（Evidence in Code）
-- ChatScopeKey（确定性键）存在：
-  - `crates/gateway/src/channel_events.rs`：`default_channel_session_key()` 返回 `"{channel}:{account_id}:{chat_id}"`
-- Active session binding 表存在：
-  - `crates/sessions/src/metadata.rs`：`channel_sessions` 表、`get_active_session()`、`set_active_session()`
-- Prompt runtime context 里出现 `session_key` 字段，但缺乏“这是 ChatScope 还是 ConversationSession”的明确标注：
-  - `crates/agents/src/prompt.rs`：`PromptHostRuntimeContext.session_key`
-- Telegram 侧同时存在 `account_id`（配置标识）与 `bot_username`（Telegram handle）：
-  - `crates/telegram/src/bot.rs`：`get_me().username`
-  - `crates/telegram/src/config.rs`：以 `account_id` 启动账号
+---
 
 ## 目标（Goals）
-- 统一术语表（Glossary）并在 docs/issues 中冻结。
-- UI debug / 日志 / /context 输出对齐术语：明确区分 ChatScopeKey 与 ConversationSessionKey。
-- 逐步重命名/重构：避免同名字段跨层复用导致歧义（不要求一次性大改）。
+- 冻结一套 Glossary（核心对象 + 核心键 + 呈现口径），供所有后续 issue/实现复用。
+- 让日志/UI/debug 面板能“一眼回答”：
+  - 我到底是哪只 bot（配置别名）在处理？
+  - 哪个 Telegram chat/thread 的消息？
+  - 对应 Moltis 的哪个会话桶？
+  - 工具执行用了哪个 sandbox（scope + effective key）？
+- 用增量迁移的方式消除现有 `session_key` 的语义漂移与同名字段复用。
 
 ## 非目标（Non-goals）
-- 不在本 issue 内改变实际路由/会话行为（先收敛口径与可观测性）。
-- 不在本 issue 内做大规模破坏性重构（以小步可回滚为原则）。
+- 不要求一次性大重构（允许分 Phase 推进）。
+- 不在本 Issue 内引入多 agent 常驻架构（本单是其前置基础设施：术语与可观测性收敛）。
 
-## 方案（Proposed Solution）
-### Phase 0（文档与口径收敛）
-- 新增/完善统一 Glossary（本单已给出建议版本）。
-- 在关键 issue 模板、/context debug 文档中引用该 Glossary。
+---
 
-### Phase 1（可观测性收敛：先让人看得懂）
-- 日志/Debug 面板同时展示：
-  - `chat_scope_key`（稳定输入来源键）
-  - `conversation_session_key`（持久会话 key）
-  - `channel_account_id`（配置标识）+ `bot_handle`（如 Telegram `@username`）
-- 在输出中避免使用裸词 `session_key`，必须带前缀或标签。
+## 核心术语与键（Core Vocabulary, Frozen）
+> 只要涉及“分桶/路由/鉴权/落盘”，只能使用本节术语；其余词汇只能作为呈现层别名。
 
-### Phase 2（代码命名收敛：逐步消歧）
-- 将 `default_channel_session_key()` 等函数命名/注释改为 `chat_scope_key` 语义。
-- 将 `SessionKey`/`session_key` 在需要时拆分为两个不同类型（或至少不同字段名）。
-- 将 `account_id` 在跨模块边界时改名为 `channel_account_id`（避免与“用户 account / OAuth account”混淆）。
+### A) Telegram 域（平台定义）
+- `user_id`：发送者/成员 id（人和 bot 在 Telegram 都是 user）
+- `chat_id`：对话容器 id（DM/群/频道统一都叫 chat）
+- `thread_id`：Topic/Thread id（可选；仅 supergroup topics）
+- `message_id`：消息 id
+
+### B) Moltis 域（系统定义）
+#### 1) `account_id`（保留此名，但冻结语义）
+`account_id` = Moltis 配置里“这只 Telegram bot 实例”的别名（例如 `fluffy`/`lovely`）。
+
+- 它**不是** Telegram 的 account 概念；
+- 语义：选择哪套 token/连接参数、以及在同一群里区分多只 bot；
+- 约束：必须稳定、可读、可作为 key 片段；不依赖 Telegram `@username`。
+
+#### 2) `session_key`（唯一跨域桥；建议对用户保持这个名字）
+`session_key = telegram:<account_id>:<chat_id>[:<thread_id>]`
+
+示例：
+- DM：`telegram:fluffy:8454363355`（chat_id 可能是正数）
+- 群：`telegram:fluffy:-5288040422`
+- topics：`telegram:fluffy:-5288040422:12`
+
+**硬规则**
+- `session_key` 只允许表示“账号实例 + chat/thread 的会话桶”；
+- 任意工具上下文（如 `_session_key`）、sandbox key 派生、channel ingest/reply routing 必须以 `session_key` 为主轴；
+- `session_key` 不得拼 `@username`，不得拼 display name/title。
+
+#### 3) 内部持久会话（为消歧：建议用 `session_id` / `conversation_id`）
+仓库现状里存在 `session:<uuid>` 这种“持久会话 key”，用于承载历史、compaction、metadata 等。
+
+为了彻底止住歧义：对外呈现与跨域桥固定为 `session_key`；而 `session:<uuid>` 在文档/UI/日志里应标注为 `session_id`（或 `conversation_id`），并尽量只在 debug/详情里出现。
+
+---
+
+## 呈现口径（Presentation Contract, Frozen）
+> 呈现字段要“少且稳定”，并与核心键明确解耦。
+
+### 默认呈现（日志/UI 默认只显示 3 项）
+1) `actor`：`<account_id>[/@handle?]`
+2) `where`：`chat:<chat_id>[#<thread_id>] <title?>`
+3) `session`：`<session_key>`
+
+### 详情呈现（展开后可见，但不得参与逻辑）
+- `bot_handle`（Telegram `@username`，可空/可变）
+- `sender_display_name`、`chat_title`
+- `bot_user_id`、`sender_user_id`
+- `message_id`、entities 解析结果
+- `container_name`/hash 等
+
+---
+
+## Sandbox / Tools 相关口径（最小必要）
+> 仅定义必须出现在可观测性里的两项，避免再引入新的“工作台/环境”名词漂移。
+
+- `sandbox_scope`：配置值 `tools.exec.sandbox.scope=session|chat|bot|global`
+- `effective_sandbox_key`：由 `sandbox_scope + session_key` 派生的复用键（必须可在 debug/详情里反查）
+
+---
+
+## 方案（Proposed Solution / Migration Plan）
+### Phase 0：文档冻结
+- [ ] 本 Issue 的 Glossary 与 Presentation Contract 作为“团队共识基线”冻结；
+- [ ] 在后续 Telegram / sessions / sandbox / multi-agent 相关 issue 里引用本术语表。
+
+### Phase 1：可观测性收敛（先让人看得懂）
+- [ ] 日志统一输出：默认 3 项（actor/where/session），并提供展开详情字段；
+- [ ] `/context` 与 debug panel 统一显示：
+  - `session_key`（核心桥）
+  - `account_id`（配置别名）
+  - `chat_id/thread_id`（Telegram 定位）
+  - `sandbox_scope/effective_sandbox_key`（工具环境定位）
+- [ ] 任何输出避免裸词 `session_key` 漂移：如果出现 `session:<uuid>`，必须标注为 `session_id`（或 `conversation_id`）。
+
+### Phase 2：代码命名与类型消歧（逐步、可回滚）
+- [ ] 将 `default_channel_session_key()` 等函数注释/命名逐步收敛为“生成 `session_key`（跨域桥）”；
+- [ ] 在跨模块边界把 `session_key` 拆成两个明确字段（或新类型）：
+  - `session_key`（跨域桥，确定性）
+  - `session_id`（内部持久会话，opaque）
+- [ ] 把 `bot_username` 的语义固定为 `bot_handle`（presentation only），禁止在核心逻辑里做 key。
+
+---
 
 ## 验收标准（Acceptance Criteria）
-- [ ] 文档层：统一 Glossary 落地并被模板引用。
-- [ ] Debug/日志：同一条链路里不再出现“无法判断语义”的 `session_key` 字段；至少展示清晰标签。
-- [ ] 代码层：关键边界（gateway<->channels<->sessions）术语一致，减少同名复用。
+- [ ] 术语：本文件成为后续设计/实现的引用基线（至少被关键 issue 引用）。
+- [ ] 可观测性：同一条链路里能稳定对齐 `account_id + chat_id/thread_id + session_key`，无需猜。
+- [ ] 消歧：用户与调试输出中不再出现“无法判断语义”的 `session_key`；内部 `session:<uuid>` 一律标注为 `session_id`/`conversation_id`。
 
 ## 交叉引用（Cross References）
-- `issues/done/issue-telegram-group-mention-gating-not-working.md`（多 bot 群聊时“收到/处理/留痕”三层口径）
-- `issues/done/issue-telegram-context-debug-parity.md`（/context debug 口径与字段命名）
-- `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（debug 面板字段口径收敛）
+- `issues/done/issue-telegram-group-mention-gating-not-working.md`
+- `issues/done/issue-telegram-context-debug-parity.md`
+- `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md`

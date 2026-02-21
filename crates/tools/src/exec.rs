@@ -371,11 +371,10 @@ impl AgentTool for ExecTool {
             if is_sandboxed {
                 let _lease = router.acquire_lease(sk);
                 router.touch(sk);
-                let id = router.sandbox_id_for(sk);
                 let image = router.resolve_image(sk, None).await;
+                let id = router.ensure_ready_for_session(sk, Some(&image)).await?;
                 let backend = router.backend();
                 info!(session = sk, sandbox_id = %id, backend = backend.backend_name(), image, "sandbox ensure_ready");
-                backend.ensure_ready(&id, Some(&image)).await?;
                 debug!(session = sk, sandbox_id = %id, command, "sandbox running command");
                 let mut sandbox_result = backend.exec(&id, command, &opts).await?;
                 if sandbox_result.exit_code != 0
@@ -387,7 +386,7 @@ impl AgentTool for ExecTool {
                         command,
                         "sandbox exec failed because container is not running, reinitializing and retrying once"
                     );
-                    backend.ensure_ready(&id, Some(&image)).await?;
+                    router.ensure_ready_for_session(sk, Some(&image)).await?;
                     sandbox_result = backend.exec(&id, command, &opts).await?;
                 }
                 router.touch(sk);
