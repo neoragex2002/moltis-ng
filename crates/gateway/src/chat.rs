@@ -47,6 +47,7 @@ use {
 use crate::{
     broadcast::{BroadcastOpts, broadcast},
     chat_error::parse_chat_error,
+    run_failure::{FailureInput, FailureStage, normalize_failure},
     services::{ChatService, ModelService, ServiceResult},
     session::extract_preview_from_value,
     state::GatewayState,
@@ -183,6 +184,18 @@ struct ChatErrorBroadcast {
     state: &'static str,
     error: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct RunFailedEvent {
+    run_id: String,
+    session_key: String,
+    provider_name: String,
+    model_id: String,
+    stage_hint: FailureStage,
+    raw_error: String,
+    details: serde_json::Value,
     seq: Option<u64>,
 }
 
@@ -2619,39 +2632,26 @@ impl ChatService for LiveChatService {
                 {
                     Ok(result) => result,
                     Err(_) => {
-                        warn!(
-                            run_id = %run_id_clone,
-                            session = %session_key_clone,
-                            timeout_secs = agent_timeout_secs,
-                            "agent run timed out"
-                        );
-                        let error_obj = serde_json::json!({
-                            "type": "timeout",
-                            "message": format!(
-                                "Agent run timed out after {agent_timeout_secs}s"
-                            ),
-                        });
-                        broadcast(
+                        let raw_error =
+                            format!("Agent run timed out after {agent_timeout_secs}s");
+                        handle_run_failed_event(
                             &state,
-                            "chat",
-                            serde_json::json!({
-                                "runId": run_id_clone,
-                                "sessionKey": session_key_clone,
-                                "state": "error",
-                                "error": error_obj,
-                            }),
-                            BroadcastOpts::default(),
+                            &model_store,
+                            RunFailedEvent {
+                                run_id: run_id_clone.clone(),
+                                session_key: session_key_clone.clone(),
+                                provider_name: provider_name.clone(),
+                                model_id: model_id.clone(),
+                                stage_hint: FailureStage::GatewayTimeout,
+                                raw_error,
+                                details: serde_json::json!({
+                                    "timeout_secs": agent_timeout_secs,
+                                    "elapsed_ms": agent_timeout_secs * 1000,
+                                }),
+                                seq: client_seq,
+                            },
                         )
                         .await;
-                        // Channel stopgap: send a minimal error reply and drain any pending
-                        // reply targets/logbook so later replies don't get cross-wired.
-                        let channel_error = serde_json::json!({
-                            "icon": "\u{23F1}\u{FE0F}",
-                            "title": "Timed out",
-                            "detail": format!("Agent run timed out after {agent_timeout_secs}s."),
-                        });
-                        deliver_channel_error_replies(&state, &session_key_clone, &channel_error)
-                            .await;
                         None
                     },
                 }
@@ -3936,6 +3936,145 @@ async fn clear_unsupported_model(
     }
 }
 
+async fn handle_run_failed_event(
+    state: &Arc<GatewayState>,
+    model_store: &Arc<RwLock<DisabledModelsStore>>,
+    event: RunFailedEvent,
+) {
+    let normalized = normalize_failure(FailureInput {
+        stage_hint: event.stage_hint,
+        raw_error: &event.raw_error,
+        provider_name: Some(event.provider_name.as_str()),
+        model_id: Some(event.model_id.as_str()),
+        details: event.details.clone(),
+    });
+
+    // For send_sync callers: store a safe, user-facing error string.
+    state
+        .set_run_error(&event.run_id, normalized.message.user.clone())
+        .await;
+
+    let dedup_key = format!("run.failure.egress:{}", event.run_id);
+    let suppress_side_effects = state.dedupe_check_and_insert(&dedup_key).await;
+
+    let reply_targets_before = state.peek_channel_replies(&event.session_key).await.len();
+    let targets = state.drain_channel_replies(&event.session_key).await;
+    let drained_count = targets.len();
+    // Always drain status logs on failure so they don't leak to later replies.
+    let _ = state.drain_channel_status_log(&event.session_key).await;
+
+    let mut egress = serde_json::json!({
+        "sent": false,
+        "reply_targets_before": reply_targets_before,
+        "drained_count": drained_count,
+    });
+
+    // Best-effort channel error reply: send once per run_id in-process.
+    if suppress_side_effects {
+        // Still drain reply targets/status log to prevent cross-wiring, but do not
+        // send/broadcast/log the failure twice.
+        warn!(
+            event = "run.failure.duplicate",
+            run_id = event.run_id,
+            session_key = event.session_key,
+            provider = event.provider_name,
+            model = event.model_id,
+            dedup_key,
+            egress_reply_targets_before = reply_targets_before,
+            egress_drained_count = drained_count,
+            "duplicate failure egress suppressed"
+        );
+        return;
+    }
+
+    if !targets.is_empty() && !normalized.message.user.trim().is_empty() {
+        match state.services.channel_outbound_arc() {
+            Some(outbound) => {
+                let text = format!("\u{26A0}\u{FE0F} {}", normalized.message.user);
+                deliver_channel_replies_to_targets(
+                    outbound,
+                    targets,
+                    &event.session_key,
+                    &text,
+                    Arc::clone(state),
+                    ReplyMedium::Text,
+                    Vec::new(),
+                )
+                .await;
+                egress["sent"] = serde_json::json!(true);
+            },
+            None => {
+                egress["last_error"] = serde_json::json!({
+                    "action": "DeliverChannelErrorOnce",
+                    "class": "outbound_unavailable",
+                    "message_redacted": "channel outbound unavailable",
+                });
+            },
+        }
+    }
+
+    // Build the UI error card and enrich it with normalized fields.
+    let mut error_obj = parse_chat_error(&event.raw_error, Some(event.provider_name.as_str()));
+    if let Some(obj) = error_obj.as_object_mut() {
+        // Prefer showing the user-facing message as the card detail; other diagnostics
+        // are available via additional fields.
+        obj.insert(
+            "detail".into(),
+            serde_json::Value::String(normalized.message.user.clone()),
+        );
+        obj.insert("stage".into(), serde_json::json!(normalized.stage));
+        obj.insert("kind".into(), serde_json::json!(normalized.kind));
+        obj.insert("retryable".into(), serde_json::json!(normalized.retryable));
+        obj.insert("action".into(), serde_json::json!(normalized.action));
+        obj.insert("message".into(), serde_json::json!(normalized.message));
+        obj.insert("details".into(), normalized.details.clone());
+        obj.insert("raw".into(), serde_json::json!(normalized.raw));
+        obj.insert("egress".into(), egress.clone());
+        obj.insert("dedup_key".into(), serde_json::Value::String(dedup_key.clone()));
+    }
+
+    mark_unsupported_model(
+        state,
+        model_store,
+        &event.model_id,
+        &event.provider_name,
+        &error_obj,
+    )
+    .await;
+
+    // Broadcast terminal error frame (Web UI).
+    let error_payload = ChatErrorBroadcast {
+        run_id: event.run_id.clone(),
+        session_key: event.session_key.clone(),
+        state: "error",
+        error: error_obj,
+        seq: event.seq,
+    };
+    #[allow(clippy::unwrap_used)] // serializing known-valid struct
+    let payload_val = serde_json::to_value(&error_payload).unwrap();
+    broadcast(state, "chat", payload_val, BroadcastOpts::default()).await;
+
+    // Single structured failure line (logs).
+    warn!(
+        event = "run.failure",
+        run_id = event.run_id,
+        session_key = event.session_key,
+        provider = event.provider_name,
+        model = event.model_id,
+        stage = normalized.stage.as_str(),
+        kind = normalized.kind.as_str(),
+        retryable = normalized.retryable,
+        action = normalized.action.as_str(),
+        dedup_key,
+        raw_class = normalized.raw.class,
+        raw_message = normalized.raw.message_redacted,
+        egress_sent = egress.get("sent").and_then(|v| v.as_bool()).unwrap_or(false),
+        egress_reply_targets_before = reply_targets_before,
+        egress_drained_count = drained_count,
+        "run failed"
+    );
+}
+
 fn ordered_runner_event_callback() -> (
     Box<dyn Fn(RunnerEvent) + Send + Sync>,
     mpsc::UnboundedReceiver<RunnerEvent>,
@@ -4560,21 +4699,21 @@ async fn run_with_tools(
         },
         Err(e) => {
             let error_str = e.to_string();
-            warn!(run_id, error = %error_str, "agent run error");
-            state.set_run_error(run_id, error_str.clone()).await;
-            let error_obj = parse_chat_error(&error_str, Some(provider_name));
-            mark_unsupported_model(state, model_store, model_id, provider_name, &error_obj).await;
-            let error_payload = ChatErrorBroadcast {
-                run_id: run_id.to_string(),
-                session_key: session_key.to_string(),
-                state: "error",
-                error: error_obj.clone(),
-                seq: client_seq,
-            };
-            #[allow(clippy::unwrap_used)] // serializing known-valid struct
-            let payload_val = serde_json::to_value(&error_payload).unwrap();
-            broadcast(state, "chat", payload_val, BroadcastOpts::default()).await;
-            deliver_channel_error_replies(state, session_key, &error_obj).await;
+            handle_run_failed_event(
+                state,
+                model_store,
+                RunFailedEvent {
+                    run_id: run_id.to_string(),
+                    session_key: session_key.to_string(),
+                    provider_name: provider_name.to_string(),
+                    model_id: model_id.to_string(),
+                    stage_hint: FailureStage::Runner,
+                    raw_error: error_str,
+                    details: serde_json::json!({}),
+                    seq: client_seq,
+                },
+            )
+            .await;
             None
         },
     }
@@ -5117,8 +5256,9 @@ async fn run_streaming(
         content: user_content.clone(),
     });
 
+    let stream_started_at = Instant::now();
     #[cfg(feature = "metrics")]
-    let stream_start = Instant::now();
+    let stream_start = stream_started_at;
 
     let llm_context = moltis_agents::model::LlmRequestContext {
         session_key: Some(session_key.to_string()),
@@ -5268,22 +5408,23 @@ async fn run_streaming(
                 });
             },
             StreamEvent::Error(msg) => {
-                warn!(run_id, error = %msg, "chat stream error");
-                state.set_run_error(run_id, msg.clone()).await;
-                let error_obj = parse_chat_error(&msg, Some(provider_name));
-                mark_unsupported_model(state, model_store, model_id, provider_name, &error_obj)
-                    .await;
-                let error_payload = ChatErrorBroadcast {
-                    run_id: run_id.to_string(),
-                    session_key: session_key.to_string(),
-                    state: "error",
-                    error: error_obj.clone(),
-                    seq: client_seq,
-                };
-                #[allow(clippy::unwrap_used)] // serializing known-valid struct
-                let payload_val = serde_json::to_value(&error_payload).unwrap();
-                broadcast(state, "chat", payload_val, BroadcastOpts::default()).await;
-                deliver_channel_error_replies(state, session_key, &error_obj).await;
+                handle_run_failed_event(
+                    state,
+                    model_store,
+                    RunFailedEvent {
+                        run_id: run_id.to_string(),
+                        session_key: session_key.to_string(),
+                        provider_name: provider_name.to_string(),
+                        model_id: model_id.to_string(),
+                        stage_hint: FailureStage::ProviderStream,
+                        raw_error: msg,
+                        details: serde_json::json!({
+                            "elapsed_ms": stream_started_at.elapsed().as_millis() as u64
+                        }),
+                        seq: client_seq,
+                    },
+                )
+                .await;
                 return None;
             },
             // Tool events not expected in stream-only mode.
@@ -5414,90 +5555,6 @@ async fn deliver_channel_replies(
         Arc::clone(state),
         desired_reply_medium,
         status_log,
-    )
-    .await;
-}
-
-fn sanitize_channel_error_text(text: &str, max_chars: usize) -> String {
-    // Remove newlines/tabs and trim so error replies are compact and don't
-    // accidentally include structured dumps.
-    let mut s = text
-        .replace(['\r', '\n', '\t'], " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if s.is_empty() {
-        return s;
-    }
-    if s.chars().count() > max_chars {
-        s = s
-            .chars()
-            .take(max_chars.saturating_sub(1))
-            .collect::<String>();
-        s.push('…');
-    }
-    s
-}
-
-fn format_channel_error_reply(error_obj: &serde_json::Value) -> String {
-    let mut icon = error_obj
-        .get("icon")
-        .and_then(|v| v.as_str())
-        .unwrap_or("\u{26A0}\u{FE0F}");
-    if icon.trim().is_empty() {
-        icon = "\u{26A0}\u{FE0F}";
-    }
-    let title = error_obj
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Error");
-    let detail = error_obj
-        .get("detail")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let title = sanitize_channel_error_text(title, 120);
-    let detail = sanitize_channel_error_text(detail, 360);
-
-    if detail.is_empty() {
-        format!("{icon} {title}")
-    } else {
-        format!("{icon} {title}: {detail}")
-    }
-}
-
-async fn deliver_channel_error_replies(
-    state: &Arc<GatewayState>,
-    session_key: &str,
-    error_obj: &serde_json::Value,
-) {
-    let targets = state.drain_channel_replies(session_key).await;
-    // Always drain status logs on error so they don't leak to later replies.
-    let _ = state.drain_channel_status_log(session_key).await;
-
-    if targets.is_empty() {
-        return;
-    }
-
-    let text = format_channel_error_reply(error_obj);
-    if text.is_empty() {
-        return;
-    }
-
-    let outbound = match state.services.channel_outbound_arc() {
-        Some(o) => o,
-        None => return,
-    };
-
-    // Error replies are always text (no TTS/logbook suffix).
-    deliver_channel_replies_to_targets(
-        outbound,
-        targets,
-        session_key,
-        &text,
-        Arc::clone(state),
-        ReplyMedium::Text,
-        Vec::new(),
     )
     .await;
 }
@@ -7064,6 +7121,88 @@ mod tests {
         assert!(state.peek_channel_replies(session_key).await.is_empty());
         assert!(state.drain_channel_status_log(session_key).await.is_empty());
         assert!(rec.texts.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_failed_event_duplicate_still_drains_reply_targets_without_sending() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = rec.clone();
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
+
+        let session_key = "telegram:acct:123";
+        state
+            .push_channel_reply(
+                session_key,
+                moltis_channels::ChannelReplyTarget {
+                    channel_type: moltis_channels::ChannelType::Telegram,
+                    account_id: "acct".to_string(),
+                    account_handle: None,
+                    chat_id: "123".to_string(),
+                    message_id: Some("7".to_string()),
+                },
+            )
+            .await;
+
+        handle_run_failed_event(
+            &state,
+            &model_store,
+            RunFailedEvent {
+                run_id: "run-dupe".to_string(),
+                session_key: session_key.to_string(),
+                provider_name: "openai-responses".to_string(),
+                model_id: "gpt".to_string(),
+                stage_hint: FailureStage::Runner,
+                raw_error: "HTTP 401 Unauthorized".to_string(),
+                details: serde_json::json!({}),
+                seq: None,
+            },
+        )
+        .await;
+
+        // Push another pending target (simulating late arrival or out-of-order failure path).
+        state
+            .push_channel_reply(
+                session_key,
+                moltis_channels::ChannelReplyTarget {
+                    channel_type: moltis_channels::ChannelType::Telegram,
+                    account_id: "acct".to_string(),
+                    account_handle: None,
+                    chat_id: "123".to_string(),
+                    message_id: Some("8".to_string()),
+                },
+            )
+            .await;
+
+        handle_run_failed_event(
+            &state,
+            &model_store,
+            RunFailedEvent {
+                run_id: "run-dupe".to_string(),
+                session_key: session_key.to_string(),
+                provider_name: "openai-responses".to_string(),
+                model_id: "gpt".to_string(),
+                stage_hint: FailureStage::Runner,
+                raw_error: "HTTP 401 Unauthorized".to_string(),
+                details: serde_json::json!({}),
+                seq: None,
+            },
+        )
+        .await;
+
+        assert!(state.peek_channel_replies(session_key).await.is_empty());
+
+        // Only the first failure should send a reply (at most once).
+        let texts = rec.texts.lock().await;
+        assert_eq!(texts.len(), 1);
     }
 
     #[tokio::test]

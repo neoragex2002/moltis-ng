@@ -574,6 +574,13 @@ impl GatewayState {
         self.inner.write().await.run_errors.remove(run_id)
     }
 
+    /// TTL-based idempotency helper for one-off side effects (best-effort).
+    ///
+    /// Returns `true` if the key is a duplicate (already seen within TTL).
+    pub async fn dedupe_check_and_insert(&self, key: &str) -> bool {
+        self.inner.write().await.dedupe.check_and_insert(key)
+    }
+
     /// Append a status line (e.g. tool use, model selection) to the channel
     /// status log for a session. These are drained and appended as a logbook
     /// when the final response is delivered.

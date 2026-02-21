@@ -137,6 +137,28 @@ export function chatAddErrorCard(err) {
 		body.appendChild(prov);
 	}
 
+	if (err.stage || err.kind || err.action) {
+		var meta = document.createElement("div");
+		meta.className = "error-detail";
+		var parts = [];
+		if (err.stage) parts.push(`stage=${err.stage}`);
+		if (err.kind) parts.push(`kind=${err.kind}`);
+		if (err.action) parts.push(`action=${err.action}`);
+		meta.textContent = parts.join(" · ");
+		meta.style.marginTop = "4px";
+		meta.style.opacity = "0.55";
+		body.appendChild(meta);
+	}
+
+	if (err.message && err.message.debug) {
+		var dbg = document.createElement("div");
+		dbg.className = "error-detail";
+		dbg.textContent = err.message.debug;
+		dbg.style.marginTop = "4px";
+		dbg.style.opacity = "0.45";
+		body.appendChild(dbg);
+	}
+
 	if (err.resetsAt) {
 		var countdown = document.createElement("div");
 		countdown.className = "error-countdown";

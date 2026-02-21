@@ -43,6 +43,7 @@ pub mod provider_setup;
 pub mod push;
 #[cfg(feature = "push-notifications")]
 pub mod push_routes;
+pub mod run_failure;
 pub mod request_throttle;
 pub mod server;
 pub mod services;
