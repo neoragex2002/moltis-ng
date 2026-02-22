@@ -178,7 +178,7 @@
   - `content-type`、是否启用 stream、已接收字节数/事件数、以及（若存在）`x-request-id` 之类 header。
 - 将 gateway 的 “agent run timed out” 与子代理失败建立关联：
   - 在 run 的 broadcast error payload 中标注 “timed_out=true / timeout_secs / last_tool=spawn_agent（若适用）”
-- 长远：纳入 `issues/issue-error-handling-taxonomy-single-egress.md` 的统一失败出口。
+- 长远：纳入 `issues/done/issue-error-handling-taxonomy-single-egress.md` 的统一失败出口。
 
 ## 验收标准（Acceptance Criteria）【不可省略】
 - [ ] `spawn_agent` 在 `model=""` 时不再报 `unknown model:`，并能正常 fallback 执行。
@@ -203,7 +203,7 @@
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
-  - `issues/issue-error-handling-taxonomy-single-egress.md`
+  - `issues/done/issue-error-handling-taxonomy-single-egress.md`
   - `issues/done/issue-telegram-channel-no-error-reply-on-llm-failure.md`
   - `issues/issue-named-personas-and-per-session-agent-profiles.md`（更广义的 per-session persona/agent 配置能力）
   - `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（run/debug 可观测性口径先例）

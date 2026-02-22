@@ -3077,6 +3077,58 @@ impl ChatService for LiveChatService {
         }
     }
 
+    async fn internal_complete(&self, params: Value) -> ServiceResult {
+        use moltis_agents::model::{ChatMessage, UserContent};
+
+        let system = params
+            .get("system")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'system' parameter".to_string())?
+            .to_string();
+        let user = params
+            .get("user")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'user' parameter".to_string())?
+            .to_string();
+        let explicit_model = params.get("model").and_then(|v| v.as_str());
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = {
+            let reg = self.providers.read().await;
+            if let Some(id) = explicit_model {
+                reg.get(id)
+                    .ok_or_else(|| format!("model '{id}' not found"))?
+            } else {
+                reg.first()
+                    .ok_or_else(|| "no LLM providers configured".to_string())?
+            }
+        };
+
+        let messages = [
+            ChatMessage::System { content: system },
+            ChatMessage::User {
+                content: UserContent::text(user),
+            },
+        ];
+
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            provider.complete(&messages, &[]),
+        )
+        .await
+        .map_err(|_| "internal complete timed out after 8s".to_string())?
+        .map_err(|e| e.to_string())?;
+
+        if !resp.tool_calls.is_empty() {
+            return Err("internal complete returned unexpected tool calls".into());
+        }
+
+        Ok(serde_json::json!({
+            "text": resp.text.unwrap_or_default(),
+            "inputTokens": resp.usage.input_tokens,
+            "outputTokens": resp.usage.output_tokens,
+        }))
+    }
+
     async fn abort(&self, params: Value) -> ServiceResult {
         let run_id = params
             .get("runId")
@@ -5585,6 +5637,605 @@ fn sha256_hex(input: &str) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[derive(Debug, Clone)]
+struct RelayInboundContext {
+    chain_id: String,
+    hop: u8,
+}
+
+async fn load_telegram_relay_inbound_context(
+    state: &Arc<GatewayState>,
+    session_key: &str,
+) -> Option<RelayInboundContext> {
+    let Some(ref store) = state.services.session_store else {
+        return None;
+    };
+    let tail = store.read_last_n(session_key, 30).await.ok()?;
+    // Only treat a run as part of an existing relay chain if the most recent
+    // user message itself is a relay-injected message. Otherwise, an old relay
+    // entry could "leak" chain context into an unrelated run.
+    let last_user = tail
+        .iter()
+        .rev()
+        .find(|v| v.get("role").and_then(|v| v.as_str()) == Some("user"))?;
+    let Some(channel) = last_user.get("channel") else {
+        return None;
+    };
+    if channel.get("relay").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let chain_id = channel
+        .get("relay_chain_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())?;
+    let hop = channel
+        .get("relay_hop")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if hop == 0 || hop > u8::MAX as u64 {
+        return None;
+    }
+    Some(RelayInboundContext {
+        chain_id,
+        hop: hop as u8,
+    })
+}
+
+fn sanitize_for_relay_scan(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_fence = false;
+
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        // Skip quoted lines (common in explanations / references).
+        if trimmed.starts_with('>') {
+            continue;
+        }
+
+        // Strip inline code spans.
+        let mut in_inline = false;
+        for ch in line.chars() {
+            if ch == '`' {
+                in_inline = !in_inline;
+                continue;
+            }
+            if !in_inline {
+                out.push(ch);
+            }
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+#[derive(Debug, Clone)]
+struct MentionMatch {
+    username: String,
+    start: usize,
+    end: usize,
+}
+
+fn is_non_bot_broadcast_mention(username: &str) -> bool {
+    matches!(username, "all" | "here" | "everyone")
+}
+
+fn find_mentions(input: &str) -> Vec<MentionMatch> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'@' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut j = i + 1;
+        while j < bytes.len() {
+            let b = bytes[j];
+            let ok = (b'0'..=b'9').contains(&b)
+                || (b'a'..=b'z').contains(&b)
+                || (b'A'..=b'Z').contains(&b)
+                || b == b'_';
+            if !ok {
+                break;
+            }
+            j += 1;
+        }
+        let username = &input[start + 1..j];
+        if (3..=32).contains(&username.len()) {
+            out.push(MentionMatch {
+                username: username.to_ascii_lowercase(),
+                start,
+                end: j,
+            });
+        }
+        i = j;
+    }
+    out
+}
+
+fn only_whitespace_or_punct(s: &str) -> bool {
+    s.chars().all(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | '，' | '、' | ';' | '；' | ':' | '：' | '!' | '！' | '?' | '？' | '。'
+            )
+    })
+}
+
+fn line_start_for_index(text: &str, idx: usize) -> usize {
+    text[..idx.min(text.len())]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0)
+}
+
+fn is_line_start_token(text: &str, idx: usize) -> bool {
+    let line_start = line_start_for_index(text, idx);
+    text[line_start..idx.min(text.len())]
+        .chars()
+        .all(|c| c.is_whitespace())
+}
+
+fn line_at_index(text: &str, idx: usize) -> String {
+    let start = line_start_for_index(text, idx);
+    let end = text[idx.min(text.len())..]
+        .find('\n')
+        .map(|p| idx + p)
+        .unwrap_or(text.len());
+    text[start..end].trim_end().to_string()
+}
+
+fn trim_leading_separators(s: &str) -> &str {
+    s.trim_start_matches(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | '，' | '、' | ';' | '；' | ':' | '：' | '!' | '！' | '?' | '？' | '。'
+            )
+    })
+}
+
+fn trim_trailing_connectors(s: &str) -> &str {
+    let mut t = s.trim_end_matches(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | '，' | '、' | ';' | '；' | ':' | '：' | '!' | '！' | '?' | '？' | '。'
+            )
+    });
+
+    // Common "next directive" lead-ins that appear right before the next @mention.
+    // Example: "…任务1；请@bot2…" → previous segment ends with "；请".
+    for kw in ["请你", "请", "麻烦", "让", "帮"] {
+        if t.ends_with(kw) {
+            t = t.trim_end_matches(kw).trim_end();
+            t = t.trim_end_matches(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        ',' | '，' | '、' | ';' | '；' | ':' | '：' | '!' | '！' | '?' | '？' | '。'
+                    )
+            });
+        }
+    }
+
+    t
+}
+
+#[derive(Debug, Clone)]
+struct RelayDirective {
+    target_account_id: String,
+    target_handle: Option<String>,
+    task_text: String,
+}
+
+#[derive(Debug, Clone)]
+struct RelayTargetMention {
+    mention_username: String,
+    target_account_id: String,
+    target_handle: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RelayMentionGroup {
+    line: String,
+    line_start: bool,
+    task_text: String,
+    mentions: Vec<RelayTargetMention>,
+}
+
+fn extract_relay_groups(
+    outbound_text: &str,
+    accounts: &[moltis_telegram::config::TelegramBusAccountSnapshot],
+    source_account_id: &str,
+) -> Vec<RelayMentionGroup> {
+    let sanitized = sanitize_for_relay_scan(outbound_text);
+    let mentions = find_mentions(&sanitized);
+    if mentions.is_empty() {
+        return Vec::new();
+    }
+
+    let mut username_to_account: HashMap<String, (String, Option<String>)> = HashMap::new();
+    for a in accounts {
+        let handle = a.bot_username.as_deref().map(|u| format!("@{u}"));
+        if let Some(ref u) = a.bot_username {
+            username_to_account.insert(u.to_ascii_lowercase(), (a.account_id.clone(), handle.clone()));
+        }
+        username_to_account.insert(a.account_id.to_ascii_lowercase(), (a.account_id.clone(), handle));
+    }
+
+    let mut groups_out = Vec::new();
+    let mut i = 0;
+    while i < mentions.len() {
+        let group_start = mentions[i].start;
+        let mut group_end = mentions[i].end;
+        let mut group = vec![mentions[i].clone()];
+        let mut j = i + 1;
+        while j < mentions.len() && only_whitespace_or_punct(&sanitized[group_end..mentions[j].start])
+        {
+            group.push(mentions[j].clone());
+            group_end = mentions[j].end;
+            j += 1;
+        }
+
+        let seg_end = if j < mentions.len() { mentions[j].start } else { sanitized.len() };
+        let raw_task = &sanitized[group_end..seg_end];
+        let raw_task = trim_trailing_connectors(raw_task);
+        let task = trim_leading_separators(raw_task).trim();
+        let line_start = is_line_start_token(&sanitized, group_start);
+        let line = line_at_index(&sanitized, group_start);
+
+        let mut resolved = Vec::new();
+        for m in &group {
+            if is_non_bot_broadcast_mention(&m.username) {
+                continue;
+            }
+            if let Some((aid, handle)) = username_to_account.get(&m.username) {
+                if aid == source_account_id {
+                    continue;
+                }
+                resolved.push(RelayTargetMention {
+                    mention_username: m.username.clone(),
+                    target_account_id: aid.clone(),
+                    target_handle: handle.clone(),
+                });
+            }
+        }
+        if !resolved.is_empty() && !task.is_empty() {
+            groups_out.push(RelayMentionGroup {
+                line,
+                line_start,
+                task_text: task.to_string(),
+                mentions: resolved,
+            });
+        }
+
+        i = j;
+    }
+
+    groups_out
+}
+
+async fn dispatch_telegram_relay(
+    state: &Arc<GatewayState>,
+    target_account_id: &str,
+    target_handle: Option<String>,
+    chat_id: &str,
+    reply_to_message_id: &str,
+    relay_text: &str,
+    channel_meta: serde_json::Value,
+) -> Result<(), String> {
+    let Some(ref store) = state.services.session_store else {
+        return Err("session store not configured".into());
+    };
+
+    let target_session_key = resolve_telegram_session_key(state, target_account_id, chat_id).await;
+    let session_exists = if let Some(ref sm) = state.services.session_metadata {
+        sm.get(&target_session_key).await.is_some()
+    } else {
+        store.count(&target_session_key).await.unwrap_or(0) > 0
+    };
+    if !session_exists {
+        return Err("target session does not exist for this group".into());
+    }
+
+    ensure_channel_bound_session(state, &target_session_key, target_account_id, chat_id).await;
+
+    let reply_target = moltis_channels::ChannelReplyTarget {
+        channel_type: moltis_channels::ChannelType::Telegram,
+        account_id: target_account_id.to_string(),
+        account_handle: target_handle,
+        chat_id: chat_id.to_string(),
+        message_id: Some(reply_to_message_id.to_string()),
+    };
+    state.push_channel_reply(&target_session_key, reply_target).await;
+
+    let chat = state.chat().await;
+    let params = serde_json::json!({
+        "text": relay_text,
+        "channel": channel_meta,
+        "_session_key": target_session_key,
+    });
+    chat.send(params).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn maybe_relay_telegram_group_mentions(
+    state: &Arc<GatewayState>,
+    bus_accounts: &[moltis_telegram::config::TelegramBusAccountSnapshot],
+    inbound_ctx: Option<RelayInboundContext>,
+    source_account_id: &str,
+    source_account_handle: Option<&str>,
+    chat_id: &str,
+    inbound_trigger_message_id: Option<&str>,
+    source_outbound_message_id: &str,
+    outbound_text: &str,
+) {
+    let Ok(chat_i64) = chat_id.parse::<i64>() else {
+        return;
+    };
+    if chat_i64 >= 0 {
+        return;
+    }
+
+    if bus_accounts.is_empty() {
+        return;
+    }
+
+    let source_cfg = bus_accounts
+        .iter()
+        .find(|a| a.account_id == source_account_id)
+        .cloned()
+        .unwrap_or(moltis_telegram::config::TelegramBusAccountSnapshot {
+            account_id: source_account_id.to_string(),
+            bot_username: None,
+            relay_chain_enabled: true,
+            relay_hop_limit: 3,
+            relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+        });
+
+    let (chain_id, next_hop) = if let Some(ctx) = inbound_ctx {
+        if !source_cfg.relay_chain_enabled {
+            return;
+        }
+        let hop = ctx.hop.saturating_add(1);
+        (ctx.chain_id, hop)
+    } else {
+        let seed = format!("{source_account_id}|{chat_id}|{source_outbound_message_id}");
+        (format!("sha256:{}", sha256_hex(&seed)), 1)
+    };
+
+    if next_hop == 0 || next_hop > source_cfg.relay_hop_limit {
+        return;
+    }
+
+    let groups = extract_relay_groups(outbound_text, bus_accounts, source_account_id);
+    if groups.is_empty() {
+        return;
+    }
+
+    let source_handle = source_account_handle
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("@{source_account_id}"));
+    let source_username = source_handle.strip_prefix('@').unwrap_or(&source_handle);
+    let inbound_id = inbound_trigger_message_id.unwrap_or("").to_string();
+
+    #[derive(Debug, serde::Serialize)]
+    struct MentionLabelItem<'a> {
+        id: &'a str,
+        mention: &'a str,
+        line: &'a str,
+        task: &'a str,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct MentionLabel {
+        id: String,
+        label: String,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct MentionLabelResponse {
+        labels: Vec<MentionLabel>,
+    }
+
+    fn parse_label_response(text: &str) -> Option<HashMap<String, String>> {
+        let parse = |s: &str| serde_json::from_str::<MentionLabelResponse>(s).ok();
+        let resp = parse(text).or_else(|| {
+            // Best-effort: extract the first JSON object if the model wrapped it.
+            let start = text.find('{')?;
+            let end = text.rfind('}')?;
+            if end <= start {
+                return None;
+            }
+            parse(&text[start..=end])
+        })?;
+        let mut out = HashMap::new();
+        for l in resp.labels {
+            let label = l.label.trim().to_ascii_lowercase();
+            if label == "directive" || label == "reference" {
+                out.insert(l.id, label);
+            }
+        }
+        Some(out)
+    }
+
+    // Build relay directives:
+    // - line-start mentions always relay
+    // - non-line-start mentions:
+    //   - strict: never relay
+    //   - loose: ask LLM to label reference|directive (best-effort; failures => no relay)
+    let mut directives = Vec::<RelayDirective>::new();
+    let mut ambiguous_items = Vec::<(String, RelayDirective, String, String)>::new(); // (id, directive, line, mention)
+
+    for (gi, g) in groups.into_iter().enumerate() {
+        if only_whitespace_or_punct(&g.task_text) {
+            continue;
+        }
+
+        for (ti, m) in g.mentions.iter().enumerate() {
+            let d = RelayDirective {
+                target_account_id: m.target_account_id.clone(),
+                target_handle: m.target_handle.clone(),
+                task_text: g.task_text.clone(),
+            };
+            if g.line_start {
+                directives.push(d);
+            } else {
+                match source_cfg.relay_strictness {
+                    moltis_telegram::config::RelayStrictness::Strict => {},
+                    moltis_telegram::config::RelayStrictness::Loose => {
+                        let id = format!("g{gi}.t{ti}");
+                        let mention = format!("@{}", m.mention_username);
+                        ambiguous_items.push((id, d, g.line.clone(), mention));
+                    },
+                }
+            }
+        }
+    }
+
+    // Ask LLM to label ambiguous mentions (loose mode only).
+    if !ambiguous_items.is_empty() {
+        let items_for_prompt: Vec<_> = ambiguous_items
+            .iter()
+            .map(|(id, _d, line, mention)| MentionLabelItem {
+                id,
+                mention,
+                line,
+                task: _d.task_text.as_str(),
+            })
+            .collect();
+
+        let system = r#"You are a strict classifier.
+Label each mention as either:
+- "directive": the author is asking that bot to do the task.
+- "reference": the author is only mentioning the bot (example/quote/tutorial/reference), do not trigger.
+
+Rules:
+- Output ONLY valid JSON, no markdown.
+- Do NOT invent extra items; only label the given ids.
+- If unsure, choose "reference".
+
+Output format:
+{"labels":[{"id":"...","label":"directive|reference","confidence":0.0}]}
+"#;
+
+        let user = serde_json::json!({ "labels": items_for_prompt }).to_string();
+
+        match state
+            .chat()
+            .await
+            .internal_complete(serde_json::json!({ "system": system, "user": user }))
+            .await
+        {
+            Ok(val) => {
+                let text = val.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(map) = parse_label_response(text) {
+                    for (id, d, _line, _mention) in &ambiguous_items {
+                        if map.get(id).map(|s| s.as_str()) == Some("directive") {
+                            directives.push(d.clone());
+                        }
+                    }
+                } else {
+                    warn!(
+                        source_account_id,
+                        chat_id,
+                        "telegram outbound relay: LLM label JSON parse failed (skipping non-line-start mentions)"
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(
+                    source_account_id,
+                    chat_id,
+                    "telegram outbound relay: LLM label failed: {e} (skipping non-line-start mentions)"
+                );
+            },
+        }
+    }
+
+    // Dedup: keep first directive per (target, task).
+    let mut seen = HashSet::<(String, String)>::new();
+    directives.retain(|d| seen.insert((d.target_account_id.clone(), d.task_text.clone())));
+
+    if directives.is_empty() {
+        return;
+    }
+
+    for d in directives {
+        let task_hash = sha256_hex(&d.task_text);
+        let dedupe_key = format!(
+            "telegram.relay|{}|hop:{}|src:{}|dst:{}|task:{}",
+            chain_id, next_hop, source_account_id, d.target_account_id, task_hash
+        );
+        let is_dup = state.inner.write().await.dedupe.check_and_insert(&dedupe_key);
+        if is_dup {
+            continue;
+        }
+
+        let relay_text = format!("（来自 {source_handle}）{}", d.task_text.trim());
+        let channel_meta = serde_json::json!({
+            "channel_type": "telegram",
+            "message_kind": "text",
+            "username": source_username,
+            "sender_name": source_username,
+            "relay": true,
+            "relay_chain_id": chain_id,
+            "relay_hop": next_hop,
+            "relay_from_account_id": source_account_id,
+            "relay_from_bot_handle": source_handle,
+            "relay_source_chat_id": chat_id,
+            "relay_source_outbound_message_id": source_outbound_message_id,
+            "relay_source_inbound_trigger_message_id": inbound_id,
+        });
+
+        let state = Arc::clone(state);
+        let chat_id = chat_id.to_string();
+        let reply_to_id = source_outbound_message_id.to_string();
+        let source_account_id = source_account_id.to_string();
+        let hop = next_hop;
+        let target_account_id = d.target_account_id.clone();
+        let target_handle = d.target_handle.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dispatch_telegram_relay(
+                &state,
+                &target_account_id,
+                target_handle,
+                &chat_id,
+                &reply_to_id,
+                &relay_text,
+                channel_meta,
+            )
+            .await
+            {
+                warn!(
+                    target_account_id,
+                    chat_id,
+                    "telegram outbound relay: dispatch failed: {e}"
+                );
+            } else {
+                info!(
+                    source_account_id = %source_account_id,
+                    target_account_id,
+                    chat_id,
+                    hop,
+                    "telegram outbound relay: dispatched"
+                );
+            }
+        });
+    }
+}
+
 async fn ensure_channel_bound_session(
     state: &Arc<GatewayState>,
     session_key: &str,
@@ -5655,18 +6306,6 @@ async fn maybe_mirror_telegram_group_reply(
         return;
     };
 
-    let Some(src_snap) = state
-        .services
-        .channel
-        .telegram_mirror_snapshot(source_account_id)
-        .await
-    else {
-        return;
-    };
-    if !src_snap.group_outbound_mirror_enabled {
-        return;
-    }
-
     let accounts = state.services.channel.list_telegram_accounts().await;
     if accounts.is_empty() {
         return;
@@ -5707,21 +6346,21 @@ async fn maybe_mirror_telegram_group_reply(
             continue;
         }
 
-        if let Some(target_snap) = state
-            .services
-            .channel
-            .telegram_mirror_snapshot(&target_account_id)
-            .await
-        {
-            if !target_snap.group_allowlist.is_empty()
-                && !target_snap.group_allowlist.iter().any(|id| id == chat_id)
-            {
-                continue;
-            }
-        }
-
         let target_session_key =
             resolve_telegram_session_key(state, &target_account_id, chat_id).await;
+
+        // Only mirror into sessions that already exist for this (bot, group) pair.
+        // This prevents accidental creation of "phantom" group sessions for bots
+        // that are not actually in the group.
+        let session_exists = if let Some(ref sm) = state.services.session_metadata {
+            sm.get(&target_session_key).await.is_some()
+        } else {
+            store.count(&target_session_key).await.unwrap_or(0) > 0
+        };
+        if !session_exists {
+            continue;
+        }
+
         ensure_channel_bound_session(state, &target_session_key, &target_account_id, chat_id).await;
 
         if let Ok(found) = store
@@ -5790,6 +6429,8 @@ async fn deliver_channel_replies_to_targets(
 ) {
     let session_key = session_key.to_string();
     let text = text.to_string();
+    let bus_accounts = Arc::new(state.services.channel.telegram_bus_accounts_snapshot().await);
+    let inbound_relay_ctx = load_telegram_relay_inbound_context(&state, &session_key).await;
     let logbook_html = format_logbook_html(&status_log);
     let mut tasks = Vec::with_capacity(targets.len());
     for target in targets {
@@ -5798,6 +6439,8 @@ async fn deliver_channel_replies_to_targets(
         let session_key = session_key.clone();
         let text = text.clone();
         let logbook_html = logbook_html.clone();
+        let bus_accounts = Arc::clone(&bus_accounts);
+        let inbound_relay_ctx = inbound_relay_ctx.clone();
         tasks.push(tokio::spawn(async move {
             let tts_payload = match desired_reply_medium {
                 ReplyMedium::Voice => build_tts_payload(&state, &session_key, &target, &text).await,
@@ -5813,7 +6456,12 @@ async fn deliver_channel_replies_to_targets(
                         if transcript.len() <= moltis_telegram::markdown::TELEGRAM_CAPTION_LIMIT {
                             payload.text = transcript;
                             let send_res = outbound
-                                .send_media(&target.account_id, &target.chat_id, &payload, reply_to)
+                                .send_media_with_ref(
+                                    &target.account_id,
+                                    &target.chat_id,
+                                    &payload,
+                                    reply_to,
+                                )
                                 .await;
                             if let Err(e) = send_res {
                                 warn!(
@@ -5835,9 +6483,10 @@ async fn deliver_channel_replies_to_targets(
                             // Send logbook as a follow-up if present.
                             if !logbook_html.is_empty()
                                 && let Err(e) = outbound
-                                    .send_text(
+                                    .send_text_with_suffix(
                                         &target.account_id,
                                         &target.chat_id,
+                                        "",
                                         &logbook_html,
                                         None,
                                     )
@@ -5853,7 +6502,12 @@ async fn deliver_channel_replies_to_targets(
                             // Transcript too long for a caption — send voice
                             // without caption, then the full text as a follow-up.
                             if let Err(e) = outbound
-                                .send_media(&target.account_id, &target.chat_id, &payload, reply_to)
+                                .send_media_with_ref(
+                                    &target.account_id,
+                                    &target.chat_id,
+                                    &payload,
+                                    reply_to,
+                                )
                                 .await
                             {
                                 warn!(
@@ -5904,11 +6558,16 @@ async fn deliver_channel_replies_to_targets(
                     None => {
                         let result = if logbook_html.is_empty() {
                             outbound
-                                .send_text(&target.account_id, &target.chat_id, &text, reply_to)
+                                .send_text_with_ref(
+                                    &target.account_id,
+                                    &target.chat_id,
+                                    &text,
+                                    reply_to,
+                                )
                                 .await
                         } else {
                             outbound
-                                .send_text_with_suffix(
+                                .send_text_with_suffix_with_ref(
                                     &target.account_id,
                                     &target.chat_id,
                                     &text,
@@ -5917,22 +6576,46 @@ async fn deliver_channel_replies_to_targets(
                                 )
                                 .await
                         };
-                        if let Err(e) = result {
-                            warn!(
-                                account_id = target.account_id,
-                                chat_id = target.chat_id,
-                                "failed to send channel reply: {e}"
-                            );
-                        } else {
-                            maybe_mirror_telegram_group_reply(
+                        let sent_ref = match result {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!(
+                                    account_id = target.account_id,
+                                    chat_id = target.chat_id,
+                                    "failed to send channel reply: {e}"
+                                );
+                                return;
+                            },
+                        };
+                        maybe_mirror_telegram_group_reply(
+                            &state,
+                            &target.account_id,
+                            target.account_handle.as_deref(),
+                            &target.chat_id,
+                            reply_to,
+                            &text,
+                        )
+                        .await;
+
+                        if let Some(ref sent) = sent_ref {
+                            maybe_relay_telegram_group_mentions(
                                 &state,
+                                bus_accounts.as_ref(),
+                                inbound_relay_ctx,
                                 &target.account_id,
                                 target.account_handle.as_deref(),
                                 &target.chat_id,
                                 reply_to,
+                                &sent.message_id,
                                 &text,
                             )
                             .await;
+                        } else {
+                            warn!(
+                                account_id = target.account_id,
+                                chat_id = target.chat_id,
+                                "telegram outbound reply sent but no message_id ref returned (relay disabled for this reply)"
+                            );
                         }
                     },
                 },
@@ -6347,7 +7030,6 @@ mod tests {
         anyhow::Result,
         moltis_agents::{model::LlmProvider, tool_registry::AgentTool},
         moltis_common::types::ReplyPayload,
-        moltis_telegram::config::TelegramMirrorConfigSnapshot,
         std::{
             pin::Pin,
             sync::{
@@ -6625,7 +7307,6 @@ mod tests {
 
     struct MirrorChannelService {
         accounts: Vec<String>,
-        snaps: std::collections::HashMap<String, TelegramMirrorConfigSnapshot>,
     }
 
     #[async_trait]
@@ -6661,13 +7342,11 @@ mod tests {
         async fn list_telegram_accounts(&self) -> Vec<String> {
             self.accounts.clone()
         }
+    }
 
-        async fn telegram_mirror_snapshot(
-            &self,
-            account_id: &str,
-        ) -> Option<TelegramMirrorConfigSnapshot> {
-            self.snaps.get(account_id).cloned()
-        }
+    async fn seed_session(store: &SessionStore, session_key: &str) {
+        let user_val = PersistedMessage::user("seed").to_value();
+        store.append(session_key, &user_val).await.unwrap();
     }
 
     #[tokio::test]
@@ -6682,37 +7361,12 @@ mod tests {
             .with_channel_outbound(Arc::clone(&outbound))
             .with_session_store(Arc::clone(&store));
 
-        let mut snaps = std::collections::HashMap::new();
-        snaps.insert(
-            "lovely".to_string(),
-            TelegramMirrorConfigSnapshot {
-                group_outbound_mirror_enabled: true,
-                group_allowlist: vec!["-100".to_string()],
-            },
-        );
-        snaps.insert(
-            "fluffy".to_string(),
-            TelegramMirrorConfigSnapshot {
-                group_outbound_mirror_enabled: false,
-                group_allowlist: vec!["-100".to_string()],
-            },
-        );
-        // alpha is "not in the group" (allowlist excludes) — should not receive mirrors.
-        snaps.insert(
-            "alpha".to_string(),
-            TelegramMirrorConfigSnapshot {
-                group_outbound_mirror_enabled: false,
-                group_allowlist: vec!["-999".to_string()],
-            },
-        );
-
         services.channel = Arc::new(MirrorChannelService {
             accounts: vec![
                 "lovely".to_string(),
                 "fluffy".to_string(),
                 "alpha".to_string(),
             ],
-            snaps,
         });
 
         let state = Arc::new(crate::state::GatewayState::new(
@@ -6723,6 +7377,9 @@ mod tests {
             },
             services,
         ));
+
+        // Only fluffy has an existing (bot, group) session — alpha does not.
+        seed_session(store.as_ref(), "telegram:fluffy:-100").await;
 
         let targets = vec![moltis_channels::ChannelReplyTarget {
             channel_type: moltis_channels::ChannelType::Telegram,
@@ -6763,9 +7420,9 @@ mod tests {
         let alpha_key = "telegram:alpha:-100";
 
         let fluffy = store.read(fluffy_key).await.unwrap();
-        assert_eq!(fluffy.len(), 1, "mirror should be deduped");
+        assert_eq!(fluffy.len(), 2, "mirror should be appended once and deduped");
         assert_eq!(fluffy[0].get("role").and_then(|v| v.as_str()), Some("user"));
-        let content = fluffy[0]
+        let content = fluffy[1]
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("");
@@ -6773,7 +7430,7 @@ mod tests {
             content.starts_with("[@lovely_apple_bot mirror] "),
             "unexpected mirror prefix: {content}"
         );
-        let mirror_key = fluffy[0]
+        let mirror_key = fluffy[1]
             .get("channel")
             .and_then(|c| c.get("mirror_key"))
             .and_then(|v| v.as_str())
@@ -6783,7 +7440,7 @@ mod tests {
         let alpha = store.read(alpha_key).await.unwrap();
         assert!(
             alpha.is_empty(),
-            "alpha should not receive mirror when allowlist excludes the chat"
+            "alpha should not receive mirror when it has no session for the group"
         );
     }
 
@@ -6799,25 +7456,8 @@ mod tests {
             .with_channel_outbound(Arc::clone(&outbound))
             .with_session_store(Arc::clone(&store));
 
-        let mut snaps = std::collections::HashMap::new();
-        snaps.insert(
-            "lovely".to_string(),
-            TelegramMirrorConfigSnapshot {
-                group_outbound_mirror_enabled: true,
-                group_allowlist: vec![],
-            },
-        );
-        snaps.insert(
-            "fluffy".to_string(),
-            TelegramMirrorConfigSnapshot {
-                group_outbound_mirror_enabled: false,
-                group_allowlist: vec![],
-            },
-        );
-
         services.channel = Arc::new(MirrorChannelService {
             accounts: vec!["lovely".to_string(), "fluffy".to_string()],
-            snaps,
         });
 
         let state = Arc::new(crate::state::GatewayState::new(
@@ -6866,25 +7506,8 @@ mod tests {
         let mut services = crate::services::GatewayServices::noop()
             .with_channel_outbound(Arc::clone(&outbound))
             .with_session_store(Arc::clone(&store));
-
-        let mut snaps = std::collections::HashMap::new();
-        snaps.insert(
-            "lovely".to_string(),
-            TelegramMirrorConfigSnapshot {
-                group_outbound_mirror_enabled: true,
-                group_allowlist: vec!["-100".to_string()],
-            },
-        );
-        snaps.insert(
-            "fluffy".to_string(),
-            TelegramMirrorConfigSnapshot {
-                group_outbound_mirror_enabled: false,
-                group_allowlist: vec!["-100".to_string()],
-            },
-        );
         services.channel = Arc::new(MirrorChannelService {
             accounts: vec!["lovely".to_string(), "fluffy".to_string()],
-            snaps,
         });
 
         let state = Arc::new(crate::state::GatewayState::new(
@@ -6911,12 +7534,15 @@ mod tests {
             )
             .await;
 
+        // Ensure the target bot has an existing (bot, group) session.
+        seed_session(store.as_ref(), "telegram:fluffy:-100").await;
+
         // Send a dummy data URI screenshot.
         send_screenshot_to_channels(&state, session_key, "data:image/png;base64,AAAA").await;
 
         let fluffy = store.read("telegram:fluffy:-100").await.unwrap();
-        assert_eq!(fluffy.len(), 1);
-        let content = fluffy[0]
+        assert_eq!(fluffy.len(), 2);
+        let content = fluffy[1]
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("");
@@ -6928,6 +7554,280 @@ mod tests {
             content.starts_with("[@lovely_apple_bot mirror] "),
             "unexpected prefix: {content}"
         );
+    }
+
+    struct RelayLabelingChatService {
+        send_tx: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+        internal_complete_called: Arc<std::sync::atomic::AtomicUsize>,
+        label_json: String,
+    }
+
+    #[async_trait]
+    impl crate::services::ChatService for RelayLabelingChatService {
+        async fn send(&self, params: serde_json::Value) -> crate::services::ServiceResult {
+            let _ = self.send_tx.send(params);
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        async fn internal_complete(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
+            self.internal_complete_called
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(serde_json::json!({
+                "text": self.label_json,
+                "inputTokens": 0,
+                "outputTokens": 0,
+            }))
+        }
+
+        async fn abort(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+        async fn cancel_queued(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "cleared": 0 }))
+        }
+        async fn history(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+        async fn inject(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+        async fn clear(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        async fn compact(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        async fn context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+        async fn raw_prompt(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+        async fn full_context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_loose_mode_uses_llm_labels_for_non_line_start_mentions() {
+        use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        // Ensure target (bot, group) session exists.
+        seed_session(store.as_ref(), "telegram:bot2:-100").await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .set_chat(Arc::new(RelayLabelingChatService {
+                send_tx: tx,
+                internal_complete_called: Arc::clone(&called),
+                label_json: r#"{"labels":[{"id":"g0.t0","label":"directive","confidence":0.9}]}"#
+                    .to_string(),
+            }))
+            .await;
+
+        let bus_accounts = vec![
+            TelegramBusAccountSnapshot {
+                account_id: "bot1".into(),
+                bot_username: Some("bot1".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 3,
+                relay_strictness: RelayStrictness::Loose,
+            },
+            TelegramBusAccountSnapshot {
+                account_id: "bot2".into(),
+                bot_username: Some("bot2".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 3,
+                relay_strictness: RelayStrictness::Strict,
+            },
+        ];
+
+        maybe_relay_telegram_group_mentions(
+            &state,
+            &bus_accounts,
+            None,
+            "bot1",
+            Some("@bot1"),
+            "-100",
+            Some("184"),
+            "999",
+            "请 @bot2 帮我总结一下",
+        )
+        .await;
+
+        // Wait for the spawned dispatch to call chat.send().
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "expected one internal_complete call"
+        );
+        assert_eq!(sent.get("_session_key").and_then(|v| v.as_str()), Some("telegram:bot2:-100"));
+        let relay_text = sent.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            relay_text.contains("帮我总结一下"),
+            "unexpected relay text: {relay_text}"
+        );
+        assert!(
+            relay_text.contains("来自"),
+            "expected relay attribution prefix, got: {relay_text}"
+        );
+        assert!(sent.get("channel").is_some(), "expected channel metadata");
+    }
+
+    #[tokio::test]
+    async fn relay_inbound_context_does_not_leak_from_older_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let session_key = "telegram:bot2:-100";
+
+        // Older relay-injected message.
+        let mut relay_msg = PersistedMessage::user("relay").to_value();
+        relay_msg["channel"] = serde_json::json!({
+            "channel_type": "telegram",
+            "relay": true,
+            "relay_chain_id": "sha256:deadbeef",
+            "relay_hop": 1,
+        });
+        store.append(session_key, &relay_msg).await.unwrap();
+
+        // Newer normal user message (not a relay).
+        let normal = PersistedMessage::user("normal").to_value();
+        store.append(session_key, &normal).await.unwrap();
+
+        let ctx = load_telegram_relay_inbound_context(&state, session_key).await;
+        assert!(ctx.is_none(), "expected no relay ctx for non-relay latest user message");
+    }
+
+    #[test]
+    fn relay_line_start_extracts_multi_bot_tasks() {
+        use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
+
+        let accounts = vec![
+            TelegramBusAccountSnapshot {
+                account_id: "bot1".into(),
+                bot_username: Some("bot1".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 3,
+                relay_strictness: RelayStrictness::Strict,
+            },
+            TelegramBusAccountSnapshot {
+                account_id: "bot2".into(),
+                bot_username: Some("bot2".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 3,
+                relay_strictness: RelayStrictness::Strict,
+            },
+        ];
+
+        let text = "@bot1 完成任务1\n@bot2 完成任务2";
+        let groups = extract_relay_groups(text, &accounts, "source");
+        let directives: Vec<(String, String)> = groups
+            .into_iter()
+            .filter(|g| g.line_start)
+            .flat_map(|g| {
+                g.mentions.into_iter().map(move |m| {
+                    (m.target_account_id, g.task_text.clone())
+                })
+            })
+            .collect();
+
+        assert_eq!(directives.len(), 2);
+        assert!(directives.iter().any(|d| d.0 == "bot1" && d.1 == "完成任务1"));
+        assert!(directives.iter().any(|d| d.0 == "bot2" && d.1 == "完成任务2"));
+    }
+
+    #[test]
+    fn relay_skips_code_blocks_and_quotes_and_keeps_line_start_mentions() {
+        use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
+
+        let accounts = vec![TelegramBusAccountSnapshot {
+            account_id: "bot2".into(),
+            bot_username: Some("bot2".into()),
+            relay_chain_enabled: true,
+            relay_hop_limit: 3,
+            relay_strictness: RelayStrictness::Strict,
+        }];
+
+        let text = r#"
+> @bot2 这是一段引用，不应触发
+
+```sh
+echo @bot2
+```
+
+比如 @bot2 这样写也不应触发
+
+@bot2 请执行任务
+"#;
+
+        let groups = extract_relay_groups(text, &accounts, "source");
+        let line_start: Vec<_> = groups.into_iter().filter(|g| g.line_start).collect();
+        assert_eq!(line_start.len(), 1);
+        assert_eq!(line_start[0].mentions.len(), 1);
+        assert_eq!(line_start[0].mentions[0].target_account_id, "bot2");
+        assert_eq!(line_start[0].task_text, "请执行任务");
+    }
+
+    #[test]
+    fn relay_line_start_supports_multi_bot_same_task() {
+        use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
+
+        let accounts = vec![
+            TelegramBusAccountSnapshot {
+                account_id: "bot1".into(),
+                bot_username: Some("bot1".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 3,
+                relay_strictness: RelayStrictness::Strict,
+            },
+            TelegramBusAccountSnapshot {
+                account_id: "bot2".into(),
+                bot_username: Some("bot2".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 3,
+                relay_strictness: RelayStrictness::Strict,
+            },
+        ];
+
+        let text = "@bot1 @bot2 做同一个任务";
+        let groups = extract_relay_groups(text, &accounts, "source");
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].line_start);
+        assert_eq!(groups[0].mentions.len(), 2);
+        assert_eq!(groups[0].task_text, "做同一个任务");
     }
 
     struct ErrorStreamProvider;

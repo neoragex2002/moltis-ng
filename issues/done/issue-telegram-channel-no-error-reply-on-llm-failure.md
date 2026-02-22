@@ -7,7 +7,7 @@
 - Components: gateway/chat / gateway/channel_events / channels delivery / telegram outbound
 - Affected providers/models: all（只要是 channel session 都受影响）
 - Cross-ref：
-  - 全局错误语义收敛（taxonomy + single egress）：`issues/issue-error-handling-taxonomy-single-egress.md`（本单不做大收敛，先止血）
+  - 全局错误语义收敛（taxonomy + single egress）：`issues/done/issue-error-handling-taxonomy-single-egress.md`（本单不做大收敛，先止血）
 
 **已实现（2026-02-20）**
 - run internal failure / stream error：失败时发送错误回执（text）并 drain（targets + logbook）：`crates/gateway/src/chat.rs:4569` / `crates/gateway/src/chat.rs:5271`

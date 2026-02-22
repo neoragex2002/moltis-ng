@@ -149,13 +149,22 @@ mod tests {
     }
 
     /// Start a mock HTTP server and return its base URL.
-    async fn start_mock(app: Router) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    async fn start_mock(app: Router) -> Option<String> {
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping oauth device-flow tests: binding to ephemeral port is not permitted in this environment ({e})"
+                );
+                return None;
+            }
+            Err(e) => panic!("failed to bind test listener: {e}"),
+        };
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        format!("http://{addr}")
+        Some(format!("http://{addr}"))
     }
 
     #[test]
@@ -230,7 +239,9 @@ mod tests {
                 }))
             }),
         );
-        let base = start_mock(app).await;
+        let Some(base) = start_mock(app).await else {
+            return;
+        };
         let config = test_config(format!("{base}/device/code"), String::new());
 
         let client = reqwest::Client::new();
@@ -258,7 +269,9 @@ mod tests {
                 }))
             }),
         );
-        let base = start_mock(app).await;
+        let Some(base) = start_mock(app).await else {
+            return;
+        };
         let config = test_config(format!("{base}/device/code"), String::new());
 
         let client = reqwest::Client::new();
@@ -276,7 +289,9 @@ mod tests {
             "/device/code",
             post(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
         );
-        let base = start_mock(app).await;
+        let Some(base) = start_mock(app).await else {
+            return;
+        };
         let config = test_config(format!("{base}/device/code"), String::new());
 
         let client = reqwest::Client::new();
@@ -294,7 +309,9 @@ mod tests {
                 }))
             }),
         );
-        let base = start_mock(app).await;
+        let Some(base) = start_mock(app).await else {
+            return;
+        };
         let config = test_config(String::new(), format!("{base}/token"));
 
         let client = reqwest::Client::new();
@@ -321,7 +338,9 @@ mod tests {
                 }))
             }),
         );
-        let base = start_mock(app).await;
+        let Some(base) = start_mock(app).await else {
+            return;
+        };
         let config = test_config(String::new(), format!("{base}/token"));
 
         let client = reqwest::Client::new();
@@ -370,7 +389,9 @@ mod tests {
                 }
             }),
         );
-        let base = start_mock(app).await;
+        let Some(base) = start_mock(app).await else {
+            return;
+        };
         let config = test_config(String::new(), format!("{base}/token"));
 
         let client = reqwest::Client::new();
@@ -391,7 +412,9 @@ mod tests {
             "/token",
             post(|| async { axum::Json(serde_json::json!({"error": "access_denied"})) }),
         );
-        let base = start_mock(app).await;
+        let Some(base) = start_mock(app).await else {
+            return;
+        };
         let config = test_config(String::new(), format!("{base}/token"));
 
         let client = reqwest::Client::new();
@@ -411,7 +434,9 @@ mod tests {
             "/token",
             post(|| async { axum::Json(serde_json::json!({})) }),
         );
-        let base = start_mock(app).await;
+        let Some(base) = start_mock(app).await else {
+            return;
+        };
         let config = test_config(String::new(), format!("{base}/token"));
 
         let client = reqwest::Client::new();

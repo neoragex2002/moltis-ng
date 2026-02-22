@@ -269,8 +269,10 @@ function AddChannelModal() {
 				token: token,
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
 				mention_mode: form.querySelector("[data-field=mentionMode]").value,
-				group_ingest_mode: form.querySelector("[data-field=groupIngestMode]").value,
 				allowlist: allowlistItems.value,
+				relay_strictness: form.querySelector("[data-field=relayStrictness]").value,
+				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
+				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
 		if (addModel.value) {
 			addConfig.model = addModel.value;
@@ -334,14 +336,19 @@ function AddChannelModal() {
 	      <select data-field="mentionMode" style=${selectStyle}>
 	        <option value="mention">Must @mention bot</option>
 	        <option value="always">Always respond</option>
-	        <option value="none">Don't respond in groups</option>
 	      </select>
-	      <label class="text-xs text-[var(--muted)]">Group Ingest Mode</label>
-	      <select data-field="groupIngestMode" style=${selectStyle}>
-	        <option value="mentioned_only">Mentioned only (default)</option>
-	        <option value="all_messages">Listen (ingest all)</option>
-	        <option value="none">Off (ingest none)</option>
-	      </select>
+      <label class="text-xs text-[var(--muted)]">Group Relay Strictness</label>
+      <select data-field="relayStrictness" style=${selectStyle}>
+        <option value="strict">Strict (avoid false triggers)</option>
+        <option value="loose">Loose (more permissive)</option>
+      </select>
+      <label class="text-xs text-[var(--muted)]">Relay Chain</label>
+      <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+        <input type="checkbox" data-field="relayChainEnabled" checked=${true} />
+        Allow bot-to-bot chained delegations
+      </label>
+      <label class="text-xs text-[var(--muted)]">Relay Hop Limit</label>
+      <input data-field="relayHopLimit" type="number" min="1" max="10" value="3" style=${inputStyle} />
 	      <label class="text-xs text-[var(--muted)]">Default Model</label>
 	      <${ModelSelect} models=${modelsSig.value} value=${addModel.value}
 	        onChange=${(v) => {
@@ -384,9 +391,10 @@ function EditChannelModal() {
 				token: cfg.token || "",
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
 				mention_mode: form.querySelector("[data-field=mentionMode]").value,
-				group_ingest_mode: form.querySelector("[data-field=groupIngestMode]").value,
-				group_outbound_mirror_enabled: form.querySelector("[data-field=groupOutboundMirrorEnabled]").checked,
 				allowlist: allowlistItems.value,
+				relay_strictness: form.querySelector("[data-field=relayStrictness]").value,
+				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
+				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
 		if (editModel.value) {
 			updateConfig.model = editModel.value;
@@ -430,19 +438,19 @@ function EditChannelModal() {
 	      <select data-field="mentionMode" style=${selectStyle} value=${cfg.mention_mode || "mention"}>
 	        <option value="mention">Must @mention bot</option>
 	        <option value="always">Always respond</option>
-	        <option value="none">Don't respond in groups</option>
 	      </select>
-	      <label class="text-xs text-[var(--muted)]">Group Ingest Mode</label>
-	      <select data-field="groupIngestMode" style=${selectStyle} value=${cfg.group_ingest_mode || "mentioned_only"}>
-	        <option value="mentioned_only">Mentioned only (default)</option>
-	        <option value="all_messages">Listen (ingest all)</option>
-	        <option value="none">Off (ingest none)</option>
-	      </select>
-	      <label class="text-xs text-[var(--muted)]">Group Outbound Mirror</label>
-	      <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
-	        <input type="checkbox" data-field="groupOutboundMirrorEnabled" checked=${!!cfg.group_outbound_mirror_enabled} />
-	        Mirror this bot’s successful group replies into other bots’ sessions (ingest-only)
-	      </label>
+      <label class="text-xs text-[var(--muted)]">Group Relay Strictness</label>
+      <select data-field="relayStrictness" style=${selectStyle} value=${cfg.relay_strictness || "strict"}>
+        <option value="strict">Strict (avoid false triggers)</option>
+        <option value="loose">Loose (more permissive)</option>
+      </select>
+      <label class="text-xs text-[var(--muted)]">Relay Chain</label>
+      <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+        <input type="checkbox" data-field="relayChainEnabled" checked=${cfg.relay_chain_enabled !== false} />
+        Allow bot-to-bot chained delegations
+      </label>
+      <label class="text-xs text-[var(--muted)]">Relay Hop Limit</label>
+      <input data-field="relayHopLimit" type="number" min="1" max="10" value=${cfg.relay_hop_limit || 3} style="font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;" />
 	      <label class="text-xs text-[var(--muted)]">Default Model</label>
 	      <${ModelSelect} models=${modelsSig.value} value=${editModel.value}
 	        onChange=${(v) => {

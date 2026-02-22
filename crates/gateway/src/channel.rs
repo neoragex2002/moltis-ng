@@ -244,9 +244,8 @@ impl ChannelService for LiveChannelService {
         merge_json_in_place(&mut merged, &patch);
 
         // Validate and normalize before stopping the bot (avoid downtime on invalid patches).
-        let mut tg_cfg: moltis_telegram::TelegramAccountConfig =
+        let tg_cfg: moltis_telegram::TelegramAccountConfig =
             serde_json::from_value(merged.clone()).map_err(|e| e.to_string())?;
-        tg_cfg.normalize_in_place();
         if tg_cfg.token.expose_secret().is_empty() {
             return Err("telegram bot token is required".into());
         }
@@ -476,12 +475,11 @@ impl ChannelService for LiveChannelService {
         tg.account_ids()
     }
 
-    async fn telegram_mirror_snapshot(
+    async fn telegram_bus_accounts_snapshot(
         &self,
-        account_id: &str,
-    ) -> Option<moltis_telegram::config::TelegramMirrorConfigSnapshot> {
+    ) -> Vec<moltis_telegram::config::TelegramBusAccountSnapshot> {
         let tg = self.telegram.read().await;
-        tg.account_mirror_snapshot(account_id)
+        tg.bus_accounts_snapshot()
     }
 }
 

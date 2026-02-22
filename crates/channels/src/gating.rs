@@ -57,11 +57,10 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 pub enum MentionMode {
     /// Bot must be @mentioned to respond.
     #[default]
+    #[serde(alias = "none")]
     Mention,
     /// Bot responds to all messages.
     Always,
-    /// Bot does not respond in groups.
-    None,
 }
 
 /// DM access policy.

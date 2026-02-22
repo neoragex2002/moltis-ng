@@ -686,7 +686,21 @@ mod tests {
 
     #[test]
     fn test_find_available_port() {
-        let port = find_available_port().unwrap();
+        let port = match find_available_port() {
+            Ok(port) => port,
+            Err(e) => {
+                let permission_denied = e.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+                });
+                if permission_denied {
+                    eprintln!("skipping: binding to ephemeral port is not permitted in this environment ({e:#})");
+                    return;
+                }
+                panic!("find_available_port failed: {e:#}");
+            }
+        };
         assert!(port > 0);
     }
 

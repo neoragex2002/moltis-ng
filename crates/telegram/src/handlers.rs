@@ -25,7 +25,6 @@ use moltis_metrics::{counter, histogram, telegram as tg_metrics};
 
 use crate::{
     access::{self, AccessDenied},
-    config::GroupIngestMode,
     otp::{OtpInitResult, OtpVerifyResult},
     state::AccountStateMap,
 };
@@ -244,11 +243,10 @@ pub async fn handle_message_direct(
             .await;
         }
 
-        // Group listen/sidecar mode: ingest unaddressed messages into session
-        // history without replying or triggering an LLM run.
+        // Group listen/sidecar mode (always enabled): ingest unaddressed messages into
+        // session history without replying or triggering an LLM run.
         if chat_type == ChatType::Group
-            && matches!(reason, AccessDenied::NotMentioned | AccessDenied::MentionModeNone)
-            && config.group_ingest_mode == GroupIngestMode::AllMessages
+            && matches!(reason, AccessDenied::NotMentioned)
             && let Some(ref sink) = event_sink
         {
             let mut body = text.clone().unwrap_or_default();
@@ -1515,24 +1513,17 @@ Next (estimate, method={}): prompt={} · threshold={} · progress={}%
     let group_reply_mode = match config.mention_mode {
         moltis_channels::gating::MentionMode::Mention => "mention_only",
         moltis_channels::gating::MentionMode::Always => "always",
-        moltis_channels::gating::MentionMode::None => "never",
     };
-    let group_ingest_mode = match config.group_ingest_mode {
-        crate::config::GroupIngestMode::MentionedOnly => "mentioned_only",
-        crate::config::GroupIngestMode::AllMessages => "all_messages",
-        crate::config::GroupIngestMode::None => "none",
-    };
-    let group_policy = match config.group_policy {
-        moltis_channels::gating::GroupPolicy::Open => "open",
-        moltis_channels::gating::GroupPolicy::Allowlist => "allowlist",
-        moltis_channels::gating::GroupPolicy::Disabled => "disabled",
+    let relay_strictness = match config.relay_strictness {
+        crate::config::RelayStrictness::Strict => "strict",
+        crate::config::RelayStrictness::Loose => "loose",
     };
     let group_scope_note = match chat_type {
         ChatType::Group => format!(
-            "reply=<code>{}</code> · ingest=<code>{}</code> · policy=<code>{}</code>",
+            "reply=<code>{}</code> · listen=<code>on</code> · mirror=<code>on</code> · relay=<code>on</code> · hop_limit=<code>{}</code> · strictness=<code>{}</code>",
             escape_html_simple(group_reply_mode),
-            escape_html_simple(group_ingest_mode),
-            escape_html_simple(group_policy),
+            config.relay_hop_limit,
+            escape_html_simple(relay_strictness),
         ),
         _ => "<i>(n/a)</i>".to_string(),
     };
@@ -3112,7 +3103,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_not_mentioned_ingests_when_listen_mode_enabled() {
+    async fn group_not_mentioned_always_ingests_listen_only() {
         let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let outbound = Arc::new(TelegramOutbound {
             accounts: Arc::clone(&accounts),
@@ -3123,11 +3114,10 @@ mod tests {
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            let mut cfg = TelegramAccountConfig {
+            let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
                 ..Default::default()
             };
-            cfg.group_ingest_mode = GroupIngestMode::AllMessages;
             map.insert(
                 account_id.to_string(),
                 AccountState {
@@ -3179,7 +3169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_ingest_all_messages_works_even_when_reply_mode_is_never() {
+    async fn group_mentioned_dispatches_and_strips_self_mention() {
         let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let outbound = Arc::new(TelegramOutbound {
             accounts: Arc::clone(&accounts),
@@ -3190,12 +3180,10 @@ mod tests {
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            let mut cfg = TelegramAccountConfig {
+            let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
                 ..Default::default()
             };
-            cfg.mention_mode = moltis_channels::gating::MentionMode::None;
-            cfg.group_ingest_mode = GroupIngestMode::AllMessages;
             map.insert(
                 account_id.to_string(),
                 AccountState {
@@ -3237,15 +3225,15 @@ mod tests {
         assert_eq!(
             sink.dispatch_calls
                 .load(std::sync::atomic::Ordering::Relaxed),
-            0
+            1
         );
         assert_eq!(
             sink.ingest_calls
                 .load(std::sync::atomic::Ordering::Relaxed),
-            1
+            0
         );
-        let last = sink.last_ingest_text.lock().unwrap().clone();
-        // Self-mention is stripped even in ingest-only path.
+        let last = sink.last_dispatch_text.lock().unwrap().clone();
+        // Self-mention is stripped before dispatch.
         assert_eq!(last.as_deref(), Some("hi"));
     }
 

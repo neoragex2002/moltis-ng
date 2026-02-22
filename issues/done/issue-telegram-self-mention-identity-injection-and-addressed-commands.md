@@ -125,9 +125,8 @@
 > 目的：解释“群 session 太长需要 compact 时怎么办”，并冻结最简单一致的行为，不把 Telegram 的编辑/删除复杂性引入会话系统。
 
 ### 关键事实（避免误解）
-- **默认模式（现状）**：只有 **被放行并进入处理链路** 的 bot 会把消息写入该会话的 LLM history；未被点名而被 `NotMentioned` 拒绝的 bot 不会增长其对话上下文。
-- **旁听模式（规划）**：若未来启用 `group_ingest_mode=all_messages`（见 `issues/done/issue-telegram-group-ingest-reply-decoupling.md`），则即便 Gate 仍是 `NotMentioned`，该消息也可能被 **ingest-only 写入 session**（但仍不得进入 LLM、不得 outbound 回复）。
-- 因此：在同一个群里，即使 Telegram 平台把消息投递给多个 bot，是否会“增长某个 bot 的上下文/触发 compaction”取决于该 bot 的 `group_ingest_mode`（默认不会，旁听会）。
+- **当前群聊口径（2026-02-21 后）**：群聊旁听写入已收敛为固定行为：未点名消息会 **ingest-only 写入 session**（不触发 LLM、不产生出站），点名/always 才会 dispatch/run。
+- 因此：群聊 session 会自然变长；当后续有点名触发 LLM 时，更可能触发 auto-compact（compact 仍为“即将发出的 LLM 请求”的内部预处理）。
 - auto-compact 是对“即将发出的 LLM 请求”的内部预处理（预算触发后会先总结/压缩历史再继续）。
 
 ### 冻结行为（群聊场景）
@@ -142,8 +141,7 @@
 > 注：本单不要求实现新的 compaction 逻辑，仅要求 Telegram 渠道在群聊中对定向命令与错误文案保持一致且不刷屏。
 
 ### 验收补充（Acceptance Addendum）
-- [x] 默认模式（未启用旁听写入）下：在同一群聊中，多 bot 同时收到消息时，只有被放行的 bot 会把该消息写入会话历史并可能触发 compaction；被 `NotMentioned` 拒绝的 bot 不写入历史、不触发 compaction（只留痕/日志）。
-  - 旁听写入（规划）：启用 `group_ingest_mode=all_messages` 后，`NotMentioned` 也可能 ingest-only 写入 session（但仍不得进入 LLM、不得 outbound），见：`issues/done/issue-telegram-group-ingest-reply-decoupling.md`。
+- [x] 群聊旁听固定开启：在同一群聊中，多 bot 同时收到消息时，未点名消息会 ingest-only 写入会话历史（不触发 LLM/不出站）；只有被点名放行的消息才会进入 LLM 并可能触发 compaction。
 
 ## 问题陈述（Problem Statement）
 ### 现象 1：自我点名导致 LLM 误解（搞笑/自相矛盾）

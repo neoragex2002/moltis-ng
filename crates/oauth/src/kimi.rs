@@ -4,12 +4,8 @@ use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::config_dir::moltis_config_dir;
 
-/// Get or generate a persistent device ID for Kimi API headers.
-/// Stored at `~/.config/moltis/kimi_device_id`.
-pub fn get_or_create_device_id() -> String {
-    let path = moltis_config_dir().join("kimi_device_id");
-
-    if let Ok(id) = std::fs::read_to_string(&path) {
+fn get_or_create_device_id_at(path: &std::path::Path) -> String {
+    if let Ok(id) = std::fs::read_to_string(path) {
         let id = id.trim().to_string();
         if !id.is_empty() {
             return id;
@@ -21,13 +17,20 @@ pub fn get_or_create_device_id() -> String {
         return id;
     };
     let _ = std::fs::create_dir_all(dir);
-    let _ = std::fs::write(&path, &id);
+    let _ = std::fs::write(path, &id);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     id
+}
+
+/// Get or generate a persistent device ID for Kimi API headers.
+/// Stored at `~/.config/moltis/kimi_device_id`.
+pub fn get_or_create_device_id() -> String {
+    let path = moltis_config_dir().join("kimi_device_id");
+    get_or_create_device_id_at(&path)
 }
 
 /// Build the `X-Msh-*` headers required by Kimi's OAuth and API endpoints.
@@ -66,8 +69,10 @@ mod tests {
 
     #[test]
     fn device_id_is_stable() {
-        let id1 = get_or_create_device_id();
-        let id2 = get_or_create_device_id();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kimi_device_id");
+        let id1 = get_or_create_device_id_at(&path);
+        let id2 = get_or_create_device_id_at(&path);
         assert_eq!(id1, id2);
         assert!(!id1.is_empty());
     }

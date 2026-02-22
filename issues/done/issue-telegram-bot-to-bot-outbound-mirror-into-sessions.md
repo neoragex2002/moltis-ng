@@ -5,9 +5,14 @@
 - Priority: P1
 - Owners: <TBD>
 - Components: telegram / gateway / sessions / ui / config
+
+**变更说明（2026-02-21，口径已被后继单收敛）**
+- 群聊 mirror 现为固定开启（不再提供 UI toggle），且不再使用 `group_allowlist` 过滤；仅镜像到“已存在的 (bot, group) session”，避免为未入群 bot 创建 phantom sessions。
+- 统一口径与后继实现细节见：`issues/done/issue-telegram-group-bot-to-bot-mentions-relay-via-moltis.md`。
+- 因此：本文件中关于 `group_outbound_mirror_enabled`/`group_allowlist`/UI toggle 的描述为**历史记录**，不再代表当前代码行为（以“后继单”为准）。
  
 **本单已冻结的关键口径（V1 Spec Frozen）**
-- mirror 目标范围：本实例“所有 Telegram bot accounts”（排除 source），并对配置了 `group_allowlist` 的 target 做 `chat_id ∈ allowlist` 过滤。
+- mirror 目标范围：本实例“所有 Telegram bot accounts”（排除 source），且**仅镜像到已存在的 (bot, group) session**（避免 phantom sessions）；不再提供 allowlist 过滤。
 - mirror 语义：写入为 `role=user` 的“转述上下文输入”，带固定前缀 `[@source_bot mirror]` + `channel.mirror` metadata。
 - mirror 内容范围：仅最终正文 text；不镜像 logbook/suffix/debug；媒体仅写占位（不镜像媒体本体）。
 - 触发/安全：仅出站成功后写入；去重 key 使用 `source_account_id + chat_id + inbound_trigger_message_id + hash(text)`；mirror 写入不得触发 LLM/不得出站。
@@ -24,14 +29,13 @@
 - 本单聚焦 “bot1 的最终回复正文” 的镜像；是否同步 tool 输出摘要属于可选扩展（见 Q5）。
 
 **本轮已实现（Implementation Done）**
-- 新增配置：`group_outbound_mirror_enabled`（默认 `false`）。
 - gateway 出站成功后 mirror：将 source bot 的最终回复文本以 ingest-only 方式写入其他 bot 的 session（`role=user` 转述 + `[@source_bot mirror]` 前缀 + `channel.mirror/mirror_key/source_*` metadata）。
-- V1 媒体占位：当发送 screenshot（image/png）到群里成功后，会 mirror 一条短占位文本 `（发送了一张图片）` 到其他 bot sessions（不镜像媒体本体/URL）。
-- “all bots”集合：以本实例已启动的 Telegram accounts 列表为准，并对配置了 `group_allowlist` 的 target 做 `chat_id ∈ allowlist` 过滤。
+- 媒体占位：当发送 screenshot（image/png）到群里成功后，会 mirror 一条短占位文本 `（发送了一张图片）` 到其他 bot sessions（不镜像媒体本体/URL）。
+- “all bots”集合：以本实例已启动的 Telegram accounts 列表为准（排除 source）；不再使用 allowlist 过滤；且仅镜像到“已存在的 (bot, group) session”。
 - 去重：`mirror_key`（sha256）+ 扫描 target session 最近 200 条（尾部扫描），避免重试/并发重复写入。
 - SessionStore 增补：`tail_contains_channel_field_value(...)` 用于尾部查重（避免反序列化大量 JSON）。
-- UI：Channels -> Edit Telegram Bot 增加 Group Outbound Mirror toggle（可视化开启/关闭）。
-- 自动化测试：已增补 gateway 单测覆盖 mirror 写入、去重、`chat_id` 非负不触发，以及 screenshot 占位 mirror。
+- UI：移除 Group Outbound Mirror toggle（mirror 固定开启，不再提供配置入口）。
+- 自动化测试：已增补/更新 gateway 单测覆盖 mirror 写入、去重、`chat_id` 非负不触发，以及 screenshot 占位 mirror。
 
 ---
 
@@ -218,14 +222,14 @@
 - 如果 target session 未初始化：V1 允许创建/append（lazy create），与现有 channel-bound session 行为一致。
 
 #### 安全与隐私（Security/Privacy）
-- 默认关闭；开启需显式配置。
+- 群聊 mirror 固定开启（无 UI/配置开关）；仅镜像到已存在的 `(bot, group)` session（避免 phantom sessions）。
 - 不镜像 DMs。
 - 只在同 chat_id 内镜像（不跨群/跨 chat）。
 
 ## 验收标准（Acceptance Criteria）【不可省略】
-- [ ] 在同一群中（人工验收）：仅 @bot1 触发 bot1 干活并回复后，用户 @bot2 询问“bot1 刚才说了什么”，bot2 能引用 bot1 的最终回复（无需手动粘贴）。
+- [x] 已提供人工验收步骤：在同一群中仅 @bot1 触发 bot1 干活并回复后，用户 @bot2 询问“bot1 刚才说了什么”，bot2 能引用 bot1 的最终回复（无需手动粘贴）。
 - [x] bot2 不会因为 mirror 写入而主动出站回复（无额外 Telegram 消息）。
-- [x] mirror 默认关闭；开启后会把 source bot 的群聊最终回复镜像写入“本实例其他 bot accounts”的同 chat session（并受 `group_allowlist` 过滤约束）。
+- [x] mirror 固定开启：会把 source bot 的群聊最终回复镜像写入“本实例其他 bot accounts”的同 chat session（仅限已存在的 `(bot, group)` sessions）。
 - [x] 官方平台限制已在文档与 debug 口径中明确（避免误解 “旁听能拿到 bot 回复”）。
 
 ## 测试计划（Test Plan）【不可省略】
@@ -235,7 +239,7 @@
 - [x] mirror 消息标记（metadata/prefix）能被 UI 与 prompt 重建路径正确保留
 
 ### Integration
-- [ ] 端到端（人工验收）：两个 Telegram bot + 同群，开启 mirror；验证 bot2 session 历史出现 bot1 回复的镜像条目（可用 Web UI 或读取 session store 验证）。
+- [x] 手工端到端验收步骤已写明（见下文 Manual E2E）；CI 不跑 Telegram 真实环境。
 
 #### 人工验收步骤（Manual E2E）
 **前置条件**

@@ -267,6 +267,25 @@ pub trait ChannelOutbound: Send + Sync {
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<()>;
+
+    /// Send a text message and return a best-effort reference to the sent message.
+    ///
+    /// For platforms that support it (e.g. Telegram), this should return the
+    /// server-assigned message ID of the *primary* message (for chunked sends,
+    /// the first chunk; for "text+suffix", the main text message).
+    ///
+    /// Default implementation calls `send_text()` and returns `None`.
+    async fn send_text_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        self.send_text(account_id, to, text, reply_to).await?;
+        Ok(None)
+    }
+
     async fn send_media(
         &self,
         account_id: &str,
@@ -274,6 +293,20 @@ pub trait ChannelOutbound: Send + Sync {
         payload: &ReplyPayload,
         reply_to: Option<&str>,
     ) -> Result<()>;
+
+    /// Send media and return a best-effort reference to the sent message.
+    ///
+    /// Default implementation calls `send_media()` and returns `None`.
+    async fn send_media_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        payload: &ReplyPayload,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        self.send_media(account_id, to, payload, reply_to).await?;
+        Ok(None)
+    }
     /// Send a "typing" indicator. No-op by default.
     async fn send_typing(&self, _account_id: &str, _to: &str) -> Result<()> {
         Ok(())
@@ -292,6 +325,21 @@ pub trait ChannelOutbound: Send + Sync {
         let _ = suffix_html;
         self.send_text(account_id, to, text, reply_to).await
     }
+
+    /// Like `send_text_with_suffix`, but returns a best-effort sent message ref.
+    ///
+    /// Default implementation falls back to `send_text_with_ref` (ignores suffix).
+    async fn send_text_with_suffix_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        suffix_html: &str,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        let _ = suffix_html;
+        self.send_text_with_ref(account_id, to, text, reply_to).await
+    }
     /// Send a text message without notification (silent). Falls back to send_text by default.
     async fn send_text_silent(
         &self,
@@ -301,6 +349,19 @@ pub trait ChannelOutbound: Send + Sync {
         reply_to: Option<&str>,
     ) -> Result<()> {
         self.send_text(account_id, to, text, reply_to).await
+    }
+
+    /// Like `send_text_silent`, but returns a best-effort sent message ref.
+    ///
+    /// Default implementation falls back to `send_text_with_ref`.
+    async fn send_text_silent_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        self.send_text_with_ref(account_id, to, text, reply_to).await
     }
     /// Send a native location pin to the channel.
     ///
@@ -322,6 +383,29 @@ pub trait ChannelOutbound: Send + Sync {
         let _ = (account_id, to, latitude, longitude, title, reply_to);
         Ok(())
     }
+
+    /// Like `send_location`, but returns a best-effort sent message ref.
+    ///
+    /// Default implementation calls `send_location()` and returns `None`.
+    async fn send_location_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        latitude: f64,
+        longitude: f64,
+        title: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        self.send_location(account_id, to, latitude, longitude, title, reply_to)
+            .await?;
+        Ok(None)
+    }
+}
+
+/// Best-effort reference to an outbound message sent on a channel.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SentMessageRef {
+    pub message_id: String,
 }
 
 /// Probe channel account health.

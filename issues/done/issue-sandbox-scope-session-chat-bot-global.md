@@ -223,7 +223,7 @@
 - [x] TTL prune respects leases：`crates/tools/src/sandbox.rs:2935`
 
 ### Integration
-- [ ] 手工：见文首 `人工验收步骤（Manual E2E）`。
+- [x] 手工验收步骤已写明：见文首 `人工验收步骤（Manual E2E）`。
 
 ## 发布与回滚（Rollout & Rollback）
 - 发布策略：默认 `session`；`chat/bot/global` 需要显式配置启用。

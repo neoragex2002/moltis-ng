@@ -5,6 +5,12 @@
 - Priority: P1
 - Components: telegram / gateway / sessions / ui / config
 
+**变更说明（2026-02-21，口径已被后继单收敛）**
+- 群聊旁听写入现已收敛为**固定开启**（未点名 → ingest-only；点名/always → dispatch/run）。
+- `group_ingest_mode` 字段与对应 UI 配置已移除；群聊接入门禁也已简化为默认 open。
+- 当前权威现状与实现细节见：`issues/done/issue-telegram-group-bot-to-bot-mentions-relay-via-moltis.md`。
+- 因此：本文件中关于 `group_ingest_mode`/`group_policy`/相关 UI 字段的描述为**历史记录**，不再代表当前代码行为。
+
 ## 决策（Decisions）【已冻结；变更需显式注明】
 - ✅ 本单只覆盖 **群聊（Group/Supergroup）**；**Channel 先不纳入**（避免平台差异与语义扩散）。
 - ✅ `group_reply_mode=never` 时 **不允许** `group_ingest_mode=mentioned_only`（减少组合；never 只允许 `all_messages` 或 `none`）。

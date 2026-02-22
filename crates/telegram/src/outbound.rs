@@ -12,7 +12,7 @@ use {
 
 use {
     moltis_channels::plugin::{
-        ChannelOutbound, ChannelStreamOutbound, StreamEvent, StreamReceiver,
+        ChannelOutbound, ChannelStreamOutbound, SentMessageRef, StreamEvent, StreamReceiver,
     },
     moltis_common::types::ReplyPayload,
 };
@@ -36,43 +36,26 @@ impl TelegramOutbound {
             .ok_or_else(|| anyhow::anyhow!("unknown account: {account_id}"))
     }
 
-    /// Build reply parameters only when `reply_to_message` is enabled for this account.
-    fn reply_params(&self, account_id: &str, reply_to: Option<&str>) -> Option<ReplyParameters> {
-        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
-        let enabled = accounts
-            .get(account_id)
-            .is_some_and(|s| s.config.reply_to_message);
-        if enabled {
-            parse_reply_params(reply_to)
-        } else {
-            None
-        }
+    fn reply_params(&self, _account_id: &str, reply_to: Option<&str>) -> Option<ReplyParameters> {
+        parse_reply_params(reply_to)
     }
-}
 
-/// Parse a platform message ID string into Telegram `ReplyParameters`.
-/// Returns `None` if the string is not a valid i32 (Telegram message IDs are i32).
-fn parse_reply_params(reply_to: Option<&str>) -> Option<ReplyParameters> {
-    reply_to
-        .and_then(|id| id.parse::<i32>().ok())
-        .map(|id| ReplyParameters::new(MessageId(id)).allow_sending_without_reply())
-}
-
-#[async_trait]
-impl ChannelOutbound for TelegramOutbound {
-    async fn send_text(
+    async fn send_text_inner(
         &self,
         account_id: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
-    ) -> Result<()> {
+        silent: bool,
+    ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_id)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_id, reply_to);
 
         // Send typing indicator
-        let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+        if !silent {
+            let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+        }
 
         let html = markdown::markdown_to_telegram_html(text);
         let chunks = markdown::chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
@@ -82,18 +65,26 @@ impl ChannelOutbound for TelegramOutbound {
             reply_to = ?reply_to,
             text_len = text.len(),
             chunk_count = chunks.len(),
+            silent,
             "telegram outbound text send start"
         );
 
+        let mut first_id: Option<MessageId> = None;
         for (i, chunk) in chunks.iter().enumerate() {
             let mut req = bot.send_message(chat_id, chunk).parse_mode(ParseMode::Html);
+            if silent {
+                req = req.disable_notification(true);
+            }
             // Thread only the first chunk as a reply to the original message.
             if i == 0
                 && let Some(ref rp) = rp
             {
                 req = req.reply_parameters(rp.clone());
             }
-            req.await?;
+            let sent = req.await?;
+            if first_id.is_none() {
+                first_id = Some(sent.id);
+            }
         }
 
         info!(
@@ -102,19 +93,20 @@ impl ChannelOutbound for TelegramOutbound {
             reply_to = ?reply_to,
             text_len = text.len(),
             chunk_count = chunks.len(),
+            silent,
             "telegram outbound text sent"
         );
-        Ok(())
+        Ok(first_id)
     }
 
-    async fn send_text_with_suffix(
+    async fn send_text_with_suffix_inner(
         &self,
         account_id: &str,
         to: &str,
         text: &str,
         suffix_html: &str,
         reply_to: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_id)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_id, reply_to);
@@ -137,6 +129,7 @@ impl ChannelOutbound for TelegramOutbound {
             "telegram outbound text+suffix send start"
         );
 
+        let mut first_id: Option<MessageId> = None;
         for (i, chunk) in chunks.iter().enumerate() {
             let content = if i == last_idx {
                 // Append suffix to the last chunk. If it would exceed the limit,
@@ -152,12 +145,18 @@ impl ChannelOutbound for TelegramOutbound {
                     {
                         req = req.reply_parameters(rp.clone());
                     }
-                    req.await?;
+                    let sent = req.await?;
+                    if first_id.is_none() {
+                        first_id = Some(sent.id);
+                    }
+
                     // Send suffix as the final message (no reply threading).
-                    bot.send_message(chat_id, suffix_html)
+                    let _ = bot
+                        .send_message(chat_id, suffix_html)
                         .parse_mode(ParseMode::Html)
                         .disable_notification(true)
                         .await?;
+
                     info!(
                         account_id,
                         chat_id = to,
@@ -167,7 +166,7 @@ impl ChannelOutbound for TelegramOutbound {
                         chunk_count = chunks.len(),
                         "telegram outbound text+suffix sent (separate suffix message)"
                     );
-                    return Ok(());
+                    return Ok(first_id);
                 }
             } else {
                 chunk.clone()
@@ -180,7 +179,10 @@ impl ChannelOutbound for TelegramOutbound {
             {
                 req = req.reply_parameters(rp.clone());
             }
-            req.await?;
+            let sent = req.await?;
+            if first_id.is_none() {
+                first_id = Some(sent.id);
+            }
         }
 
         info!(
@@ -192,69 +194,16 @@ impl ChannelOutbound for TelegramOutbound {
             chunk_count = chunks.len(),
             "telegram outbound text+suffix sent"
         );
-        Ok(())
+        Ok(first_id)
     }
 
-    async fn send_typing(&self, account_id: &str, to: &str) -> Result<()> {
-        let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
-        let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
-        Ok(())
-    }
-
-    async fn send_text_silent(
-        &self,
-        account_id: &str,
-        to: &str,
-        text: &str,
-        reply_to: Option<&str>,
-    ) -> Result<()> {
-        let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
-        let rp = self.reply_params(account_id, reply_to);
-
-        let html = markdown::markdown_to_telegram_html(text);
-        let chunks = markdown::chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
-        info!(
-            account_id,
-            chat_id = to,
-            reply_to = ?reply_to,
-            text_len = text.len(),
-            chunk_count = chunks.len(),
-            "telegram outbound silent text send start"
-        );
-
-        for (i, chunk) in chunks.iter().enumerate() {
-            let mut req = bot
-                .send_message(chat_id, chunk)
-                .parse_mode(ParseMode::Html)
-                .disable_notification(true);
-            if i == 0
-                && let Some(ref rp) = rp
-            {
-                req = req.reply_parameters(rp.clone());
-            }
-            req.await?;
-        }
-
-        info!(
-            account_id,
-            chat_id = to,
-            reply_to = ?reply_to,
-            text_len = text.len(),
-            chunk_count = chunks.len(),
-            "telegram outbound silent text sent"
-        );
-        Ok(())
-    }
-
-    async fn send_media(
+    async fn send_media_inner(
         &self,
         account_id: &str,
         to: &str,
         payload: &ReplyPayload,
         reply_to: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_id)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_id, reply_to);
@@ -313,7 +262,7 @@ impl ChannelOutbound for TelegramOutbound {
                     }
 
                     match req.await {
-                        Ok(_) => {
+                        Ok(sent) => {
                             info!(
                                 account_id,
                                 chat_id = to,
@@ -322,7 +271,7 @@ impl ChannelOutbound for TelegramOutbound {
                                 caption_len = payload.text.len(),
                                 "telegram outbound media sent as photo"
                             );
-                            return Ok(());
+                            return Ok(Some(sent.id));
                         },
                         Err(e) => {
                             let err_str = e.to_string();
@@ -339,7 +288,10 @@ impl ChannelOutbound for TelegramOutbound {
                                 if !payload.text.is_empty() {
                                     req = req.caption(&payload.text);
                                 }
-                                req.await?;
+                                if let Some(ref rp) = rp {
+                                    req = req.reply_parameters(rp.clone());
+                                }
+                                let sent = req.await?;
                                 info!(
                                     account_id,
                                     chat_id = to,
@@ -348,21 +300,24 @@ impl ChannelOutbound for TelegramOutbound {
                                     caption_len = payload.text.len(),
                                     "telegram outbound media sent as document fallback"
                                 );
-                                return Ok(());
+                                return Ok(Some(sent.id));
                             }
                             return Err(e.into());
                         },
                     }
                 }
 
-                // Non-image types: send as document
+                // Non-image types: send as document/voice/audio depending on mime type.
                 if media.mime_type == "audio/ogg" {
                     let input = InputFile::memory(bytes).file_name("voice.ogg");
                     let mut req = bot.send_voice(chat_id, input);
                     if !payload.text.is_empty() {
                         req = req.caption(&payload.text);
                     }
-                    req.await?;
+                    if let Some(ref rp) = rp {
+                        req = req.reply_parameters(rp.clone());
+                    }
+                    let sent = req.await?;
                     info!(
                         account_id,
                         chat_id = to,
@@ -371,13 +326,18 @@ impl ChannelOutbound for TelegramOutbound {
                         caption_len = payload.text.len(),
                         "telegram outbound media sent as voice"
                     );
-                } else if media.mime_type.starts_with("audio/") {
+                    return Ok(Some(sent.id));
+                }
+                if media.mime_type.starts_with("audio/") {
                     let input = InputFile::memory(bytes).file_name("audio.mp3");
                     let mut req = bot.send_audio(chat_id, input);
                     if !payload.text.is_empty() {
                         req = req.caption(&payload.text);
                     }
-                    req.await?;
+                    if let Some(ref rp) = rp {
+                        req = req.reply_parameters(rp.clone());
+                    }
+                    let sent = req.await?;
                     info!(
                         account_id,
                         chat_id = to,
@@ -386,98 +346,123 @@ impl ChannelOutbound for TelegramOutbound {
                         caption_len = payload.text.len(),
                         "telegram outbound media sent as audio"
                     );
-                } else {
-                    let input = InputFile::memory(bytes).file_name(filename);
-                    let mut req = bot.send_document(chat_id, input);
+                    return Ok(Some(sent.id));
+                }
+
+                let input = InputFile::memory(bytes).file_name(filename);
+                let mut req = bot.send_document(chat_id, input);
+                if !payload.text.is_empty() {
+                    req = req.caption(&payload.text);
+                }
+                if let Some(ref rp) = rp {
+                    req = req.reply_parameters(rp.clone());
+                }
+                let sent = req.await?;
+                info!(
+                    account_id,
+                    chat_id = to,
+                    reply_to = ?reply_to,
+                    media_mime = %media.mime_type,
+                    caption_len = payload.text.len(),
+                    "telegram outbound media sent as document"
+                );
+                return Ok(Some(sent.id));
+            }
+
+            // URL-based media
+            let input = InputFile::url(media.url.parse()?);
+            let sent = match media.mime_type.as_str() {
+                t if t.starts_with("image/") => {
+                    let mut req = bot.send_photo(chat_id, input);
                     if !payload.text.is_empty() {
                         req = req.caption(&payload.text);
                     }
-                    req.await?;
+                    if let Some(ref rp) = rp {
+                        req = req.reply_parameters(rp.clone());
+                    }
+                    let sent = req.await?;
                     info!(
                         account_id,
                         chat_id = to,
                         reply_to = ?reply_to,
                         media_mime = %media.mime_type,
                         caption_len = payload.text.len(),
-                        "telegram outbound media sent as document"
+                        "telegram outbound URL media sent as photo"
                     );
-                }
-            } else {
-                // URL-based media
-                let input = InputFile::url(media.url.parse()?);
-
-                match media.mime_type.as_str() {
-                    t if t.starts_with("image/") => {
-                        let mut req = bot.send_photo(chat_id, input);
-                        if !payload.text.is_empty() {
-                            req = req.caption(&payload.text);
-                        }
-                        req.await?;
-                        info!(
-                            account_id,
-                            chat_id = to,
-                            reply_to = ?reply_to,
-                            media_mime = %media.mime_type,
-                            caption_len = payload.text.len(),
-                            "telegram outbound URL media sent as photo"
-                        );
-                    },
-                    "audio/ogg" => {
-                        let mut req = bot.send_voice(chat_id, input);
-                        if !payload.text.is_empty() {
-                            req = req.caption(&payload.text);
-                        }
-                        req.await?;
-                        info!(
-                            account_id,
-                            chat_id = to,
-                            reply_to = ?reply_to,
-                            media_mime = %media.mime_type,
-                            caption_len = payload.text.len(),
-                            "telegram outbound URL media sent as voice"
-                        );
-                    },
-                    t if t.starts_with("audio/") => {
-                        let mut req = bot.send_audio(chat_id, input);
-                        if !payload.text.is_empty() {
-                            req = req.caption(&payload.text);
-                        }
-                        req.await?;
-                        info!(
-                            account_id,
-                            chat_id = to,
-                            reply_to = ?reply_to,
-                            media_mime = %media.mime_type,
-                            caption_len = payload.text.len(),
-                            "telegram outbound URL media sent as audio"
-                        );
-                    },
-                    _ => {
-                        let mut req = bot.send_document(chat_id, input);
-                        if !payload.text.is_empty() {
-                            req = req.caption(&payload.text);
-                        }
-                        req.await?;
-                        info!(
-                            account_id,
-                            chat_id = to,
-                            reply_to = ?reply_to,
-                            media_mime = %media.mime_type,
-                            caption_len = payload.text.len(),
-                            "telegram outbound URL media sent as document"
-                        );
-                    },
-                }
-            }
-        } else if !payload.text.is_empty() {
-            self.send_text(account_id, to, &payload.text, reply_to)
-                .await?;
+                    sent.id
+                },
+                "audio/ogg" => {
+                    let mut req = bot.send_voice(chat_id, input);
+                    if !payload.text.is_empty() {
+                        req = req.caption(&payload.text);
+                    }
+                    if let Some(ref rp) = rp {
+                        req = req.reply_parameters(rp.clone());
+                    }
+                    let sent = req.await?;
+                    info!(
+                        account_id,
+                        chat_id = to,
+                        reply_to = ?reply_to,
+                        media_mime = %media.mime_type,
+                        caption_len = payload.text.len(),
+                        "telegram outbound URL media sent as voice"
+                    );
+                    sent.id
+                },
+                t if t.starts_with("audio/") => {
+                    let mut req = bot.send_audio(chat_id, input);
+                    if !payload.text.is_empty() {
+                        req = req.caption(&payload.text);
+                    }
+                    if let Some(ref rp) = rp {
+                        req = req.reply_parameters(rp.clone());
+                    }
+                    let sent = req.await?;
+                    info!(
+                        account_id,
+                        chat_id = to,
+                        reply_to = ?reply_to,
+                        media_mime = %media.mime_type,
+                        caption_len = payload.text.len(),
+                        "telegram outbound URL media sent as audio"
+                    );
+                    sent.id
+                },
+                _ => {
+                    let mut req = bot.send_document(chat_id, input);
+                    if !payload.text.is_empty() {
+                        req = req.caption(&payload.text);
+                    }
+                    if let Some(ref rp) = rp {
+                        req = req.reply_parameters(rp.clone());
+                    }
+                    let sent = req.await?;
+                    info!(
+                        account_id,
+                        chat_id = to,
+                        reply_to = ?reply_to,
+                        media_mime = %media.mime_type,
+                        caption_len = payload.text.len(),
+                        "telegram outbound URL media sent as document"
+                    );
+                    sent.id
+                },
+            };
+            return Ok(Some(sent));
         }
 
-        Ok(())
+        if !payload.text.is_empty() {
+            let sent = self
+                .send_text_inner(account_id, to, &payload.text, reply_to, false)
+                .await?;
+            return Ok(sent);
+        }
+
+        Ok(None)
     }
 
-    async fn send_location(
+    async fn send_location_inner(
         &self,
         account_id: &str,
         to: &str,
@@ -485,7 +470,7 @@ impl ChannelOutbound for TelegramOutbound {
         longitude: f64,
         title: Option<&str>,
         reply_to: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_id)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_id, reply_to);
@@ -499,21 +484,21 @@ impl ChannelOutbound for TelegramOutbound {
             "telegram outbound location send start"
         );
 
-        if let Some(name) = title {
+        let sent = if let Some(name) = title {
             // Venue shows the place name in the chat bubble.
             let address = format!("{latitude:.6}, {longitude:.6}");
             let mut req = bot.send_venue(chat_id, latitude, longitude, name, address);
             if let Some(ref rp) = rp {
                 req = req.reply_parameters(rp.clone());
             }
-            req.await?;
+            req.await?
         } else {
             let mut req = bot.send_location(chat_id, latitude, longitude);
             if let Some(ref rp) = rp {
                 req = req.reply_parameters(rp.clone());
             }
-            req.await?;
-        }
+            req.await?
+        };
 
         info!(
             account_id,
@@ -524,7 +509,171 @@ impl ChannelOutbound for TelegramOutbound {
             has_title = title.is_some(),
             "telegram outbound location sent"
         );
+        Ok(Some(sent.id))
+    }
+}
+
+/// Parse a platform message ID string into Telegram `ReplyParameters`.
+/// Returns `None` if the string is not a valid i32 (Telegram message IDs are i32).
+fn parse_reply_params(reply_to: Option<&str>) -> Option<ReplyParameters> {
+    reply_to
+        .and_then(|id| id.parse::<i32>().ok())
+        .map(|id| ReplyParameters::new(MessageId(id)).allow_sending_without_reply())
+}
+
+#[async_trait]
+impl ChannelOutbound for TelegramOutbound {
+    async fn send_text(
+        &self,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        reply_to: Option<&str>,
+    ) -> Result<()> {
+        let _ = self
+            .send_text_inner(account_id, to, text, reply_to, false)
+            .await?;
         Ok(())
+    }
+
+    async fn send_text_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_text_inner(account_id, to, text, reply_to, false)
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
+    }
+
+    async fn send_text_with_suffix(
+        &self,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        suffix_html: &str,
+        reply_to: Option<&str>,
+    ) -> Result<()> {
+        let _ = self
+            .send_text_with_suffix_inner(account_id, to, text, suffix_html, reply_to)
+            .await?;
+        Ok(())
+    }
+
+    async fn send_text_with_suffix_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        suffix_html: &str,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_text_with_suffix_inner(account_id, to, text, suffix_html, reply_to)
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
+    }
+
+    async fn send_typing(&self, account_id: &str, to: &str) -> Result<()> {
+        let bot = self.get_bot(account_id)?;
+        let chat_id = ChatId(to.parse::<i64>()?);
+        let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+        Ok(())
+    }
+
+    async fn send_text_silent(
+        &self,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        reply_to: Option<&str>,
+    ) -> Result<()> {
+        let _ = self
+            .send_text_inner(account_id, to, text, reply_to, true)
+            .await?;
+        Ok(())
+    }
+
+    async fn send_text_silent_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_text_inner(account_id, to, text, reply_to, true)
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
+    }
+
+    async fn send_media(
+        &self,
+        account_id: &str,
+        to: &str,
+        payload: &ReplyPayload,
+        reply_to: Option<&str>,
+    ) -> Result<()> {
+        let _ = self
+            .send_media_inner(account_id, to, payload, reply_to)
+            .await?;
+        Ok(())
+    }
+
+    async fn send_media_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        payload: &ReplyPayload,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_media_inner(account_id, to, payload, reply_to)
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
+    }
+
+    async fn send_location(
+        &self,
+        account_id: &str,
+        to: &str,
+        latitude: f64,
+        longitude: f64,
+        title: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<()> {
+        let _ = self
+            .send_location_inner(account_id, to, latitude, longitude, title, reply_to)
+            .await?;
+        Ok(())
+    }
+
+    async fn send_location_with_ref(
+        &self,
+        account_id: &str,
+        to: &str,
+        latitude: f64,
+        longitude: f64,
+        title: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_location_inner(account_id, to, latitude, longitude, title, reply_to)
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
     }
 }
 

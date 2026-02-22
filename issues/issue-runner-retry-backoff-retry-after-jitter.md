@@ -125,7 +125,7 @@
 ## 交叉引用（Cross References）
 - Related issues/docs：
   - `issues/overall_issues_1.md`（P3 原始 TODO）
-  - `issues/issue-error-handling-taxonomy-single-egress.md`（失败出口去重/渠道回执一致性；避免重试时多次回执）
+  - `issues/done/issue-error-handling-taxonomy-single-egress.md`（失败出口去重/渠道回执一致性；避免重试时多次回执）
 
 ## Close Checklist（关单清单）【不可省略】
 - [ ] 行为已按 Spec 实现（口径一致）

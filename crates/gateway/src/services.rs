@@ -374,14 +374,13 @@ pub trait ChannelService: Send + Sync {
         Vec::new()
     }
 
-    /// Return a safe snapshot of mirror-related config for a Telegram account.
+    /// Safe identity + group-bus snapshot for all Telegram accounts.
     ///
-    /// Default implementation returns None for non-live/noop services.
-    async fn telegram_mirror_snapshot(
+    /// Used by gateway hot paths (mirror/relay) without exposing secrets.
+    async fn telegram_bus_accounts_snapshot(
         &self,
-        _account_id: &str,
-    ) -> Option<moltis_telegram::config::TelegramMirrorConfigSnapshot> {
-        None
+    ) -> Vec<moltis_telegram::config::TelegramBusAccountSnapshot> {
+        Vec::new()
     }
 }
 
@@ -517,6 +516,15 @@ pub trait ChatService: Send + Sync {
     /// Returns `{ "text": "...", "inputTokens": N, "outputTokens": N }`.
     async fn send_sync(&self, params: Value) -> ServiceResult {
         self.send(params).await
+    }
+    /// Internal helper for side-effect-free LLM completions (no session I/O).
+    ///
+    /// Intended for small classification tasks (e.g. relay mention labeling).
+    /// Contract:
+    /// - Input: `{ "system": "...", "user": "...", "model"?: "..." }`
+    /// - Output: `{ "text": "...", "inputTokens": N, "outputTokens": N }`
+    async fn internal_complete(&self, _params: Value) -> ServiceResult {
+        Err("internal complete not supported".into())
     }
     async fn abort(&self, params: Value) -> ServiceResult;
     async fn cancel_queued(&self, params: Value) -> ServiceResult;

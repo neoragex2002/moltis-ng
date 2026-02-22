@@ -20,7 +20,7 @@ use moltis_channels::{
 
 use crate::{
     bot,
-    config::{TelegramAccountConfig, TelegramMirrorConfigSnapshot},
+    config::{TelegramAccountConfig, TelegramBusAccountSnapshot},
     outbound::TelegramOutbound,
     state::AccountStateMap,
 };
@@ -83,29 +83,26 @@ impl TelegramPlugin {
             .and_then(|s| serde_json::to_value(&s.config).ok())
     }
 
-    /// Get a safe snapshot of mirror-related config for a specific account.
-    ///
-    /// This intentionally excludes the bot token and other sensitive fields so
-    /// it can be used in gateway hot paths without risking accidental leakage.
-    pub fn account_mirror_snapshot(
-        &self,
-        account_id: &str,
-    ) -> Option<TelegramMirrorConfigSnapshot> {
+    /// Return safe (non-secret) identity + group-bus snapshot for all accounts.
+    pub fn bus_accounts_snapshot(&self) -> Vec<TelegramBusAccountSnapshot> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
-            .get(account_id)
-            .map(|s| TelegramMirrorConfigSnapshot {
-                group_outbound_mirror_enabled: s.config.group_outbound_mirror_enabled,
-                group_allowlist: s.config.group_allowlist.clone(),
+            .iter()
+            .map(|(account_id, s)| TelegramBusAccountSnapshot {
+                account_id: account_id.clone(),
+                bot_username: s.bot_username.clone(),
+                relay_chain_enabled: s.config.relay_chain_enabled,
+                relay_hop_limit: s.config.relay_hop_limit,
+                relay_strictness: s.config.relay_strictness.clone(),
             })
+            .collect()
     }
 
     /// Update the in-memory config for an account without restarting the
     /// polling loop.  Use for allowlist changes that don't need
     /// re-authentication or bot restart.
     pub fn update_account_config(&self, account_id: &str, config: serde_json::Value) -> Result<()> {
-        let mut tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
-        tg_config.normalize_in_place();
+        let tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
         let mut accounts = self.accounts.write().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = accounts.get_mut(account_id) {
             state.config = tg_config;
@@ -145,8 +142,7 @@ impl ChannelPlugin for TelegramPlugin {
     }
 
     async fn start_account(&mut self, account_id: &str, config: serde_json::Value) -> Result<()> {
-        let mut tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
-        tg_config.normalize_in_place();
+        let tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
 
         if tg_config.token.expose_secret().is_empty() {
             return Err(anyhow::anyhow!("telegram bot token is required"));
