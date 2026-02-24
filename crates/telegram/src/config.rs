@@ -76,6 +76,22 @@ pub struct TelegramAccountConfig {
 
     /// Cooldown in seconds after 3 failed OTP attempts (default: 300).
     pub otp_cooldown_secs: u64,
+
+    /// Optional persona ID bound to this Telegram bot (named persona directory).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona_id: Option<String>,
+
+    /// Telegram bot user id from `getMe.id` (stable primary key).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chan_user_id: Option<u64>,
+
+    /// Telegram bot username from `getMe.username` (without `@`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chan_user_name: Option<String>,
+
+    /// Telegram bot display name from `getMe.first_name/last_name` (human-friendly).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chan_nickname: Option<String>,
 }
 
 /// Safe, non-secret snapshot of Telegram bot identity + group bus config.
@@ -123,6 +139,10 @@ impl Default for TelegramAccountConfig {
             model_provider: None,
             otp_self_approval: true,
             otp_cooldown_secs: 300,
+            persona_id: None,
+            chan_user_id: None,
+            chan_user_name: None,
+            chan_nickname: None,
         }
     }
 }

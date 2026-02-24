@@ -153,20 +153,42 @@ impl ChannelService for LiveChannelService {
             return Err(format!("unsupported channel type: {channel_type}"));
         }
 
-        let account_id = params
-            .get("account_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'account_id'".to_string())?;
-
         let config = params
             .get("config")
             .cloned()
             .unwrap_or(Value::Object(Default::default()));
 
+        let mut tg_cfg: moltis_telegram::TelegramAccountConfig =
+            serde_json::from_value(config.clone()).map_err(|e| e.to_string())?;
+        if tg_cfg.token.expose_secret().is_empty() {
+            return Err("telegram bot token is required".into());
+        }
+
+        let identity = moltis_telegram::bot::probe_bot_identity(tg_cfg.token.expose_secret())
+            .await
+            .map_err(|e| format!("telegram getMe failed: {e}"))?;
+        let account_id = format!("telegram:{}", identity.chan_user_id);
+
+        if let Some(supplied) = params.get("account_id").and_then(|v| v.as_str())
+            && supplied != account_id
+        {
+            warn!(
+                supplied,
+                derived = %account_id,
+                "telegram channel add: ignoring supplied account_id and using derived identity handle"
+            );
+        }
+
+        tg_cfg.chan_user_id = Some(identity.chan_user_id);
+        tg_cfg.chan_user_name = identity.chan_user_name;
+        tg_cfg.chan_nickname = identity.chan_nickname;
+
+        let config = serde_json::to_value(tg_cfg).map_err(|e| e.to_string())?;
+
         info!(account_id, "adding telegram channel account");
 
         let mut tg = self.telegram.write().await;
-        tg.start_account(account_id, config.clone())
+        tg.start_account(&account_id, config.clone())
             .await
             .map_err(|e| {
                 error!(error = %e, account_id, "failed to start telegram account");
@@ -480,6 +502,12 @@ impl ChannelService for LiveChannelService {
     ) -> Vec<moltis_telegram::config::TelegramBusAccountSnapshot> {
         let tg = self.telegram.read().await;
         tg.bus_accounts_snapshot()
+    }
+
+    async fn telegram_account_persona_id(&self, account_id: &str) -> Option<String> {
+        let stored = self.store.get(account_id).await.ok().flatten()?;
+        let cfg: moltis_telegram::TelegramAccountConfig = serde_json::from_value(stored.config).ok()?;
+        cfg.persona_id
     }
 }
 

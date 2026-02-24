@@ -10,6 +10,7 @@ use {
 use {
     moltis_channels::{
         ChannelAttachment, ChannelEvent, ChannelEventSink, ChannelMessageMeta, ChannelReplyTarget,
+        ChannelType,
     },
     moltis_sessions::metadata::SqliteSessionMetadata,
 };
@@ -30,9 +31,12 @@ fn format_context_v1_payload(payload: serde_json::Value) -> String {
 
 /// Default (deterministic) session key for a channel chat.
 fn default_channel_session_key(target: &ChannelReplyTarget) -> String {
+    let account_key = match target.channel_type {
+        ChannelType::Telegram => target.account_id.strip_prefix("telegram:").unwrap_or(&target.account_id),
+    };
     format!(
         "{}:{}:{}",
-        target.channel_type, target.account_id, target.chat_id
+        target.channel_type, account_key, target.chat_id
     )
 }
 
@@ -1514,6 +1518,21 @@ mod tests {
             message_id: None,
         };
         assert_eq!(default_channel_session_key(&target), "telegram:bot1:12345");
+    }
+
+    #[test]
+    fn channel_session_key_strips_telegram_prefix_from_account_id() {
+        let target = ChannelReplyTarget {
+            channel_type: ChannelType::Telegram,
+            account_id: "telegram:8576199590".into(),
+            account_handle: None,
+            chat_id: "12345".into(),
+            message_id: None,
+        };
+        assert_eq!(
+            default_channel_session_key(&target),
+            "telegram:8576199590:12345"
+        );
     }
 
     #[test]

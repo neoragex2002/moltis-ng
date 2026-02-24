@@ -653,6 +653,33 @@ pub async fn run_agent_loop_with_context(
     tool_context: Option<serde_json::Value>,
     hook_registry: Option<Arc<HookRegistry>>,
 ) -> Result<AgentRunResult, AgentRunError> {
+    run_agent_loop_with_context_prefix(
+        provider,
+        tools,
+        vec![ChatMessage::system(system_prompt)],
+        user_content,
+        on_event,
+        history,
+        tool_context,
+        hook_registry,
+    )
+    .await
+}
+
+/// Like `run_agent_loop_with_context` but accepts an explicit prefix message list.
+///
+/// This enables providers/protocols that need multi-message "system/developer"
+/// preambles (e.g. OpenAI Responses `role=developer` layering).
+pub async fn run_agent_loop_with_context_prefix(
+    provider: Arc<dyn LlmProvider>,
+    tools: &ToolRegistry,
+    prefix_messages: Vec<ChatMessage>,
+    user_content: &UserContent,
+    on_event: Option<&OnEvent>,
+    history: Option<Vec<ChatMessage>>,
+    tool_context: Option<serde_json::Value>,
+    hook_registry: Option<Arc<HookRegistry>>,
+) -> Result<AgentRunResult, AgentRunError> {
     let native_tools = provider.supports_tools();
     let max_tool_result_bytes = moltis_config::discover_and_load()
         .tools
@@ -669,7 +696,7 @@ pub async fn run_agent_loop_with_context(
         "starting agent loop"
     );
 
-    let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(system_prompt)];
+    let mut messages: Vec<ChatMessage> = prefix_messages;
 
     // Insert conversation history before the current user message.
     if let Some(hist) = history {
@@ -1127,6 +1154,30 @@ pub async fn run_agent_loop_streaming(
     tool_context: Option<serde_json::Value>,
     hook_registry: Option<Arc<HookRegistry>>,
 ) -> Result<AgentRunResult, AgentRunError> {
+    run_agent_loop_streaming_with_prefix(
+        provider,
+        tools,
+        vec![ChatMessage::system(system_prompt)],
+        user_content,
+        on_event,
+        history,
+        tool_context,
+        hook_registry,
+    )
+    .await
+}
+
+/// Streaming variant of the agent loop with an explicit prefix message list.
+pub async fn run_agent_loop_streaming_with_prefix(
+    provider: Arc<dyn LlmProvider>,
+    tools: &ToolRegistry,
+    prefix_messages: Vec<ChatMessage>,
+    user_content: &UserContent,
+    on_event: Option<&OnEvent>,
+    history: Option<Vec<ChatMessage>>,
+    tool_context: Option<serde_json::Value>,
+    hook_registry: Option<Arc<HookRegistry>>,
+) -> Result<AgentRunResult, AgentRunError> {
     let native_tools = provider.supports_tools();
     let max_tool_result_bytes = moltis_config::discover_and_load()
         .tools
@@ -1143,7 +1194,7 @@ pub async fn run_agent_loop_streaming(
         "starting streaming agent loop"
     );
 
-    let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(system_prompt)];
+    let mut messages: Vec<ChatMessage> = prefix_messages;
 
     // Insert conversation history before the current user message.
     if let Some(hist) = history {

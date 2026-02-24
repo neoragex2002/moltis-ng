@@ -287,6 +287,35 @@ pub fn tools_path() -> PathBuf {
     data_dir().join("TOOLS.md")
 }
 
+/// Path to the workspace PEOPLE roster markdown.
+pub fn people_path() -> PathBuf {
+    data_dir().join("PEOPLE.md")
+}
+
+/// Directory containing named personas.
+pub fn personas_dir() -> PathBuf {
+    data_dir().join("personas")
+}
+
+fn is_valid_persona_id(persona_id: &str) -> bool {
+    let id = persona_id.trim();
+    if id.is_empty() || id.len() > 64 {
+        return false;
+    }
+    id.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn persona_dir(persona_id: &str) -> Option<PathBuf> {
+    is_valid_persona_id(persona_id).then(|| personas_dir().join(persona_id))
+}
+
+fn load_markdown_raw(path: PathBuf) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let trimmed = strip_leading_html_comments(&content).trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// Path to workspace heartbeat markdown.
 pub fn heartbeat_path() -> PathBuf {
     data_dir().join("HEARTBEAT.md")
@@ -294,7 +323,10 @@ pub fn heartbeat_path() -> PathBuf {
 
 /// Load identity values from `IDENTITY.md` frontmatter if present.
 pub fn load_identity() -> Option<AgentIdentity> {
-    let path = identity_path();
+    load_identity_from_path(identity_path())
+}
+
+fn load_identity_from_path(path: PathBuf) -> Option<AgentIdentity> {
     let content = std::fs::read_to_string(path).ok()?;
     let frontmatter = extract_yaml_frontmatter(&content)?;
     let identity = parse_identity_frontmatter(frontmatter);
@@ -307,6 +339,23 @@ pub fn load_identity() -> Option<AgentIdentity> {
     } else {
         Some(identity)
     }
+}
+
+/// Load identity values from a named persona's `IDENTITY.md` frontmatter if present.
+pub fn load_persona_identity(persona_id: &str) -> Option<AgentIdentity> {
+    let dir = persona_dir(persona_id)?;
+    load_identity_from_path(dir.join("IDENTITY.md"))
+}
+
+/// Load IDENTITY.md raw markdown from the workspace root (`data_dir`) if present and non-empty.
+pub fn load_identity_md_raw() -> Option<String> {
+    load_markdown_raw(identity_path())
+}
+
+/// Load IDENTITY.md raw markdown from a named persona directory if present and non-empty.
+pub fn load_persona_identity_md_raw(persona_id: &str) -> Option<String> {
+    let dir = persona_dir(persona_id)?;
+    load_markdown_raw(dir.join("IDENTITY.md"))
 }
 
 /// Load user values from `USER.md` frontmatter if present.
@@ -399,6 +448,12 @@ pub fn load_soul() -> Option<String> {
     }
 }
 
+/// Load SOUL.md from a named persona directory if present and non-empty.
+pub fn load_persona_soul(persona_id: &str) -> Option<String> {
+    let dir = persona_dir(persona_id)?;
+    load_markdown_raw(dir.join("SOUL.md"))
+}
+
 /// Write `DEFAULT_SOUL` to `SOUL.md` when the file doesn't already exist.
 fn write_default_soul() -> anyhow::Result<()> {
     let path = soul_path();
@@ -418,9 +473,21 @@ pub fn load_agents_md() -> Option<String> {
     load_workspace_markdown(agents_path())
 }
 
+/// Load AGENTS.md from a named persona directory if present and non-empty.
+pub fn load_persona_agents_md(persona_id: &str) -> Option<String> {
+    let dir = persona_dir(persona_id)?;
+    load_workspace_markdown(dir.join("AGENTS.md"))
+}
+
 /// Load TOOLS.md from the workspace root (`data_dir`) if present and non-empty.
 pub fn load_tools_md() -> Option<String> {
     load_workspace_markdown(tools_path())
+}
+
+/// Load TOOLS.md from a named persona directory if present and non-empty.
+pub fn load_persona_tools_md(persona_id: &str) -> Option<String> {
+    let dir = persona_dir(persona_id)?;
+    load_workspace_markdown(dir.join("TOOLS.md"))
 }
 
 /// Load HEARTBEAT.md from the workspace root (`data_dir`) if present and non-empty.

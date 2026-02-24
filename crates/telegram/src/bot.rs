@@ -20,6 +20,31 @@ use crate::{
     state::{AccountState, AccountStateMap},
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramBotIdentity {
+    pub chan_user_id: u64,
+    /// Telegram `getMe.username` (without `@`).
+    pub chan_user_name: Option<String>,
+    /// Telegram display name (first + last).
+    pub chan_nickname: Option<String>,
+}
+
+pub async fn probe_bot_identity(token: &str) -> anyhow::Result<TelegramBotIdentity> {
+    let client = teloxide::net::default_reqwest_settings()
+        .timeout(std::time::Duration::from_secs(45))
+        .build()?;
+    let bot = teloxide::Bot::with_client(token, client);
+    let me = bot.get_me().await?;
+    let first = me.first_name.clone();
+    let last = me.last_name.clone().unwrap_or_default();
+    let nick = format!("{first} {last}").trim().to_string();
+    Ok(TelegramBotIdentity {
+        chan_user_id: me.id.0,
+        chan_user_name: me.username.clone(),
+        chan_nickname: (!nick.is_empty()).then_some(nick),
+    })
+}
+
 /// Start polling for a single bot account.
 ///
 /// Spawns a background task that processes updates until the returned

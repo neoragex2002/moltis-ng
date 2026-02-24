@@ -1,19 +1,31 @@
 # Issue: 命名 persona（按 Telegram bot identity 绑定）+ OpenAI Responses `role=developer` 注入（cache-friendly）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: SURVEY
+- Status: DONE（2026-02-24）
 - Priority: P1（多 bot/多用途的根能力；影响可控性与缓存命中）
 - Components: gateway / agents / config / sessions metadata / channels(telegram) / providers(openai-responses) / Web UI
 - Affected providers/models: openai-responses（重点）；其它 providers 需兼容降级
 
 **已实现（如有，写日期）**
-- 暂无（本单为设计与实现规划）
+- OpenAI Responses：`instructions` 字段 **完全省略**；所有 `ChatMessage::System` 映射为 `input[]` 中 `role=developer` 的 message item：`crates/agents/src/providers/openai_responses.rs:33`
+- Gateway：对 OpenAI Responses provider 注入三条 preamble（system/persona/runtime snapshot）并在 run 前置：`crates/gateway/src/chat.rs:4269`
+- Prompt builder：新增 `build_openai_responses_developer_prompts()` 构造三段 developer 文本（含 People reference、runtime snapshot、tools/skills/memory）：`crates/agents/src/prompt.rs:38`
+- Runtime snapshot：默认脱敏 `remote_ip/location`（不进入 prompt）以降低隐私泄露风险：`crates/agents/src/prompt.rs:154`
+- Runner：新增 `*_with_prefix` 入口支持多条 preamble messages：`crates/agents/src/runner.rs:660`
+- Telegram 接入：Add Bot 仅提交 token；后端通过 `getMe` 派生稳定账号句柄 `telegram:<chan_user_id>` 并写入 config（含 `persona_id/chan_user_*`）：`crates/gateway/src/channel.rs:137`
+- Session key：Telegram 默认会话键从 `telegram:{account_id}:{chat_id}` 改为 `telegram:{chan_user_id}:{chat_id}`（自动 strip `telegram:` 前缀避免双前缀）：`crates/gateway/src/channel_events.rs:35`
+- UI：Channels 与 Onboarding 的 Telegram 表单改为 token-only，并支持 `persona_id`：`crates/gateway/src/assets/js/page-channels.js:246`、`crates/gateway/src/assets/js/onboarding-view.js:1957`
+- spawn_agent：支持显式 `persona_id` 参数；在 OpenAI Responses provider 下同样注入三条 preamble：`crates/tools/src/spawn_agent.rs:168`
 
 **已覆盖测试（如有）**
-- 暂无新增（需补齐：见 Test Plan）
+- Responses `instructions` omission + developer input mapping（含 user item `type=message`）：`crates/agents/src/providers/openai_responses.rs:1243`
+- 三段 developer prompt（system/persona/runtime snapshot）内容完整性 + runtime 脱敏：`crates/agents/src/prompt.rs:1052`
+- Telegram session_key strip 双前缀回归：`crates/gateway/src/channel_events.rs:1524`
+- spawn_agent 在 openai-responses 下三条 system preamble：`crates/gateway/tests/spawn_agent_openai_responses.rs:44`
 
 **已知差异/后续优化（非阻塞）**
 - prompt cache（OpenAI Responses）按 `session_key` 分桶即可；本单不改分桶策略（persona 与 prompt cache key 无强绑定关系）。
+- 术语/字段名：实现层未做“`account_id` → `account_handle`”大范围重命名；当前 `account_id` 承载稳定句柄 `telegram:<chan_user_id>`，`account_handle` 仍保留为人类可读 `@username`（避免 UI/RPC/存储 churn）。
 
 ---
 

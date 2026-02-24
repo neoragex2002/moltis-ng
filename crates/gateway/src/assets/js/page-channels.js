@@ -253,16 +253,12 @@ function AddChannelModal() {
 	function onSubmit(e) {
 		e.preventDefault();
 		var form = e.target.closest(".channel-form");
-		var accountId = form.querySelector("[data-field=accountId]").value.trim();
 		var token = form.querySelector("[data-field=token]").value.trim();
-		if (!accountId) {
-			error.value = "Bot username is required.";
-			return;
-		}
 		if (!token) {
 			error.value = "Bot token is required.";
 			return;
 		}
+		var personaId = form.querySelector("[data-field=personaId]")?.value?.trim() || "";
 		error.value = "";
 		saving.value = true;
 			var addConfig = {
@@ -274,6 +270,9 @@ function AddChannelModal() {
 				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
 				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
+		if (personaId) {
+			addConfig.persona_id = personaId;
+		}
 		if (addModel.value) {
 			addConfig.model = addModel.value;
 			var found = modelsSig.value.find((x) => x.id === addModel.value);
@@ -281,7 +280,6 @@ function AddChannelModal() {
 		}
 		sendRpc("channels.add", {
 			type: "telegram",
-			account_id: accountId,
 			config: addConfig,
 		}).then((res) => {
 			saving.value = false;
@@ -317,8 +315,12 @@ function AddChannelModal() {
         <div class="text-xs text-[var(--muted)]">3. Copy the bot token (looks like 123456:ABC-DEF...) and paste it below</div>
         <div class="text-xs text-[var(--muted)] channel-help" style="margin-top:2px;">See the <a href="https://core.telegram.org/bots/tutorial" target="_blank" class="text-[var(--accent)]" style="text-decoration:underline;">Telegram Bot Tutorial</a> for more details.</div>
       </div>
-	      <label class="text-xs text-[var(--muted)]">Bot username</label>
-	      <input data-field="accountId" type="text" placeholder="e.g. my_assistant_bot" style=${inputStyle} />
+	      <label class="text-xs text-[var(--muted)]">Persona ID (optional)</label>
+	      <input data-field="personaId" type="text" placeholder="e.g. default / ops / research" style=${inputStyle}
+	        autocapitalize="none"
+	        autocorrect="off"
+	        spellcheck="false"
+	        name="telegram_persona_id" />
 	      <label class="text-xs text-[var(--muted)]">Bot Token (from @BotFather)</label>
 	      <input data-field="token" type="password" placeholder="123456:ABC-DEF..." style=${inputStyle}
 	        autocomplete="new-password"
@@ -387,6 +389,7 @@ function EditChannelModal() {
 		var form = e.target.closest(".channel-form");
 		error.value = "";
 		saving.value = true;
+		var personaId = form.querySelector("[data-field=personaId]")?.value?.trim() || "";
 			var updateConfig = {
 				token: cfg.token || "",
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
@@ -396,6 +399,8 @@ function EditChannelModal() {
 				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
 				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
+		// Allow clearing persona binding by sending explicit null.
+		updateConfig.persona_id = personaId ? personaId : null;
 		if (editModel.value) {
 			updateConfig.model = editModel.value;
 			var found = modelsSig.value.find((x) => x.id === editModel.value);
@@ -428,6 +433,13 @@ function EditChannelModal() {
 	}} title="Edit Telegram Bot">
     <div class="channel-form">
       <div class="text-sm text-[var(--text-strong)]">${ch.name || ch.account_id}</div>
+      <label class="text-xs text-[var(--muted)]">Persona ID (optional)</label>
+      <input data-field="personaId" type="text" value=${cfg.persona_id || ""} placeholder="e.g. default / ops / research"
+        style="font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;"
+        autocapitalize="none"
+        autocorrect="off"
+        spellcheck="false"
+        name="telegram_persona_id_edit" />
       <label class="text-xs text-[var(--muted)]">DM Policy</label>
       <select data-field="dmPolicy" style=${selectStyle} value=${cfg.dm_policy || "open"}>
         <option value="open">Open (anyone)</option>

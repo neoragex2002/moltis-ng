@@ -382,6 +382,13 @@ pub trait ChannelService: Send + Sync {
     ) -> Vec<moltis_telegram::config::TelegramBusAccountSnapshot> {
         Vec::new()
     }
+
+    /// Resolve the configured persona_id for a Telegram account, if any.
+    ///
+    /// Default implementation returns `None` for non-live/noop services.
+    async fn telegram_account_persona_id(&self, _account_id: &str) -> Option<String> {
+        None
+    }
 }
 
 pub struct NoopChannelService;

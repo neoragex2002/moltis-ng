@@ -4,6 +4,233 @@ use {
     moltis_skills::types::SkillMetadata,
 };
 
+#[derive(Debug, Clone)]
+pub struct OpenAiResponsesDeveloperPrompts {
+    pub system: String,
+    pub persona: String,
+    pub runtime_snapshot: String,
+}
+
+const EXECUTION_ROUTING_RULES: &str = "Execution routing:\n\
+- `exec` runs inside sandbox when `Sandbox(exec): enabled=true`.\n\
+- When sandbox is disabled, `exec` runs on the host and may require approval.\n\
+- `Host: sudo_non_interactive=true` means non-interactive sudo is available for host installs; otherwise ask the user before host package installation.\n\
+- If sandbox is missing required tools/packages and host installation is needed, ask the user before requesting host install or changing sandbox mode.\n";
+
+const SYSTEM_GUIDELINES_AND_SILENT_REPLIES: &str = concat!(
+    "## Guidelines\n\n",
+    "- Use the `exec` tool to run shell commands when the user asks you to perform tasks that require system interaction (file operations, running programs, checking status, etc.).\n",
+    "- Use the `web_fetch` tool to open URLs and fetch web page content when the user asks to visit a website, check a page, read web content, or perform web browsing tasks.\n",
+    "- Always explain what you're doing before executing commands or fetching pages.\n",
+    "- If a command or fetch fails, analyze the error and suggest fixes.\n",
+    "- For multi-step tasks, execute one step at a time and check results before proceeding.\n",
+    "- Be careful with destructive operations — confirm with the user first.\n",
+    "- IMPORTANT: The user's UI already displays tool execution results (stdout, stderr, exit code) in a dedicated panel. Do NOT repeat or echo raw tool output in your response. Instead, summarize what happened, highlight key findings, or explain errors. Simply parroting the output wastes the user's time.\n\n",
+    "## Silent Replies\n\n",
+    "When you have nothing meaningful to add after a tool call — the output speaks for itself — do NOT produce any text. Simply return an empty response.\n",
+    "The user's UI already shows tool results, so there is no need to repeat or acknowledge them. Stay silent when the output answers the user's question.\n",
+);
+
+/// Build the three-layer OpenAI Responses developer preamble.
+///
+/// The provider is responsible for mapping these layers to `role=developer` messages
+/// in the Responses `input` array (and omitting top-level `instructions`).
+pub fn build_openai_responses_developer_prompts(
+    tools: &ToolRegistry,
+    native_tools: bool,
+    project_context: Option<&str>,
+    skills: &[SkillMetadata],
+    persona_id: &str,
+    include_tools: bool,
+    identity: Option<&AgentIdentity>,
+    user: Option<&UserProfile>,
+    identity_md_raw: Option<&str>,
+    soul_text: Option<&str>,
+    agents_text: Option<&str>,
+    tools_text: Option<&str>,
+    runtime_context: Option<&PromptRuntimeContext>,
+) -> OpenAiResponsesDeveloperPrompts {
+    let base_intro = if include_tools {
+        "You are a helpful assistant with access to tools for executing shell commands.\n\n"
+    } else {
+        "You are a helpful assistant. Answer questions clearly and concisely.\n\n"
+    };
+
+    let mut system = String::from(base_intro);
+    if include_tools {
+        system.push_str(EXECUTION_ROUTING_RULES);
+        system.push('\n');
+        system.push_str(SYSTEM_GUIDELINES_AND_SILENT_REPLIES);
+    } else {
+        system.push_str(concat!(
+            "## Guidelines\n\n",
+            "- Be helpful, accurate, and concise.\n",
+            "- If you don't know something, say so rather than making things up.\n",
+            "- For coding questions, provide clear explanations with examples.\n",
+        ));
+    }
+
+    let mut persona = String::new();
+    persona.push_str(&format!("# Persona: {persona_id}\n\n"));
+
+    persona.push_str("## Identity\n\n");
+    if let Some(id) = identity {
+        let mut parts = Vec::new();
+        if let (Some(name), Some(emoji)) = (&id.name, &id.emoji) {
+            parts.push(format!("Your name is {name} {emoji}."));
+        } else if let Some(name) = &id.name {
+            parts.push(format!("Your name is {name}."));
+        }
+        if let Some(creature) = &id.creature {
+            parts.push(format!("You are a {creature}."));
+        }
+        if let Some(vibe) = &id.vibe {
+            parts.push(format!("Your vibe: {vibe}."));
+        }
+        if !parts.is_empty() {
+            persona.push_str(&parts.join(" "));
+            persona.push_str("\n\n");
+        }
+    }
+    if let Some(raw) = identity_md_raw.map(str::trim)
+        && !raw.is_empty()
+    {
+        persona.push_str(raw);
+        persona.push_str("\n\n");
+    } else {
+        persona.push_str("<IDENTITY.md missing>\n\n");
+    }
+
+    persona.push_str("## Soul\n\n");
+    persona.push_str(soul_text.unwrap_or(DEFAULT_SOUL).trim());
+    persona.push_str("\n\n");
+
+    persona.push_str("## Owner (USER.md)\n\n");
+    if let Some(u) = user {
+        if let Some(name) = &u.name {
+            persona.push_str(&format!("Owner / primary operator: {name}\n"));
+        }
+        if let Some(tz) = &u.timezone {
+            persona.push_str(&format!("Timezone: {tz}\n"));
+        }
+        persona.push('\n');
+    } else {
+        persona.push_str("<USER.md missing>\n\n");
+    }
+
+    persona.push_str("## People (reference)\n\n");
+    persona.push_str("For other agents/bots managed by this Moltis instance, see:\n");
+    persona.push_str("- ~/.moltis/PEOPLE.md\n");
+    persona.push_str("Note: do not inline the roster here; keep this message cache-friendly.\n\n");
+
+    persona.push_str("## Tools\n\n");
+    if let Some(raw) = tools_text.map(str::trim)
+        && !raw.is_empty()
+    {
+        persona.push_str(raw);
+        persona.push_str("\n\n");
+    } else {
+        persona.push_str("<TOOLS.md missing>\n\n");
+    }
+
+    persona.push_str("## Agents\n\n");
+    if let Some(raw) = agents_text.map(str::trim)
+        && !raw.is_empty()
+    {
+        persona.push_str(raw);
+        persona.push_str("\n\n");
+    } else {
+        persona.push_str("<AGENTS.md missing>\n\n");
+    }
+
+    persona.push_str("## Workspace/Project Context (reference)\n\n");
+    persona.push_str("Project/workspace rules may be injected separately per run. If present, treat them as authoritative for that scope.\n\n");
+
+    let mut runtime_snapshot = String::new();
+    runtime_snapshot.push_str("## Runtime (snapshot, may change)\n\n");
+    if let Some(runtime) = runtime_context {
+        let mut host = runtime.host.clone();
+        // Default: do not include precise remote IP or exact location in the prompt.
+        host.remote_ip = None;
+        host.location = None;
+
+        if let Some(line) = format_host_runtime_line(&host) {
+            runtime_snapshot.push_str(&line);
+            runtime_snapshot.push('\n');
+        }
+        if let Some(ref sandbox) = runtime.sandbox {
+            runtime_snapshot.push_str(&format_sandbox_runtime_line(sandbox));
+            runtime_snapshot.push('\n');
+        }
+        runtime_snapshot.push('\n');
+    }
+    if include_tools {
+        runtime_snapshot.push_str(EXECUTION_ROUTING_RULES);
+        runtime_snapshot.push('\n');
+    }
+
+    runtime_snapshot.push_str("## Project Context (snapshot, may change)\n\n");
+    if let Some(ctx) = project_context.map(str::trim)
+        && !ctx.is_empty()
+    {
+        runtime_snapshot.push_str(ctx);
+    } else {
+        runtime_snapshot.push_str("<no project context injected>");
+    }
+    runtime_snapshot.push_str("\n\n");
+
+    if !skills.is_empty() {
+        runtime_snapshot.push_str(&moltis_skills::prompt_gen::generate_skills_prompt(skills));
+    }
+
+    // If memory tools are registered, add a hint about them.
+    let tool_schemas = tools.list_schemas();
+    let has_memory = tool_schemas
+        .iter()
+        .any(|s| s["name"].as_str() == Some("memory_search"));
+    if has_memory {
+        runtime_snapshot.push_str(concat!(
+            "## Long-Term Memory\n\n",
+            "You have access to a long-term memory system. Use `memory_search` to recall ",
+            "past conversations, decisions, and context. Search proactively when the user ",
+            "references previous work or when context would help.\n\n",
+        ));
+    }
+
+    if !tool_schemas.is_empty() {
+        runtime_snapshot.push_str("## Available Tools\n\n");
+        if native_tools {
+            for schema in &tool_schemas {
+                let name = schema["name"].as_str().unwrap_or("unknown");
+                let desc = schema["description"].as_str().unwrap_or("");
+                let compact_desc = truncate_prompt_text(desc, 160);
+                if compact_desc.is_empty() {
+                    runtime_snapshot.push_str(&format!("- `{name}`\n"));
+                } else {
+                    runtime_snapshot.push_str(&format!("- `{name}`: {compact_desc}\n"));
+                }
+            }
+            runtime_snapshot.push('\n');
+        } else {
+            for schema in &tool_schemas {
+                let name = schema["name"].as_str().unwrap_or("unknown");
+                let desc = schema["description"].as_str().unwrap_or("");
+                let params = &schema["parameters"];
+                runtime_snapshot.push_str(&format!(
+                    "### {name}\n{desc}\n\nParameters:\n```json\n{}\n```\n\n",
+                    serde_json::to_string_pretty(params).unwrap_or_default()
+                ));
+            }
+        }
+    }
+
+    OpenAiResponsesDeveloperPrompts {
+        system,
+        persona,
+        runtime_snapshot,
+    }
+}
+
 /// Runtime context for the host process running the current agent turn.
 #[derive(Debug, Clone, Default)]
 pub struct PromptHostRuntimeContext {
@@ -819,5 +1046,150 @@ mod tests {
     fn test_silent_replies_not_in_minimal_prompt() {
         let prompt = build_system_prompt_minimal_runtime(None, None, None, None, None, None, None);
         assert!(!prompt.contains("## Silent Replies"));
+    }
+
+    #[test]
+    fn build_openai_responses_developer_prompts_includes_expected_sections_and_redacts_sensitive_runtime(
+    ) {
+        let mut tools = ToolRegistry::new();
+
+        struct DummyTool {
+            name: &'static str,
+            description: &'static str,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::tool_registry::AgentTool for DummyTool {
+            fn name(&self) -> &str {
+                self.name
+            }
+
+            fn description(&self) -> &str {
+                self.description
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+
+            async fn execute(&self, _: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        tools.register(Box::new(DummyTool {
+            name: "memory_search",
+            description: "Search long-term memory",
+        }));
+        tools.register(Box::new(DummyTool {
+            name: "exec",
+            description: "Run a shell command",
+        }));
+
+        let skills = vec![SkillMetadata {
+            name: "tmux".into(),
+            description: "Interact with terminal apps".into(),
+            license: None,
+            compatibility: None,
+            allowed_tools: vec![],
+            homepage: None,
+            dockerfile: None,
+            requires: Default::default(),
+            path: std::path::PathBuf::from("/skills/tmux"),
+            source: None,
+        }];
+
+        let identity = AgentIdentity {
+            name: Some("Jarvis".into()),
+            emoji: Some("🤖".into()),
+            creature: Some("robot".into()),
+            vibe: Some("chill".into()),
+        };
+        let user = UserProfile {
+            name: Some("Neo".into()),
+            timezone: None,
+            location: None,
+        };
+
+        let runtime = PromptRuntimeContext {
+            host: PromptHostRuntimeContext {
+                host: Some("DESKTOP".into()),
+                os: Some("linux".into()),
+                arch: Some("x86_64".into()),
+                shell: Some("bash".into()),
+                provider: Some("openai-responses".into()),
+                model: Some("openai-responses::gpt-5.2".into()),
+                session_key: Some("telegram:lovely:8454363355".into()),
+                channel: Some("telegram".into()),
+                channel_account_id: Some("lovely".into()),
+                channel_account_handle: Some("@lovely_apple_bot".into()),
+                channel_chat_id: Some("8454363355".into()),
+                sudo_non_interactive: Some(false),
+                sudo_status: Some("requires_password".into()),
+                timezone: Some("Asia/Shanghai".into()),
+                accept_language: Some("zh-CN".into()),
+                remote_ip: Some("203.0.113.42".into()),
+                location: Some("48.8566,2.3522".into()),
+            },
+            sandbox: Some(PromptSandboxRuntimeContext {
+                exec_sandboxed: true,
+                mode: Some("all".into()),
+                backend: Some("none".into()),
+                scope: Some("chat".into()),
+                image: Some("ubuntu:25.10".into()),
+                workspace_mount: Some("ro".into()),
+                no_network: Some(false),
+                session_override: Some(true),
+            }),
+        };
+
+        let prompts = build_openai_responses_developer_prompts(
+            &tools,
+            true, // native_tools
+            None,
+            &skills,
+            "default",
+            true, // include_tools
+            Some(&identity),
+            Some(&user),
+            Some("# IDENTITY.md\n\nYou are a robot.\n"),
+            Some("# SOUL.md\n\nBe helpful.\n"),
+            Some("# AGENTS.md\n\nSome agents.\n"),
+            Some("# TOOLS.md\n\nSome tools.\n"),
+            Some(&runtime),
+        );
+
+        assert!(prompts.system.contains("Execution routing:"));
+        assert!(prompts.system.contains("## Guidelines"));
+        assert!(prompts.system.contains("## Silent Replies"));
+
+        assert!(prompts.persona.contains("# Persona: default"));
+        assert!(prompts.persona.contains("## Identity"));
+        assert!(prompts.persona.contains("Your name is Jarvis 🤖."));
+        assert!(prompts.persona.contains("You are a robot."));
+        assert!(prompts.persona.contains("Your vibe: chill."));
+        assert!(prompts.persona.contains("## Soul"));
+        assert!(prompts.persona.contains("# SOUL.md"));
+        assert!(prompts.persona.contains("## Owner (USER.md)"));
+        assert!(prompts.persona.contains("Owner / primary operator: Neo"));
+        assert!(prompts.persona.contains("## People (reference)"));
+        assert!(prompts.persona.contains("~/.moltis/PEOPLE.md"));
+        assert!(prompts.persona.contains("## Tools"));
+        assert!(prompts.persona.contains("# TOOLS.md"));
+        assert!(prompts.persona.contains("## Agents"));
+        assert!(prompts.persona.contains("# AGENTS.md"));
+
+        assert!(prompts.runtime_snapshot.contains("## Runtime (snapshot, may change)"));
+        assert!(prompts.runtime_snapshot.contains("Host: host=DESKTOP"));
+        assert!(prompts.runtime_snapshot.contains("provider=openai-responses"));
+        assert!(prompts.runtime_snapshot.contains("model=openai-responses::gpt-5.2"));
+        assert!(prompts.runtime_snapshot.contains("channel_account_handle=@lovely_apple_bot"));
+        assert!(!prompts.runtime_snapshot.contains("remote_ip="));
+        assert!(!prompts.runtime_snapshot.contains("location="));
+        assert!(prompts.runtime_snapshot.contains("## Long-Term Memory"));
+        assert!(prompts.runtime_snapshot.contains("## Available Tools"));
+        assert!(prompts.runtime_snapshot.contains("- `exec`"));
+        assert!(prompts.runtime_snapshot.contains("- `memory_search`"));
+        assert!(prompts.runtime_snapshot.contains("tmux"));
     }
 }

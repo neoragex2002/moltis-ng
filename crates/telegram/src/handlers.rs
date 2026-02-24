@@ -2493,11 +2493,12 @@ fn build_session_key(
     peer_id: &str,
     group_id: Option<&str>,
 ) -> String {
+    let chan_user_id = account_id.strip_prefix("telegram:").unwrap_or(account_id);
     match chat_type {
-        ChatType::Dm => format!("telegram:{account_id}:dm:{peer_id}"),
+        ChatType::Dm => format!("telegram:{chan_user_id}:dm:{peer_id}"),
         ChatType::Group | ChatType::Channel => {
             let gid = group_id.unwrap_or("unknown");
-            format!("telegram:{account_id}:group:{gid}")
+            format!("telegram:{chan_user_id}:group:{gid}")
         },
     }
 }

@@ -1957,7 +1957,6 @@ function VoiceStep({ onNext, onBack }) {
 // ── Channel step ────────────────────────────────────────────
 
 function ChannelStep({ onNext, onBack }) {
-	var [accountId, setAccountId] = useState("");
 	var [token, setToken] = useState("");
 	var [dmPolicy, setDmPolicy] = useState("allowlist");
 	var [allowlist, setAllowlist] = useState("");
@@ -1968,10 +1967,6 @@ function ChannelStep({ onNext, onBack }) {
 
 	function onSubmit(e) {
 		e.preventDefault();
-		if (!accountId.trim()) {
-			setError("Bot username is required.");
-			return;
-		}
 		if (!token.trim()) {
 			setError("Bot token is required.");
 			return;
@@ -1985,7 +1980,6 @@ function ChannelStep({ onNext, onBack }) {
 			.filter(Boolean);
 		sendRpc("channels.add", {
 			type: "telegram",
-			account_id: accountId.trim(),
 			config: {
 				token: token.trim(),
 				dm_policy: dmPolicy,
@@ -1996,7 +1990,7 @@ function ChannelStep({ onNext, onBack }) {
 			setSaving(false);
 			if (res?.ok) {
 				setConnected(true);
-				setConnectedName(accountId.trim());
+				setConnectedName(res?.result?.added || "");
 			} else {
 				setError((res?.error && (res.error.message || res.error.detail)) || "Failed to connect bot.");
 			}
@@ -2012,7 +2006,7 @@ function ChannelStep({ onNext, onBack }) {
 				<span class="icon icon-lg icon-check-circle shrink-0" style="color:var(--ok)"></span>
 				<div>
 					<div class="text-sm font-medium text-[var(--text-strong)]">Bot connected</div>
-					<div class="text-xs text-[var(--muted)] mt-0.5">@${connectedName} is now linked to your agent.</div>
+					<div class="text-xs text-[var(--muted)] mt-0.5">${connectedName || "Telegram bot"} is now linked to your agent.</div>
 				</div>
 			</div>`
 				: html`<form onSubmit=${onSubmit} class="flex flex-col gap-3 max-h-80 overflow-y-auto -mr-4 pr-4">
@@ -2021,18 +2015,6 @@ function ChannelStep({ onNext, onBack }) {
 					<span>1. Open <a href="https://t.me/BotFather" target="_blank" class="text-[var(--accent)] underline">@BotFather</a> in Telegram</span>
 					<span>2. Send /newbot and follow the prompts</span>
 					<span>3. Copy the bot token and paste it below</span>
-				</div>
-				<div>
-					<label class="text-xs text-[var(--muted)] mb-1 block">Bot username</label>
-					<input type="text" class="provider-key-input w-full"
-						value=${accountId} onInput=${(e) => setAccountId(e.target.value)}
-						placeholder="e.g. my_assistant_bot"
-						autocomplete="off"
-						autocapitalize="none"
-						autocorrect="off"
-						spellcheck="false"
-						name="telegram_bot_username"
-						autofocus />
 				</div>
 					<div>
 						<label class="text-xs text-[var(--muted)] mb-1 block">Bot token (from @BotFather)</label>

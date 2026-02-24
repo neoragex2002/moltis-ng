@@ -30,25 +30,15 @@ fn responses_endpoint(base_url: &str) -> String {
     )
 }
 
-fn responses_instructions(messages: &[ChatMessage]) -> Option<String> {
-    let chunks: Vec<&str> = messages
-        .iter()
-        .filter_map(|m| match m {
-            ChatMessage::System { content } => Some(content.as_str()),
-            _ => None,
-        })
-        .collect();
-    if chunks.is_empty() {
-        return None;
-    }
-    Some(chunks.join("\n\n"))
-}
-
 fn messages_to_responses_input(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
     messages
         .iter()
         .flat_map(|msg| match msg {
-            ChatMessage::System { .. } => vec![],
+            ChatMessage::System { content } => vec![serde_json::json!({
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": content}],
+            })],
             ChatMessage::User { content } => {
                 let content_blocks = match content {
                     UserContent::Text(text) => vec![serde_json::json!({"type": "input_text", "text": text})],
@@ -69,6 +59,7 @@ fn messages_to_responses_input(messages: &[ChatMessage]) -> Vec<serde_json::Valu
                         .collect(),
                 };
                 vec![serde_json::json!({
+                    "type": "message",
                     "role": "user",
                     "content": content_blocks,
                 })]
@@ -749,14 +740,11 @@ impl OpenAiResponsesProvider {
         tools: &[serde_json::Value],
         stream: bool,
     ) -> serde_json::Value {
-        let instructions = responses_instructions(messages)
-            .unwrap_or_else(|| "You are a helpful assistant.".to_string());
         let input = messages_to_responses_input(messages);
 
         let mut body = serde_json::json!({
             "model": self.model,
             "input": input,
-            "instructions": instructions,
             "store": false,
         });
 
@@ -1239,13 +1227,82 @@ mod tests {
     }
 
     #[test]
-    fn build_responses_body_requires_instructions_and_input() {
+    fn build_responses_body_omits_instructions_field() {
         let provider = test_provider("https://api.example.com/v1");
         let body = provider.build_responses_body(&[ChatMessage::user("ping")], &[], false);
         assert_eq!(body["model"].as_str(), Some("gpt-4o"));
-        assert!(body.get("instructions").is_some());
+        assert!(
+            body.get("instructions").is_none(),
+            "instructions must be omitted (absent), not set"
+        );
         assert!(body.get("input").is_some());
         assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn build_responses_body_sends_system_messages_as_developer_input_items() {
+        let provider = test_provider("https://api.example.com/v1");
+        let body = provider.build_responses_body(
+            &[ChatMessage::system("sys-a"), ChatMessage::user("ping")],
+            &[],
+            false,
+        );
+
+        assert!(
+            body.get("instructions").is_none(),
+            "instructions must be omitted even when system messages exist"
+        );
+
+        let input = body
+            .get("input")
+            .and_then(|v| v.as_array())
+            .expect("expected input array");
+        assert!(input.len() >= 2, "expected at least developer + user items");
+
+        assert_eq!(input[0].get("type").and_then(|v| v.as_str()), Some("message"));
+        assert_eq!(input[0].get("role").and_then(|v| v.as_str()), Some("developer"));
+        assert_eq!(
+            input[0]
+                .get("content")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("input_text")
+        );
+        assert_eq!(
+            input[0]
+                .get("content")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.get("text"))
+                .and_then(|v| v.as_str()),
+            Some("sys-a")
+        );
+
+        assert_eq!(input[1].get("type").and_then(|v| v.as_str()), Some("message"));
+        assert_eq!(input[1].get("role").and_then(|v| v.as_str()), Some("user"));
+    }
+
+    #[test]
+    fn build_responses_body_preserves_system_message_order_as_multiple_developer_items() {
+        let provider = test_provider("https://api.example.com/v1");
+        let body = provider.build_responses_body(
+            &[
+                ChatMessage::system("sys-1"),
+                ChatMessage::system("sys-2"),
+                ChatMessage::user("ping"),
+            ],
+            &[],
+            false,
+        );
+        let input = body["input"].as_array().expect("expected input array");
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"].as_str(), Some("developer"));
+        assert_eq!(input[0]["content"][0]["text"].as_str(), Some("sys-1"));
+        assert_eq!(input[1]["role"].as_str(), Some("developer"));
+        assert_eq!(input[1]["content"][0]["text"].as_str(), Some("sys-2"));
+        assert_eq!(input[2]["role"].as_str(), Some("user"));
     }
 
     #[test]

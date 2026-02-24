@@ -29,11 +29,12 @@ use {
         multimodal::parse_data_uri,
         prompt::{
             PromptHostRuntimeContext, PromptRuntimeContext, PromptSandboxRuntimeContext,
-            VOICE_REPLY_SUFFIX, build_system_prompt_minimal_runtime,
+            VOICE_REPLY_SUFFIX, build_openai_responses_developer_prompts,
+            build_system_prompt_minimal_runtime,
             build_system_prompt_with_session_runtime,
         },
         providers::{ProviderRegistry, raw_model_id},
-        runner::{RunnerEvent, run_agent_loop_streaming},
+        runner::{RunnerEvent, run_agent_loop_streaming, run_agent_loop_streaming_with_prefix},
         tool_registry::ToolRegistry,
     },
     moltis_sessions::{
@@ -228,6 +229,26 @@ pub(crate) fn normalize_model_key(value: &str) -> String {
 
 fn normalize_provider_key(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn is_openai_responses_provider(provider_name: &str) -> bool {
+    normalize_provider_key(provider_name) == "openai-responses"
+}
+
+async fn resolve_session_persona_id(
+    state: &GatewayState,
+    runtime_context: Option<&PromptRuntimeContext>,
+) -> Option<String> {
+    let rt = runtime_context?;
+    if rt.host.channel.as_deref() != Some("telegram") {
+        return None;
+    }
+    let account_id = rt.host.channel_account_id.as_deref()?;
+    state
+        .services
+        .channel
+        .telegram_account_persona_id(account_id)
+        .await
 }
 
 #[allow(dead_code)]
@@ -724,6 +745,7 @@ async fn detect_host_sudo_access() -> (Option<bool>, Option<String>) {
 struct PromptPersona {
     config: moltis_config::MoltisConfig,
     identity: moltis_config::AgentIdentity,
+    identity_md_raw: Option<String>,
     user: moltis_config::UserProfile,
     soul_text: Option<String>,
     agents_text: Option<String>,
@@ -735,9 +757,16 @@ struct PromptPersona {
 /// Both `run_with_tools` and `run_streaming` need the same persona data;
 /// this function avoids duplicating the merge logic.
 fn load_prompt_persona() -> PromptPersona {
+    load_prompt_persona_with_id(None)
+}
+
+fn load_prompt_persona_with_id(persona_id: Option<&str>) -> PromptPersona {
     let config = moltis_config::discover_and_load();
     let mut identity = config.identity.clone();
-    if let Some(file_identity) = moltis_config::load_identity() {
+    let file_identity = persona_id
+        .and_then(moltis_config::load_persona_identity)
+        .or_else(moltis_config::load_identity);
+    if let Some(file_identity) = file_identity {
         if file_identity.name.is_some() {
             identity.name = file_identity.name;
         }
@@ -763,10 +792,19 @@ fn load_prompt_persona() -> PromptPersona {
     PromptPersona {
         config,
         identity,
+        identity_md_raw: persona_id
+            .and_then(moltis_config::load_persona_identity_md_raw)
+            .or_else(moltis_config::load_identity_md_raw),
         user,
-        soul_text: moltis_config::load_soul(),
-        agents_text: moltis_config::load_agents_md(),
-        tools_text: moltis_config::load_tools_md(),
+        soul_text: persona_id
+            .and_then(moltis_config::load_persona_soul)
+            .or_else(moltis_config::load_soul),
+        agents_text: persona_id
+            .and_then(moltis_config::load_persona_agents_md)
+            .or_else(moltis_config::load_agents_md),
+        tools_text: persona_id
+            .and_then(moltis_config::load_persona_tools_md)
+            .or_else(moltis_config::load_tools_md),
     }
 }
 
@@ -2308,46 +2346,68 @@ impl ChatService for LiveChatService {
             );
         }
 
-        let persona = load_prompt_persona();
-        let system_prompt = if stream_only {
-            build_system_prompt_minimal_runtime(
-                project_context.as_deref(),
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-            )
-        } else {
-            let native_tools = provider.supports_tools();
-            let filtered_registry = {
-                let registry_guard = self.tool_registry.read().await;
-                if native_tools {
-                    apply_runtime_tool_filters(
-                        &registry_guard,
-                        &persona.config,
-                        &discovered_skills,
-                        mcp_disabled,
-                    )
-                } else {
-                    registry_guard.clone_without(&[])
-                }
-            };
-            if native_tools {
-                build_system_prompt_with_session_runtime(
-                    &filtered_registry,
-                    native_tools,
+        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
+        let persona = load_prompt_persona_with_id(persona_id.as_deref());
+        let system_prompt = if is_openai_responses_provider(provider.name()) {
+            if stream_only {
+                let prompts = build_openai_responses_developer_prompts(
+                    &ToolRegistry::new(),
+                    provider.supports_tools(),
                     project_context.as_deref(),
-                    &discovered_skills,
+                    &[],
+                    persona_id.as_deref().unwrap_or("default"),
+                    false, // include_tools
                     Some(&persona.identity),
                     Some(&persona.user),
+                    persona.identity_md_raw.as_deref(),
                     persona.soul_text.as_deref(),
                     persona.agents_text.as_deref(),
                     persona.tools_text.as_deref(),
                     Some(&runtime_context),
-                )
+                );
+                let mut runtime_snapshot = prompts.runtime_snapshot;
+                if desired_reply_medium == ReplyMedium::Voice {
+                    runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
+                }
+                format!("{}\n\n{}\n\n{}", prompts.system, prompts.persona, runtime_snapshot)
             } else {
+                let native_tools = provider.supports_tools();
+                let filtered_registry = {
+                    let registry_guard = self.tool_registry.read().await;
+                    if native_tools {
+                        apply_runtime_tool_filters(
+                            &registry_guard,
+                            &persona.config,
+                            &discovered_skills,
+                            mcp_disabled,
+                        )
+                    } else {
+                        registry_guard.clone_without(&[])
+                    }
+                };
+                let prompts = build_openai_responses_developer_prompts(
+                    &filtered_registry,
+                    native_tools,
+                    project_context.as_deref(),
+                    &discovered_skills,
+                    persona_id.as_deref().unwrap_or("default"),
+                    true, // include_tools
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.identity_md_raw.as_deref(),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                );
+                let mut runtime_snapshot = prompts.runtime_snapshot;
+                if desired_reply_medium == ReplyMedium::Voice {
+                    runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
+                }
+                format!("{}\n\n{}\n\n{}", prompts.system, prompts.persona, runtime_snapshot)
+            }
+        } else {
+            let system_prompt = if stream_only {
                 build_system_prompt_minimal_runtime(
                     project_context.as_deref(),
                     Some(&persona.identity),
@@ -2357,12 +2417,51 @@ impl ChatService for LiveChatService {
                     persona.tools_text.as_deref(),
                     Some(&runtime_context),
                 )
+            } else {
+                let native_tools = provider.supports_tools();
+                let filtered_registry = {
+                    let registry_guard = self.tool_registry.read().await;
+                    if native_tools {
+                        apply_runtime_tool_filters(
+                            &registry_guard,
+                            &persona.config,
+                            &discovered_skills,
+                            mcp_disabled,
+                        )
+                    } else {
+                        registry_guard.clone_without(&[])
+                    }
+                };
+                if native_tools {
+                    build_system_prompt_with_session_runtime(
+                        &filtered_registry,
+                        native_tools,
+                        project_context.as_deref(),
+                        &discovered_skills,
+                        Some(&persona.identity),
+                        Some(&persona.user),
+                        persona.soul_text.as_deref(),
+                        persona.agents_text.as_deref(),
+                        persona.tools_text.as_deref(),
+                        Some(&runtime_context),
+                    )
+                } else {
+                    build_system_prompt_minimal_runtime(
+                        project_context.as_deref(),
+                        Some(&persona.identity),
+                        Some(&persona.user),
+                        persona.soul_text.as_deref(),
+                        persona.agents_text.as_deref(),
+                        persona.tools_text.as_deref(),
+                        Some(&runtime_context),
+                    )
+                }
+            };
+            if desired_reply_medium == ReplyMedium::Voice {
+                format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
+            } else {
+                system_prompt
             }
-        };
-        let system_prompt = if desired_reply_medium == ReplyMedium::Voice {
-            format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
-        } else {
-            system_prompt
         };
 
         let estimated_next_input_tokens =
@@ -4163,9 +4262,11 @@ async fn run_with_tools(
     mcp_disabled: bool,
     client_seq: Option<u64>,
 ) -> Option<ChatRunOutput> {
-    let persona = load_prompt_persona();
+    let persona_id = resolve_session_persona_id(state, runtime_context).await;
+    let persona = load_prompt_persona_with_id(persona_id.as_deref());
 
     let native_tools = provider.supports_tools();
+    let openai_responses = is_openai_responses_provider(provider_name);
 
     let filtered_registry = {
         let registry_guard = tool_registry.read().await;
@@ -4176,39 +4277,71 @@ async fn run_with_tools(
         }
     };
 
-    // Use a minimal prompt without tool schemas for providers that don't support tools.
-    // This reduces context size and avoids confusing the LLM with unusable instructions.
-    let system_prompt = if native_tools {
-        build_system_prompt_with_session_runtime(
+    let (system_prompt_text, prefix_messages) = if openai_responses {
+        let prompts = build_openai_responses_developer_prompts(
             &filtered_registry,
             native_tools,
             project_context,
             skills,
+            persona_id.as_deref().unwrap_or("default"),
+            true, // include_tools
             Some(&persona.identity),
             Some(&persona.user),
+            persona.identity_md_raw.as_deref(),
             persona.soul_text.as_deref(),
             persona.agents_text.as_deref(),
             persona.tools_text.as_deref(),
             runtime_context,
+        );
+        let mut runtime_snapshot = prompts.runtime_snapshot;
+        if desired_reply_medium == ReplyMedium::Voice {
+            runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
+        }
+        let prefix = vec![
+            ChatMessage::system(prompts.system.clone()),
+            ChatMessage::system(prompts.persona.clone()),
+            ChatMessage::system(runtime_snapshot.clone()),
+        ];
+        (
+            format!("{}\n\n{}\n\n{}", prompts.system, prompts.persona, runtime_snapshot),
+            Some(prefix),
         )
     } else {
-        // Minimal prompt without tools for local LLMs
-        build_system_prompt_minimal_runtime(
-            project_context,
-            Some(&persona.identity),
-            Some(&persona.user),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
-            runtime_context,
-        )
-    };
+        // Use a minimal prompt without tool schemas for providers that don't support tools.
+        // This reduces context size and avoids confusing the LLM with unusable instructions.
+        let system_prompt = if native_tools {
+            build_system_prompt_with_session_runtime(
+                &filtered_registry,
+                native_tools,
+                project_context,
+                skills,
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                runtime_context,
+            )
+        } else {
+            // Minimal prompt without tools for local LLMs
+            build_system_prompt_minimal_runtime(
+                project_context,
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                runtime_context,
+            )
+        };
 
-    // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
-    let system_prompt = if desired_reply_medium == ReplyMedium::Voice {
-        format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
-    } else {
-        system_prompt
+        // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
+        let system_prompt = if desired_reply_medium == ReplyMedium::Voice {
+            format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
+        } else {
+            system_prompt
+        };
+        (system_prompt, None)
     };
 
     // Determine if this session is sandboxed (for browser tool execution mode)
@@ -4525,7 +4658,7 @@ async fn run_with_tools(
 
     let retry_budget = CompactionBudget::for_provider(provider.as_ref());
     let estimated_next_input_tokens =
-        estimate_next_input_tokens(&system_prompt, history_raw, user_content);
+        estimate_next_input_tokens(&system_prompt_text, history_raw, user_content);
 
     // Inject session key, sandbox mode, and accept-language into tool call params so tools can
     // resolve per-session state and forward the user's locale to web requests.
@@ -4542,17 +4675,31 @@ async fn run_with_tools(
     }
 
     let provider_ref = provider.clone();
-    let first_result = run_agent_loop_streaming(
-        provider,
-        &filtered_registry,
-        &system_prompt,
-        user_content,
-        Some(&on_event),
-        hist,
-        Some(tool_context.clone()),
-        hook_registry.clone(),
-    )
-    .await;
+    let first_result = if let Some(prefix) = prefix_messages.clone() {
+        run_agent_loop_streaming_with_prefix(
+            provider,
+            &filtered_registry,
+            prefix,
+            user_content,
+            Some(&on_event),
+            hist,
+            Some(tool_context.clone()),
+            hook_registry.clone(),
+        )
+        .await
+    } else {
+        run_agent_loop_streaming(
+            provider,
+            &filtered_registry,
+            &system_prompt_text,
+            user_content,
+            Some(&on_event),
+            hist,
+            Some(tool_context.clone()),
+            hook_registry.clone(),
+        )
+        .await
+    };
 
     // On context-window overflow, compact the session and retry once.
     let result = match first_result {
@@ -4626,17 +4773,31 @@ async fn run_with_tools(
                         Some(compacted_chat)
                     };
 
-                    run_agent_loop_streaming(
-                        provider_ref.clone(),
-                        &filtered_registry,
-                        &system_prompt,
-                        user_content,
-                        Some(&on_event),
-                        retry_hist,
-                        Some(tool_context),
-                        hook_registry,
-                    )
-                    .await
+                    if let Some(prefix) = prefix_messages {
+                        run_agent_loop_streaming_with_prefix(
+                            provider_ref.clone(),
+                            &filtered_registry,
+                            prefix,
+                            user_content,
+                            Some(&on_event),
+                            retry_hist,
+                            Some(tool_context),
+                            hook_registry,
+                        )
+                        .await
+                    } else {
+                        run_agent_loop_streaming(
+                            provider_ref.clone(),
+                            &filtered_registry,
+                            &system_prompt_text,
+                            user_content,
+                            Some(&on_event),
+                            retry_hist,
+                            Some(tool_context),
+                            hook_registry,
+                        )
+                        .await
+                    }
                 },
                 Err(e) => {
                     warn!(run_id, error = %e, "retry compaction failed");
@@ -5281,27 +5442,53 @@ async fn run_streaming(
     session_store: Option<&Arc<SessionStore>>,
     client_seq: Option<u64>,
 ) -> Option<ChatRunOutput> {
-    let persona = load_prompt_persona();
-
-    let system_prompt = build_system_prompt_minimal_runtime(
-        project_context,
-        Some(&persona.identity),
-        Some(&persona.user),
-        persona.soul_text.as_deref(),
-        persona.agents_text.as_deref(),
-        persona.tools_text.as_deref(),
-        runtime_context,
-    );
-
-    // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
-    let system_prompt = if desired_reply_medium == ReplyMedium::Voice {
-        format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
-    } else {
-        system_prompt
-    };
+    let persona_id = resolve_session_persona_id(state, runtime_context).await;
+    let persona = load_prompt_persona_with_id(persona_id.as_deref());
 
     let mut messages: Vec<ChatMessage> = Vec::new();
-    messages.push(ChatMessage::system(system_prompt));
+    if is_openai_responses_provider(provider_name) {
+        let prompts = build_openai_responses_developer_prompts(
+            &ToolRegistry::new(),
+            provider.supports_tools(),
+            project_context,
+            &[],
+            persona_id.as_deref().unwrap_or("default"),
+            false, // include_tools
+            Some(&persona.identity),
+            Some(&persona.user),
+            persona.identity_md_raw.as_deref(),
+            persona.soul_text.as_deref(),
+            persona.agents_text.as_deref(),
+            persona.tools_text.as_deref(),
+            runtime_context,
+        );
+        let mut runtime_snapshot = prompts.runtime_snapshot;
+        if desired_reply_medium == ReplyMedium::Voice {
+            runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
+        }
+        messages.push(ChatMessage::system(prompts.system));
+        messages.push(ChatMessage::system(prompts.persona));
+        messages.push(ChatMessage::system(runtime_snapshot));
+    } else {
+        let system_prompt = build_system_prompt_minimal_runtime(
+            project_context,
+            Some(&persona.identity),
+            Some(&persona.user),
+            persona.soul_text.as_deref(),
+            persona.agents_text.as_deref(),
+            persona.tools_text.as_deref(),
+            runtime_context,
+        );
+
+        // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
+        let system_prompt = if desired_reply_medium == ReplyMedium::Voice {
+            format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
+        } else {
+            system_prompt
+        };
+
+        messages.push(ChatMessage::system(system_prompt));
+    }
     // Convert persisted JSON history to typed ChatMessages for the LLM provider.
     messages.extend(values_to_chat_messages(history_raw));
     messages.push(ChatMessage::User {
@@ -6284,7 +6471,8 @@ async fn resolve_telegram_session_key(
     {
         return key;
     }
-    format!("telegram:{account_id}:{chat_id}")
+    let chan_user_id = account_id.strip_prefix("telegram:").unwrap_or(account_id);
+    format!("telegram:{chan_user_id}:{chat_id}")
 }
 
 async fn maybe_mirror_telegram_group_reply(

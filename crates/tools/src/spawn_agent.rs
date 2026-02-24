@@ -5,9 +5,13 @@ use std::sync::Arc;
 use {anyhow::Result, async_trait::async_trait, tracing::info};
 
 use moltis_agents::{
-    model::LlmProvider,
+    model::{ChatMessage, LlmProvider, UserContent},
+    prompt::{
+        build_openai_responses_developer_prompts, build_system_prompt_minimal_runtime,
+        build_system_prompt_with_session_runtime,
+    },
     providers::ProviderRegistry,
-    runner::{RunnerEvent, run_agent_loop_with_context},
+    runner::{RunnerEvent, run_agent_loop_with_context, run_agent_loop_with_context_prefix},
     tool_registry::{AgentTool, ToolRegistry},
 };
 
@@ -25,6 +29,65 @@ const SPAWN_DEPTH_KEY: &str = "_spawn_depth";
 /// focused system prompt.
 /// Callback for emitting events from the sub-agent back to the parent UI.
 pub type OnSpawnEvent = Arc<dyn Fn(RunnerEvent) + Send + Sync>;
+
+struct LoadedPersona {
+    identity: moltis_config::AgentIdentity,
+    user: moltis_config::UserProfile,
+    identity_md_raw: Option<String>,
+    soul_text: Option<String>,
+    agents_text: Option<String>,
+    tools_text: Option<String>,
+}
+
+fn load_persona(persona_id: Option<&str>) -> LoadedPersona {
+    let config = moltis_config::discover_and_load();
+
+    let mut identity = config.identity.clone();
+    let file_identity = persona_id
+        .and_then(moltis_config::load_persona_identity)
+        .or_else(moltis_config::load_identity);
+    if let Some(file_identity) = file_identity {
+        if file_identity.name.is_some() {
+            identity.name = file_identity.name;
+        }
+        if file_identity.emoji.is_some() {
+            identity.emoji = file_identity.emoji;
+        }
+        if file_identity.creature.is_some() {
+            identity.creature = file_identity.creature;
+        }
+        if file_identity.vibe.is_some() {
+            identity.vibe = file_identity.vibe;
+        }
+    }
+
+    let mut user = config.user.clone();
+    if let Some(file_user) = moltis_config::load_user() {
+        if file_user.name.is_some() {
+            user.name = file_user.name;
+        }
+        if file_user.timezone.is_some() {
+            user.timezone = file_user.timezone;
+        }
+    }
+
+    LoadedPersona {
+        identity,
+        identity_md_raw: persona_id
+            .and_then(moltis_config::load_persona_identity_md_raw)
+            .or_else(moltis_config::load_identity_md_raw),
+        user,
+        soul_text: persona_id
+            .and_then(moltis_config::load_persona_soul)
+            .or_else(moltis_config::load_soul),
+        agents_text: persona_id
+            .and_then(moltis_config::load_persona_agents_md)
+            .or_else(moltis_config::load_agents_md),
+        tools_text: persona_id
+            .and_then(moltis_config::load_persona_tools_md)
+            .or_else(moltis_config::load_tools_md),
+    }
+}
 
 pub struct SpawnAgentTool {
     provider_registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
@@ -88,6 +151,10 @@ impl AgentTool for SpawnAgentTool {
                 "model": {
                     "type": "string",
                     "description": "Model ID to use (e.g. a cheaper model). If not specified, uses the parent's current model."
+                },
+                "persona_id": {
+                    "type": "string",
+                    "description": "Persona ID to use for the sub-agent. Defaults to the system default persona; does not implicitly inherit from the parent session."
                 }
             },
             "required": ["task"]
@@ -100,6 +167,12 @@ impl AgentTool for SpawnAgentTool {
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: task"))?;
         let context = params["context"].as_str().unwrap_or("");
         let model_id = params["model"].as_str();
+        let persona_id = params.get("persona_id").and_then(|v| v.as_str());
+        let persona_id = match persona_id.map(str::trim) {
+            Some("") | None => None,
+            Some("default") => None,
+            Some(other) => Some(other),
+        };
 
         // Check nesting depth.
         let depth = params
@@ -138,20 +211,7 @@ impl AgentTool for SpawnAgentTool {
         // Build filtered tool registry (no spawn_agent to prevent recursive spawning).
         let sub_tools = self.tool_registry.clone_without(&["spawn_agent"]);
 
-        // Build system prompt.
-        let system_prompt = if context.is_empty() {
-            format!(
-                "You are a sub-agent spawned to handle a specific task. \
-                 Complete the task thoroughly and return a clear result.\n\n\
-                 Task: {task}"
-            )
-        } else {
-            format!(
-                "You are a sub-agent spawned to handle a specific task. \
-                 Complete the task thoroughly and return a clear result.\n\n\
-                 Task: {task}\n\nContext: {context}"
-            )
-        };
+        let persona = load_persona(persona_id);
 
         // Build tool context with incremented depth and propagated session key.
         let mut tool_context = serde_json::json!({
@@ -162,18 +222,90 @@ impl AgentTool for SpawnAgentTool {
         }
 
         // Run the sub-agent loop (no event forwarding, no hooks, no history).
-        let user_content = moltis_agents::UserContent::text(task);
-        let result = run_agent_loop_with_context(
-            provider,
-            &sub_tools,
-            &system_prompt,
-            &user_content,
-            None,
-            None, // no history
-            Some(tool_context),
-            None, // no hooks for sub-agents
-        )
-        .await;
+        let user_text = if context.trim().is_empty() {
+            task.to_string()
+        } else {
+            format!("{task}\n\nContext:\n{context}")
+        };
+        let user_content = UserContent::text(user_text);
+
+        let is_openai_responses = provider.name().trim().eq_ignore_ascii_case("openai-responses");
+        let result = if is_openai_responses {
+            let include_tools = !sub_tools.list_schemas().is_empty();
+            let persona_label = persona_id.unwrap_or("default");
+            let prompts = build_openai_responses_developer_prompts(
+                &sub_tools,
+                provider.supports_tools(),
+                None,
+                &[],
+                persona_label,
+                include_tools,
+                Some(&persona.identity),
+                Some(&persona.user),
+                persona.identity_md_raw.as_deref(),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                None,
+            );
+            let mut runtime_snapshot = prompts.runtime_snapshot;
+            runtime_snapshot.push_str("\n## Sub-agent\n\nYou are a sub-agent spawned to complete the user's task thoroughly and return a clear result.\n");
+            let prefix_messages = vec![
+                ChatMessage::system(prompts.system),
+                ChatMessage::system(prompts.persona),
+                ChatMessage::system(runtime_snapshot),
+            ];
+
+            run_agent_loop_with_context_prefix(
+                provider,
+                &sub_tools,
+                prefix_messages,
+                &user_content,
+                None,
+                None,
+                Some(tool_context),
+                None,
+            )
+            .await
+        } else {
+            let native_tools = provider.supports_tools();
+            let system_prompt = if native_tools {
+                build_system_prompt_with_session_runtime(
+                    &sub_tools,
+                    native_tools,
+                    None,
+                    &[],
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    None,
+                )
+            } else {
+                build_system_prompt_minimal_runtime(
+                    None,
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    None,
+                )
+            };
+
+            run_agent_loop_with_context(
+                provider,
+                &sub_tools,
+                &system_prompt,
+                &user_content,
+                None,
+                None, // no history
+                Some(tool_context),
+                None, // no hooks for sub-agents
+            )
+            .await
+        };
 
         // Emit SubAgentEnd regardless of success/failure.
         let (iterations, tool_calls_made) = match &result {
