@@ -376,7 +376,7 @@ mod tests {
         let status = svc.wizard_status();
         assert_eq!(status["onboarded"], true);
 
-        assert!(dir.path().join("IDENTITY.md").exists());
+        assert!(dir.path().join("personas/default/IDENTITY.md").exists());
         assert!(dir.path().join("USER.md").exists());
         moltis_config::clear_data_dir();
     }
@@ -470,7 +470,7 @@ mod tests {
         let res = svc.identity_update(json!({ "soul": null })).unwrap();
         assert!(res["soul"].is_null());
 
-        let soul_path = dir.path().join("SOUL.md");
+        let soul_path = dir.path().join("personas/default/SOUL.md");
         // save_soul(None) writes an empty file (not deleted) to prevent re-seeding
         assert!(soul_path.exists());
         assert!(std::fs::read_to_string(&soul_path).unwrap().is_empty());

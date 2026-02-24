@@ -28,10 +28,14 @@ import { connected } from "./signals.js";
 import * as S from "./state.js";
 import { fetchPhrase } from "./tts-phrases.js";
 import { Modal } from "./ui.js";
+import {
+	parseIdentityFrontmatter,
+	upsertIdentityFrontmatter,
+} from "./identity-frontmatter.js";
 
 var identity = signal(null);
 var loading = signal(true);
-var activeSection = signal("identity");
+var activeSection = signal("personas");
 var mounted = false;
 var containerRef = null;
 
@@ -69,8 +73,13 @@ function fetchIdentity() {
 var sections = [
 	{ group: "General" },
 	{
-		id: "identity",
-		label: "Identity",
+		id: "personas",
+		label: "Personas",
+		icon: html`<span class="icon icon-person"></span>`,
+	},
+	{
+		id: "owner",
+		label: "Owner",
 		icon: html`<span class="icon icon-person"></span>`,
 	},
 	{
@@ -475,6 +484,381 @@ function IdentitySection() {
 						<button type="submit" class="provider-btn" disabled=${saving || emojiSaving || nameSaving || userNameSaving}>
 							${saving || emojiSaving || nameSaving || userNameSaving ? "Saving\u2026" : "Save"}
 						</button>
+				${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+				${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+			</div>
+		</form>
+	</div>`;
+}
+
+// ── Personas section ─────────────────────────────────────────
+
+function PersonasSection() {
+	var [personaIds, setPersonaIds] = useState([]);
+	var [selectedId, setSelectedId] = useState("default");
+	var [loadingPersona, setLoadingPersona] = useState(false);
+	var [saving, setSaving] = useState(false);
+	var [saved, setSaved] = useState(false);
+	var [error, setError] = useState(null);
+
+	var [identityRaw, setIdentityRaw] = useState("");
+	var [soul, setSoul] = useState("");
+	var [tools, setTools] = useState("");
+	var [agents, setAgents] = useState("");
+
+	var [name, setName] = useState("");
+	var [emoji, setEmoji] = useState("");
+	var [creature, setCreature] = useState("");
+	var [vibe, setVibe] = useState("");
+
+	function flashSaved() {
+		setSaved(true);
+		setTimeout(() => {
+			setSaved(false);
+			rerender();
+		}, 1200);
+	}
+
+	function loadList() {
+		sendRpc("personas.list", {}).then((res) => {
+			if (!res?.ok) return;
+			var ids = res.payload?.personas || [];
+			setPersonaIds(ids);
+			if (!ids.includes(selectedId) && ids.length > 0) {
+				setSelectedId(ids[0]);
+			}
+			rerender();
+		});
+	}
+
+	function loadPersona(pid) {
+		if (!pid) return;
+		setLoadingPersona(true);
+		setError(null);
+		sendRpc("personas.get", { persona_id: pid }).then((res) => {
+			setLoadingPersona(false);
+			if (!res?.ok) {
+				setError(res?.error?.message || "Failed to load persona");
+				rerender();
+				return;
+			}
+			var p = res.payload || {};
+			var raw = p.identity || "";
+			setIdentityRaw(raw);
+			setSoul(p.soul || "");
+			setTools(p.tools || "");
+			setAgents(p.agents || "");
+
+			var fm = parseIdentityFrontmatter(raw);
+			setName(fm.name || "");
+			setEmoji(fm.emoji || "");
+			setCreature(fm.creature || "");
+			setVibe(fm.vibe || "");
+			rerender();
+		});
+	}
+
+	useEffect(() => {
+		loadList();
+	}, []);
+
+	useEffect(() => {
+		loadPersona(selectedId);
+	}, [selectedId]);
+
+	function syncIdentityFrontmatter(nextFields) {
+		var raw = upsertIdentityFrontmatter(identityRaw || "", nextFields);
+		setIdentityRaw(raw);
+		rerender();
+	}
+
+	function onIdentityRawInput(val) {
+		setIdentityRaw(val);
+		var fm = parseIdentityFrontmatter(val || "");
+		if (fm.name != null) setName(fm.name || "");
+		if (fm.emoji != null) setEmoji(fm.emoji || "");
+		if (fm.creature != null) setCreature(fm.creature || "");
+		if (fm.vibe != null) setVibe(fm.vibe || "");
+	}
+
+	function onCreate() {
+		var id = window.prompt("New persona_id (letters, numbers, _ and -):", "");
+		if (!id) return;
+		var next = id.trim();
+		if (!next) return;
+		setError(null);
+		sendRpc("personas.clone", { from_id: "default", to_id: next }).then((res) => {
+			if (res?.ok) {
+				loadList();
+				setSelectedId(next);
+			} else {
+				setError(res?.error?.message || "Failed to create persona");
+				rerender();
+			}
+		});
+	}
+
+	function onClone() {
+		var id = window.prompt(`Clone '${selectedId}' to new persona_id:`, "");
+		if (!id) return;
+		var next = id.trim();
+		if (!next) return;
+		setError(null);
+		sendRpc("personas.clone", { from_id: selectedId, to_id: next }).then((res) => {
+			if (res?.ok) {
+				loadList();
+				setSelectedId(next);
+			} else {
+				setError(res?.error?.message || "Failed to clone persona");
+				rerender();
+			}
+		});
+	}
+
+	function onDelete() {
+		if (selectedId === "default") {
+			setError("The 'default' persona cannot be deleted.");
+			rerender();
+			return;
+		}
+		var yes = window.confirm(`Delete persona '${selectedId}'?`);
+		if (!yes) return;
+		setError(null);
+		sendRpc("personas.delete", { persona_id: selectedId }).then((res) => {
+			if (res?.ok) {
+				loadList();
+				setSelectedId("default");
+			} else {
+				setError(res?.error?.message || "Failed to delete persona");
+				rerender();
+			}
+		});
+	}
+
+	function onSave(e) {
+		e.preventDefault();
+		setSaving(true);
+		setError(null);
+		// Ensure structured fields are reflected in the YAML frontmatter.
+		var raw = upsertIdentityFrontmatter(identityRaw || "", {
+			name,
+			emoji,
+			creature,
+			vibe,
+		});
+		sendRpc("personas.save", {
+			persona_id: selectedId,
+			identity: raw,
+			soul: soul || "",
+			tools: tools || "",
+			agents: agents || "",
+		}).then((res) => {
+			setSaving(false);
+			if (res?.ok) {
+				setIdentityRaw(raw);
+				flashSaved();
+				loadList();
+			} else {
+				setError(res?.error?.message || "Failed to save persona");
+			}
+			rerender();
+		});
+	}
+
+	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
+		<h2 class="text-lg font-medium text-[var(--text-strong)]">Personas</h2>
+		<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:800px;margin:0;">
+			Manages persona profiles stored under <code>data_dir/personas/&lt;persona_id&gt;/</code>.
+			Each persona has <code>IDENTITY.md</code>, <code>SOUL.md</code>, <code>TOOLS.md</code>, and <code>AGENTS.md</code>.
+		</p>
+
+		<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:900px;">
+			<label class="text-xs text-[var(--muted)]">persona_id</label>
+			<select
+				class="provider-key-input"
+				style="max-width:240px;"
+				value=${selectedId}
+				onChange=${(e) => setSelectedId(e.target.value)}
+			>
+				${personaIds.map((id) => html`<option key=${id} value=${id}>${id}</option>`)}
+			</select>
+			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onCreate}>Create</button>
+			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onClone}>Clone</button>
+			<button type="button" class="provider-btn provider-btn-sm provider-btn-danger" onClick=${onDelete}>Delete</button>
+			${loadingPersona ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
+			${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+			${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+		</div>
+
+		<form onSubmit=${onSave} style="max-width:900px;display:flex;flex-direction:column;gap:16px;">
+			<div>
+				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Identity (frontmatter)</h3>
+				<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;">
+					<div>
+						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Name</div>
+						<input type="text" class="provider-key-input" style="width:100%;"
+							value=${name} onInput=${(e) => {
+								setName(e.target.value);
+								syncIdentityFrontmatter({ name: e.target.value, emoji, creature, vibe });
+							}}
+							placeholder="e.g. Rex" />
+					</div>
+					<div>
+						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Emoji</div>
+						<${EmojiPicker} value=${emoji} onChange=${(v) => {
+							setEmoji(v);
+							syncIdentityFrontmatter({ name, emoji: v, creature, vibe });
+						}} onSelect=${(v) => {
+							setEmoji(v);
+							syncIdentityFrontmatter({ name, emoji: v, creature, vibe });
+						}} />
+					</div>
+					<div>
+						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Creature</div>
+						<input type="text" class="provider-key-input" style="width:100%;"
+							value=${creature} onInput=${(e) => {
+								setCreature(e.target.value);
+								syncIdentityFrontmatter({ name, emoji, creature: e.target.value, vibe });
+							}}
+							placeholder="e.g. robot" />
+					</div>
+					<div>
+						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Vibe</div>
+						<input type="text" class="provider-key-input" style="width:100%;"
+							value=${vibe} onInput=${(e) => {
+								setVibe(e.target.value);
+								syncIdentityFrontmatter({ name, emoji, creature, vibe: e.target.value });
+							}}
+							placeholder="e.g. chill" />
+					</div>
+				</div>
+			</div>
+
+			<div>
+				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">IDENTITY.md (raw)</h3>
+				<textarea
+					class="provider-key-input"
+					rows="10"
+					style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
+					value=${identityRaw}
+					onInput=${(e) => onIdentityRawInput(e.target.value)}
+				/>
+			</div>
+
+			<div>
+				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">SOUL.md</h3>
+				<textarea
+					class="provider-key-input"
+					rows="10"
+					style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
+					value=${soul}
+					onInput=${(e) => setSoul(e.target.value)}
+				/>
+			</div>
+
+			<div>
+				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">TOOLS.md</h3>
+				<textarea
+					class="provider-key-input"
+					rows="10"
+					style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
+					value=${tools}
+					onInput=${(e) => setTools(e.target.value)}
+				/>
+			</div>
+
+			<div>
+				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">AGENTS.md</h3>
+				<textarea
+					class="provider-key-input"
+					rows="10"
+					style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
+					value=${agents}
+					onInput=${(e) => setAgents(e.target.value)}
+				/>
+			</div>
+
+			<div style="display:flex;align-items:center;gap:8px;">
+				<button type="submit" class="provider-btn" disabled=${saving}>
+					${saving ? "Saving\u2026" : "Save"}
+				</button>
+			</div>
+		</form>
+	</div>`;
+}
+
+// ── Owner section ───────────────────────────────────────────
+
+function OwnerSection() {
+	var [userMd, setUserMd] = useState("");
+	var [loadingOwner, setLoadingOwner] = useState(true);
+	var [saving, setSaving] = useState(false);
+	var [saved, setSaved] = useState(false);
+	var [error, setError] = useState(null);
+
+	function flashSaved() {
+		setSaved(true);
+		setTimeout(() => {
+			setSaved(false);
+			rerender();
+		}, 1200);
+	}
+
+	function loadOwner() {
+		setLoadingOwner(true);
+		setError(null);
+		sendRpc("owner.get", {}).then((res) => {
+			setLoadingOwner(false);
+			if (res?.ok) {
+				setUserMd(res.payload?.user_md || "");
+			} else {
+				setError(res?.error?.message || "Failed to load USER.md");
+			}
+			rerender();
+		});
+	}
+
+	useEffect(() => {
+		loadOwner();
+	}, []);
+
+	function onSave(e) {
+		e.preventDefault();
+		setSaving(true);
+		setError(null);
+		sendRpc("owner.save", { user_md: userMd || "" }).then((res) => {
+			setSaving(false);
+			if (res?.ok) {
+				flashSaved();
+			} else {
+				setError(res?.error?.message || "Failed to save USER.md");
+			}
+			rerender();
+		});
+	}
+
+	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
+		<h2 class="text-lg font-medium text-[var(--text-strong)]">Owner</h2>
+		<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:800px;margin:0;">
+			Edits the global <code>data_dir/USER.md</code> (shared across all personas and channels).
+		</p>
+		<form onSubmit=${onSave} style="max-width:900px;display:flex;flex-direction:column;gap:12px;">
+			<textarea
+				class="provider-key-input"
+				rows="16"
+				style="width:100%;min-height:16rem;resize:vertical;font-size:.8rem;line-height:1.5;"
+				value=${userMd}
+				onInput=${(e) => setUserMd(e.target.value)}
+				placeholder="---\nname: Neo\ntimezone: Asia/Shanghai\n---\n"
+			/>
+			<div style="display:flex;align-items:center;gap:8px;">
+				<button type="submit" class="provider-btn" disabled=${saving || loadingOwner}>
+					${saving ? "Saving\u2026" : "Save"}
+				</button>
+				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadOwner} disabled=${saving}>
+					Reload
+				</button>
+				${loadingOwner ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
 				${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
 				${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
 			</div>
@@ -3267,17 +3651,14 @@ function PageSection({ initFn, teardownFn }) {
 // ── Main layout ──────────────────────────────────────────────
 
 function SettingsPage() {
-	useEffect(() => {
-		fetchIdentity();
-	}, []);
-
 	var section = activeSection.value;
 	var ps = pageSectionHandlers[section];
 
 	return html`<div class="settings-layout">
 		<${SettingsSidebar} />
 		${ps ? html`<${PageSection} key=${section} initFn=${ps.init} teardownFn=${ps.teardown} />` : null}
-		${section === "identity" ? html`<${IdentitySection} />` : null}
+		${section === "personas" ? html`<${PersonasSection} />` : null}
+		${section === "owner" ? html`<${OwnerSection} />` : null}
 		${section === "memory" ? html`<${MemorySection} />` : null}
 		${section === "environment" ? html`<${EnvironmentSection} />` : null}
 		${section === "security" ? html`<${SecuritySection} />` : null}
@@ -3288,7 +3669,7 @@ function SettingsPage() {
 	</div>`;
 }
 
-var DEFAULT_SECTION = "identity";
+var DEFAULT_SECTION = "personas";
 
 registerPrefix(
 	routes.settings,
@@ -3303,7 +3684,6 @@ registerPrefix(
 			history.replaceState(null, "", settingsPath(section));
 		}
 		render(html`<${SettingsPage} />`, container);
-		fetchIdentity();
 	},
 	() => {
 		mounted = false;

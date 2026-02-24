@@ -55,6 +55,9 @@ const READ_METHODS: &[&str] = &[
     "models.list_all",
     "agents.list",
     "agent.identity.get",
+    "personas.list",
+    "personas.get",
+    "owner.get",
     "skills.list",
     "skills.status",
     "skills.security.status",
@@ -107,6 +110,10 @@ const WRITE_METHODS: &[&str] = &[
     "agent.wait",
     "agent.identity.update",
     "agent.identity.update_soul",
+    "personas.save",
+    "personas.delete",
+    "personas.clone",
+    "owner.save",
     "wake",
     "talk.mode",
     "tts.enable",
@@ -1237,6 +1244,150 @@ impl MethodRegistry {
                         .identity_update_soul(soul)
                         .await
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
+                })
+            }),
+        );
+
+        // Personas / Owner (USER.md)
+        self.register(
+            "personas.list",
+            Box::new(|_ctx| {
+                Box::pin(async move {
+                    let personas = crate::personas::list_personas()
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(serde_json::json!({ "personas": personas }))
+                })
+            }),
+        );
+        self.register(
+            "personas.get",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    let persona_id = ctx
+                        .params
+                        .get("persona_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            ErrorShape::new(error_codes::INVALID_REQUEST, "missing 'persona_id'")
+                        })?;
+                    let files = crate::personas::get_persona(persona_id)
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(serde_json::json!({
+                        "persona_id": persona_id,
+                        "identity": files.identity,
+                        "soul": files.soul,
+                        "tools": files.tools,
+                        "agents": files.agents,
+                    }))
+                })
+            }),
+        );
+        self.register(
+            "personas.save",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    let persona_id = ctx
+                        .params
+                        .get("persona_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            ErrorShape::new(error_codes::INVALID_REQUEST, "missing 'persona_id'")
+                        })?;
+                    let files = crate::personas::PersonaFiles {
+                        identity: ctx
+                            .params
+                            .get("identity")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        soul: ctx
+                            .params
+                            .get("soul")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        tools: ctx
+                            .params
+                            .get("tools")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        agents: ctx
+                            .params
+                            .get("agents")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    };
+                    crate::personas::save_persona(persona_id, &files)
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(serde_json::json!({ "saved": persona_id }))
+                })
+            }),
+        );
+        self.register(
+            "personas.delete",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    let persona_id = ctx
+                        .params
+                        .get("persona_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            ErrorShape::new(error_codes::INVALID_REQUEST, "missing 'persona_id'")
+                        })?;
+                    crate::personas::delete_persona(persona_id)
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(serde_json::json!({ "deleted": persona_id }))
+                })
+            }),
+        );
+        self.register(
+            "personas.clone",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    let from_id = ctx
+                        .params
+                        .get("from_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            ErrorShape::new(error_codes::INVALID_REQUEST, "missing 'from_id'")
+                        })?;
+                    let to_id = ctx
+                        .params
+                        .get("to_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            ErrorShape::new(error_codes::INVALID_REQUEST, "missing 'to_id'")
+                        })?;
+                    crate::personas::clone_persona(from_id, to_id)
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(serde_json::json!({ "cloned": { "from": from_id, "to": to_id } }))
+                })
+            }),
+        );
+        self.register(
+            "owner.get",
+            Box::new(|_ctx| {
+                Box::pin(async move {
+                    let user_md = crate::owner::read_user_md()
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(serde_json::json!({ "user_md": user_md }))
+                })
+            }),
+        );
+        self.register(
+            "owner.save",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    let user_md = ctx
+                        .params
+                        .get("user_md")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    crate::owner::save_user_md(user_md)
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(serde_json::json!({ "saved": true }))
                 })
             }),
         );

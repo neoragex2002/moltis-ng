@@ -143,16 +143,22 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 // before we can set the binding column.
                 let entry = session_meta.get(&session_key).await;
                 if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
-                    let existing = session_meta
-                        .list_channel_sessions(
-                            reply_to.channel_type.as_str(),
+                    let label = if reply_to.channel_type == ChannelType::Telegram {
+                        let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+                        let u = crate::session_labels::resolve_telegram_bot_username(
+                            &snapshots,
                             &reply_to.account_id,
+                        );
+                        crate::session_labels::format_telegram_session_label(
+                            &reply_to.account_id,
+                            u,
                             &reply_to.chat_id,
                         )
-                        .await;
-                    let n = existing.len() + 1;
+                    } else {
+                        session_key.clone()
+                    };
                     let _ = session_meta
-                        .upsert(&session_key, Some(format!("Telegram {n}")))
+                        .upsert(&session_key, Some(label))
                         .await;
                 }
                 session_meta
@@ -363,16 +369,22 @@ impl ChannelEventSink for GatewayChannelEventSink {
             // Ensure the session row exists and label it on first use.
             let entry = session_meta.get(&session_key).await;
             if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
-                let existing = session_meta
-                    .list_channel_sessions(
-                        reply_to.channel_type.as_str(),
+                let label = if reply_to.channel_type == ChannelType::Telegram {
+                    let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+                    let u = crate::session_labels::resolve_telegram_bot_username(
+                        &snapshots,
                         &reply_to.account_id,
+                    );
+                    crate::session_labels::format_telegram_session_label(
+                        &reply_to.account_id,
+                        u,
                         &reply_to.chat_id,
                     )
-                    .await;
-                let n = existing.len() + 1;
+                } else {
+                    session_key.clone()
+                };
                 let _ = session_meta
-                    .upsert(&session_key, Some(format!("Telegram {n}")))
+                    .upsert(&session_key, Some(label))
                     .await;
             }
             session_meta
@@ -686,16 +698,22 @@ impl ChannelEventSink for GatewayChannelEventSink {
         {
             let entry = session_meta.get(&session_key).await;
             if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
-                let existing = session_meta
-                    .list_channel_sessions(
-                        reply_to.channel_type.as_str(),
+                let label = if reply_to.channel_type == ChannelType::Telegram {
+                    let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+                    let u = crate::session_labels::resolve_telegram_bot_username(
+                        &snapshots,
                         &reply_to.account_id,
+                    );
+                    crate::session_labels::format_telegram_session_label(
+                        &reply_to.account_id,
+                        u,
                         &reply_to.chat_id,
                     )
-                    .await;
-                let n = existing.len() + 1;
+                } else {
+                    session_key.clone()
+                };
                 let _ = session_meta
-                    .upsert(&session_key, Some(format!("Telegram {n}")))
+                    .upsert(&session_key, Some(label))
                     .await;
             }
             session_meta
@@ -849,19 +867,24 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 let binding_json = serde_json::to_string(&reply_to)
                     .map_err(|e| anyhow!("failed to serialize binding: {e}"))?;
 
-                // Sequential label: count existing sessions for this chat.
-                let existing = session_metadata
-                    .list_channel_sessions(
-                        reply_to.channel_type.as_str(),
+                let label = if reply_to.channel_type == ChannelType::Telegram {
+                    let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+                    let u = crate::session_labels::resolve_telegram_bot_username(
+                        &snapshots,
                         &reply_to.account_id,
+                    );
+                    crate::session_labels::format_telegram_session_label(
+                        &reply_to.account_id,
+                        u,
                         &reply_to.chat_id,
                     )
-                    .await;
-                let n = existing.len() + 1;
+                } else {
+                    new_key.clone()
+                };
 
                 // Create the new session entry with channel binding.
                 session_metadata
-                    .upsert(&new_key, Some(format!("Telegram {n}")))
+                    .upsert(&new_key, Some(label))
                     .await
                     .map_err(|e| anyhow!("failed to create session: {e}"))?;
                 session_metadata
@@ -1465,6 +1488,7 @@ mod tests {
         async_trait::async_trait,
         moltis_channels::{ChannelType, plugin::ChannelOutbound},
         moltis_common::types::ReplyPayload,
+        moltis_telegram::config::TelegramBusAccountSnapshot,
         std::{
             sync::{
                 atomic::{AtomicUsize, Ordering},
@@ -1473,6 +1497,24 @@ mod tests {
         },
         tokio::sync::OnceCell,
     };
+
+    async fn sqlite_metadata() -> Arc<moltis_sessions::metadata::SqliteSessionMetadata> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // The sessions table has a foreign key to projects(id); tests that use
+        // in-memory sqlite must provide a minimal projects table.
+        sqlx::query("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+            .await
+            .unwrap();
+        Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(pool))
+    }
 
     #[test]
     fn format_context_v1_payload_wraps_payload_with_versioned_contract() {
@@ -1709,5 +1751,230 @@ mod tests {
         assert_eq!(texts[0].1, "123");
         assert_eq!(texts[0].3.as_deref(), Some("1"));
         assert!(texts[0].2.starts_with("⚠️"));
+    }
+
+    struct SnapshotChannelService {
+        snapshots: Vec<TelegramBusAccountSnapshot>,
+    }
+
+    #[async_trait]
+    impl crate::services::ChannelService for SnapshotChannelService {
+        async fn status(&self) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn logout(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn send(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn add(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn remove(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn update(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn senders_list(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn sender_approve(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn sender_deny(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+
+        async fn telegram_bus_accounts_snapshot(&self) -> Vec<TelegramBusAccountSnapshot> {
+            self.snapshots.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_labels_telegram_session_with_bot_username_and_dm_chat_id() {
+        let metadata = sqlite_metadata().await;
+        metadata
+            .upsert("session:test", Some("ok".into()))
+            .await
+            .expect("metadata upsert works");
+        assert!(
+            metadata.get("session:test").await.is_some(),
+            "metadata get works"
+        );
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_chat(Arc::new(ErrChatService))
+            .with_session_metadata(Arc::clone(&metadata));
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_id: "telegram:845".into(),
+                bot_username: Some("lovely_apple_bot".into()),
+                relay_chain_enabled: false,
+                relay_hop_limit: 0,
+                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+            }],
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        assert!(
+            state.services.session_metadata.is_some(),
+            "test must have session_metadata wired"
+        );
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = GatewayChannelEventSink::new(Arc::clone(&cell));
+
+        sink.dispatch_to_chat(
+            "hi",
+            ChannelReplyTarget {
+                channel_type: ChannelType::Telegram,
+                account_id: "telegram:845".into(),
+                account_handle: None,
+                chat_id: "123".into(),
+                message_id: None,
+            },
+            ChannelMessageMeta {
+                channel_type: ChannelType::Telegram,
+                sender_name: None,
+                username: None,
+                message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                model: None,
+            },
+        )
+        .await;
+
+        let entry = metadata.get("telegram:845:123").await.expect("session row");
+        assert_eq!(
+            entry.label.as_deref(),
+            Some("TG @lovely_apple_bot · dm:123")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_labels_telegram_session_group_chat_as_grp() {
+        let metadata = sqlite_metadata().await;
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_chat(Arc::new(ErrChatService))
+            .with_session_metadata(Arc::clone(&metadata));
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_id: "telegram:845".into(),
+                bot_username: Some("lovely_apple_bot".into()),
+                relay_chain_enabled: false,
+                relay_hop_limit: 0,
+                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+            }],
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = GatewayChannelEventSink::new(Arc::clone(&cell));
+
+        sink.dispatch_to_chat(
+            "hi",
+            ChannelReplyTarget {
+                channel_type: ChannelType::Telegram,
+                account_id: "telegram:845".into(),
+                account_handle: None,
+                chat_id: "-100".into(),
+                message_id: None,
+            },
+            ChannelMessageMeta {
+                channel_type: ChannelType::Telegram,
+                sender_name: None,
+                username: None,
+                message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                model: None,
+            },
+        )
+        .await;
+
+        let entry = metadata.get("telegram:845:-100").await.expect("session row");
+        assert_eq!(
+            entry.label.as_deref(),
+            Some("TG @lovely_apple_bot · grp:-100")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_labels_telegram_session_falls_back_to_chan_user_id_when_username_missing() {
+        let metadata = sqlite_metadata().await;
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_chat(Arc::new(ErrChatService))
+            .with_session_metadata(Arc::clone(&metadata));
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_id: "telegram:845".into(),
+                bot_username: None,
+                relay_chain_enabled: false,
+                relay_hop_limit: 0,
+                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+            }],
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = GatewayChannelEventSink::new(Arc::clone(&cell));
+
+        sink.dispatch_to_chat(
+            "hi",
+            ChannelReplyTarget {
+                channel_type: ChannelType::Telegram,
+                account_id: "telegram:845".into(),
+                account_handle: None,
+                chat_id: "123".into(),
+                message_id: None,
+            },
+            ChannelMessageMeta {
+                channel_type: ChannelType::Telegram,
+                sender_name: None,
+                username: None,
+                message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                model: None,
+            },
+        )
+        .await;
+
+        let entry = metadata.get("telegram:845:123").await.expect("session row");
+        assert_eq!(entry.label.as_deref(), Some("TG 845 · dm:123"));
     }
 }

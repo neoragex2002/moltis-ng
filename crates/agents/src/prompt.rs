@@ -120,7 +120,7 @@ pub fn build_openai_responses_developer_prompts(
 
     persona.push_str("## People (reference)\n\n");
     persona.push_str("For other agents/bots managed by this Moltis instance, see:\n");
-    persona.push_str("- ~/.moltis/PEOPLE.md\n");
+    persona.push_str("- data_dir/PEOPLE.md\n");
     persona.push_str("Note: do not inline the roster here; keep this message cache-friendly.\n\n");
 
     persona.push_str("## Tools\n\n");
@@ -1173,7 +1173,7 @@ mod tests {
         assert!(prompts.persona.contains("## Owner (USER.md)"));
         assert!(prompts.persona.contains("Owner / primary operator: Neo"));
         assert!(prompts.persona.contains("## People (reference)"));
-        assert!(prompts.persona.contains("~/.moltis/PEOPLE.md"));
+        assert!(prompts.persona.contains("data_dir/PEOPLE.md"));
         assert!(prompts.persona.contains("## Tools"));
         assert!(prompts.persona.contains("# TOOLS.md"));
         assert!(prompts.persona.contains("## Agents"));

@@ -11,8 +11,11 @@ import { connected } from "./signals.js";
 import * as S from "./state.js";
 import { models as modelsSig } from "./stores/model-store.js";
 import { ConfirmDialog, Modal, ModelSelect, requestConfirm, showToast } from "./ui.js";
+import { isPersonaListLoaded, isPersonaMissing } from "./persona-utils.js";
 
 var channels = signal([]);
+var personaIds = signal([]);
+var personaIdsLoaded = signal(false);
 
 export function prefetchChannels() {
 	sendRpc("channels.status", {}).then((res) => {
@@ -20,6 +23,16 @@ export function prefetchChannels() {
 			var ch = res.payload?.channels || [];
 			channels.value = ch;
 			S.setCachedChannels(ch);
+		}
+	});
+	sendRpc("personas.list", {}).then((res) => {
+		if (res?.ok) {
+			var ids = res.payload?.personas || [];
+			personaIds.value = ids;
+			// Avoid false "(missing → default)" warnings before we have a reliable list.
+			personaIdsLoaded.value = isPersonaListLoaded(ids);
+		} else {
+			personaIdsLoaded.value = false;
 		}
 	});
 }
@@ -36,6 +49,15 @@ function loadChannels() {
 			channels.value = ch;
 			S.setCachedChannels(ch);
 			updateNavCount("channels", ch.length);
+		}
+	});
+	sendRpc("personas.list", {}).then((res) => {
+		if (res?.ok) {
+			var ids = res.payload?.personas || [];
+			personaIds.value = ids;
+			personaIdsLoaded.value = isPersonaListLoaded(ids);
+		} else {
+			personaIdsLoaded.value = false;
 		}
 	});
 }
@@ -59,6 +81,43 @@ function TelegramIcon() {
 // ── Channel card ─────────────────────────────────────────────
 function ChannelCard(props) {
 	var ch = props.channel;
+	var cfg = ch.config || {};
+	var configuredPersona = cfg.persona_id || "";
+	var personaMissing = isPersonaMissing(
+		configuredPersona,
+		personaIds.value,
+		personaIdsLoaded.value,
+	);
+
+	function copyText(label, text) {
+		if (!text) return;
+		if (navigator?.clipboard?.writeText) {
+			navigator.clipboard
+				.writeText(text)
+				.then(() => showToast(`${label} copied`))
+				.catch(() => showToast("Copy failed"));
+		} else {
+			showToast("Clipboard not available");
+		}
+	}
+
+	function DetailRow({ label, value }) {
+		var v = value == null ? "" : String(value);
+		return html`<div style="display:flex;align-items:center;gap:8px;justify-content:space-between;">
+			<div class="text-xs text-[var(--muted)]" style="min-width:140px;">${label}</div>
+			<div style="display:flex;align-items:center;gap:8px;min-width:0;">
+				<code class="text-xs" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:420px;">${v || "-"}</code>
+				<button
+					type="button"
+					class="provider-btn provider-btn-sm provider-btn-secondary"
+					disabled=${!v}
+					onClick=${() => copyText(label, v)}
+				>
+					Copy
+				</button>
+			</div>
+		</div>`;
+	}
 
 	function onRemove() {
 		requestConfirm(`Remove ${ch.name || ch.account_id}?`).then((yes) => {
@@ -99,6 +158,19 @@ function ChannelCard(props) {
       <button class="provider-btn provider-btn-sm provider-btn-danger" title="Remove ${ch.account_id || "channel"}"
         onClick=${onRemove}>Remove</button>
     </div>
+		<details style="margin-top:10px;">
+			<summary class="text-xs text-[var(--muted)]" style="cursor:pointer;user-select:none;">Details</summary>
+			<div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+				<${DetailRow} label="account_id" value=${ch.account_id} />
+				<${DetailRow} label="chan_user_id" value=${cfg.chan_user_id} />
+				<${DetailRow} label="chan_user_name" value=${cfg.chan_user_name ? "@" + cfg.chan_user_name : ""} />
+				<${DetailRow} label="chan_nickname" value=${cfg.chan_nickname} />
+				<${DetailRow}
+					label="persona_id"
+					value=${personaMissing ? `${configuredPersona} (missing → default)` : configuredPersona}
+				/>
+			</div>
+		</details>
   </div>`;
 }
 

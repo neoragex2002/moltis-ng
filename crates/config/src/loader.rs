@@ -262,19 +262,19 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".moltis"))
 }
 
-/// Path to the workspace soul file.
+/// Path to the default persona's soul file.
 pub fn soul_path() -> PathBuf {
-    data_dir().join("SOUL.md")
+    data_dir().join("personas/default/SOUL.md")
 }
 
-/// Path to the workspace AGENTS markdown.
+/// Path to the default persona's AGENTS markdown.
 pub fn agents_path() -> PathBuf {
-    data_dir().join("AGENTS.md")
+    data_dir().join("personas/default/AGENTS.md")
 }
 
-/// Path to the workspace identity file.
+/// Path to the default persona's identity file.
 pub fn identity_path() -> PathBuf {
-    data_dir().join("IDENTITY.md")
+    data_dir().join("personas/default/IDENTITY.md")
 }
 
 /// Path to the workspace user profile file.
@@ -282,9 +282,9 @@ pub fn user_path() -> PathBuf {
     data_dir().join("USER.md")
 }
 
-/// Path to workspace tool-guidance markdown.
+/// Path to the default persona's tool-guidance markdown.
 pub fn tools_path() -> PathBuf {
-    data_dir().join("TOOLS.md")
+    data_dir().join("personas/default/TOOLS.md")
 }
 
 /// Path to the workspace PEOPLE roster markdown.
@@ -298,7 +298,7 @@ pub fn personas_dir() -> PathBuf {
 }
 
 fn is_valid_persona_id(persona_id: &str) -> bool {
-    let id = persona_id.trim();
+    let id = persona_id;
     if id.is_empty() || id.len() > 64 {
         return false;
     }
@@ -347,7 +347,8 @@ pub fn load_persona_identity(persona_id: &str) -> Option<AgentIdentity> {
     load_identity_from_path(dir.join("IDENTITY.md"))
 }
 
-/// Load IDENTITY.md raw markdown from the workspace root (`data_dir`) if present and non-empty.
+/// Load IDENTITY.md raw markdown for the default persona
+/// (`data_dir/personas/default/IDENTITY.md`) if present and non-empty.
 pub fn load_identity_md_raw() -> Option<String> {
     load_markdown_raw(identity_path())
 }
@@ -422,7 +423,8 @@ If you change this file, tell the user — it's your soul, and they should know.
 \n\
 _This file is yours to evolve. As you learn who you are, update it._";
 
-/// Load SOUL.md from the workspace root (`data_dir`) if present and non-empty.
+/// Load SOUL.md for the default persona (`data_dir/personas/default/SOUL.md`)
+/// if present and non-empty.
 ///
 /// When the file does not exist, it is seeded with [`DEFAULT_SOUL`] (mirroring
 /// how `discover_and_load()` writes `moltis.toml` on first run).
@@ -454,7 +456,8 @@ pub fn load_persona_soul(persona_id: &str) -> Option<String> {
     load_markdown_raw(dir.join("SOUL.md"))
 }
 
-/// Write `DEFAULT_SOUL` to `SOUL.md` when the file doesn't already exist.
+/// Write `DEFAULT_SOUL` to the default persona's `SOUL.md` when the file doesn't
+/// already exist.
 fn write_default_soul() -> anyhow::Result<()> {
     let path = soul_path();
     if path.exists() {
@@ -468,7 +471,8 @@ fn write_default_soul() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Load AGENTS.md from the workspace root (`data_dir`) if present and non-empty.
+/// Load AGENTS.md for the default persona (`data_dir/personas/default/AGENTS.md`)
+/// if present and non-empty.
 pub fn load_agents_md() -> Option<String> {
     load_workspace_markdown(agents_path())
 }
@@ -479,7 +483,8 @@ pub fn load_persona_agents_md(persona_id: &str) -> Option<String> {
     load_workspace_markdown(dir.join("AGENTS.md"))
 }
 
-/// Load TOOLS.md from the workspace root (`data_dir`) if present and non-empty.
+/// Load TOOLS.md for the default persona (`data_dir/personas/default/TOOLS.md`)
+/// if present and non-empty.
 pub fn load_tools_md() -> Option<String> {
     load_workspace_markdown(tools_path())
 }
@@ -495,7 +500,7 @@ pub fn load_heartbeat_md() -> Option<String> {
     load_workspace_markdown(heartbeat_path())
 }
 
-/// Persist SOUL.md in the workspace root (`data_dir`).
+/// Persist SOUL.md for the default persona (`data_dir/personas/default/SOUL.md`).
 ///
 /// - `Some(non-empty)` writes `SOUL.md` with the given content
 /// - `None` or empty writes an empty `SOUL.md` so that `load_soul()`
@@ -1308,6 +1313,21 @@ name = "Rex"
     }
 
     #[test]
+    fn default_persona_paths_live_under_personas_default() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        let data = data_dir();
+        assert_eq!(identity_path(), data.join("personas/default/IDENTITY.md"));
+        assert_eq!(soul_path(), data.join("personas/default/SOUL.md"));
+        assert_eq!(tools_path(), data.join("personas/default/TOOLS.md"));
+        assert_eq!(agents_path(), data.join("personas/default/AGENTS.md"));
+
+        clear_data_dir();
+    }
+
+    #[test]
     fn save_identity_removes_empty_file() {
         let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1412,7 +1432,8 @@ name = "Rex"
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
-        std::fs::write(dir.path().join("TOOLS.md"), "\n  Use safe tools first.  \n").unwrap();
+        std::fs::create_dir_all(tools_path().parent().unwrap()).unwrap();
+        std::fs::write(tools_path(), "\n  Use safe tools first.  \n").unwrap();
         assert_eq!(load_tools_md().as_deref(), Some("Use safe tools first."));
 
         clear_data_dir();
@@ -1424,8 +1445,9 @@ name = "Rex"
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
+        std::fs::create_dir_all(agents_path().parent().unwrap()).unwrap();
         std::fs::write(
-            dir.path().join("AGENTS.md"),
+            agents_path(),
             "\nLocal workspace instructions\n",
         )
         .unwrap();
@@ -1455,8 +1477,9 @@ name = "Rex"
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
+        std::fs::create_dir_all(tools_path().parent().unwrap()).unwrap();
         std::fs::write(
-            dir.path().join("TOOLS.md"),
+            tools_path(),
             "<!-- comment -->\n\nUse read-only tools first.",
         )
         .unwrap();
@@ -1486,7 +1509,7 @@ name = "Rex"
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
-        let soul_file = dir.path().join("SOUL.md");
+        let soul_file = soul_path();
         assert!(!soul_file.exists(), "SOUL.md should not exist yet");
 
         let content = load_soul();
@@ -1510,12 +1533,13 @@ name = "Rex"
         set_data_dir(dir.path().to_path_buf());
 
         let custom = "You are a loyal companion who loves fetch.";
-        std::fs::write(dir.path().join("SOUL.md"), custom).unwrap();
+        std::fs::create_dir_all(soul_path().parent().unwrap()).unwrap();
+        std::fs::write(soul_path(), custom).unwrap();
 
         let content = load_soul();
         assert_eq!(content.as_deref(), Some(custom));
 
-        let on_disk = std::fs::read_to_string(dir.path().join("SOUL.md")).unwrap();
+        let on_disk = std::fs::read_to_string(soul_path()).unwrap();
         assert_eq!(on_disk, custom, "existing SOUL.md must not be overwritten");
 
         clear_data_dir();
@@ -1529,7 +1553,7 @@ name = "Rex"
 
         // First call seeds the file.
         let _ = load_soul();
-        let soul_file = dir.path().join("SOUL.md");
+        let soul_file = soul_path();
         assert!(soul_file.exists());
 
         // Delete it.
@@ -1552,7 +1576,7 @@ name = "Rex"
 
         // Auto-seed SOUL.md.
         let _ = load_soul();
-        let soul_file = dir.path().join("SOUL.md");
+        let soul_file = soul_path();
         assert!(soul_file.exists());
 
         // User explicitly clears the soul via settings.
@@ -1592,7 +1616,7 @@ name = "Rex"
         let content = load_soul();
         assert_eq!(content.as_deref(), Some(custom));
 
-        let on_disk = std::fs::read_to_string(dir.path().join("SOUL.md")).unwrap();
+        let on_disk = std::fs::read_to_string(soul_path()).unwrap();
         assert_eq!(on_disk, custom);
 
         clear_data_dir();

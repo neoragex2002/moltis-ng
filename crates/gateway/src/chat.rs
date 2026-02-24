@@ -6448,12 +6448,13 @@ async fn ensure_channel_bound_session(
     let entry = session_meta.get(session_key).await;
     let has_binding = entry.as_ref().is_some_and(|e| e.channel_binding.is_some());
     if !has_binding {
-        let existing = session_meta
-            .list_channel_sessions("telegram", account_id, chat_id)
-            .await;
-        let n = existing.len() + 1;
+        let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+        let bot_username =
+            crate::session_labels::resolve_telegram_bot_username(&snapshots, account_id);
+        let label =
+            crate::session_labels::format_telegram_session_label(account_id, bot_username, chat_id);
         let _ = session_meta
-            .upsert(session_key, Some(format!("Telegram {n}")))
+            .upsert(session_key, Some(label))
             .await;
         session_meta
             .set_channel_binding(session_key, Some(binding_json))
@@ -7218,6 +7219,7 @@ mod tests {
         anyhow::Result,
         moltis_agents::{model::LlmProvider, tool_registry::AgentTool},
         moltis_common::types::ReplyPayload,
+        moltis_sessions::store::SessionStore,
         std::{
             pin::Pin,
             sync::{
@@ -7228,6 +7230,22 @@ mod tests {
         },
         tokio_stream::Stream,
     };
+
+    async fn sqlite_metadata() -> Arc<moltis_sessions::metadata::SqliteSessionMetadata> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+            .await
+            .unwrap();
+        Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(pool))
+    }
 
     struct DummyTool {
         name: String,
@@ -9819,5 +9837,85 @@ echo @bot2
         assert_eq!(b.low_watermark, 163_200);
         assert_eq!(b.reserved_output_tokens, 128_000);
         assert_eq!(b.reserve_safety_tokens, SAFETY_MARGIN_TOKENS);
+    }
+
+    struct SnapshotChannelService {
+        snapshots: Vec<moltis_telegram::config::TelegramBusAccountSnapshot>,
+    }
+
+    #[async_trait]
+    impl crate::services::ChannelService for SnapshotChannelService {
+        async fn status(&self) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn logout(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn send(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn add(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn remove(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn update(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn senders_list(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn sender_approve(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn sender_deny(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+
+        async fn telegram_bus_accounts_snapshot(
+            &self,
+        ) -> Vec<moltis_telegram::config::TelegramBusAccountSnapshot> {
+            self.snapshots.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_channel_bound_session_sets_stable_telegram_label() {
+        let metadata = sqlite_metadata().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_session_metadata(Arc::clone(&metadata))
+            .with_session_store(Arc::clone(&store));
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
+                account_id: "telegram:845".into(),
+                bot_username: Some("lovely_apple_bot".into()),
+                relay_chain_enabled: false,
+                relay_hop_limit: 0,
+                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+            }],
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let key = "telegram:845:123";
+        ensure_channel_bound_session(&state, key, "telegram:845", "123").await;
+
+        let entry = metadata.get(key).await.expect("session row");
+        assert_eq!(
+            entry.label.as_deref(),
+            Some("TG @lovely_apple_bot · dm:123")
+        );
+        assert!(entry.channel_binding.is_some());
     }
 }

@@ -210,6 +210,12 @@ impl ChannelService for LiveChannelService {
             warn!(error = %e, account_id, "failed to persist channel");
         }
 
+        if let Ok(channels) = self.store.list().await {
+            if let Err(e) = crate::people::regenerate_people_md(&channels) {
+                warn!(error = %e, "failed to regenerate PEOPLE.md after channels.add");
+            }
+        }
+
         Ok(serde_json::json!({ "added": account_id }))
     }
 
@@ -229,6 +235,12 @@ impl ChannelService for LiveChannelService {
 
         if let Err(e) = self.store.delete(account_id).await {
             warn!(error = %e, account_id, "failed to delete channel from store");
+        }
+
+        if let Ok(channels) = self.store.list().await {
+            if let Err(e) = crate::people::regenerate_people_md(&channels) {
+                warn!(error = %e, "failed to regenerate PEOPLE.md after channels.remove");
+            }
         }
 
         Ok(serde_json::json!({ "removed": account_id }))
@@ -301,6 +313,12 @@ impl ChannelService for LiveChannelService {
             .await
         {
             warn!(error = %e, account_id, "failed to persist channel update");
+        }
+
+        if let Ok(channels) = self.store.list().await {
+            if let Err(e) = crate::people::regenerate_people_md(&channels) {
+                warn!(error = %e, "failed to regenerate PEOPLE.md after channels.update");
+            }
         }
 
         Ok(serde_json::json!({ "updated": account_id }))

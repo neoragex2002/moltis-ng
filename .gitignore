@@ -10,3 +10,7 @@ prompts
 features/
 .moltis/
 docs/book/
+
+# Local-only prompt-dump artifacts (avoid accidental commit)
+issues/background.md
+issues/Codex*Prompt*Dump*.md
