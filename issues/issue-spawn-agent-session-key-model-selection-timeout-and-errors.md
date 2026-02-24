@@ -205,7 +205,7 @@
 - Related issues/docs：
   - `issues/done/issue-error-handling-taxonomy-single-egress.md`
   - `issues/done/issue-telegram-channel-no-error-reply-on-llm-failure.md`
-  - `issues/issue-named-personas-and-per-session-agent-profiles.md`（更广义的 per-session persona/agent 配置能力）
+  - `issues/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md`（更广义的 persona/agent 配置能力；本单以 Telegram bot identity 绑定 persona 为 V1 落点）
   - `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（run/debug 可观测性口径先例）
 
 ## Close Checklist（关单清单）【不可省略】

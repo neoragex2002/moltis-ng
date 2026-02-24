@@ -49,7 +49,7 @@
 - [ ] 全量记录 fan-out：会议相关消息写入所有参会 agent 的会议派生 session（带来源标记与 metadata）
 
 ### D) 已有相关 issue（本单实现时需要参考/可能复用）
-- `issues/issue-named-personas-and-per-session-agent-profiles.md`：per-agent profile/capabilities（本单要求“按 agent 能力集”最终要靠这张落地；V1 可先按 Telegram account 作为 agent 身份，能力集先沿用全局或 channel 默认）
+- `issues/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md`：per-agent profile/persona/capabilities（本单要求“按 agent 能力集”最终要靠这张落地；V1 可先按 Telegram bot identity 作为 agent 身份，能力集先沿用全局或 channel 默认）
 - `issues/issue-terminology-and-concept-convergence.md`：术语收敛（agent/account/session/scope）
 - `issues/done/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md`：非会议场景也要跨 bot 可见性时再做（本单会议场景优先走“会议派生 session 的全量 fan-out”，不依赖 Telegram bot-to-bot update）
 
@@ -184,7 +184,7 @@ chairbot 行为冻结：
 
 ### Phase 3：per-agent 配置（能力集 + 风格）【依赖后续单子】
 - agent 的 profile/capabilities 独立配置与强制执行（对用户仍只称“agent”）
-- cross-ref：`issues/issue-named-personas-and-per-session-agent-profiles.md`（需按“agent”口径改写）
+- cross-ref：`issues/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md`（需按“agent”口径改写）
 
 ## 可实施性评估（Feasibility）
 ### 已具备的实施基础
@@ -228,4 +228,4 @@ chairbot 行为冻结：
 ## 交叉引用（Cross References）
 - `issues/done/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md`（若后续需要“非会议”场景的 bot-to-bot 可见性补偿）
 - `issues/issue-terminology-and-concept-convergence.md`（术语收敛：agent/account/session）
-- `issues/issue-named-personas-and-per-session-agent-profiles.md`（按“agent”口径重写为内部 profile/capabilities 实现细节）
+- `issues/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md`（按“agent”口径重写为内部 profile/capabilities 实现细节）
