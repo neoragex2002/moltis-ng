@@ -49,6 +49,7 @@
 # Architecture
 
 - [System Prompt](system-prompt.md)
+- [概念与标识符](concepts-and-ids.md)
 - [Streaming](streaming.md)
 - [SQLite Migrations](sqlite-migration.md)
 - [Metrics & Tracing](metrics-and-tracing.md)
