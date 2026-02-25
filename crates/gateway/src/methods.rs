@@ -7,6 +7,40 @@ use {
     moltis_protocol::{ErrorShape, ResponseFrame, error_codes},
 };
 
+fn validate_account_handle_for_channel(channel_type: &str, account_handle: &str) -> Result<(), String> {
+    let parts = moltis_common::identity::parse_account_handle(account_handle)
+        .ok_or_else(|| format!("invalid accountHandle: expected '{channel_type}:<chan_user_id>'"))?;
+
+    if parts.channel != channel_type {
+        return Err(format!(
+            "invalid accountHandle: expected '{channel_type}:<chan_user_id>', got '{}:<...>'",
+            parts.channel
+        ));
+    }
+
+    // Enforce Telegram account handles as `telegram:<numeric_chan_user_id>`.
+    if channel_type == "telegram" {
+        let id = parts
+            .chan_user_id
+            .parse::<u64>()
+            .map_err(|_| "invalid accountHandle: telegram chan_user_id must be numeric".to_string())?;
+        if id == 0 {
+            return Err("invalid accountHandle: telegram chan_user_id must be > 0".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+fn require_account_handle_param(params: &serde_json::Value) -> Result<&str, ErrorShape> {
+    params
+        .get("accountHandle")
+        .or_else(|| params.get("accountId"))
+        .or_else(|| params.get("account_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ErrorShape::new(error_codes::INVALID_REQUEST, "missing accountHandle"))
+}
+
 use crate::{
     broadcast::{BroadcastOpts, broadcast},
     state::GatewayState,
@@ -1616,6 +1650,10 @@ impl MethodRegistry {
             "channels.remove",
             Box::new(|ctx| {
                 Box::pin(async move {
+                    let account_handle = require_account_handle_param(&ctx.params)?;
+                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
+                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
+                    })?;
                     ctx.state
                         .services
                         .channel
@@ -1629,6 +1667,10 @@ impl MethodRegistry {
             "channels.update",
             Box::new(|ctx| {
                 Box::pin(async move {
+                    let account_handle = require_account_handle_param(&ctx.params)?;
+                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
+                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
+                    })?;
                     ctx.state
                         .services
                         .channel
@@ -1655,6 +1697,10 @@ impl MethodRegistry {
             "channels.senders.list",
             Box::new(|ctx| {
                 Box::pin(async move {
+                    let account_handle = require_account_handle_param(&ctx.params)?;
+                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
+                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
+                    })?;
                     ctx.state
                         .services
                         .channel
@@ -1668,6 +1714,10 @@ impl MethodRegistry {
             "channels.senders.approve",
             Box::new(|ctx| {
                 Box::pin(async move {
+                    let account_handle = require_account_handle_param(&ctx.params)?;
+                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
+                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
+                    })?;
                     ctx.state
                         .services
                         .channel
@@ -1681,6 +1731,10 @@ impl MethodRegistry {
             "channels.senders.deny",
             Box::new(|ctx| {
                 Box::pin(async move {
+                    let account_handle = require_account_handle_param(&ctx.params)?;
+                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
+                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
+                    })?;
                     ctx.state
                         .services
                         .channel
@@ -3880,16 +3934,21 @@ impl MethodRegistry {
                             .or_else(|| ctx.params.get("channel_type"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("telegram");
-                        let account_id = ctx
+                        let account_handle = ctx
                             .params
-                            .get("accountId")
+                            .get("accountHandle")
+                            .or_else(|| ctx.params.get("accountId"))
                             .or_else(|| ctx.params.get("account_id"))
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
-                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing accountId")
+                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing accountHandle")
                             })?;
 
-                        let key = format!("{}:{}", channel_type, account_id);
+                        validate_account_handle_for_channel(channel_type, account_handle).map_err(|e| {
+                            ErrorShape::new(error_codes::INVALID_REQUEST, e)
+                        })?;
+
+                        let key = format!("{}:{}", channel_type, account_handle);
                         let override_cfg = crate::state::TtsRuntimeOverride {
                             provider: ctx
                                 .params
@@ -3930,16 +3989,21 @@ impl MethodRegistry {
                             .or_else(|| ctx.params.get("channel_type"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("telegram");
-                        let account_id = ctx
+                        let account_handle = ctx
                             .params
-                            .get("accountId")
+                            .get("accountHandle")
+                            .or_else(|| ctx.params.get("accountId"))
                             .or_else(|| ctx.params.get("account_id"))
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
-                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing accountId")
+                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing accountHandle")
                             })?;
 
-                        let key = format!("{}:{}", channel_type, account_id);
+                        validate_account_handle_for_channel(channel_type, account_handle).map_err(|e| {
+                            ErrorShape::new(error_codes::INVALID_REQUEST, e)
+                        })?;
+
+                        let key = format!("{}:{}", channel_type, account_handle);
                         ctx.state
                             .inner
                             .write()
@@ -5635,6 +5699,22 @@ mod tests {
 
     fn scopes(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn validate_account_handle_for_channel_rejects_invalid_formats() {
+        assert!(validate_account_handle_for_channel("telegram", "123").is_err());
+        assert!(validate_account_handle_for_channel("telegram", "telegram:").is_err());
+        assert!(validate_account_handle_for_channel("telegram", "discord:123").is_err());
+        assert!(validate_account_handle_for_channel("telegram", "telegram:abc").is_err());
+        assert!(validate_account_handle_for_channel("telegram", "telegram:0").is_err());
+        assert!(validate_account_handle_for_channel("telegram", "telegram:-1").is_err());
+        assert!(validate_account_handle_for_channel("telegram", "telegram:123:456").is_err());
+    }
+
+    #[test]
+    fn validate_account_handle_for_channel_accepts_telegram_numeric_id() {
+        assert!(validate_account_handle_for_channel("telegram", "telegram:123").is_ok());
     }
 
     fn test_voice_provider(id: VoiceProviderId) -> VoiceProviderInfo {

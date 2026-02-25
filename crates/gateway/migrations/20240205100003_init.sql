@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS env_variables (
 
 CREATE TABLE IF NOT EXISTS message_log (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id     TEXT    NOT NULL,
+    account_handle TEXT    NOT NULL,
     channel_type   TEXT    NOT NULL,
     peer_id        TEXT    NOT NULL,
     username       TEXT,
@@ -63,14 +63,14 @@ CREATE TABLE IF NOT EXISTS message_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_message_log_account_created
-    ON message_log (account_id, created_at DESC);
+    ON message_log (account_handle, created_at DESC);
 
 -- ============================================================================
 -- Channels
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS channels (
-    account_id   TEXT    PRIMARY KEY,
+    account_handle TEXT    PRIMARY KEY,
     channel_type TEXT    NOT NULL DEFAULT 'telegram',
     config       TEXT    NOT NULL,
     created_at   INTEGER NOT NULL,

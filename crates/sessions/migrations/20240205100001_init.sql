@@ -22,9 +22,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);
 
 CREATE TABLE IF NOT EXISTS channel_sessions (
     channel_type TEXT    NOT NULL,
-    account_id   TEXT    NOT NULL,
+    account_handle TEXT  NOT NULL,
     chat_id      TEXT    NOT NULL,
-    session_key  TEXT    NOT NULL,
+    session_id   TEXT    NOT NULL,
     updated_at   INTEGER NOT NULL,
-    PRIMARY KEY (channel_type, account_id, chat_id)
+    PRIMARY KEY (channel_type, account_handle, chat_id)
 );

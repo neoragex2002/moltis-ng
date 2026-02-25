@@ -22,7 +22,7 @@ pub async fn get_reply(msg: &MsgContext) -> anyhow::Result<ReplyPayload> {
 
     info!(
         channel = %msg.channel,
-        account_id = %msg.account_id,
+        account_handle = %msg.account_handle,
         from = %msg.from,
         sender = msg.sender_name.as_deref().unwrap_or("unknown"),
         chat_type = ?msg.chat_type,

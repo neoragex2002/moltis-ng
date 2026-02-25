@@ -63,12 +63,12 @@ function loadChannels() {
 }
 
 function loadSenders() {
-	var accountId = sendersAccount.value;
-	if (!accountId) {
+	var accountHandle = sendersAccount.value;
+	if (!accountHandle) {
 		senders.value = [];
 		return;
 	}
-	sendRpc("channels.senders.list", { account_id: accountId }).then((res) => {
+	sendRpc("channels.senders.list", { accountHandle }).then((res) => {
 		if (res?.ok) senders.value = res.payload?.senders || [];
 	});
 }
@@ -120,9 +120,9 @@ function ChannelCard(props) {
 	}
 
 	function onRemove() {
-		requestConfirm(`Remove ${ch.name || ch.account_id}?`).then((yes) => {
+		requestConfirm(`Remove ${ch.name || ch.accountHandle}?`).then((yes) => {
 			if (!yes) return;
-			sendRpc("channels.remove", { account_id: ch.account_id }).then((r) => {
+			sendRpc("channels.remove", { accountHandle: ch.accountHandle }).then((r) => {
 				if (r?.ok) loadChannels();
 			});
 		});
@@ -144,26 +144,26 @@ function ChannelCard(props) {
         <${TelegramIcon} />
       </span>
       <div style="display:flex;flex-direction:column;gap:2px;">
-        <span class="text-sm text-[var(--text-strong)]">${ch.name || ch.account_id || "Telegram"}</span>
+					<span class="text-sm text-[var(--text-strong)]">${ch.name || ch.accountHandle || "Telegram"}</span>
         ${ch.details && html`<span class="text-xs text-[var(--muted)]">${ch.details}</span>`}
         ${sessionLine && html`<span class="text-xs text-[var(--muted)]">${sessionLine}</span>`}
       </div>
       <span class="provider-item-badge ${statusClass}">${ch.status || "unknown"}</span>
     </div>
     <div class="flex gap-2">
-      <button class="provider-btn provider-btn-sm provider-btn-secondary" title="Edit ${ch.account_id || "channel"}"
+					<button class="provider-btn provider-btn-sm provider-btn-secondary" title="Edit ${ch.accountHandle || "channel"}"
         onClick=${() => {
 					editingChannel.value = ch;
 				}}>Edit</button>
-      <button class="provider-btn provider-btn-sm provider-btn-danger" title="Remove ${ch.account_id || "channel"}"
+					<button class="provider-btn provider-btn-sm provider-btn-danger" title="Remove ${ch.accountHandle || "channel"}"
         onClick=${onRemove}>Remove</button>
     </div>
 		<details style="margin-top:10px;">
 			<summary class="text-xs text-[var(--muted)]" style="cursor:pointer;user-select:none;">Details</summary>
 			<div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
-				<${DetailRow} label="account_id" value=${ch.account_id} />
+				<${DetailRow} label="account_handle" value=${ch.accountHandle} />
 				<${DetailRow} label="chan_user_id" value=${cfg.chan_user_id} />
-				<${DetailRow} label="chan_user_name" value=${cfg.chan_user_name ? "@" + cfg.chan_user_name : ""} />
+				<${DetailRow} label="bot_handle" value=${cfg.chan_user_name ? "@" + cfg.chan_user_name : ""} />
 				<${DetailRow} label="chan_nickname" value=${cfg.chan_nickname} />
 				<${DetailRow}
 					label="persona_id"
@@ -182,14 +182,14 @@ function ChannelsTab() {
       <div class="text-xs text-[var(--muted)]">Click "+ Add Telegram Bot" to connect one using a token from @BotFather.</div>
     </div>`;
 	}
-	return html`${channels.value.map((ch) => html`<${ChannelCard} key=${ch.account_id} channel=${ch} />`)}`;
+	return html`${channels.value.map((ch) => html`<${ChannelCard} key=${ch.accountHandle} channel=${ch} />`)}`;
 }
 
 // ── Senders tab ──────────────────────────────────────────────
 function SendersTab() {
 	useEffect(() => {
 		if (channels.value.length > 0 && !sendersAccount.value) {
-			sendersAccount.value = channels.value[0].account_id;
+			sendersAccount.value = channels.value[0].accountHandle;
 		}
 	}, [channels.value]);
 
@@ -204,7 +204,7 @@ function SendersTab() {
 	function onAction(identifier, action) {
 		var rpc = action === "approve" ? "channels.senders.approve" : "channels.senders.deny";
 		sendRpc(rpc, {
-			account_id: sendersAccount.value,
+			accountHandle: sendersAccount.value,
 			identifier: identifier,
 		}).then(() => {
 			loadSenders();
@@ -220,7 +220,7 @@ function SendersTab() {
 					sendersAccount.value = e.target.value;
 				}}>
         ${channels.value.map(
-					(ch) => html`<option key=${ch.account_id} value=${ch.account_id}>${ch.name || ch.account_id}</option>`,
+					(ch) => html`<option key=${ch.accountHandle} value=${ch.accountHandle}>${ch.name || ch.accountHandle}</option>`,
 				)}
       </select>
     </div>
@@ -479,7 +479,7 @@ function EditChannelModal() {
 			if (found?.provider) updateConfig.model_provider = found.provider;
 		}
 		sendRpc("channels.update", {
-			account_id: ch.account_id,
+			accountHandle: ch.accountHandle,
 			config: updateConfig,
 		}).then((res) => {
 			saving.value = false;
@@ -504,7 +504,7 @@ function EditChannelModal() {
 		editingChannel.value = null;
 	}} title="Edit Telegram Bot">
     <div class="channel-form">
-      <div class="text-sm text-[var(--text-strong)]">${ch.name || ch.account_id}</div>
+			<div class="text-sm text-[var(--text-strong)]">${ch.name || ch.accountHandle}</div>
       <label class="text-xs text-[var(--muted)]">Persona ID (optional)</label>
       <input data-field="personaId" type="text" value=${cfg.persona_id || ""} placeholder="e.g. default / ops / research"
         style="font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;"
@@ -565,9 +565,10 @@ function ChannelsPage() {
 			if (p.kind === "otp_resolved") {
 				loadChannels();
 			}
+			var eventAccountHandle = p.accountHandle || p.account_handle;
 			if (
 				activeTab.value === "senders" &&
-				sendersAccount.value === p.account_id &&
+				sendersAccount.value === eventAccountHandle &&
 				(p.kind === "inbound_message" || p.kind === "otp_challenge" || p.kind === "otp_resolved")
 			) {
 				loadSenders();

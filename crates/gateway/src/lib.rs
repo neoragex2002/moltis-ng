@@ -76,6 +76,31 @@ pub(crate) mod test_support;
 /// env_variables, message_log, and channels tables. Should be called at application
 /// startup after the other crate migrations (projects, sessions, cron).
 pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    let channels_cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('channels')")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    if channels_cols.iter().any(|c| c == "account_id")
+        && !channels_cols.iter().any(|c| c == "account_handle")
+    {
+        sqlx::query("ALTER TABLE channels RENAME COLUMN account_id TO account_handle")
+            .execute(pool)
+            .await?;
+    }
+
+    let message_log_cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('message_log')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+    if message_log_cols.iter().any(|c| c == "account_id")
+        && !message_log_cols.iter().any(|c| c == "account_handle")
+    {
+        sqlx::query("ALTER TABLE message_log RENAME COLUMN account_id TO account_handle")
+            .execute(pool)
+            .await?;
+    }
+
     sqlx::migrate!("./migrations")
         .set_ignore_missing(true)
         .run(pool)

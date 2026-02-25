@@ -1,6 +1,7 @@
 //! Shared types, error definitions, and utilities used across all moltis crates.
 
 pub mod error;
+pub mod identity;
 pub mod hooks;
 pub mod types;
 

@@ -69,17 +69,16 @@ impl TelegramPlugin {
         })
     }
 
-    /// List all active account IDs.
-    pub fn account_ids(&self) -> Vec<String> {
+    pub fn account_handles(&self) -> Vec<String> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts.keys().cloned().collect()
     }
 
     /// Get the config for a specific account (serialized to JSON).
-    pub fn account_config(&self, account_id: &str) -> Option<serde_json::Value> {
+    pub fn account_config(&self, account_handle: &str) -> Option<serde_json::Value> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
-            .get(account_id)
+            .get(account_handle)
             .and_then(|s| serde_json::to_value(&s.config).ok())
     }
 
@@ -88,9 +87,9 @@ impl TelegramPlugin {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
             .iter()
-            .map(|(account_id, s)| TelegramBusAccountSnapshot {
-                account_id: account_id.clone(),
-                bot_username: s.bot_username.clone(),
+            .map(|(account_handle, s)| TelegramBusAccountSnapshot {
+                account_handle: account_handle.clone(),
+                chan_user_name: s.bot_username.clone(),
                 relay_chain_enabled: s.config.relay_chain_enabled,
                 relay_hop_limit: s.config.relay_hop_limit,
                 relay_strictness: s.config.relay_strictness.clone(),
@@ -101,22 +100,26 @@ impl TelegramPlugin {
     /// Update the in-memory config for an account without restarting the
     /// polling loop.  Use for allowlist changes that don't need
     /// re-authentication or bot restart.
-    pub fn update_account_config(&self, account_id: &str, config: serde_json::Value) -> Result<()> {
+    pub fn update_account_config(
+        &self,
+        account_handle: &str,
+        config: serde_json::Value,
+    ) -> Result<()> {
         let tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
         let mut accounts = self.accounts.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(state) = accounts.get_mut(account_id) {
+        if let Some(state) = accounts.get_mut(account_handle) {
             state.config = tg_config;
             Ok(())
         } else {
-            Err(anyhow::anyhow!("account not found: {account_id}"))
+            Err(anyhow::anyhow!("account not found: {account_handle}"))
         }
     }
 
     /// List pending OTP challenges for a specific account.
-    pub fn pending_otp_challenges(&self, account_id: &str) -> Vec<crate::otp::OtpChallengeInfo> {
+    pub fn pending_otp_challenges(&self, account_handle: &str) -> Vec<crate::otp::OtpChallengeInfo> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
-            .get(account_id)
+            .get(account_handle)
             .map(|s| {
                 let otp = s.otp.lock().unwrap_or_else(|e| e.into_inner());
                 otp.list_pending()
@@ -141,17 +144,17 @@ impl ChannelPlugin for TelegramPlugin {
         "Telegram"
     }
 
-    async fn start_account(&mut self, account_id: &str, config: serde_json::Value) -> Result<()> {
+    async fn start_account(&mut self, account_handle: &str, config: serde_json::Value) -> Result<()> {
         let tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
 
         if tg_config.token.expose_secret().is_empty() {
             return Err(anyhow::anyhow!("telegram bot token is required"));
         }
 
-        info!(account_id, "starting telegram account");
+        info!(account_handle, "starting telegram account");
 
         bot::start_polling(
-            account_id.to_string(),
+            account_handle.to_string(),
             tg_config,
             Arc::clone(&self.accounts),
             self.message_log.clone(),
@@ -162,19 +165,19 @@ impl ChannelPlugin for TelegramPlugin {
         Ok(())
     }
 
-    async fn stop_account(&mut self, account_id: &str) -> Result<()> {
+    async fn stop_account(&mut self, account_handle: &str) -> Result<()> {
         let cancel = {
             let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
-            accounts.get(account_id).map(|s| s.cancel.clone())
+            accounts.get(account_handle).map(|s| s.cancel.clone())
         };
 
         if let Some(cancel) = cancel {
-            info!(account_id, "stopping telegram account");
+            info!(account_handle, "stopping telegram account");
             cancel.cancel();
             let mut accounts = self.accounts.write().unwrap_or_else(|e| e.into_inner());
-            accounts.remove(account_id);
+            accounts.remove(account_handle);
         } else {
-            warn!(account_id, "telegram account not found");
+            warn!(account_handle, "telegram account not found");
         }
 
         Ok(())
@@ -191,10 +194,10 @@ impl ChannelPlugin for TelegramPlugin {
 
 #[async_trait]
 impl ChannelStatus for TelegramPlugin {
-    async fn probe(&self, account_id: &str) -> Result<ChannelHealthSnapshot> {
+    async fn probe(&self, account_handle: &str) -> Result<ChannelHealthSnapshot> {
         // Return cached result if fresh enough.
         if let Ok(cache) = self.probe_cache.read()
-            && let Some((snap, ts)) = cache.get(account_id)
+            && let Some((snap, ts)) = cache.get(account_handle)
             && ts.elapsed() < PROBE_CACHE_TTL
         {
             return Ok(snap.clone());
@@ -202,14 +205,14 @@ impl ChannelStatus for TelegramPlugin {
 
         let bot = {
             let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
-            accounts.get(account_id).map(|s| s.bot.clone())
+            accounts.get(account_handle).map(|s| s.bot.clone())
         };
 
         let result = match bot {
             Some(bot) => match bot.get_me().await {
                 Ok(me) => ChannelHealthSnapshot {
                     connected: true,
-                    account_id: account_id.to_string(),
+                    account_handle: account_handle.to_string(),
                     details: Some(format!(
                         "Bot: @{}",
                         me.username.as_deref().unwrap_or("unknown")
@@ -217,19 +220,19 @@ impl ChannelStatus for TelegramPlugin {
                 },
                 Err(e) => ChannelHealthSnapshot {
                     connected: false,
-                    account_id: account_id.to_string(),
+                    account_handle: account_handle.to_string(),
                     details: Some(format!("API error: {e}")),
                 },
             },
             None => ChannelHealthSnapshot {
                 connected: false,
-                account_id: account_id.to_string(),
+                account_handle: account_handle.to_string(),
                 details: Some("account not started".into()),
             },
         };
 
         if let Ok(mut cache) = self.probe_cache.write() {
-            cache.insert(account_id.to_string(), (result.clone(), Instant::now()));
+            cache.insert(account_handle.to_string(), (result.clone(), Instant::now()));
         }
 
         Ok(result)
@@ -253,7 +256,7 @@ mod tests {
             bot: teloxide::Bot::new("test:fake_token_for_unit_tests"),
             bot_user_id: None,
             bot_username: Some("test_bot".into()),
-            account_id: "test".into(),
+            account_handle: "telegram:test".into(),
             config: TelegramAccountConfig {
                 token: Secret::new("test:fake_token_for_unit_tests".into()),
                 ..Default::default()

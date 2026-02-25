@@ -28,29 +28,33 @@ pub struct TelegramOutbound {
 }
 
 impl TelegramOutbound {
-    fn get_bot(&self, account_id: &str) -> Result<teloxide::Bot> {
+    fn get_bot(&self, account_handle: &str) -> Result<teloxide::Bot> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
-            .get(account_id)
+            .get(account_handle)
             .map(|s| s.bot.clone())
-            .ok_or_else(|| anyhow::anyhow!("unknown account: {account_id}"))
+            .ok_or_else(|| anyhow::anyhow!("unknown account: {account_handle}"))
     }
 
-    fn reply_params(&self, _account_id: &str, reply_to: Option<&str>) -> Option<ReplyParameters> {
+    fn reply_params(
+        &self,
+        _account_handle: &str,
+        reply_to: Option<&str>,
+    ) -> Option<ReplyParameters> {
         parse_reply_params(reply_to)
     }
 
     async fn send_text_inner(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
         silent: bool,
     ) -> Result<Option<MessageId>> {
-        let bot = self.get_bot(account_id)?;
+        let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        let rp = self.reply_params(account_id, reply_to);
+        let rp = self.reply_params(account_handle, reply_to);
 
         // Send typing indicator
         if !silent {
@@ -60,7 +64,7 @@ impl TelegramOutbound {
         let html = markdown::markdown_to_telegram_html(text);
         let chunks = markdown::chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
         info!(
-            account_id,
+            account_handle,
             chat_id = to,
             reply_to = ?reply_to,
             text_len = text.len(),
@@ -88,7 +92,7 @@ impl TelegramOutbound {
         }
 
         info!(
-            account_id,
+            account_handle,
             chat_id = to,
             reply_to = ?reply_to,
             text_len = text.len(),
@@ -101,15 +105,15 @@ impl TelegramOutbound {
 
     async fn send_text_with_suffix_inner(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         suffix_html: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<MessageId>> {
-        let bot = self.get_bot(account_id)?;
+        let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        let rp = self.reply_params(account_id, reply_to);
+        let rp = self.reply_params(account_handle, reply_to);
 
         // Send typing indicator
         let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
@@ -120,7 +124,7 @@ impl TelegramOutbound {
         let chunks = markdown::chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
         let last_idx = chunks.len().saturating_sub(1);
         info!(
-            account_id,
+            account_handle,
             chat_id = to,
             reply_to = ?reply_to,
             text_len = text.len(),
@@ -158,7 +162,7 @@ impl TelegramOutbound {
                         .await?;
 
                     info!(
-                        account_id,
+                        account_handle,
                         chat_id = to,
                         reply_to = ?reply_to,
                         text_len = text.len(),
@@ -186,7 +190,7 @@ impl TelegramOutbound {
         }
 
         info!(
-            account_id,
+            account_handle,
             chat_id = to,
             reply_to = ?reply_to,
             text_len = text.len(),
@@ -199,21 +203,21 @@ impl TelegramOutbound {
 
     async fn send_media_inner(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         payload: &ReplyPayload,
         reply_to: Option<&str>,
     ) -> Result<Option<MessageId>> {
-        let bot = self.get_bot(account_id)?;
+        let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        let rp = self.reply_params(account_id, reply_to);
+        let rp = self.reply_params(account_handle, reply_to);
         let media_mime = payload
             .media
             .as_ref()
             .map(|m| m.mime_type.as_str())
             .unwrap_or("none");
         info!(
-            account_id,
+            account_handle,
             chat_id = to,
             reply_to = ?reply_to,
             has_media = payload.media.is_some(),
@@ -264,7 +268,7 @@ impl TelegramOutbound {
                     match req.await {
                         Ok(sent) => {
                             info!(
-                                account_id,
+                                account_handle,
                                 chat_id = to,
                                 reply_to = ?reply_to,
                                 media_mime = %media.mime_type,
@@ -293,7 +297,7 @@ impl TelegramOutbound {
                                 }
                                 let sent = req.await?;
                                 info!(
-                                    account_id,
+                                    account_handle,
                                     chat_id = to,
                                     reply_to = ?reply_to,
                                     media_mime = %media.mime_type,
@@ -319,7 +323,7 @@ impl TelegramOutbound {
                     }
                     let sent = req.await?;
                     info!(
-                        account_id,
+                        account_handle,
                         chat_id = to,
                         reply_to = ?reply_to,
                         media_mime = %media.mime_type,
@@ -339,7 +343,7 @@ impl TelegramOutbound {
                     }
                     let sent = req.await?;
                     info!(
-                        account_id,
+                        account_handle,
                         chat_id = to,
                         reply_to = ?reply_to,
                         media_mime = %media.mime_type,
@@ -359,7 +363,7 @@ impl TelegramOutbound {
                 }
                 let sent = req.await?;
                 info!(
-                    account_id,
+                    account_handle,
                     chat_id = to,
                     reply_to = ?reply_to,
                     media_mime = %media.mime_type,
@@ -382,7 +386,7 @@ impl TelegramOutbound {
                     }
                     let sent = req.await?;
                     info!(
-                        account_id,
+                        account_handle,
                         chat_id = to,
                         reply_to = ?reply_to,
                         media_mime = %media.mime_type,
@@ -401,7 +405,7 @@ impl TelegramOutbound {
                     }
                     let sent = req.await?;
                     info!(
-                        account_id,
+                        account_handle,
                         chat_id = to,
                         reply_to = ?reply_to,
                         media_mime = %media.mime_type,
@@ -420,7 +424,7 @@ impl TelegramOutbound {
                     }
                     let sent = req.await?;
                     info!(
-                        account_id,
+                        account_handle,
                         chat_id = to,
                         reply_to = ?reply_to,
                         media_mime = %media.mime_type,
@@ -439,7 +443,7 @@ impl TelegramOutbound {
                     }
                     let sent = req.await?;
                     info!(
-                        account_id,
+                        account_handle,
                         chat_id = to,
                         reply_to = ?reply_to,
                         media_mime = %media.mime_type,
@@ -454,7 +458,7 @@ impl TelegramOutbound {
 
         if !payload.text.is_empty() {
             let sent = self
-                .send_text_inner(account_id, to, &payload.text, reply_to, false)
+                .send_text_inner(account_handle, to, &payload.text, reply_to, false)
                 .await?;
             return Ok(sent);
         }
@@ -464,18 +468,18 @@ impl TelegramOutbound {
 
     async fn send_location_inner(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         latitude: f64,
         longitude: f64,
         title: Option<&str>,
         reply_to: Option<&str>,
     ) -> Result<Option<MessageId>> {
-        let bot = self.get_bot(account_id)?;
+        let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        let rp = self.reply_params(account_id, reply_to);
+        let rp = self.reply_params(account_handle, reply_to);
         info!(
-            account_id,
+            account_handle,
             chat_id = to,
             reply_to = ?reply_to,
             latitude,
@@ -501,7 +505,7 @@ impl TelegramOutbound {
         };
 
         info!(
-            account_id,
+            account_handle,
             chat_id = to,
             reply_to = ?reply_to,
             latitude,
@@ -525,26 +529,26 @@ fn parse_reply_params(reply_to: Option<&str>) -> Option<ReplyParameters> {
 impl ChannelOutbound for TelegramOutbound {
     async fn send_text(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_text_inner(account_id, to, text, reply_to, false)
+            .send_text_inner(account_handle, to, text, reply_to, false)
             .await?;
         Ok(())
     }
 
     async fn send_text_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_text_inner(account_id, to, text, reply_to, false)
+            .send_text_inner(account_handle, to, text, reply_to, false)
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
@@ -553,36 +557,36 @@ impl ChannelOutbound for TelegramOutbound {
 
     async fn send_text_with_suffix(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         suffix_html: &str,
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_text_with_suffix_inner(account_id, to, text, suffix_html, reply_to)
+            .send_text_with_suffix_inner(account_handle, to, text, suffix_html, reply_to)
             .await?;
         Ok(())
     }
 
     async fn send_text_with_suffix_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         suffix_html: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_text_with_suffix_inner(account_id, to, text, suffix_html, reply_to)
+            .send_text_with_suffix_inner(account_handle, to, text, suffix_html, reply_to)
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
         }))
     }
 
-    async fn send_typing(&self, account_id: &str, to: &str) -> Result<()> {
-        let bot = self.get_bot(account_id)?;
+    async fn send_typing(&self, account_handle: &str, to: &str) -> Result<()> {
+        let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
         Ok(())
@@ -590,26 +594,26 @@ impl ChannelOutbound for TelegramOutbound {
 
     async fn send_text_silent(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_text_inner(account_id, to, text, reply_to, true)
+            .send_text_inner(account_handle, to, text, reply_to, true)
             .await?;
         Ok(())
     }
 
     async fn send_text_silent_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_text_inner(account_id, to, text, reply_to, true)
+            .send_text_inner(account_handle, to, text, reply_to, true)
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
@@ -618,26 +622,26 @@ impl ChannelOutbound for TelegramOutbound {
 
     async fn send_media(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         payload: &ReplyPayload,
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_media_inner(account_id, to, payload, reply_to)
+            .send_media_inner(account_handle, to, payload, reply_to)
             .await?;
         Ok(())
     }
 
     async fn send_media_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         payload: &ReplyPayload,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_media_inner(account_id, to, payload, reply_to)
+            .send_media_inner(account_handle, to, payload, reply_to)
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
@@ -646,7 +650,7 @@ impl ChannelOutbound for TelegramOutbound {
 
     async fn send_location(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         latitude: f64,
         longitude: f64,
@@ -654,14 +658,14 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_location_inner(account_id, to, latitude, longitude, title, reply_to)
+            .send_location_inner(account_handle, to, latitude, longitude, title, reply_to)
             .await?;
         Ok(())
     }
 
     async fn send_location_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         latitude: f64,
         longitude: f64,
@@ -669,7 +673,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_location_inner(account_id, to, latitude, longitude, title, reply_to)
+            .send_location_inner(account_handle, to, latitude, longitude, title, reply_to)
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
@@ -718,17 +722,17 @@ impl TelegramOutbound {
 impl ChannelStreamOutbound for TelegramOutbound {
     async fn send_stream(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         mut stream: StreamReceiver,
     ) -> Result<()> {
-        let bot = self.get_bot(account_id)?;
+        let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
 
         let throttle_ms = {
             let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
             accounts
-                .get(account_id)
+                .get(account_handle)
                 .map(|s| s.config.edit_throttle_ms)
                 .unwrap_or(300)
         };

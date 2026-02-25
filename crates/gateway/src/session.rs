@@ -107,6 +107,40 @@ fn extract_preview(history: &[Value]) -> Option<String> {
     Some(truncate_preview(&combined, MAX))
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ChannelReplyTargetCompat {
+    pub channel_type: moltis_channels::ChannelType,
+    #[serde(alias = "account_id")]
+    pub account_handle: String,
+    pub chat_id: String,
+}
+
+/// Derive the deterministic channel session key used for sandbox routing
+/// from a persisted `channel_binding` JSON blob (best-effort).
+///
+/// This key is intentionally *not* the opaque persistent `session:<uuid>`.
+pub(crate) fn sandbox_session_key_for_channel_binding(binding_json: &str) -> Option<String> {
+    let target: ChannelReplyTargetCompat = serde_json::from_str(binding_json).ok()?;
+    let chan_user_id = moltis_common::identity::chan_user_id_from_account_handle(
+        &target.account_handle,
+        Some(target.channel_type.as_str()),
+    )?;
+    Some(moltis_common::identity::format_session_key(
+        target.channel_type.as_str(),
+        chan_user_id,
+        &target.chat_id,
+        None,
+    ))
+}
+
+pub(crate) fn sandbox_router_key_for_entry(entry: &moltis_sessions::metadata::SessionEntry) -> String {
+    entry
+        .channel_binding
+        .as_deref()
+        .and_then(sandbox_session_key_for_channel_binding)
+        .unwrap_or_else(|| entry.key.clone())
+}
+
 /// Live session service backed by JSONL store + SQLite metadata.
 pub struct LiveSessionService {
     store: Arc<SessionStore>,
@@ -173,9 +207,9 @@ impl SessionService for LiveSessionService {
                     serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
                 {
                     self.metadata
-                        .get_active_session(
+                        .get_active_session_id(
                             target.channel_type.as_str(),
-                            &target.account_id,
+                            &target.account_handle,
                             &target.chat_id,
                         )
                         .await
@@ -349,12 +383,16 @@ impl SessionService for LiveSessionService {
             self.metadata
                 .set_sandbox_image(key, sandbox_image.clone())
                 .await;
+            let router_key = match self.metadata.get(key).await {
+                Some(entry) => sandbox_router_key_for_entry(&entry),
+                None => key.to_string(),
+            };
             // Push image override to sandbox router.
             if let Some(ref router) = self.sandbox_router {
                 if let Some(ref img) = sandbox_image {
-                    router.set_image_override(key, img.clone()).await;
+                    router.set_image_override(&router_key, img.clone()).await;
                 } else {
-                    router.remove_image_override(key).await;
+                    router.remove_image_override(&router_key).await;
                 }
             }
         }
@@ -371,12 +409,16 @@ impl SessionService for LiveSessionService {
             self.metadata
                 .set_sandbox_enabled(key, sandbox_enabled)
                 .await;
+            let router_key = match self.metadata.get(key).await {
+                Some(entry) => sandbox_router_key_for_entry(&entry),
+                None => key.to_string(),
+            };
             // Push override to sandbox router.
             if let Some(ref router) = self.sandbox_router {
                 if let Some(enabled) = sandbox_enabled {
-                    router.set_override(key, enabled).await;
+                    router.set_override(&router_key, enabled).await;
                 } else {
-                    router.remove_override(key).await;
+                    router.remove_override(&router_key).await;
                 }
             }
         }
@@ -427,8 +469,10 @@ impl SessionService for LiveSessionService {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let deleted_entry = self.metadata.get(key).await;
+
         // Check for worktree cleanup before deleting metadata.
-        if let Some(entry) = self.metadata.get(key).await
+        if let Some(entry) = deleted_entry.as_ref()
             && entry.worktree_branch.is_some()
             && let Some(ref project_id) = entry.project_id
             && let Some(ref project_store) = self.project_store
@@ -467,20 +511,24 @@ impl SessionService for LiveSessionService {
         self.store.clear(key).await.map_err(|e| e.to_string())?;
 
         // Clean up sandbox resources for this session.
+        let deleted_router_key = deleted_entry
+            .as_ref()
+            .map(sandbox_router_key_for_entry)
+            .unwrap_or_else(|| key.to_string());
         let deleted_effective_sandbox_key = self
             .sandbox_router
             .as_ref()
-            .map(|r| r.effective_sandbox_key(key));
+            .map(|r| r.effective_sandbox_key(&deleted_router_key));
         if let Some(ref router) = self.sandbox_router {
             match router.config().scope {
                 moltis_tools::sandbox::SandboxScope::Session => {
-                    if let Err(e) = router.cleanup_session(key).await {
-                        tracing::warn!("sandbox cleanup for session {key}: {e}");
+                    if let Err(e) = router.cleanup_session(&deleted_router_key).await {
+                        tracing::warn!("sandbox cleanup for session {deleted_router_key}: {e}");
                     }
                 },
                 _ => {
                     // Shared scopes: only clean up per-session override state here.
-                    router.cleanup_session_state(key).await;
+                    router.cleanup_session_state(&deleted_router_key).await;
                 },
             }
         }
@@ -504,10 +552,11 @@ impl SessionService for LiveSessionService {
             let remaining_entries = self.metadata.list().await;
             let mut remaining_refs = 0usize;
             for entry in remaining_entries {
-                if router.effective_sandbox_key(&entry.key) != *deleted_key {
+                let router_key = sandbox_router_key_for_entry(&entry);
+                if router.effective_sandbox_key(&router_key) != *deleted_key {
                     continue;
                 }
-                if router.is_sandboxed(&entry.key).await {
+                if router.is_sandboxed(&router_key).await {
                     remaining_refs += 1;
                 }
             }
@@ -730,6 +779,24 @@ impl SessionService for LiveSessionService {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_session_key_for_channel_binding_parses_account_handle() {
+        let binding = r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#;
+        assert_eq!(
+            sandbox_session_key_for_channel_binding(binding),
+            Some("telegram:bot1:123".to_string())
+        );
+    }
+
+    #[test]
+    fn sandbox_session_key_for_channel_binding_parses_legacy_account_id() {
+        let binding = r#"{"channel_type":"telegram","account_id":"telegram:bot1","chat_id":"123"}"#;
+        assert_eq!(
+            sandbox_session_key_for_channel_binding(binding),
+            Some("telegram:bot1:123".to_string())
+        );
+    }
 
     #[test]
     fn filter_ui_history_removes_empty_assistant_messages() {

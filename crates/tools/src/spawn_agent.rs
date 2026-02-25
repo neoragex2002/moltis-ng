@@ -220,6 +220,9 @@ impl AgentTool for SpawnAgentTool {
         if let Some(session_key) = params.get("_session_key") {
             tool_context["_session_key"] = session_key.clone();
         }
+        if let Some(session_id) = params.get("_session_id") {
+            tool_context["_session_id"] = session_id.clone();
+        }
 
         // Run the sub-agent loop (no event forwarding, no hooks, no history).
         let user_text = if context.trim().is_empty() {

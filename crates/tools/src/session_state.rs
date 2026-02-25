@@ -73,9 +73,12 @@ impl AgentTool for SessionStateTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'namespace' parameter"))?;
 
+        // Prefer persistent session id when provided by the gateway (e.g. channel sessions),
+        // but fall back to the deterministic session key for older callers.
         let session_key = params
-            .get("_session_key")
+            .get("_session_id")
             .and_then(|v| v.as_str())
+            .or_else(|| params.get("_session_key").and_then(|v| v.as_str()))
             .ok_or_else(|| anyhow::anyhow!("missing session context"))?;
 
         match operation {
@@ -178,6 +181,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["value"], "42");
+    }
+
+    #[tokio::test]
+    async fn prefers_session_id_when_present() {
+        let pool = test_pool().await;
+        let tool = make_tool(pool);
+
+        // Store under session_id even if the deterministic session key differs.
+        tool.execute(json!({
+            "operation": "set",
+            "namespace": "ns",
+            "key": "k",
+            "value": "v",
+            "_session_key": "telegram:bot1:123",
+            "_session_id": "session:1",
+        }))
+        .await
+        .unwrap();
+
+        // Read back using a different deterministic key but the same session_id.
+        let result = tool
+            .execute(json!({
+                "operation": "get",
+                "namespace": "ns",
+                "key": "k",
+                "_session_key": "telegram:bot1:999",
+                "_session_id": "session:1",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["value"], "v");
     }
 
     #[tokio::test]

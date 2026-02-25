@@ -23,6 +23,27 @@ pub use {
 /// at application startup after [`moltis_projects::run_migrations`] (sessions
 /// has a foreign key to projects).
 pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('channel_sessions')")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+    if cols.iter().any(|c| c == "session_key") && !cols.iter().any(|c| c == "session_id") {
+        sqlx::query("ALTER TABLE channel_sessions RENAME COLUMN session_key TO session_id")
+            .execute(pool)
+            .await?;
+    }
+
+    let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('channel_sessions')")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    if cols.iter().any(|c| c == "account_id") && !cols.iter().any(|c| c == "account_handle") {
+        sqlx::query("ALTER TABLE channel_sessions RENAME COLUMN account_id TO account_handle")
+            .execute(pool)
+            .await?;
+    }
+
     sqlx::migrate!("./migrations")
         .set_ignore_missing(true)
         .run(pool)

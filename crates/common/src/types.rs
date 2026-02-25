@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Unique identifier for an agent.
 pub type AgentId = String;
 
-/// Unique identifier for a channel account.
-pub type AccountId = String;
+pub type AccountHandle = String;
 
 /// Unique identifier for a peer (user on a channel).
 pub type PeerId = String;
@@ -28,7 +27,7 @@ pub struct MsgContext {
     pub from: PeerId,
     pub to: String,
     pub channel: ChannelId,
-    pub account_id: AccountId,
+    pub account_handle: AccountHandle,
     pub chat_type: ChatType,
     pub session_key: String,
     pub reply_to_id: Option<String>,

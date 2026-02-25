@@ -18,7 +18,7 @@ pub struct AccountState {
     /// Bot user id returned by `get_me()` (used for stable reply-to-bot checks).
     pub bot_user_id: Option<teloxide::types::UserId>,
     pub bot_username: Option<String>,
-    pub account_id: String,
+    pub account_handle: String,
     pub config: TelegramAccountConfig,
     pub outbound: Arc<TelegramOutbound>,
     pub cancel: CancellationToken,

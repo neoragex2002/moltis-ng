@@ -2202,9 +2202,9 @@ function SummaryStep({ onBack, onFinish }) {
 						${data.channels.map((ch) => {
 							var statusColor =
 								ch.status === "connected" ? "var(--ok)" : ch.status === "error" ? "var(--error)" : "var(--warn)";
-							return html`<div key=${ch.account_id} class="flex items-center gap-1">
+							return html`<div key=${ch.accountHandle} class="flex items-center gap-1">
 								<span style="color:${statusColor}">\u25CF</span>
-								<span class="font-medium text-[var(--text)]">${ch.type}</span>: ${ch.name || ch.account_id}
+								<span class="font-medium text-[var(--text)]">${ch.type}</span>: ${ch.name || ch.accountHandle}
 								<span>(${ch.status})</span>
 							</div>`;
 						})}

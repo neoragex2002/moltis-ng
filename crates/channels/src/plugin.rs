@@ -46,7 +46,7 @@ impl std::str::FromStr for ChannelType {
 pub enum ChannelEvent {
     InboundMessage {
         channel_type: ChannelType,
-        account_id: String,
+        account_handle: String,
         peer_id: String,
         username: Option<String>,
         sender_name: Option<String>,
@@ -56,13 +56,13 @@ pub enum ChannelEvent {
     /// A channel account was automatically disabled due to a runtime error.
     AccountDisabled {
         channel_type: ChannelType,
-        account_id: String,
+        account_handle: String,
         reason: String,
     },
     /// An OTP challenge was issued to a non-allowlisted DM user.
     OtpChallenge {
         channel_type: ChannelType,
-        account_id: String,
+        account_handle: String,
         peer_id: String,
         username: Option<String>,
         sender_name: Option<String>,
@@ -72,7 +72,7 @@ pub enum ChannelEvent {
     /// An OTP challenge was resolved (approved, locked out, or expired).
     OtpResolved {
         channel_type: ChannelType,
-        account_id: String,
+        account_handle: String,
         peer_id: String,
         username: Option<String>,
         resolution: String,
@@ -120,7 +120,7 @@ pub trait ChannelEventSink: Send + Sync {
     ///
     /// This is used when the polling loop detects an unrecoverable error
     /// (e.g. another bot instance is running with the same token).
-    async fn request_disable_account(&self, channel_type: &str, account_id: &str, reason: &str);
+    async fn request_disable_account(&self, channel_type: &str, account_handle: &str, reason: &str);
 
     /// Request adding a sender to the allowlist (OTP self-approval).
     ///
@@ -129,7 +129,7 @@ pub trait ChannelEventSink: Send + Sync {
     async fn request_sender_approval(
         &self,
         _channel_type: &str,
-        _account_id: &str,
+        _account_handle: &str,
         _identifier: &str,
     ) {
     }
@@ -219,11 +219,9 @@ pub struct ChannelAttachment {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChannelReplyTarget {
     pub channel_type: ChannelType,
-    pub account_id: String,
-    /// Optional human-friendly handle for this channel account (e.g. Telegram `@my_bot`).
-    /// Used for debugging and prompt runtime context; not required for routing.
+    pub account_handle: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub account_handle: Option<String>,
+    pub bot_handle: Option<String>,
     /// Chat/peer ID to send the reply to.
     pub chat_id: String,
     /// Platform-specific message ID of the inbound message.
@@ -242,10 +240,10 @@ pub trait ChannelPlugin: Send + Sync {
     fn name(&self) -> &str;
 
     /// Start an account connection.
-    async fn start_account(&mut self, account_id: &str, config: serde_json::Value) -> Result<()>;
+    async fn start_account(&mut self, account_handle: &str, config: serde_json::Value) -> Result<()>;
 
     /// Stop an account connection.
-    async fn stop_account(&mut self, account_id: &str) -> Result<()>;
+    async fn stop_account(&mut self, account_handle: &str) -> Result<()>;
 
     /// Get outbound adapter for sending messages.
     fn outbound(&self) -> Option<&dyn ChannelOutbound>;
@@ -262,7 +260,7 @@ pub trait ChannelPlugin: Send + Sync {
 pub trait ChannelOutbound: Send + Sync {
     async fn send_text(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
@@ -277,18 +275,18 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation calls `send_text()` and returns `None`.
     async fn send_text_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
-        self.send_text(account_id, to, text, reply_to).await?;
+        self.send_text(account_handle, to, text, reply_to).await?;
         Ok(None)
     }
 
     async fn send_media(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         payload: &ReplyPayload,
         reply_to: Option<&str>,
@@ -299,16 +297,16 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation calls `send_media()` and returns `None`.
     async fn send_media_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         payload: &ReplyPayload,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
-        self.send_media(account_id, to, payload, reply_to).await?;
+        self.send_media(account_handle, to, payload, reply_to).await?;
         Ok(None)
     }
     /// Send a "typing" indicator. No-op by default.
-    async fn send_typing(&self, _account_id: &str, _to: &str) -> Result<()> {
+    async fn send_typing(&self, _account_handle: &str, _to: &str) -> Result<()> {
         Ok(())
     }
     /// Send a text message with a pre-formatted HTML suffix appended after the main
@@ -316,14 +314,14 @@ pub trait ChannelOutbound: Send + Sync {
     /// The default implementation ignores the suffix and calls `send_text`.
     async fn send_text_with_suffix(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         suffix_html: &str,
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = suffix_html;
-        self.send_text(account_id, to, text, reply_to).await
+        self.send_text(account_handle, to, text, reply_to).await
     }
 
     /// Like `send_text_with_suffix`, but returns a best-effort sent message ref.
@@ -331,24 +329,24 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation falls back to `send_text_with_ref` (ignores suffix).
     async fn send_text_with_suffix_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         suffix_html: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let _ = suffix_html;
-        self.send_text_with_ref(account_id, to, text, reply_to).await
+        self.send_text_with_ref(account_handle, to, text, reply_to).await
     }
     /// Send a text message without notification (silent). Falls back to send_text by default.
     async fn send_text_silent(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<()> {
-        self.send_text(account_id, to, text, reply_to).await
+        self.send_text(account_handle, to, text, reply_to).await
     }
 
     /// Like `send_text_silent`, but returns a best-effort sent message ref.
@@ -356,12 +354,12 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation falls back to `send_text_with_ref`.
     async fn send_text_silent_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
-        self.send_text_with_ref(account_id, to, text, reply_to).await
+        self.send_text_with_ref(account_handle, to, text, reply_to).await
     }
     /// Send a native location pin to the channel.
     ///
@@ -373,14 +371,14 @@ pub trait ChannelOutbound: Send + Sync {
     /// location pins are unaffected.
     async fn send_location(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         latitude: f64,
         longitude: f64,
         title: Option<&str>,
         reply_to: Option<&str>,
     ) -> Result<()> {
-        let _ = (account_id, to, latitude, longitude, title, reply_to);
+        let _ = (account_handle, to, latitude, longitude, title, reply_to);
         Ok(())
     }
 
@@ -389,14 +387,14 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation calls `send_location()` and returns `None`.
     async fn send_location_with_ref(
         &self,
-        account_id: &str,
+        account_handle: &str,
         to: &str,
         latitude: f64,
         longitude: f64,
         title: Option<&str>,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
-        self.send_location(account_id, to, latitude, longitude, title, reply_to)
+        self.send_location(account_handle, to, latitude, longitude, title, reply_to)
             .await?;
         Ok(None)
     }
@@ -411,14 +409,14 @@ pub struct SentMessageRef {
 /// Probe channel account health.
 #[async_trait]
 pub trait ChannelStatus: Send + Sync {
-    async fn probe(&self, account_id: &str) -> Result<ChannelHealthSnapshot>;
+    async fn probe(&self, account_handle: &str) -> Result<ChannelHealthSnapshot>;
 }
 
 /// Channel health snapshot.
 #[derive(Debug, Clone)]
 pub struct ChannelHealthSnapshot {
     pub connected: bool,
-    pub account_id: String,
+    pub account_handle: String,
     pub details: Option<String>,
 }
 
@@ -443,7 +441,7 @@ pub type StreamSender = mpsc::Sender<StreamEvent>;
 #[async_trait]
 pub trait ChannelStreamOutbound: Send + Sync {
     /// Send a streaming response that updates a message in place.
-    async fn send_stream(&self, account_id: &str, to: &str, stream: StreamReceiver) -> Result<()>;
+    async fn send_stream(&self, account_handle: &str, to: &str, stream: StreamReceiver) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -483,7 +481,7 @@ mod tests {
         async fn request_disable_account(
             &self,
             _channel_type: &str,
-            _account_id: &str,
+            _account_handle: &str,
             _reason: &str,
         ) {
         }
@@ -500,8 +498,8 @@ mod tests {
         let sink = DummySink;
         let target = ChannelReplyTarget {
             channel_type: ChannelType::Telegram,
-            account_id: "bot1".into(),
-            account_handle: None,
+            account_handle: "telegram:1".into(),
+            bot_handle: None,
             chat_id: "42".into(),
             message_id: None,
         };
@@ -514,7 +512,7 @@ mod tests {
     impl ChannelOutbound for DummyOutbound {
         async fn send_text(
             &self,
-            _account_id: &str,
+            _account_handle: &str,
             _to: &str,
             _text: &str,
             _reply_to: Option<&str>,
@@ -524,7 +522,7 @@ mod tests {
 
         async fn send_media(
             &self,
-            _account_id: &str,
+            _account_handle: &str,
             _to: &str,
             _payload: &ReplyPayload,
             _reply_to: Option<&str>,

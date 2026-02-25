@@ -368,7 +368,14 @@ impl moltis_agents::tool_registry::AgentTool for LocationTool {
         if let Some(session_key) = params.get("_session_key").and_then(|v| v.as_str())
             && (session_key.starts_with("telegram:") || session_key.starts_with("discord:"))
         {
-            let result = self.requester.request_channel_location(session_key).await?;
+            // Use the persistent session id for tool ↔ gateway coordination (pending invokes,
+            // session metadata), while still using the deterministic channel session key for
+            // detecting channel origin.
+            let request_key = params
+                .get("_session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(session_key);
+            let result = self.requester.request_channel_location(request_key).await?;
             return match result.location {
                 Some(loc) => {
                     let geocoded = reverse_geocode(loc.latitude, loc.longitude).await;
@@ -440,6 +447,35 @@ mod tests {
                     error: Some(LocationError::NotSupported),
                 }),
             }
+        }
+    }
+
+    /// Requester that captures the argument used for channel location requests.
+    struct ChannelArgCapturingRequester {
+        seen: std::sync::Mutex<Option<String>>,
+        response: LocationResult,
+    }
+
+    #[async_trait]
+    impl LocationRequester for ChannelArgCapturingRequester {
+        async fn request_location(
+            &self,
+            _conn_id: &str,
+            _precision: LocationPrecision,
+        ) -> Result<LocationResult> {
+            Ok(LocationResult {
+                location: None,
+                error: None,
+            })
+        }
+
+        fn cached_location(&self) -> Option<GeoLocation> {
+            None
+        }
+
+        async fn request_channel_location(&self, session_key: &str) -> Result<LocationResult> {
+            *self.seen.lock().unwrap() = Some(session_key.to_string());
+            Ok(self.response.clone())
         }
     }
 
@@ -626,6 +662,35 @@ mod tests {
         assert_eq!(result["latitude"], 51.5074);
         assert_eq!(result["longitude"], -0.1278);
         assert_eq!(result["source"], "channel");
+    }
+
+    #[tokio::test]
+    async fn channel_location_uses_session_id_for_gateway_coordination() {
+        let req = Arc::new(ChannelArgCapturingRequester {
+            seen: std::sync::Mutex::new(None),
+            response: LocationResult {
+                location: Some(BrowserLocation {
+                    latitude: 1.0,
+                    longitude: 2.0,
+                    accuracy: 0.0,
+                }),
+                error: None,
+            },
+        });
+        let tool = LocationTool::new(req.clone());
+
+        let _ = tool
+            .execute(serde_json::json!({
+                "_session_key": "telegram:bot1:12345",
+                "_session_id": "session:abc",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *req.seen.lock().unwrap(),
+            Some("session:abc".to_string())
+        );
     }
 
     #[tokio::test]

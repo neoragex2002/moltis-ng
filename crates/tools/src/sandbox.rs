@@ -2317,8 +2317,11 @@ impl SandboxRouter {
             SandboxScope::Chat => {
                 if let Some((channel, _account, chat)) = parse_channel_session_key(session_key) {
                     // V1: Keep DM behavior stable — do not apply chat-scope to Telegram DMs.
-                    if channel == "telegram" && chat.starts_with("dm:") {
-                        return session_key.to_string();
+                    if channel == "telegram" {
+                        let chat_id = chat.split(':').next().unwrap_or("");
+                        if !chat_id.starts_with('-') {
+                            return session_key.to_string();
+                        }
                     }
                     format!("{channel}:chat:{chat}")
                 } else {

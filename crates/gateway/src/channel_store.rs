@@ -5,7 +5,7 @@ use moltis_channels::store::{ChannelStore, StoredChannel};
 /// Internal row type for sqlx mapping.
 #[derive(sqlx::FromRow)]
 struct ChannelRow {
-    account_id: String,
+    account_handle: String,
     channel_type: String,
     config: String,
     created_at: i64,
@@ -17,7 +17,7 @@ impl TryFrom<ChannelRow> for StoredChannel {
 
     fn try_from(r: ChannelRow) -> Result<Self> {
         Ok(Self {
-            account_id: r.account_id,
+            account_handle: r.account_handle,
             channel_type: r.channel_type,
             config: serde_json::from_str(&r.config)?,
             created_at: r.created_at,
@@ -44,7 +44,7 @@ impl SqliteChannelStore {
     pub async fn init(pool: &SqlitePool) -> Result<()> {
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS channels (
-                account_id   TEXT    PRIMARY KEY,
+                account_handle TEXT   PRIMARY KEY,
                 channel_type TEXT    NOT NULL DEFAULT 'telegram',
                 config       TEXT    NOT NULL,
                 created_at   INTEGER NOT NULL,
@@ -67,9 +67,10 @@ impl ChannelStore for SqliteChannelStore {
         rows.into_iter().map(TryInto::try_into).collect()
     }
 
-    async fn get(&self, account_id: &str) -> Result<Option<StoredChannel>> {
-        let row = sqlx::query_as::<_, ChannelRow>("SELECT * FROM channels WHERE account_id = ?")
-            .bind(account_id)
+    async fn get(&self, account_handle: &str) -> Result<Option<StoredChannel>> {
+        let row =
+            sqlx::query_as::<_, ChannelRow>("SELECT * FROM channels WHERE account_handle = ?")
+                .bind(account_handle)
             .fetch_optional(&self.pool)
             .await?;
         row.map(TryInto::try_into).transpose()
@@ -78,14 +79,14 @@ impl ChannelStore for SqliteChannelStore {
     async fn upsert(&self, channel: StoredChannel) -> Result<()> {
         let config_json = serde_json::to_string(&channel.config)?;
         sqlx::query(
-            r#"INSERT INTO channels (account_id, channel_type, config, created_at, updated_at)
+            r#"INSERT INTO channels (account_handle, channel_type, config, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(account_id) DO UPDATE SET
+               ON CONFLICT(account_handle) DO UPDATE SET
                  channel_type = excluded.channel_type,
                  config = excluded.config,
                  updated_at = excluded.updated_at"#,
         )
-        .bind(&channel.account_id)
+        .bind(&channel.account_handle)
         .bind(&channel.channel_type)
         .bind(&config_json)
         .bind(channel.created_at)
@@ -95,9 +96,9 @@ impl ChannelStore for SqliteChannelStore {
         Ok(())
     }
 
-    async fn delete(&self, account_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM channels WHERE account_id = ?")
-            .bind(account_id)
+    async fn delete(&self, account_handle: &str) -> Result<()> {
+        sqlx::query("DELETE FROM channels WHERE account_handle = ?")
+            .bind(account_handle)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -128,7 +129,7 @@ mod tests {
         let store = SqliteChannelStore::new(pool);
 
         let ch = StoredChannel {
-            account_id: "bot1".into(),
+            account_handle: "telegram:bot1".into(),
             channel_type: "telegram".into(),
             config: serde_json::json!({"token": "abc"}),
             created_at: now(),
@@ -136,8 +137,8 @@ mod tests {
         };
         store.upsert(ch).await.unwrap();
 
-        let got = store.get("bot1").await.unwrap().unwrap();
-        assert_eq!(got.account_id, "bot1");
+        let got = store.get("telegram:bot1").await.unwrap().unwrap();
+        assert_eq!(got.account_handle, "telegram:bot1");
         assert_eq!(got.config["token"], "abc");
     }
 
@@ -149,7 +150,7 @@ mod tests {
 
         store
             .upsert(StoredChannel {
-                account_id: "bot1".into(),
+                account_handle: "telegram:bot1".into(),
                 channel_type: "telegram".into(),
                 config: serde_json::json!({"token": "old"}),
                 created_at: t,
@@ -160,7 +161,7 @@ mod tests {
 
         store
             .upsert(StoredChannel {
-                account_id: "bot1".into(),
+                account_handle: "telegram:bot1".into(),
                 channel_type: "telegram".into(),
                 config: serde_json::json!({"token": "new"}),
                 created_at: t,
@@ -169,7 +170,7 @@ mod tests {
             .await
             .unwrap();
 
-        let got = store.get("bot1").await.unwrap().unwrap();
+        let got = store.get("telegram:bot1").await.unwrap().unwrap();
         assert_eq!(got.config["token"], "new");
 
         let all = store.list().await.unwrap();
@@ -183,7 +184,7 @@ mod tests {
 
         store
             .upsert(StoredChannel {
-                account_id: "bot1".into(),
+                account_handle: "telegram:bot1".into(),
                 channel_type: "telegram".into(),
                 config: serde_json::json!({}),
                 created_at: now(),
@@ -192,8 +193,8 @@ mod tests {
             .await
             .unwrap();
 
-        store.delete("bot1").await.unwrap();
-        assert!(store.get("bot1").await.unwrap().is_none());
+        store.delete("telegram:bot1").await.unwrap();
+        assert!(store.get("telegram:bot1").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -203,7 +204,7 @@ mod tests {
 
         store
             .upsert(StoredChannel {
-                account_id: "old".into(),
+                account_handle: "telegram:old".into(),
                 channel_type: "telegram".into(),
                 config: serde_json::json!({}),
                 created_at: 100,
@@ -214,7 +215,7 @@ mod tests {
 
         store
             .upsert(StoredChannel {
-                account_id: "new".into(),
+                account_handle: "telegram:new".into(),
                 channel_type: "telegram".into(),
                 config: serde_json::json!({}),
                 created_at: 200,
@@ -225,14 +226,14 @@ mod tests {
 
         let all = store.list().await.unwrap();
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].account_id, "new");
-        assert_eq!(all[1].account_id, "old");
+        assert_eq!(all[0].account_handle, "telegram:new");
+        assert_eq!(all[1].account_handle, "telegram:old");
     }
 
     #[tokio::test]
     async fn test_get_nonexistent() {
         let pool = test_pool().await;
         let store = SqliteChannelStore::new(pool);
-        assert!(store.get("nope").await.unwrap().is_none());
+        assert!(store.get("telegram:nope").await.unwrap().is_none());
     }
 }

@@ -310,11 +310,11 @@ impl SqliteSessionMetadata {
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS channel_sessions (
                 channel_type TEXT    NOT NULL,
-                account_id   TEXT    NOT NULL,
+                account_handle TEXT  NOT NULL,
                 chat_id      TEXT    NOT NULL,
-                session_key  TEXT    NOT NULL,
+                session_id   TEXT    NOT NULL,
                 updated_at   INTEGER NOT NULL,
-                PRIMARY KEY (channel_type, account_id, chat_id)
+                PRIMARY KEY (channel_type, account_handle, chat_id)
             )"#,
         )
         .execute(pool)
@@ -540,18 +540,17 @@ impl SqliteSessionMetadata {
             .collect()
     }
 
-    /// Get the active session key for a channel chat, if one has been explicitly set.
-    pub async fn get_active_session(
+    pub async fn get_active_session_id(
         &self,
         channel_type: &str,
-        account_id: &str,
+        account_handle: &str,
         chat_id: &str,
     ) -> Option<String> {
         sqlx::query_scalar::<_, String>(
-            "SELECT session_key FROM channel_sessions WHERE channel_type = ? AND account_id = ? AND chat_id = ?",
+            "SELECT session_id FROM channel_sessions WHERE channel_type = ? AND account_handle = ? AND chat_id = ?",
         )
         .bind(channel_type)
-        .bind(account_id)
+        .bind(account_handle)
         .bind(chat_id)
         .fetch_optional(&self.pool)
         .await
@@ -559,26 +558,25 @@ impl SqliteSessionMetadata {
         .flatten()
     }
 
-    /// Set (upsert) the active session key for a channel chat.
-    pub async fn set_active_session(
+    pub async fn set_active_session_id(
         &self,
         channel_type: &str,
-        account_id: &str,
+        account_handle: &str,
         chat_id: &str,
-        session_key: &str,
+        session_id: &str,
     ) {
         let now = now_ms() as i64;
         sqlx::query(
-            r#"INSERT INTO channel_sessions (channel_type, account_id, chat_id, session_key, updated_at)
+            r#"INSERT INTO channel_sessions (channel_type, account_handle, chat_id, session_id, updated_at)
                VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(channel_type, account_id, chat_id) DO UPDATE SET
-                 session_key = excluded.session_key,
+               ON CONFLICT(channel_type, account_handle, chat_id) DO UPDATE SET
+                 session_id = excluded.session_id,
                  updated_at = excluded.updated_at"#,
         )
         .bind(channel_type)
-        .bind(account_id)
+        .bind(account_handle)
         .bind(chat_id)
-        .bind(session_key)
+        .bind(session_id)
         .bind(now)
         .execute(&self.pool)
         .await
@@ -586,21 +584,27 @@ impl SqliteSessionMetadata {
     }
 
     /// List all sessions that have been bound to a given channel chat
-    /// (i.e. sessions whose `channel_binding` JSON contains the matching chat_id + account_id).
     pub async fn list_channel_sessions(
         &self,
         channel_type: &str,
-        account_id: &str,
+        account_handle: &str,
         chat_id: &str,
     ) -> Vec<SessionEntry> {
         // Build the expected channel_binding JSON substring for matching.
-        let binding_pattern = format!(
-            r#"%"channel_type":"{channel_type}"%"account_id":"{account_id}"%"chat_id":"{chat_id}"%"#,
+        //
+        // Note: Legacy rows may have serialized `ChannelReplyTarget.account_handle` as `account_id`.
+        // Keep both discoverable to avoid post-upgrade "missing sessions" regressions.
+        let binding_pattern_handle = format!(
+            r#"%"channel_type":"{channel_type}"%"account_handle":"{account_handle}"%"chat_id":"{chat_id}"%"#,
+        );
+        let binding_pattern_id = format!(
+            r#"%"channel_type":"{channel_type}"%"account_id":"{account_handle}"%"chat_id":"{chat_id}"%"#,
         );
         sqlx::query_as::<_, SessionRow>(
-            "SELECT * FROM sessions WHERE channel_binding LIKE ? ORDER BY created_at ASC",
+            "SELECT * FROM sessions WHERE channel_binding LIKE ? OR channel_binding LIKE ? ORDER BY created_at ASC",
         )
-        .bind(&binding_pattern)
+        .bind(&binding_pattern_handle)
+        .bind(&binding_pattern_id)
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default()
@@ -613,13 +617,18 @@ impl SqliteSessionMetadata {
     pub async fn list_account_sessions(
         &self,
         channel_type: &str,
-        account_id: &str,
+        account_handle: &str,
     ) -> Vec<SessionEntry> {
-        let pattern = format!(r#"%"channel_type":"{channel_type}"%"account_id":"{account_id}"%"#,);
+        // Legacy rows may use `account_id` instead of `account_handle`.
+        let pattern_handle =
+            format!(r#"%"channel_type":"{channel_type}"%"account_handle":"{account_handle}"%"#,);
+        let pattern_id =
+            format!(r#"%"channel_type":"{channel_type}"%"account_id":"{account_handle}"%"#,);
         sqlx::query_as::<_, SessionRow>(
-            "SELECT * FROM sessions WHERE channel_binding LIKE ? ORDER BY created_at ASC",
+            "SELECT * FROM sessions WHERE channel_binding LIKE ? OR channel_binding LIKE ? ORDER BY created_at ASC",
         )
-        .bind(&pattern)
+        .bind(&pattern_handle)
+        .bind(&pattern_id)
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default()
@@ -632,13 +641,13 @@ impl SqliteSessionMetadata {
     pub async fn list_active_sessions(
         &self,
         channel_type: &str,
-        account_id: &str,
+        account_handle: &str,
     ) -> Vec<(String, String)> {
         sqlx::query_as::<_, (String, String)>(
-            "SELECT chat_id, session_key FROM channel_sessions WHERE channel_type = ? AND account_id = ?",
+            "SELECT chat_id, session_id FROM channel_sessions WHERE channel_type = ? AND account_handle = ?",
         )
         .bind(channel_type)
-        .bind(account_id)
+        .bind(account_handle)
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default()
@@ -926,7 +935,7 @@ mod tests {
         meta.upsert("tg:bot1:123", None);
         assert!(meta.get("tg:bot1:123").unwrap().channel_binding.is_none());
 
-        let binding = r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#;
+        let binding = r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#;
         meta.set_channel_binding("tg:bot1:123", Some(binding.to_string()));
         assert_eq!(
             meta.get("tg:bot1:123").unwrap().channel_binding.as_deref(),
@@ -957,26 +966,26 @@ mod tests {
 
         // No active session initially.
         assert!(
-            meta.get_active_session("telegram", "bot1", "123")
+            meta.get_active_session_id("telegram", "telegram:bot1", "123")
                 .await
                 .is_none()
         );
 
         // Set and get.
-        meta.set_active_session("telegram", "bot1", "123", "session:abc")
+        meta.set_active_session_id("telegram", "telegram:bot1", "123", "session:abc")
             .await;
         assert_eq!(
-            meta.get_active_session("telegram", "bot1", "123")
+            meta.get_active_session_id("telegram", "telegram:bot1", "123")
                 .await
                 .as_deref(),
             Some("session:abc")
         );
 
         // Overwrite.
-        meta.set_active_session("telegram", "bot1", "123", "session:def")
+        meta.set_active_session_id("telegram", "telegram:bot1", "123", "session:def")
             .await;
         assert_eq!(
-            meta.get_active_session("telegram", "bot1", "123")
+            meta.get_active_session_id("telegram", "telegram:bot1", "123")
                 .await
                 .as_deref(),
             Some("session:def")
@@ -984,7 +993,7 @@ mod tests {
 
         // Different chat_id is independent.
         assert!(
-            meta.get_active_session("telegram", "bot1", "456")
+            meta.get_active_session_id("telegram", "telegram:bot1", "456")
                 .await
                 .is_none()
         );
@@ -996,7 +1005,9 @@ mod tests {
         let meta = SqliteSessionMetadata::new(pool);
 
         let binding =
-            r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#.to_string();
+            r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#.to_string();
+        let legacy_binding =
+            r#"{"channel_type":"telegram","account_id":"telegram:bot1","chat_id":"123"}"#.to_string();
 
         // Create two sessions with the same channel binding.
         meta.upsert("telegram:bot1:123", Some("Session 1".into()))
@@ -1011,15 +1022,52 @@ mod tests {
         meta.set_channel_binding("session:new1", Some(binding.clone()))
             .await;
 
-        let sessions = meta.list_channel_sessions("telegram", "bot1", "123").await;
-        assert_eq!(sessions.len(), 2);
+        // Legacy serialized field name should remain discoverable.
+        meta.upsert("session:legacy1", Some("Legacy".into()))
+            .await
+            .unwrap();
+        meta.set_channel_binding("session:legacy1", Some(legacy_binding.clone()))
+            .await;
+
+        let sessions = meta
+            .list_channel_sessions("telegram", "telegram:bot1", "123")
+            .await;
+        assert_eq!(sessions.len(), 3);
         let keys: Vec<&str> = sessions.iter().map(|s| s.key.as_str()).collect();
         assert!(keys.contains(&"telegram:bot1:123"));
         assert!(keys.contains(&"session:new1"));
+        assert!(keys.contains(&"session:legacy1"));
 
         // Different chat should return empty.
-        let other = meta.list_channel_sessions("telegram", "bot1", "999").await;
+		let other = meta
+			.list_channel_sessions("telegram", "telegram:bot1", "999")
+			.await;
         assert!(other.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_list_account_sessions_includes_legacy_binding() {
+        let pool = sqlite_pool().await;
+        let meta = SqliteSessionMetadata::new(pool);
+
+        let binding =
+            r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#.to_string();
+        let legacy_binding =
+            r#"{"channel_type":"telegram","account_id":"telegram:bot1","chat_id":"456"}"#.to_string();
+
+        meta.upsert("session:acct1", None).await.unwrap();
+        meta.set_channel_binding("session:acct1", Some(binding)).await;
+
+        meta.upsert("session:acct_legacy", None).await.unwrap();
+        meta.set_channel_binding("session:acct_legacy", Some(legacy_binding))
+            .await;
+
+        let sessions = meta
+            .list_account_sessions("telegram", "telegram:bot1")
+            .await;
+        let keys: Vec<&str> = sessions.iter().map(|s| s.key.as_str()).collect();
+        assert!(keys.contains(&"session:acct1"));
+        assert!(keys.contains(&"session:acct_legacy"));
     }
 
     #[tokio::test]
@@ -1036,7 +1084,7 @@ mod tests {
                 .is_none()
         );
 
-        let binding = r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#;
+        let binding = r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#;
         meta.set_channel_binding("tg:bot1:123", Some(binding.to_string()))
             .await;
         assert_eq!(

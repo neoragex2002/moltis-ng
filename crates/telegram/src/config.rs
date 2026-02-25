@@ -100,8 +100,8 @@ pub struct TelegramAccountConfig {
 /// depending on secret config fields (token).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TelegramBusAccountSnapshot {
-    pub account_id: String,
-    pub bot_username: Option<String>,
+    pub account_handle: String,
+    pub chan_user_name: Option<String>,
     pub relay_chain_enabled: bool,
     pub relay_hop_limit: u8,
     pub relay_strictness: RelayStrictness,

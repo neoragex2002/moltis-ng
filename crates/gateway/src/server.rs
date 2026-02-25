@@ -210,20 +210,44 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
     ) -> anyhow::Result<moltis_tools::location::LocationResult> {
         use moltis_tools::location::{LocationError, LocationResult};
 
-        // Look up channel binding from session metadata.
+        // Resolve to the persistent session id used for metadata + pending invokes.
+        //
+        // Channel-originated tool calls often carry a deterministic `_session_key`
+        // (e.g. `telegram:<bot_id>:<chat_id>`). Channel sessions, however, are
+        // stored under an opaque `session:<uuid>` key. Tools may pass either
+        // value here, so we normalize to the active persistent session id when
+        // possible.
         let session_meta = self
             .state
             .services
             .session_metadata
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("session metadata not available"))?;
-        let entry = session_meta
-            .get(session_key)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("no session metadata for key {session_key}"))?;
+        let lookup_key = if session_key.starts_with("session:") {
+            session_key.to_string()
+        } else if let Some(parts) = moltis_common::identity::parse_session_key(session_key) {
+            let account_handle = format!("{}:{}", parts.channel, parts.chan_user_id);
+            session_meta
+                .get_active_session_id(parts.channel, &account_handle, parts.chat_id)
+                .await
+                .unwrap_or_else(|| session_key.to_string())
+        } else {
+            session_key.to_string()
+        };
+
+        // Look up channel binding from session metadata (fall back to the original key for
+        // legacy rows that still use deterministic keys).
+        let entry = match session_meta.get(&lookup_key).await {
+            Some(e) => e,
+            None if lookup_key != session_key => session_meta
+                .get(session_key)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no session metadata for key {session_key}"))?,
+            None => return Err(anyhow::anyhow!("no session metadata for key {session_key}")),
+        };
         let binding_json = entry
             .channel_binding
-            .ok_or_else(|| anyhow::anyhow!("no channel binding for session {session_key}"))?;
+            .ok_or_else(|| anyhow::anyhow!("no channel binding for session {}", entry.key))?;
         let reply_target: moltis_channels::ChannelReplyTarget =
             serde_json::from_str(&binding_json)?;
 
@@ -235,7 +259,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
             .ok_or_else(|| anyhow::anyhow!("no channel outbound available"))?;
         outbound
             .send_text(
-                &reply_target.account_id,
+                &reply_target.account_handle,
                 &reply_target.chat_id,
                 "Please share your location using the attachment menu (📎 → Location).",
                 None,
@@ -243,7 +267,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
             .await?;
 
         // Create a pending invoke keyed by session.
-        let pending_key = format!("channel_location:{session_key}");
+        let pending_key = format!("channel_location:{}", entry.key);
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
             let mut inner = self.state.inner.write().await;
@@ -1711,13 +1735,30 @@ pub async fn start_gateway(
 
     // Load any persisted sandbox overrides from session metadata.
     {
+        use std::collections::HashMap;
+
+        // For channel sessions, multiple persistent sessions can map to the same
+        // deterministic router key. Prefer the most recently updated entry so
+        // archived/old sessions don't override active settings on startup.
+        let mut best_by_router_key: HashMap<String, moltis_sessions::metadata::SessionEntry> =
+            HashMap::new();
         for entry in session_metadata.list().await {
+            let router_key = crate::session::sandbox_router_key_for_entry(&entry);
+            match best_by_router_key.get(&router_key) {
+                Some(existing) if existing.updated_at >= entry.updated_at => {},
+                _ => {
+                    best_by_router_key.insert(router_key, entry);
+                },
+            }
+        }
+
+        for (router_key, entry) in best_by_router_key {
             if let Some(enabled) = entry.sandbox_enabled {
-                sandbox_router.set_override(&entry.key, enabled).await;
+                sandbox_router.set_override(&router_key, enabled).await;
             }
             if let Some(ref image) = entry.sandbox_image {
                 sandbox_router
-                    .set_image_override(&entry.key, image.clone())
+                    .set_image_override(&router_key, image.clone())
                     .await;
             }
         }
@@ -1743,14 +1784,14 @@ pub async fn start_gateway(
         // Start channels from config file (these take precedence).
         let tg_accounts = &config.channels.telegram;
         let mut started: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (account_id, account_config) in tg_accounts {
+        for (account_handle, account_config) in tg_accounts {
             if let Err(e) = tg_plugin
-                .start_account(account_id, account_config.clone())
+                .start_account(account_handle, account_config.clone())
                 .await
             {
-                tracing::warn!(account_id, "failed to start telegram account: {e}");
+                tracing::warn!(account_handle, "failed to start telegram account: {e}");
             } else {
-                started.insert(account_id.clone());
+                started.insert(account_handle.clone());
             }
         }
 
@@ -1759,25 +1800,25 @@ pub async fn start_gateway(
             Ok(stored) => {
                 info!("{} stored channel(s) found in database", stored.len());
                 for ch in stored {
-                    if started.contains(&ch.account_id) {
+                    if started.contains(&ch.account_handle) {
                         info!(
-                            account_id = ch.account_id,
+                            account_handle = ch.account_handle,
                             "skipping stored channel (already started from config)"
                         );
                         continue;
                     }
                     info!(
-                        account_id = ch.account_id,
+                        account_handle = ch.account_handle,
                         channel_type = ch.channel_type,
                         "starting stored channel"
                     );
-                    if let Err(e) = tg_plugin.start_account(&ch.account_id, ch.config).await {
+                    if let Err(e) = tg_plugin.start_account(&ch.account_handle, ch.config).await {
                         tracing::warn!(
-                            account_id = ch.account_id,
+                            account_handle = ch.account_handle,
                             "failed to start stored telegram account: {e}"
                         );
                     } else {
-                        started.insert(ch.account_id);
+                        started.insert(ch.account_handle);
                     }
                 }
             },

@@ -53,9 +53,12 @@ impl AgentTool for BranchSessionTool {
     }
 
     async fn execute(&self, params: Value) -> Result<Value> {
+        // Prefer persistent session id when available (channel sessions), but keep
+        // compatibility with callers that only provide the deterministic session key.
         let parent_key = params
-            .get("_session_key")
+            .get("_session_id")
             .and_then(|v| v.as_str())
+            .or_else(|| params.get("_session_key").and_then(|v| v.as_str()))
             .ok_or_else(|| anyhow::anyhow!("missing session context"))?;
 
         let label = params
@@ -255,5 +258,33 @@ mod tests {
         let new_key = result["sessionKey"].as_str().unwrap();
         let child_msgs = store.read(new_key).await.unwrap();
         assert_eq!(child_msgs.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn prefers_session_id_when_present() {
+        let (store, metadata, _tmp) = setup().await;
+        let tool = BranchSessionTool::new(Arc::clone(&store), Arc::clone(&metadata));
+
+        // Parent session lives under a persistent session id.
+        let parent_id = "session:parent_id";
+        metadata.upsert(parent_id, None).await.unwrap();
+        store
+            .append(parent_id, &json!({"role": "user", "content": "hi"}))
+            .await
+            .unwrap();
+
+        // Provide a mismatched deterministic key; tool should still branch from session_id.
+        let result = tool
+            .execute(json!({
+                "label": "Branch",
+                "_session_key": "telegram:bot1:123",
+                "_session_id": parent_id,
+            }))
+            .await
+            .unwrap();
+
+        let new_key = result["sessionKey"].as_str().unwrap();
+        let child_msgs = store.read(new_key).await.unwrap();
+        assert_eq!(child_msgs.len(), 1);
     }
 }

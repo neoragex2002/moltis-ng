@@ -23,7 +23,7 @@ impl SqliteMessageLog {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS message_log (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id     TEXT    NOT NULL,
+                account_handle TEXT    NOT NULL,
                 channel_type   TEXT    NOT NULL,
                 peer_id        TEXT    NOT NULL,
                 username       TEXT,
@@ -40,7 +40,7 @@ impl SqliteMessageLog {
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_message_log_account_created
-             ON message_log (account_id, created_at DESC)",
+             ON message_log (account_handle, created_at DESC)",
         )
         .execute(pool)
         .await?;
@@ -54,11 +54,11 @@ impl MessageLog for SqliteMessageLog {
     async fn log(&self, entry: MessageLogEntry) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO message_log
-             (account_id, channel_type, peer_id, username, sender_name,
+             (account_handle, channel_type, peer_id, username, sender_name,
               chat_id, chat_type, body, access_granted, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&entry.account_id)
+        .bind(&entry.account_handle)
         .bind(&entry.channel_type)
         .bind(&entry.peer_id)
         .bind(&entry.username)
@@ -75,7 +75,7 @@ impl MessageLog for SqliteMessageLog {
 
     async fn list_by_account(
         &self,
-        account_id: &str,
+        account_handle: &str,
         limit: u32,
     ) -> anyhow::Result<Vec<MessageLogEntry>> {
         let rows = sqlx::query_as::<
@@ -94,14 +94,14 @@ impl MessageLog for SqliteMessageLog {
                 i64,
             ),
         >(
-            "SELECT id, account_id, channel_type, peer_id, username, sender_name,
+            "SELECT id, account_handle, channel_type, peer_id, username, sender_name,
                     chat_id, chat_type, body, access_granted, created_at
              FROM message_log
-             WHERE account_id = ?
+             WHERE account_handle = ?
              ORDER BY created_at DESC
              LIMIT ?",
         )
-        .bind(account_id)
+        .bind(account_handle)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -110,7 +110,7 @@ impl MessageLog for SqliteMessageLog {
             .into_iter()
             .map(|r| MessageLogEntry {
                 id: r.0,
-                account_id: r.1,
+                account_handle: r.1,
                 channel_type: r.2,
                 peer_id: r.3,
                 username: r.4,
@@ -124,18 +124,18 @@ impl MessageLog for SqliteMessageLog {
             .collect())
     }
 
-    async fn unique_senders(&self, account_id: &str) -> anyhow::Result<Vec<SenderSummary>> {
+    async fn unique_senders(&self, account_handle: &str) -> anyhow::Result<Vec<SenderSummary>> {
         let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, i64, i64, bool)>(
             "SELECT peer_id, username, sender_name,
                     COUNT(*) as message_count,
                     MAX(created_at) as last_seen,
                     MAX(CASE WHEN access_granted THEN 1 ELSE 0 END) as last_access_granted
              FROM message_log
-             WHERE account_id = ?
+             WHERE account_handle = ?
              GROUP BY peer_id
              ORDER BY last_seen DESC",
         )
-        .bind(account_id)
+        .bind(account_handle)
         .fetch_all(&self.pool)
         .await?;
 
@@ -164,10 +164,10 @@ mod tests {
         pool
     }
 
-    fn sample_entry(account_id: &str, peer_id: &str, granted: bool) -> MessageLogEntry {
+    fn sample_entry(account_handle: &str, peer_id: &str, granted: bool) -> MessageLogEntry {
         MessageLogEntry {
             id: 0,
-            account_id: account_id.into(),
+            account_handle: account_handle.into(),
             channel_type: "telegram".into(),
             peer_id: peer_id.into(),
             username: Some("testuser".into()),
@@ -186,22 +186,22 @@ mod tests {
         let store = SqliteMessageLog::new(pool);
 
         store
-            .log(sample_entry("bot1", "user1", true))
+            .log(sample_entry("telegram:bot1", "user1", true))
             .await
             .unwrap();
         store
-            .log(sample_entry("bot1", "user2", false))
+            .log(sample_entry("telegram:bot1", "user2", false))
             .await
             .unwrap();
         store
-            .log(sample_entry("bot2", "user3", true))
+            .log(sample_entry("telegram:bot2", "user3", true))
             .await
             .unwrap();
 
-        let entries = store.list_by_account("bot1", 10).await.unwrap();
+        let entries = store.list_by_account("telegram:bot1", 10).await.unwrap();
         assert_eq!(entries.len(), 2);
 
-        let entries = store.list_by_account("bot2", 10).await.unwrap();
+        let entries = store.list_by_account("telegram:bot2", 10).await.unwrap();
         assert_eq!(entries.len(), 1);
     }
 
@@ -211,12 +211,12 @@ mod tests {
         let store = SqliteMessageLog::new(pool);
 
         for i in 0..5 {
-            let mut e = sample_entry("bot1", "user1", true);
+            let mut e = sample_entry("telegram:bot1", "user1", true);
             e.created_at = 1700000000 + i;
             store.log(e).await.unwrap();
         }
 
-        let entries = store.list_by_account("bot1", 3).await.unwrap();
+        let entries = store.list_by_account("telegram:bot1", 3).await.unwrap();
         assert_eq!(entries.len(), 3);
         // Most recent first
         assert!(entries[0].created_at > entries[1].created_at);

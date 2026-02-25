@@ -50,7 +50,7 @@ pub async fn probe_bot_identity(token: &str) -> anyhow::Result<TelegramBotIdenti
 /// Spawns a background task that processes updates until the returned
 /// `CancellationToken` is cancelled.
 pub async fn start_polling(
-    account_id: String,
+    account_handle: String,
     config: TelegramAccountConfig,
     accounts: AccountStateMap,
     message_log: Option<Arc<dyn MessageLog>>,
@@ -83,11 +83,11 @@ pub async fn start_polling(
         BotCommand::new("help", "Show available commands"),
     ];
     if let Err(e) = bot.set_my_commands(commands).await {
-        warn!(account_id, "failed to register bot commands: {e}");
+        warn!(account_handle, "failed to register bot commands: {e}");
     }
 
     info!(
-        account_id,
+        account_handle,
         username = ?bot_username,
         "telegram bot connected (webhook cleared)"
     );
@@ -103,7 +103,7 @@ pub async fn start_polling(
         bot: bot.clone(),
         bot_user_id,
         bot_username,
-        account_id: account_id.clone(),
+        account_handle: account_handle.clone(),
         config,
         outbound,
         cancel: cancel.clone(),
@@ -114,19 +114,19 @@ pub async fn start_polling(
 
     {
         let mut map = accounts.write().unwrap_or_else(|e| e.into_inner());
-        map.insert(account_id.clone(), state);
+        map.insert(account_handle.clone(), state);
     }
 
     let cancel_clone = cancel.clone();
-    let aid = account_id.clone();
+    let aid = account_handle.clone();
     let poll_accounts = Arc::clone(&accounts);
     tokio::spawn(async move {
-        info!(account_id = aid, "starting telegram manual polling loop");
+        info!(account_handle = aid, "starting telegram manual polling loop");
         let mut offset: i32 = 0;
 
         loop {
             if cancel_clone.is_cancelled() {
-                info!(account_id = aid, "telegram polling stopped");
+                info!(account_handle = aid, "telegram polling stopped");
                 break;
             }
 
@@ -144,7 +144,7 @@ pub async fn start_polling(
             match result {
                 Ok(updates) => {
                     debug!(
-                        account_id = aid,
+                        account_handle = aid,
                         count = updates.len(),
                         "got telegram updates"
                     );
@@ -153,7 +153,7 @@ pub async fn start_polling(
                         match update.kind {
                             UpdateKind::Message(msg) => {
                                 debug!(
-                                    account_id = aid,
+                                    account_handle = aid,
                                     chat_id = msg.chat.id.0,
                                     "received telegram message"
                                 );
@@ -162,7 +162,7 @@ pub async fn start_polling(
                                         .await
                                 {
                                     error!(
-                                        account_id = aid,
+                                        account_handle = aid,
                                         error = %e,
                                         "error handling telegram message"
                                     );
@@ -170,7 +170,7 @@ pub async fn start_polling(
                             },
                             UpdateKind::EditedMessage(msg) => {
                                 debug!(
-                                    account_id = aid,
+                                    account_handle = aid,
                                     chat_id = msg.chat.id.0,
                                     "received telegram edited message"
                                 );
@@ -179,7 +179,7 @@ pub async fn start_polling(
                                         .await
                                 {
                                     error!(
-                                        account_id = aid,
+                                        account_handle = aid,
                                         error = %e,
                                         "error handling telegram edited message"
                                     );
@@ -187,7 +187,7 @@ pub async fn start_polling(
                             },
                             UpdateKind::CallbackQuery(query) => {
                                 debug!(
-                                    account_id = aid,
+                                    account_handle = aid,
                                     callback_data = ?query.data,
                                     "received telegram callback query"
                                 );
@@ -200,14 +200,14 @@ pub async fn start_polling(
                                 .await
                                 {
                                     error!(
-                                        account_id = aid,
+                                        account_handle = aid,
                                         error = %e,
                                         "error handling telegram callback query"
                                     );
                                 }
                             },
                             other => {
-                                debug!(account_id = aid, "ignoring non-message update: {other:?}");
+                                debug!(account_handle = aid, "ignoring non-message update: {other:?}");
                             },
                         }
                     }

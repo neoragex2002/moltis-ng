@@ -289,7 +289,7 @@ function handleChatChannelUser(p, isActive, isChatPage, eventSession) {
 	if (!(isChatPage && isActive)) return;
 	// Compare against the per-session history index, not the global one,
 	// to avoid skipping events when viewing a different session.
-	var chanSession = sessionStore.getByKey(p.sessionKey || S.activeSessionKey);
+	var chanSession = sessionStore.getByKey(p.sessionId || p.sessionKey || S.activeSessionKey);
 	var chanLastIdx = chanSession ? chanSession.lastHistoryIndex.value : S.lastHistoryIndex;
 	if (p.messageIndex !== undefined && p.messageIndex <= chanLastIdx) return;
 	var cleanText = stripChannelPrefix(p.text || "");
@@ -411,7 +411,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 
 		if (p.audio) {
 			var filename = p.audio.split("/").pop();
-			var audioSrc = `/api/sessions/${encodeURIComponent(p.sessionKey || S.activeSessionKey)}/media/${encodeURIComponent(filename)}`;
+			var audioSrc = `/api/sessions/${encodeURIComponent(p.sessionId || p.sessionKey || S.activeSessionKey)}/media/${encodeURIComponent(filename)}`;
 			console.debug("[audio] rendering persisted audio:", filename);
 			renderAudioPlayer(msgEl, audioSrc, true);
 		}
@@ -435,7 +435,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 			);
 			if (p.audio) {
 				var fn2 = p.audio.split("/").pop();
-				var src2 = `/api/sessions/${encodeURIComponent(p.sessionKey || S.activeSessionKey)}/media/${encodeURIComponent(fn2)}`;
+				var src2 = `/api/sessions/${encodeURIComponent(p.sessionId || p.sessionKey || S.activeSessionKey)}/media/${encodeURIComponent(fn2)}`;
 				console.debug("[audio] rendering persisted audio (streamed):", fn2);
 				resolvedEl.textContent = "";
 				renderAudioPlayer(resolvedEl, src2, true);
@@ -574,13 +574,13 @@ var chatHandlers = {
 };
 
 function handleChatEvent(p) {
-	var eventSession = p.sessionKey || sessionStore.activeSessionKey.value;
+	var eventSession = p.sessionId || p.sessionKey || sessionStore.activeSessionKey.value;
 	var isActive = eventSession === sessionStore.activeSessionKey.value;
 	var isChatPage = currentPrefix === "/chats";
 
 	if (isActive && sessionStore.switchInProgress.value) return;
 
-	if (p.sessionKey && !sessionStore.getByKey(p.sessionKey)) {
+	if (eventSession && !sessionStore.getByKey(eventSession)) {
 		fetchSessions();
 	}
 

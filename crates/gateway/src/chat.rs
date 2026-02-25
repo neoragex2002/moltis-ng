@@ -243,11 +243,12 @@ async fn resolve_session_persona_id(
     if rt.host.channel.as_deref() != Some("telegram") {
         return None;
     }
-    let account_id = rt.host.channel_account_id.as_deref()?;
+    let chan_user_id = rt.host.channel_account_id.as_deref()?;
+    let account_handle = format!("telegram:{chan_user_id}");
     state
         .services
         .channel
-        .telegram_account_persona_id(account_id)
+        .telegram_account_persona_id(&account_handle)
         .await
 }
 
@@ -875,10 +876,11 @@ async fn build_prompt_runtime_context(
         channel: channel_target
             .as_ref()
             .map(|t| t.channel_type.as_str().to_string()),
-        channel_account_id: channel_target.as_ref().map(|t| t.account_id.clone()),
-        channel_account_handle: channel_target
+        channel_account_id: channel_target
             .as_ref()
-            .and_then(|t| t.account_handle.clone()),
+            .and_then(|t| moltis_common::identity::parse_account_handle(&t.account_handle))
+            .map(|p| p.chan_user_id.to_string()),
+        channel_account_handle: channel_target.as_ref().and_then(|t| t.bot_handle.clone()),
         channel_chat_id: channel_target.as_ref().map(|t| t.chat_id.clone()),
         sudo_non_interactive,
         sudo_status,
@@ -1995,10 +1997,21 @@ impl ChatService for LiveChatService {
             "send() mode decision"
         );
 
-        // Resolve session key: explicit override (used by cron callbacks) or connection-scoped lookup.
-        let session_key = match params.get("_session_key").and_then(|v| v.as_str()) {
-            Some(sk) => sk.to_string(),
-            None => self.session_key_for(conn_id.as_deref()).await,
+        let session_key = match params.get("_session_id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => match params.get("_session_key").and_then(|v| v.as_str()) {
+                Some(sk) => sk.to_string(),
+                None => self.session_key_for(conn_id.as_deref()).await,
+            },
+        };
+        let tool_session_key = if params.get("_session_id").is_some() {
+            params
+                .get("_session_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&session_key)
+                .to_string()
+        } else {
+            session_key.clone()
         };
         let queued_replay = params
             .get("_queued_replay")
@@ -2190,9 +2203,9 @@ impl ChatService for LiveChatService {
             // Only echo to channel if this is the active session for this chat.
             let is_active = self
                 .session_metadata
-                .get_active_session(
+                .get_active_session_id(
                     target.channel_type.as_str(),
-                    &target.account_id,
+                    &target.account_handle,
                     &target.chat_id,
                 )
                 .await
@@ -2285,6 +2298,7 @@ impl ChatService for LiveChatService {
         let session_store = Arc::clone(&self.session_store);
         let session_metadata = Arc::clone(&self.session_metadata);
         let session_key_clone = session_key.clone();
+        let tool_session_key_clone = tool_session_key.clone();
         let accept_language = params
             .get("_accept_language")
             .and_then(|v| v.as_str())
@@ -2706,6 +2720,7 @@ impl ChatService for LiveChatService {
                         &provider_name,
                         &history,
                         &session_key_clone,
+                        &tool_session_key_clone,
                         desired_reply_medium,
                         ctx_ref,
                         Some(&runtime_context),
@@ -2890,10 +2905,12 @@ impl ChatService for LiveChatService {
         let explicit_model = params.get("model").and_then(|v| v.as_str());
         let stream_only = !self.has_tools_sync();
 
-        // Resolve session key from explicit override.
-        let session_key = match params.get("_session_key").and_then(|v| v.as_str()) {
-            Some(sk) => sk.to_string(),
-            None => "main".to_string(),
+        let session_key = match params.get("_session_id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => match params.get("_session_key").and_then(|v| v.as_str()) {
+                Some(sk) => sk.to_string(),
+                None => "main".to_string(),
+            },
         };
 
         // Resolve provider.
@@ -3104,6 +3121,7 @@ impl ChatService for LiveChatService {
                 &provider_name,
                 &history,
                 &session_key,
+                &session_key,
                 desired_reply_medium,
                 None,
                 Some(&runtime_context),
@@ -3302,7 +3320,9 @@ impl ChatService for LiveChatService {
     }
 
     async fn clear(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
+            sk.to_string()
+        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
@@ -3346,7 +3366,9 @@ impl ChatService for LiveChatService {
     }
 
     async fn compact(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
+            sk.to_string()
+        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
@@ -3389,7 +3411,9 @@ impl ChatService for LiveChatService {
     }
 
     async fn context(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
+            sk.to_string()
+        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
@@ -3704,7 +3728,9 @@ impl ChatService for LiveChatService {
     }
 
     async fn raw_prompt(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
+            sk.to_string()
+        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
@@ -3833,7 +3859,9 @@ impl ChatService for LiveChatService {
     /// Return the **full messages array** that would be sent to the LLM on the
     /// next call — system prompt + conversation history — in OpenAI format.
     async fn full_context(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
+            sk.to_string()
+        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
@@ -4250,6 +4278,7 @@ async fn run_with_tools(
     provider_name: &str,
     history_raw: &[serde_json::Value],
     session_key: &str,
+    tool_session_key: &str,
     desired_reply_medium: ReplyMedium,
     project_context: Option<&str>,
     runtime_context: Option<&PromptRuntimeContext>,
@@ -4346,7 +4375,7 @@ async fn run_with_tools(
 
     // Determine if this session is sandboxed (for browser tool execution mode)
     let session_is_sandboxed = if let Some(ref router) = state.sandbox_router {
-        router.is_sandboxed(session_key).await
+        router.is_sandboxed(&tool_session_key).await
     } else {
         false
     };
@@ -4660,11 +4689,12 @@ async fn run_with_tools(
     let estimated_next_input_tokens =
         estimate_next_input_tokens(&system_prompt_text, history_raw, user_content);
 
-    // Inject session key, sandbox mode, and accept-language into tool call params so tools can
+    // Inject session identifiers, sandbox mode, and accept-language into tool call params so tools can
     // resolve per-session state and forward the user's locale to web requests.
     // The browser tool uses _sandbox to determine whether to run in a container.
     let mut tool_context = serde_json::json!({
-        "_session_key": session_key,
+        "_session_key": tool_session_key,
+        "_session_id": session_key,
         "_sandbox": session_is_sandboxed,
     });
     if let Some(lang) = accept_language.as_deref() {
@@ -6054,11 +6084,11 @@ fn extract_relay_groups(
 
     let mut username_to_account: HashMap<String, (String, Option<String>)> = HashMap::new();
     for a in accounts {
-        let handle = a.bot_username.as_deref().map(|u| format!("@{u}"));
-        if let Some(ref u) = a.bot_username {
-            username_to_account.insert(u.to_ascii_lowercase(), (a.account_id.clone(), handle.clone()));
+        if let Some(ref u) = a.chan_user_name {
+            let handle = Some(format!("@{u}"));
+            username_to_account
+                .insert(u.to_ascii_lowercase(), (a.account_handle.clone(), handle));
         }
-        username_to_account.insert(a.account_id.to_ascii_lowercase(), (a.account_id.clone(), handle));
     }
 
     let mut groups_out = Vec::new();
@@ -6126,31 +6156,37 @@ async fn dispatch_telegram_relay(
         return Err("session store not configured".into());
     };
 
-    let target_session_key = resolve_telegram_session_key(state, target_account_id, chat_id).await;
+    let chan_user_id = target_account_id
+        .strip_prefix("telegram:")
+        .unwrap_or(target_account_id);
+    let target_session_key = moltis_common::identity::format_session_key("telegram", chan_user_id, chat_id, None);
+
+    let target_session_id = resolve_telegram_session_id(state, target_account_id, chat_id).await;
     let session_exists = if let Some(ref sm) = state.services.session_metadata {
-        sm.get(&target_session_key).await.is_some()
+        sm.get(&target_session_id).await.is_some()
     } else {
-        store.count(&target_session_key).await.unwrap_or(0) > 0
+        store.count(&target_session_id).await.unwrap_or(0) > 0
     };
     if !session_exists {
         return Err("target session does not exist for this group".into());
     }
 
-    ensure_channel_bound_session(state, &target_session_key, target_account_id, chat_id).await;
+    ensure_channel_bound_session(state, &target_session_id, target_account_id, chat_id).await;
 
     let reply_target = moltis_channels::ChannelReplyTarget {
         channel_type: moltis_channels::ChannelType::Telegram,
-        account_id: target_account_id.to_string(),
-        account_handle: target_handle,
+        account_handle: target_account_id.to_string(),
+        bot_handle: target_handle,
         chat_id: chat_id.to_string(),
         message_id: Some(reply_to_message_id.to_string()),
     };
-    state.push_channel_reply(&target_session_key, reply_target).await;
+    state.push_channel_reply(&target_session_id, reply_target).await;
 
     let chat = state.chat().await;
     let params = serde_json::json!({
         "text": relay_text,
         "channel": channel_meta,
+        "_session_id": target_session_id,
         "_session_key": target_session_key,
     });
     chat.send(params).await.map_err(|e| e.to_string())?;
@@ -6181,11 +6217,11 @@ async fn maybe_relay_telegram_group_mentions(
 
     let source_cfg = bus_accounts
         .iter()
-        .find(|a| a.account_id == source_account_id)
+        .find(|a| a.account_handle == source_account_id)
         .cloned()
         .unwrap_or(moltis_telegram::config::TelegramBusAccountSnapshot {
-            account_id: source_account_id.to_string(),
-            bot_username: None,
+            account_handle: source_account_id.to_string(),
+            chan_user_name: None,
             relay_chain_enabled: true,
             relay_hop_limit: 3,
             relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
@@ -6426,7 +6462,7 @@ Output format:
 async fn ensure_channel_bound_session(
     state: &Arc<GatewayState>,
     session_key: &str,
-    account_id: &str,
+    account_handle: &str,
     chat_id: &str,
 ) {
     let Some(ref session_meta) = state.services.session_metadata else {
@@ -6435,8 +6471,8 @@ async fn ensure_channel_bound_session(
 
     let binding = moltis_channels::ChannelReplyTarget {
         channel_type: moltis_channels::ChannelType::Telegram,
-        account_id: account_id.to_string(),
-        account_handle: None,
+        account_handle: account_handle.to_string(),
+        bot_handle: None,
         chat_id: chat_id.to_string(),
         message_id: None,
     };
@@ -6449,10 +6485,8 @@ async fn ensure_channel_bound_session(
     let has_binding = entry.as_ref().is_some_and(|e| e.channel_binding.is_some());
     if !has_binding {
         let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
-        let bot_username =
-            crate::session_labels::resolve_telegram_bot_username(&snapshots, account_id);
-        let label =
-            crate::session_labels::format_telegram_session_label(account_id, bot_username, chat_id);
+        let bot_username = crate::session_labels::resolve_telegram_bot_username(&snapshots, account_handle);
+        let label = crate::session_labels::format_telegram_session_label(account_handle, bot_username, chat_id);
         let _ = session_meta
             .upsert(session_key, Some(label))
             .await;
@@ -6462,18 +6496,20 @@ async fn ensure_channel_bound_session(
     }
 }
 
-async fn resolve_telegram_session_key(
+async fn resolve_telegram_session_id(
     state: &Arc<GatewayState>,
-    account_id: &str,
+    account_handle: &str,
     chat_id: &str,
 ) -> String {
     if let Some(ref sm) = state.services.session_metadata
-        && let Some(key) = sm.get_active_session("telegram", account_id, chat_id).await
+        && let Some(key) = sm.get_active_session_id("telegram", account_handle, chat_id).await
     {
         return key;
     }
-    let chan_user_id = account_id.strip_prefix("telegram:").unwrap_or(account_id);
-    format!("telegram:{chan_user_id}:{chat_id}")
+    let chan_user_id = account_handle
+        .strip_prefix("telegram:")
+        .unwrap_or(account_handle);
+    moltis_common::identity::format_session_key("telegram", chan_user_id, chat_id, None)
 }
 
 async fn maybe_mirror_telegram_group_reply(
@@ -6536,7 +6572,7 @@ async fn maybe_mirror_telegram_group_reply(
         }
 
         let target_session_key =
-            resolve_telegram_session_key(state, &target_account_id, chat_id).await;
+            resolve_telegram_session_id(state, &target_account_id, chat_id).await;
 
         // Only mirror into sessions that already exist for this (bot, group) pair.
         // This prevents accidental creation of "phantom" group sessions for bots
@@ -6646,7 +6682,7 @@ async fn deliver_channel_replies_to_targets(
                             payload.text = transcript;
                             let send_res = outbound
                                 .send_media_with_ref(
-                                    &target.account_id,
+                                    &target.account_handle,
                                     &target.chat_id,
                                     &payload,
                                     reply_to,
@@ -6654,15 +6690,15 @@ async fn deliver_channel_replies_to_targets(
                                 .await;
                             if let Err(e) = send_res {
                                 warn!(
-                                    account_id = target.account_id,
+                                    account_handle = target.account_handle,
                                     chat_id = target.chat_id,
                                     "failed to send channel voice reply: {e}"
                                 );
                             } else {
                                 maybe_mirror_telegram_group_reply(
                                     &state,
-                                    &target.account_id,
-                                    target.account_handle.as_deref(),
+                                    &target.account_handle,
+                                    target.bot_handle.as_deref(),
                                     &target.chat_id,
                                     reply_to,
                                     &payload.text,
@@ -6673,7 +6709,7 @@ async fn deliver_channel_replies_to_targets(
                             if !logbook_html.is_empty()
                                 && let Err(e) = outbound
                                     .send_text_with_suffix(
-                                        &target.account_id,
+                                        &target.account_handle,
                                         &target.chat_id,
                                         "",
                                         &logbook_html,
@@ -6682,7 +6718,7 @@ async fn deliver_channel_replies_to_targets(
                                     .await
                             {
                                 warn!(
-                                    account_id = target.account_id,
+                                    account_handle = target.account_handle,
                                     chat_id = target.chat_id,
                                     "failed to send logbook follow-up: {e}"
                                 );
@@ -6692,7 +6728,7 @@ async fn deliver_channel_replies_to_targets(
                             // without caption, then the full text as a follow-up.
                             if let Err(e) = outbound
                                 .send_media_with_ref(
-                                    &target.account_id,
+                                    &target.account_handle,
                                     &target.chat_id,
                                     &payload,
                                     reply_to,
@@ -6700,15 +6736,15 @@ async fn deliver_channel_replies_to_targets(
                                 .await
                             {
                                 warn!(
-                                    account_id = target.account_id,
+                                    account_handle = target.account_handle,
                                     chat_id = target.chat_id,
                                     "failed to send channel voice reply: {e}"
                                 );
                             } else {
                                 maybe_mirror_telegram_group_reply(
                                     &state,
-                                    &target.account_id,
-                                    target.account_handle.as_deref(),
+                                    &target.account_handle,
+                                    target.bot_handle.as_deref(),
                                     &target.chat_id,
                                     reply_to,
                                     &transcript,
@@ -6718,7 +6754,7 @@ async fn deliver_channel_replies_to_targets(
                             let text_result = if logbook_html.is_empty() {
                                 outbound
                                     .send_text(
-                                        &target.account_id,
+                                        &target.account_handle,
                                         &target.chat_id,
                                         &transcript,
                                         None,
@@ -6727,7 +6763,7 @@ async fn deliver_channel_replies_to_targets(
                             } else {
                                 outbound
                                     .send_text_with_suffix(
-                                        &target.account_id,
+                                        &target.account_handle,
                                         &target.chat_id,
                                         &transcript,
                                         &logbook_html,
@@ -6737,7 +6773,7 @@ async fn deliver_channel_replies_to_targets(
                             };
                             if let Err(e) = text_result {
                                 warn!(
-                                    account_id = target.account_id,
+                                    account_handle = target.account_handle,
                                     chat_id = target.chat_id,
                                     "failed to send transcript follow-up: {e}"
                                 );
@@ -6748,7 +6784,7 @@ async fn deliver_channel_replies_to_targets(
                         let result = if logbook_html.is_empty() {
                             outbound
                                 .send_text_with_ref(
-                                    &target.account_id,
+                                    &target.account_handle,
                                     &target.chat_id,
                                     &text,
                                     reply_to,
@@ -6757,7 +6793,7 @@ async fn deliver_channel_replies_to_targets(
                         } else {
                             outbound
                                 .send_text_with_suffix_with_ref(
-                                    &target.account_id,
+                                    &target.account_handle,
                                     &target.chat_id,
                                     &text,
                                     &logbook_html,
@@ -6769,7 +6805,7 @@ async fn deliver_channel_replies_to_targets(
                             Ok(r) => r,
                             Err(e) => {
                                 warn!(
-                                    account_id = target.account_id,
+                                    account_handle = target.account_handle,
                                     chat_id = target.chat_id,
                                     "failed to send channel reply: {e}"
                                 );
@@ -6778,8 +6814,8 @@ async fn deliver_channel_replies_to_targets(
                         };
                         maybe_mirror_telegram_group_reply(
                             &state,
-                            &target.account_id,
-                            target.account_handle.as_deref(),
+                            &target.account_handle,
+                            target.bot_handle.as_deref(),
                             &target.chat_id,
                             reply_to,
                             &text,
@@ -6791,8 +6827,8 @@ async fn deliver_channel_replies_to_targets(
                                 &state,
                                 bus_accounts.as_ref(),
                                 inbound_relay_ctx,
-                                &target.account_id,
-                                target.account_handle.as_deref(),
+                                &target.account_handle,
+                                target.bot_handle.as_deref(),
                                 &target.chat_id,
                                 reply_to,
                                 &sent.message_id,
@@ -6801,7 +6837,7 @@ async fn deliver_channel_replies_to_targets(
                             .await;
                         } else {
                             warn!(
-                                account_id = target.account_id,
+                                account_handle = target.account_handle,
                                 chat_id = target.chat_id,
                                 "telegram outbound reply sent but no message_id ref returned (relay disabled for this reply)"
                             );
@@ -6914,7 +6950,11 @@ async fn build_tts_payload(
     // only for TTS conversion, but keep the original for the caption.
     let sanitized = moltis_voice::tts::sanitize_text_for_tts(text);
 
-    let channel_key = format!("{}:{}", target.channel_type.as_str(), target.account_id);
+    let channel_key = format!(
+        "{}:{}",
+        target.channel_type.as_str(),
+        target.account_handle
+    );
     let (channel_override, session_override) = {
         let inner = state.inner.read().await;
         (
@@ -7107,22 +7147,32 @@ async fn send_screenshot_to_channels(
                 moltis_channels::ChannelType::Telegram => {
                     let reply_to = target.message_id.as_deref();
                     if let Err(e) = outbound
-                        .send_media(&target.account_id, &target.chat_id, &payload, reply_to)
+                        .send_media(
+                            &target.account_handle,
+                            &target.chat_id,
+                            &payload,
+                            reply_to,
+                        )
                         .await
                     {
                         warn!(
-                            account_id = target.account_id,
+                            account_handle = target.account_handle,
                             chat_id = target.chat_id,
                             "failed to send screenshot to channel: {e}"
                         );
                         // Notify the user of the error
                         let error_msg = format!("⚠️ Failed to send screenshot: {e}");
                         let _ = outbound
-                            .send_text(&target.account_id, &target.chat_id, &error_msg, reply_to)
+                            .send_text(
+                                &target.account_handle,
+                                &target.chat_id,
+                                &error_msg,
+                                reply_to,
+                            )
                             .await;
                     } else {
                         debug!(
-                            account_id = target.account_id,
+                            account_handle = target.account_handle,
                             chat_id = target.chat_id,
                             "sent screenshot to telegram"
                         );
@@ -7131,8 +7181,8 @@ async fn send_screenshot_to_channels(
                         // (do not mirror media bytes/URLs).
                         maybe_mirror_telegram_group_reply(
                             &state,
-                            &target.account_id,
-                            target.account_handle.as_deref(),
+                            &target.account_handle,
+                            target.bot_handle.as_deref(),
                             &target.chat_id,
                             reply_to,
                             "（发送了一张图片）",
@@ -7180,7 +7230,7 @@ async fn send_location_to_channels(
             let reply_to = target.message_id.as_deref();
             if let Err(e) = outbound
                 .send_location(
-                    &target.account_id,
+                    &target.account_handle,
                     &target.chat_id,
                     latitude,
                     longitude,
@@ -7190,13 +7240,13 @@ async fn send_location_to_channels(
                 .await
             {
                 warn!(
-                    account_id = target.account_id,
+                    account_handle = target.account_handle,
                     chat_id = target.chat_id,
                     "failed to send location to channel: {e}"
                 );
             } else {
                 debug!(
-                    account_id = target.account_id,
+                    account_handle = target.account_handle,
                     chat_id = target.chat_id,
                     "sent location pin to telegram"
                 );
@@ -7259,6 +7309,11 @@ mod tests {
     struct ContextStreamingProvider {
         called: Arc<std::sync::atomic::AtomicUsize>,
         expected_session_key: String,
+    }
+
+    struct SingleToolCallProvider {
+        called: Arc<std::sync::atomic::AtomicUsize>,
+        expected_ctx_session_key: String,
     }
 
     struct BudgetProvider {
@@ -7342,6 +7397,82 @@ mod tests {
     }
 
     #[async_trait]
+    impl LlmProvider for SingleToolCallProvider {
+        fn name(&self) -> &str {
+            "single-tool-call"
+        }
+
+        fn id(&self) -> &str {
+            "single-tool-call-model"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> anyhow::Result<moltis_agents::model::CompletionResponse> {
+            anyhow::bail!("not implemented for test")
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+
+        fn stream_with_tools_with_context(
+            &self,
+            ctx: &moltis_agents::model::LlmRequestContext,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            assert_eq!(
+                ctx.session_key.as_deref(),
+                Some(self.expected_ctx_session_key.as_str())
+            );
+
+            let n = self.called.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                // First iteration: request a tool call with empty args.
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::ToolCallStart {
+                        id: "tc-1".to_string(),
+                        name: "assert_ctx".to_string(),
+                        index: 0,
+                    },
+                    StreamEvent::ToolCallArgumentsDelta {
+                        index: 0,
+                        delta: "{}".to_string(),
+                    },
+                    StreamEvent::ToolCallComplete { index: 0 },
+                    StreamEvent::Done(moltis_agents::model::Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    }),
+                ]))
+            } else {
+                // Second iteration: finish with plain text.
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta("ok".to_string()),
+                    StreamEvent::Done(moltis_agents::model::Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    }),
+                ]))
+            }
+        }
+    }
+
+    #[async_trait]
     impl LlmProvider for BudgetProvider {
         fn name(&self) -> &str {
             "budget"
@@ -7398,6 +7529,42 @@ mod tests {
         }
     }
 
+    struct ContextAssertingTool {
+        expected_session_key: String,
+        expected_session_id: String,
+        called: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AgentTool for ContextAssertingTool {
+        fn name(&self) -> &str {
+            "assert_ctx"
+        }
+
+        fn description(&self) -> &str {
+            "test"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+
+        async fn execute(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+            let sk = params
+                .get("_session_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let sid = params
+                .get("_session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            assert_eq!(sk, self.expected_session_key.as_str());
+            assert_eq!(sid, self.expected_session_id.as_str());
+            self.called.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({ "ok": true }))
+        }
+    }
+
     struct MockChannelOutbound {
         calls: Arc<AtomicUsize>,
         delay: Duration,
@@ -7407,7 +7574,7 @@ mod tests {
     impl moltis_channels::plugin::ChannelOutbound for MockChannelOutbound {
         async fn send_text(
             &self,
-            _account_id: &str,
+            _account_handle: &str,
             _to: &str,
             _text: &str,
             _reply_to: Option<&str>,
@@ -7419,7 +7586,7 @@ mod tests {
 
         async fn send_media(
             &self,
-            _account_id: &str,
+            _account_handle: &str,
             _to: &str,
             _payload: &ReplyPayload,
             _reply_to: Option<&str>,
@@ -7438,8 +7605,8 @@ mod tests {
             });
         let targets = vec![moltis_channels::ChannelReplyTarget {
             channel_type: moltis_channels::ChannelType::Telegram,
-            account_id: "acct".to_string(),
-            account_handle: None,
+            account_handle: "telegram:acct".to_string(),
+            bot_handle: None,
             chat_id: "123".to_string(),
             message_id: None,
         }];
@@ -7481,13 +7648,13 @@ mod tests {
     impl moltis_channels::plugin::ChannelOutbound for RecordingOutbound {
         async fn send_text(
             &self,
-            account_id: &str,
+            account_handle: &str,
             to: &str,
             text: &str,
             reply_to: Option<&str>,
         ) -> Result<()> {
             self.texts.lock().await.push((
-                account_id.to_string(),
+                account_handle.to_string(),
                 to.to_string(),
                 text.to_string(),
                 reply_to.map(|s| s.to_string()),
@@ -7497,7 +7664,7 @@ mod tests {
 
         async fn send_media(
             &self,
-            _account_id: &str,
+            _account_handle: &str,
             _to: &str,
             _payload: &ReplyPayload,
             _reply_to: Option<&str>,
@@ -7505,7 +7672,7 @@ mod tests {
             Ok(())
         }
 
-        async fn send_typing(&self, _account_id: &str, _to: &str) -> Result<()> {
+        async fn send_typing(&self, _account_handle: &str, _to: &str) -> Result<()> {
             self.typings.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -7569,9 +7736,9 @@ mod tests {
 
         services.channel = Arc::new(MirrorChannelService {
             accounts: vec![
-                "lovely".to_string(),
-                "fluffy".to_string(),
-                "alpha".to_string(),
+                "telegram:lovely".to_string(),
+                "telegram:fluffy".to_string(),
+                "telegram:alpha".to_string(),
             ],
         });
 
@@ -7589,8 +7756,8 @@ mod tests {
 
         let targets = vec![moltis_channels::ChannelReplyTarget {
             channel_type: moltis_channels::ChannelType::Telegram,
-            account_id: "lovely".to_string(),
-            account_handle: Some("@lovely_apple_bot".to_string()),
+            account_handle: "telegram:lovely".to_string(),
+            bot_handle: Some("@lovely_apple_bot".to_string()),
             chat_id: "-100".to_string(),
             message_id: Some("184".to_string()),
         }];
@@ -7663,7 +7830,7 @@ mod tests {
             .with_session_store(Arc::clone(&store));
 
         services.channel = Arc::new(MirrorChannelService {
-            accounts: vec!["lovely".to_string(), "fluffy".to_string()],
+            accounts: vec!["telegram:lovely".to_string(), "telegram:fluffy".to_string()],
         });
 
         let state = Arc::new(crate::state::GatewayState::new(
@@ -7677,8 +7844,8 @@ mod tests {
 
         let targets = vec![moltis_channels::ChannelReplyTarget {
             channel_type: moltis_channels::ChannelType::Telegram,
-            account_id: "lovely".to_string(),
-            account_handle: Some("@lovely_apple_bot".to_string()),
+            account_handle: "telegram:lovely".to_string(),
+            bot_handle: Some("@lovely_apple_bot".to_string()),
             chat_id: "123".to_string(), // non-group
             message_id: Some("1".to_string()),
         }];
@@ -7713,7 +7880,7 @@ mod tests {
             .with_channel_outbound(Arc::clone(&outbound))
             .with_session_store(Arc::clone(&store));
         services.channel = Arc::new(MirrorChannelService {
-            accounts: vec!["lovely".to_string(), "fluffy".to_string()],
+            accounts: vec!["telegram:lovely".to_string(), "telegram:fluffy".to_string()],
         });
 
         let state = Arc::new(crate::state::GatewayState::new(
@@ -7732,8 +7899,8 @@ mod tests {
                 session_key,
                 moltis_channels::ChannelReplyTarget {
                     channel_type: moltis_channels::ChannelType::Telegram,
-                    account_id: "lovely".to_string(),
-                    account_handle: Some("@lovely_apple_bot".to_string()),
+                    account_handle: "telegram:lovely".to_string(),
+                    bot_handle: Some("@lovely_apple_bot".to_string()),
                     chat_id: "-100".to_string(),
                     message_id: Some("184".to_string()),
                 },
@@ -7850,15 +8017,15 @@ mod tests {
 
         let bus_accounts = vec![
             TelegramBusAccountSnapshot {
-                account_id: "bot1".into(),
-                bot_username: Some("bot1".into()),
+                account_handle: "telegram:bot1".into(),
+                chan_user_name: Some("bot1".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 relay_strictness: RelayStrictness::Loose,
             },
             TelegramBusAccountSnapshot {
-                account_id: "bot2".into(),
-                bot_username: Some("bot2".into()),
+                account_handle: "telegram:bot2".into(),
+                chan_user_name: Some("bot2".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 relay_strictness: RelayStrictness::Strict,
@@ -7869,7 +8036,7 @@ mod tests {
             &state,
             &bus_accounts,
             None,
-            "bot1",
+            "telegram:bot1",
             Some("@bot1"),
             "-100",
             Some("184"),
@@ -7943,15 +8110,15 @@ mod tests {
 
         let accounts = vec![
             TelegramBusAccountSnapshot {
-                account_id: "bot1".into(),
-                bot_username: Some("bot1".into()),
+                account_handle: "telegram:bot1".into(),
+                chan_user_name: Some("bot1".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 relay_strictness: RelayStrictness::Strict,
             },
             TelegramBusAccountSnapshot {
-                account_id: "bot2".into(),
-                bot_username: Some("bot2".into()),
+                account_handle: "telegram:bot2".into(),
+                chan_user_name: Some("bot2".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 relay_strictness: RelayStrictness::Strict,
@@ -7971,8 +8138,12 @@ mod tests {
             .collect();
 
         assert_eq!(directives.len(), 2);
-        assert!(directives.iter().any(|d| d.0 == "bot1" && d.1 == "完成任务1"));
-        assert!(directives.iter().any(|d| d.0 == "bot2" && d.1 == "完成任务2"));
+        assert!(directives
+            .iter()
+            .any(|d| d.0 == "telegram:bot1" && d.1 == "完成任务1"));
+        assert!(directives
+            .iter()
+            .any(|d| d.0 == "telegram:bot2" && d.1 == "完成任务2"));
     }
 
     #[test]
@@ -7980,8 +8151,8 @@ mod tests {
         use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
 
         let accounts = vec![TelegramBusAccountSnapshot {
-            account_id: "bot2".into(),
-            bot_username: Some("bot2".into()),
+            account_handle: "telegram:bot2".into(),
+            chan_user_name: Some("bot2".into()),
             relay_chain_enabled: true,
             relay_hop_limit: 3,
             relay_strictness: RelayStrictness::Strict,
@@ -8003,7 +8174,7 @@ echo @bot2
         let line_start: Vec<_> = groups.into_iter().filter(|g| g.line_start).collect();
         assert_eq!(line_start.len(), 1);
         assert_eq!(line_start[0].mentions.len(), 1);
-        assert_eq!(line_start[0].mentions[0].target_account_id, "bot2");
+        assert_eq!(line_start[0].mentions[0].target_account_id, "telegram:bot2");
         assert_eq!(line_start[0].task_text, "请执行任务");
     }
 
@@ -8013,15 +8184,15 @@ echo @bot2
 
         let accounts = vec![
             TelegramBusAccountSnapshot {
-                account_id: "bot1".into(),
-                bot_username: Some("bot1".into()),
+                account_handle: "telegram:bot1".into(),
+                chan_user_name: Some("bot1".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 relay_strictness: RelayStrictness::Strict,
             },
             TelegramBusAccountSnapshot {
-                account_id: "bot2".into(),
-                bot_username: Some("bot2".into()),
+                account_handle: "telegram:bot2".into(),
+                chan_user_name: Some("bot2".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 relay_strictness: RelayStrictness::Strict,
@@ -8122,8 +8293,8 @@ echo @bot2
                 session_key,
                 moltis_channels::ChannelReplyTarget {
                     channel_type: moltis_channels::ChannelType::Telegram,
-                    account_id: "acct".to_string(),
-                    account_handle: None,
+                    account_handle: "telegram:acct".to_string(),
+                    bot_handle: None,
                     chat_id: "123".to_string(),
                     message_id: Some("7".to_string()),
                 },
@@ -8160,7 +8331,7 @@ echo @bot2
 
         let texts = rec.texts.lock().await;
         assert_eq!(texts.len(), 1);
-        assert_eq!(texts[0].0, "acct");
+        assert_eq!(texts[0].0, "telegram:acct");
         assert_eq!(texts[0].1, "123");
         assert_eq!(texts[0].3.as_deref(), Some("7"));
         assert!(
@@ -8191,8 +8362,8 @@ echo @bot2
                 session_key,
                 moltis_channels::ChannelReplyTarget {
                     channel_type: moltis_channels::ChannelType::Telegram,
-                    account_id: "acct".to_string(),
-                    account_handle: None,
+                    account_handle: "telegram:acct".to_string(),
+                    bot_handle: None,
                     chat_id: "123".to_string(),
                     message_id: Some("9".to_string()),
                 },
@@ -8250,8 +8421,8 @@ echo @bot2
                 session_key,
                 moltis_channels::ChannelReplyTarget {
                     channel_type: moltis_channels::ChannelType::Telegram,
-                    account_id: "acct".to_string(),
-                    account_handle: None,
+                    account_handle: "telegram:acct".to_string(),
+                    bot_handle: None,
                     chat_id: "123".to_string(),
                     message_id: Some("7".to_string()),
                 },
@@ -8280,8 +8451,8 @@ echo @bot2
                 session_key,
                 moltis_channels::ChannelReplyTarget {
                     channel_type: moltis_channels::ChannelType::Telegram,
-                    account_id: "acct".to_string(),
-                    account_handle: None,
+                    account_handle: "telegram:acct".to_string(),
+                    bot_handle: None,
                     chat_id: "123".to_string(),
                     message_id: Some("8".to_string()),
                 },
@@ -8389,6 +8560,7 @@ echo @bot2
             "ctx-stream",
             &[],
             "main",
+            "main",
             ReplyMedium::Text,
             None,
             None,
@@ -8405,6 +8577,63 @@ echo @bot2
 
         assert!(result.is_some());
         assert_eq!(called.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_injects_session_id_into_tool_calls() {
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop(),
+        );
+        let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
+
+        let provider_called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(SingleToolCallProvider {
+            called: Arc::clone(&provider_called),
+            expected_ctx_session_key: "telegram:bot1:123".to_string(),
+        });
+
+        let tool_called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        tool_registry.write().await.register(Box::new(ContextAssertingTool {
+            expected_session_key: "telegram:bot1:123".to_string(),
+            expected_session_id: "session:abc".to_string(),
+            called: Arc::clone(&tool_called),
+        }));
+
+        let result = run_with_tools(
+            &state,
+            &model_store,
+            "run-1",
+            provider,
+            "single-tool-call-model",
+            &tool_registry,
+            &UserContent::text("hi"),
+            "single-tool-call",
+            &[],
+            "session:abc",
+            "telegram:bot1:123",
+            ReplyMedium::Text,
+            None,
+            None,
+            0,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await;
+
+        assert!(result.is_some());
+        assert_eq!(provider_called.load(Ordering::SeqCst), 2);
+        assert_eq!(tool_called.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -9891,8 +10120,8 @@ echo @bot2
             .with_session_store(Arc::clone(&store));
         services.channel = Arc::new(SnapshotChannelService {
             snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
-                account_id: "telegram:845".into(),
-                bot_username: Some("lovely_apple_bot".into()),
+                account_handle: "telegram:845".into(),
+                chan_user_name: Some("lovely_apple_bot".into()),
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,

@@ -1,137 +1,185 @@
 # Issue: Terminology / Concept Convergence（概念与术语收敛：两域分离、核心键冻结、呈现口径统一）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: TODO（记录在案，尚未系统推进）
-- Priority: P2（长期质量/可维护性问题；会放大后续需求与排障成本）
+- Status: IN-PROGRESS
+- Priority: P2
 - Components: gateway / sessions / channels / telegram / ui-debug / docs
+
+**已实现（2026-02-25）**
+- 引入确定性 `session_key` 格式化/解析工具：`crates/common/src/identity.rs:41`
+- Channel ingest 同时维护 `session_id`（持久会话）与 `session_key`（跨域桥）：`crates/gateway/src/channel_events.rs:100`
+- `run_with_tools` 增加 `tool_session_key`（用于工具上下文、sandbox key）：`crates/gateway/src/chat.rs:4270`
+- `run_with_tools` 工具上下文同时注入 `_session_id`（持久会话 id）与 `_session_key`（跨域桥）：`crates/gateway/src/chat.rs:4695`
+- tools 侧对持久会话相关操作优先使用 `_session_id`（避免 channel session 使用 UUID 时读错历史/metadata）：`crates/tools/src/branch_session.rs:59`、`crates/tools/src/session_state.rs:79`、`crates/tools/src/location.rs:375`
+- gateway 测试覆盖 tools 上下文 `_session_id` 注入：`crates/gateway/src/chat.rs:8583`
+- 修复 sandbox/router 与 channel session_id 的键不一致：gateway 在写入/加载 sandbox overrides 以及 session delete cleanup 时，对 channel session 使用 `channel_binding` 派生的确定性 key 与 SandboxRouter 交互：`crates/gateway/src/session.rs:140`、`crates/gateway/src/server.rs:1739`
+
+**已覆盖测试（如有）**
+- `run_with_tools_passes_session_key_via_llm_request_context`：`crates/gateway/src/chat.rs:8411`
+- `run_with_tools_injects_session_id_into_tool_calls`：`crates/gateway/src/chat.rs:8583`
+- `sandbox_session_key_for_channel_binding_parses_legacy_account_id`：`crates/gateway/src/session.rs:797`
+
+**已知差异/后续优化（非阻塞）**
+- Web UI/WS payload 仍需逐步清理旧字段别名（例如兼容 `account_handle`/`accountHandle` 的过渡期）。
 
 ---
 
 ## 背景（Background）
-当前仓库中，“Telegram 域概念”和 “Moltis 域概念”在代码/日志/UI/issue 文档里混用，且出现同名字段跨层复用（尤其 `session_key`/`account_id`/`chat`/`scope`），导致：
-- 讨论需求必须先解释名词，沟通与实现成本高；
-- 同一条链路的日志很难读懂、很难串起来排障；
-- 一旦引入多 agent / 多 loop / admin 工具，这种混乱会指数级放大（安全边界也会变脆弱）。
+- 场景：Telegram 入站消息 → gateway 生成会话桶 → LLM/Tools 执行 → 结果回传 Telegram + Web UI。
+- 约束：术语必须能支撑日志排障、UI debug、持久化 schema、以及 sandbox 复用键。
+- Out of scope：一次性全仓大重构（允许分阶段迁移）。
 
-本 Issue 的目标不是“解释更多”，而是**冻结一套极简、准确、可执行的术语体系**，并把它落实到可观测性与命名规范里。
-
----
-
-## 需求（Requirements）【必须满足】
-1) **两域严格隔离**：Telegram 域术语与 Moltis 域术语不得混用；同名词不允许跨域复用语义。
-2) **核心概念极简且冻结**：参与路由/分桶/落盘/鉴权的核心字段必须最少、语义固定、全仓统一。
-3) **跨域桥只保留一个主键**：从 Telegram 的 chat/thread 唯一定位到 Moltis 的“会话桶”，必须通过同一个核心键（避免到处隐式推导）。
-4) **核心 vs 呈现严格区分**：`@username`、display name、chat title、container name 等只允许用于“呈现”，不得用于分桶/鉴权/存储主键。
-5) **呈现字段也要收敛**：默认日志/UI 只展示 2–3 个稳定字段，其余只在“展开详情”里提供。
+当前仓库里长期存在“Telegram 域概念”和“Moltis 域概念”混用，且出现同名字段跨层复用（尤其 `session_key` / `account_id` / `scope`）。这会让：
+- 需求讨论必须先解释名词；
+- 日志与 UI 很难把同一链路串起来；
+- 多 bot、多 session、多 sandbox scope 的组合复杂度指数级上升。
 
 ---
 
-## 目标（Goals）
-- 冻结一套 Glossary（核心对象 + 核心键 + 呈现口径），供所有后续 issue/实现复用。
-- 让日志/UI/debug 面板能“一眼回答”：
-  - 我到底是哪只 bot（配置别名）在处理？
-  - 哪个 Telegram chat/thread 的消息？
-  - 对应 Moltis 的哪个会话桶？
-  - 工具执行用了哪个 sandbox（scope + effective key）？
-- 用增量迁移的方式消除现有 `session_key` 的语义漂移与同名字段复用。
+## 概念与口径（Glossary & Semantics）【概念收敛/避免歧义】
+> 只允许在这里声明别名；正文统一使用“主称呼”。
 
-## 非目标（Non-goals）
-- 不要求一次性大重构（允许分 Phase 推进）。
-- 不在本 Issue 内引入多 agent 常驻架构（本单是其前置基础设施：术语与可观测性收敛）。
+- **`account_handle`**（主称呼）：Channel 账号实例的稳定主键（对 Telegram：`telegram:<chan_user_id>`）
+  - Why：跨进程/跨重启必须稳定；可作为存储 key 片段；不依赖可变的 `@username`。
+  - Not：不是“配置别名”，不是 `@username`。
+  - Source/Method：authoritative（由 `getMe` 的 `chan_user_id` 推导并固化）。
+  - Aliases：`account_id`（历史名，禁止继续扩散）。
 
----
+- **`bot_handle`**（主称呼）：平台展示用 handle（对 Telegram：`@username`，可空、可变）
+  - Why：便于人读（日志/UI），但不能参与分桶/路由/鉴权/落盘。
+  - Not：不得出现在任何核心 key 生成逻辑中。
+  - Source/Method：authoritative（来自 Telegram `getMe`）。
+  - Aliases：`bot_username`（历史名）。
 
-## 核心术语与键（Core Vocabulary, Frozen）
-> 只要涉及“分桶/路由/鉴权/落盘”，只能使用本节术语；其余词汇只能作为呈现层别名。
+- **`session_key`**（主称呼）：跨域桥（确定性会话桶键），用于把「某只 bot + 某个 chat/thread」映射到一个逻辑会话桶
+  - 定义：`<channel>:<chan_user_id>:<chat_id>[:<thread_id>]`
+  - Why：稳定、可预测、可在日志/UI 直接对齐 Telegram 定位。
+  - Not：不是持久会话 id；不得包含 display name/title/`@username`。
+  - Source/Method：configured+effective（由输入字段确定性生成，见 `format_session_key`）。
+  - Aliases：旧 `session_key`（曾漂移为 `session:<uuid>`，此用法必须消失）。
 
-### A) Telegram 域（平台定义）
-- `user_id`：发送者/成员 id（人和 bot 在 Telegram 都是 user）
-- `chat_id`：对话容器 id（DM/群/频道统一都叫 chat）
-- `thread_id`：Topic/Thread id（可选；仅 supergroup topics）
-- `message_id`：消息 id
-
-### B) Moltis 域（系统定义）
-#### 1) `account_id`（保留此名，但冻结语义）
-`account_id` = Moltis 配置里“这只 Telegram bot 实例”的别名（例如 `fluffy`/`lovely`）。
-
-- 它**不是** Telegram 的 account 概念；
-- 语义：选择哪套 token/连接参数、以及在同一群里区分多只 bot；
-- 约束：必须稳定、可读、可作为 key 片段；不依赖 Telegram `@username`。
-
-#### 2) `session_key`（唯一跨域桥；建议对用户保持这个名字）
-`session_key = telegram:<account_id>:<chat_id>[:<thread_id>]`
-
-示例：
-- DM：`telegram:fluffy:8454363355`（chat_id 可能是正数）
-- 群：`telegram:fluffy:-5288040422`
-- topics：`telegram:fluffy:-5288040422:12`
-
-**硬规则**
-- `session_key` 只允许表示“账号实例 + chat/thread 的会话桶”；
-- 任意工具上下文（如 `_session_key`）、sandbox key 派生、channel ingest/reply routing 必须以 `session_key` 为主轴；
-- `session_key` 不得拼 `@username`，不得拼 display name/title。
-
-#### 3) 内部持久会话（为消歧：建议用 `session_id` / `conversation_id`）
-仓库现状里存在 `session:<uuid>` 这种“持久会话 key”，用于承载历史、compaction、metadata 等。
-
-为了彻底止住歧义：对外呈现与跨域桥固定为 `session_key`；而 `session:<uuid>` 在文档/UI/日志里应标注为 `session_id`（或 `conversation_id`），并尽量只在 debug/详情里出现。
+- **`session_id`**（主称呼）：内部持久会话 id（opaque），用于承载历史、compaction、metadata 等
+  - 定义：`session:<uuid>`（示例）
+  - Why：允许会话迁移/切换而不破坏历史落盘结构；避免把“持久 id”误当成“跨域桥”。
+  - Not：不应作为 sandbox 复用键，不应作为跨域路由主轴。
+  - Source/Method：authoritative（由系统生成并落库）。
 
 ---
 
-## 呈现口径（Presentation Contract, Frozen）
-> 呈现字段要“少且稳定”，并与核心键明确解耦。
+## 需求与目标（Requirements & Goals）
+### 功能目标（Functional）
+- [ ] 两域严格隔离：Telegram 域术语与 Moltis 域术语不得混用。
+- [ ] 跨域桥只保留一个主键：`session_key` 必须是唯一跨域桥。
+- [ ] 核心 vs 呈现严格区分：`bot_handle`、title、display name 只能用于呈现。
 
-### 默认呈现（日志/UI 默认只显示 3 项）
-1) `actor`：`<account_id>[/@handle?]`
-2) `where`：`chat:<chat_id>[#<thread_id>] <title?>`
-3) `session`：`<session_key>`
-
-### 详情呈现（展开后可见，但不得参与逻辑）
-- `bot_handle`（Telegram `@username`，可空/可变）
-- `sender_display_name`、`chat_title`
-- `bot_user_id`、`sender_user_id`
-- `message_id`、entities 解析结果
-- `container_name`/hash 等
+### 非功能目标（Non-functional）
+- 正确性口径（必须/不得）：
+  - 必须：sandbox/tools 复用键以 `session_key` 为主轴（可观测、可复现）。
+  - 不得：任何地方用 `bot_handle`/chat title 拼 key。
+- 兼容性：允许短期兼容旧 WS payload 字段名，但核心存储/路由必须统一。
+- 可观测性：默认日志/UI 只展示少且稳定的字段（见后续 Spec）。
 
 ---
 
-## Sandbox / Tools 相关口径（最小必要）
-> 仅定义必须出现在可观测性里的两项，避免再引入新的“工作台/环境”名词漂移。
+## 问题陈述（Problem Statement）
+### 现象（Symptoms）
+1) 同名字段在不同层含义不同（例如 `session_key` 同时指“确定性桶键”和“持久会话 id”）。
+2) UI/日志里无法一眼判断“哪个 bot + 哪个 chat/thread + 哪个持久会话”。
 
-- `sandbox_scope`：配置值 `tools.exec.sandbox.scope=session|chat|bot|global`
-- `effective_sandbox_key`：由 `sandbox_scope + session_key` 派生的复用键（必须可在 debug/详情里反查）
-
----
-
-## 方案（Proposed Solution / Migration Plan）
-### Phase 0：文档冻结
-- [ ] 本 Issue 的 Glossary 与 Presentation Contract 作为“团队共识基线”冻结；
-- [ ] 在后续 Telegram / sessions / sandbox / multi-agent 相关 issue 里引用本术语表。
-
-### Phase 1：可观测性收敛（先让人看得懂）
-- [ ] 日志统一输出：默认 3 项（actor/where/session），并提供展开详情字段；
-- [ ] `/context` 与 debug panel 统一显示：
-  - `session_key`（核心桥）
-  - `account_id`（配置别名）
-  - `chat_id/thread_id`（Telegram 定位）
-  - `sandbox_scope/effective_sandbox_key`（工具环境定位）
-- [ ] 任何输出避免裸词 `session_key` 漂移：如果出现 `session:<uuid>`，必须标注为 `session_id`（或 `conversation_id`）。
-
-### Phase 2：代码命名与类型消歧（逐步、可回滚）
-- [ ] 将 `default_channel_session_key()` 等函数注释/命名逐步收敛为“生成 `session_key`（跨域桥）”；
-- [ ] 在跨模块边界把 `session_key` 拆成两个明确字段（或新类型）：
-  - `session_key`（跨域桥，确定性）
-  - `session_id`（内部持久会话，opaque）
-- [ ] 把 `bot_username` 的语义固定为 `bot_handle`（presentation only），禁止在核心逻辑里做 key。
+### 影响（Impact）
+- 用户体验：debug 信息不稳定，解释成本高。
+- 可靠性：错误路由/错误复用 sandbox 的风险上升。
+- 排障成本：同一链路的日志难以串联。
 
 ---
 
-## 验收标准（Acceptance Criteria）
-- [ ] 术语：本文件成为后续设计/实现的引用基线（至少被关键 issue 引用）。
-- [ ] 可观测性：同一条链路里能稳定对齐 `account_id + chat_id/thread_id + session_key`，无需猜。
-- [ ] 消歧：用户与调试输出中不再出现“无法判断语义”的 `session_key`；内部 `session:<uuid>` 一律标注为 `session_id`/`conversation_id`。
+## 现状核查与证据（As-is / Evidence）【不可省略】
+- 代码证据：
+  - `crates/common/src/identity.rs:41`：`format_session_key` 固化 `session_key` 结构
+  - `crates/gateway/src/channel_events.rs:118`：广播 payload 同时包含 `sessionId` + `sessionKey`
+  - `crates/gateway/src/chat.rs:2000`：`chat.send` 支持 `_session_id` 与 `_session_key` 分离
+  - `crates/gateway/src/chat.rs:4695`：工具上下文 `_session_key` 使用 `tool_session_key`，并同时注入 `_session_id`
+- 当前测试覆盖：
+  - 已有：`crates/gateway/src/chat.rs:8411`
+  - 缺口：UI E2E 未覆盖（需手工验证 WS payload 渲染）。
+
+---
+
+## 根因分析（Root Cause）
+- A. 历史上为快速实现跨域路由，把“确定性桶键”和“持久会话 id”都塞进了 `session_key`。
+- B. `account_id` 既被当作“配置别名”，又被当作“Telegram bot 身份”，导致字段名误导。
+
+---
+
+## 期望行为（Desired Behavior / Spec）【尽量冻结】
+- 必须：
+  - `session_key` 只表示确定性桶键：`<channel>:<chan_user_id>:<chat_id>[:<thread_id>]`
+  - `session_id` 只表示内部持久会话 id：`session:<uuid>`
+  - Tools/sandbox 的复用键必须基于 `session_key`（并可在 debug/详情里反查）。
+- 不得：
+  - 不得用 `bot_handle`、chat title、display name 参与 key。
+- 应当：
+  - WS/UI 默认显示：`account_handle`（或更友好的 label）、`chat_id/thread_id`、`session_key`；`session_id` 仅在详情显示。
+
+---
+
+## 方案（Proposed Solution）
+### 最终方案（Chosen Approach）
+#### 行为规范（Normative Rules）
+- Channel ingest：对每个 (account_handle, chat_id) 维护一个“当前 active session_id”，但跨域桥始终使用 `session_key`。
+- Chat service：
+  - `session_key`（历史落盘/metadata 的 key）允许为 `session_id`
+  - `tool_session_key` 专用于 tools/sandbox `_session_key`（跨域桥）
+  - tools 侧如需读取/写入持久会话（历史/metadata/分叉等），应优先使用 `_session_id`
+
+#### 接口与数据结构（Contracts）
+- WS payload：同时发 `sessionId` 与 `sessionKey`（过渡期允许旧字段 fallback，但新逻辑以这两个为准）。
+- 存储：
+  - channel_sessions 记录 (channel_type, account_handle, chat_id) → active `session_id`
+  - sessions 表以 `session_id` 为 key 存历史/metadata；`session_key` 仅用于确定性路由与工具上下文。
+
+---
+
+## 验收标准（Acceptance Criteria）【不可省略】
+- [ ] 同一条链路能稳定对齐：`account_handle + chat_id/thread_id + session_key + session_id(详情)`。
+- [ ] `session_key` 在日志/UI 中不再出现语义漂移（不得再代表 `session:<uuid>`）。
+- [ ] gateway + sessions + telegram 编译与测试通过（至少 workspace 编译 + gateway 单测）。
+
+## 测试计划（Test Plan）【不可省略】
+### Unit
+- [x] `run_with_tools_passes_session_key_via_llm_request_context`：`crates/gateway/src/chat.rs:8411`
+
+### Integration
+- [ ] 手工：Telegram 入站消息 → Web UI 实时显示，确认 WS payload 使用 `sessionId` 取历史/媒体路径，`sessionKey` 用于工具上下文与可观测性。
+
+---
+
+## 发布与回滚（Rollout & Rollback）
+- 发布策略：无 feature flag（属于命名/口径与 schema 迁移，按迁移脚本推进）。
+- 回滚策略：保留 WS payload 的旧字段兼容一段时间；数据库迁移回滚需要显式降级脚本（暂不提供）。
+
+## 实施拆分（Implementation Outline）
+- Step 1: 引入 `identity::format_session_key` 并替换旧拼接
+- Step 2: 引入 `session_id` 与 `session_key` 并行传递（WS/UI/tools）
+- Step 3: 清理旧字段名与旧语义（逐步）
+- 受影响文件：
+  - `crates/common/src/identity.rs`
+  - `crates/gateway/src/channel_events.rs`
+  - `crates/gateway/src/chat.rs`
 
 ## 交叉引用（Cross References）
-- `issues/done/issue-telegram-group-mention-gating-not-working.md`
-- `issues/done/issue-telegram-context-debug-parity.md`
-- `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md`
+- Related issues/docs：
+  - `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md`
+  - `issues/issue-spawn-agent-session-key-model-selection-timeout-and-errors.md`
+
+## 未决问题（Open Questions）
+- Q1: 是否需要引入“人可读 bot alias”（仅呈现）并在 UI/日志默认展示？
+
+## Close Checklist（关单清单）【不可省略】
+- [ ] 行为已按 Spec 实现（口径一致）
+- [ ] authoritative vs estimate 边界清晰（且 UI/日志标注 method/source）
+- [ ] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
+- [ ] 文档/配置示例已同步更新（避免断链）
+- [ ] 兼容性/迁移说明已写清（如涉及持久化/字段变更）
+- [ ] 安全隐私检查通过（敏感字段不泄露）
+- [ ] 回滚策略明确

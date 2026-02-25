@@ -4,7 +4,7 @@ use {anyhow::Result, async_trait::async_trait};
 #[derive(Debug, Clone)]
 pub struct MessageLogEntry {
     pub id: i64,
-    pub account_id: String,
+    pub account_handle: String,
     pub channel_type: String,
     pub peer_id: String,
     pub username: Option<String>,
@@ -31,6 +31,10 @@ pub struct SenderSummary {
 #[async_trait]
 pub trait MessageLog: Send + Sync {
     async fn log(&self, entry: MessageLogEntry) -> Result<()>;
-    async fn list_by_account(&self, account_id: &str, limit: u32) -> Result<Vec<MessageLogEntry>>;
-    async fn unique_senders(&self, account_id: &str) -> Result<Vec<SenderSummary>>;
+    async fn list_by_account(
+        &self,
+        account_handle: &str,
+        limit: u32,
+    ) -> Result<Vec<MessageLogEntry>>;
+    async fn unique_senders(&self, account_handle: &str) -> Result<Vec<SenderSummary>>;
 }

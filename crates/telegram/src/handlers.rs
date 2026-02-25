@@ -33,7 +33,7 @@ use crate::{
 #[derive(Clone)]
 pub struct HandlerContext {
     pub accounts: AccountStateMap,
-    pub account_id: String,
+    pub account_handle: String,
 }
 
 /// Build the teloxide update handler.
@@ -50,7 +50,7 @@ pub fn build_handler() -> Handler<
 pub async fn handle_message_direct(
     msg: Message,
     bot: &Bot,
-    account_id: &str,
+    account_handle: &str,
     accounts: &AccountStateMap,
 ) -> anyhow::Result<()> {
     #[cfg(feature = "metrics")]
@@ -61,16 +61,16 @@ pub async fn handle_message_direct(
 
     let text = extract_text(&msg);
     if text.is_none() && !has_media(&msg) {
-        debug!(account_id, "ignoring non-text, non-media message");
+        debug!(account_handle, "ignoring non-text, non-media message");
         return Ok(());
     }
 
     let (config, bot_user_id, bot_username, outbound, message_log, event_sink) = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-        let state = match accts.get(account_id) {
+        let state = match accts.get(account_handle) {
             Some(s) => s,
             None => {
-                warn!(account_id, "handler: account not found in state map");
+                warn!(account_handle, "handler: account not found in state map");
                 return Ok(());
             },
         };
@@ -83,7 +83,7 @@ pub async fn handle_message_direct(
             state.event_sink.clone(),
         )
     };
-    let account_handle = bot_username.as_deref().map(|u| format!("@{u}"));
+    let bot_handle = bot_username.as_deref().map(|u| format!("@{u}"));
 
     let (chat_type, group_id) = classify_chat(&msg);
     let peer_id = msg
@@ -105,7 +105,7 @@ pub async fn handle_message_direct(
     let bot_mentioned = check_bot_mentioned(&msg, bot_user_id, bot_username.as_deref());
 
     debug!(
-        account_id,
+        account_handle,
         ?chat_type,
         peer_id,
         ?bot_mentioned,
@@ -116,7 +116,7 @@ pub async fn handle_message_direct(
     let inbound_kind = message_kind(&msg);
     let text_len = text.as_ref().map_or(0, |body| body.len());
     info!(
-        account_id,
+        account_handle,
         chat_id = msg.chat.id.0,
         message_id = msg.id.0,
         peer_id,
@@ -153,7 +153,7 @@ pub async fn handle_message_direct(
             .as_secs() as i64;
         let entry = MessageLogEntry {
             id: 0,
-            account_id: account_id.to_string(),
+            account_handle: account_handle.to_string(),
             channel_type: ChannelType::Telegram.to_string(),
             peer_id: peer_id.clone(),
             username: username.clone(),
@@ -165,7 +165,7 @@ pub async fn handle_message_direct(
             created_at: now,
         };
         if let Err(e) = log.log(entry).await {
-            warn!(account_id, "failed to log message: {e}");
+            warn!(account_handle, "failed to log message: {e}");
         }
     }
 
@@ -173,7 +173,7 @@ pub async fn handle_message_direct(
     if let Some(ref sink) = event_sink {
         sink.emit(ChannelEvent::InboundMessage {
             channel_type: ChannelType::Telegram,
-            account_id: account_id.to_string(),
+            account_handle: account_handle.to_string(),
             peer_id: peer_id.clone(),
             username: username.clone(),
             sender_name: sender_name.clone(),
@@ -203,7 +203,7 @@ pub async fn handle_message_direct(
             let text_has_at_sign = extract_text(&msg).is_some_and(|t| t.contains('@'));
 
             warn!(
-                account_id,
+                account_handle,
                 %reason,
                 peer_id,
                 username = ?username,
@@ -220,7 +220,7 @@ pub async fn handle_message_direct(
                 "handler: access denied"
             );
         } else {
-            warn!(account_id, %reason, peer_id, username = ?username, "handler: access denied");
+            warn!(account_handle, %reason, peer_id, username = ?username, "handler: access denied");
         }
         #[cfg(feature = "metrics")]
         counter!(tg_metrics::ACCESS_CONTROL_DENIALS_TOTAL).increment(1);
@@ -232,7 +232,7 @@ pub async fn handle_message_direct(
         {
             handle_otp_flow(
                 accounts,
-                account_id,
+                account_handle,
                 &peer_id,
                 username.as_deref(),
                 sender_name.as_deref(),
@@ -260,8 +260,8 @@ pub async fn handle_message_direct(
             if !body.trim().is_empty() {
                 let reply_target = ChannelReplyTarget {
                     channel_type: ChannelType::Telegram,
-                    account_id: account_id.to_string(),
-                    account_handle: account_handle.clone(),
+                    account_handle: account_handle.to_string(),
+                    bot_handle: bot_handle.clone(),
                     chat_id: msg.chat.id.0.to_string(),
                     message_id: Some(msg.id.0.to_string()),
                 };
@@ -273,7 +273,7 @@ pub async fn handle_message_direct(
                     model: config.model.clone(),
                 };
                 info!(
-                    account_id,
+                    account_handle,
                     chat_id = %reply_target.chat_id,
                     message_id = ?reply_target.message_id,
                     body_len = body.len(),
@@ -286,7 +286,7 @@ pub async fn handle_message_direct(
         return Ok(());
     }
 
-    debug!(account_id, "handler: access granted");
+    debug!(account_handle, "handler: access granted");
 
     // Check for voice/audio messages and transcribe them
     let (mut body, attachments) = if let Some(voice_file) = extract_voice_file(&msg) {
@@ -296,14 +296,14 @@ pub async fn handle_message_direct(
         {
             if let Err(e) = outbound
                 .send_text(
-                    account_id,
+                    account_handle,
                     &msg.chat.id.0.to_string(),
                     "I can't understand voice, you did not configure it, please visit Settings -> Voice",
                     None,
                 )
                 .await
             {
-                warn!(account_id, "failed to send STT setup hint: {e}");
+                warn!(account_handle, "failed to send STT setup hint: {e}");
             }
             return Ok(());
         }
@@ -313,7 +313,7 @@ pub async fn handle_message_direct(
             match download_telegram_file(bot, &voice_file.file_id).await {
                 Ok(audio_data) => {
                     debug!(
-                        account_id,
+                        account_handle,
                         file_id = %voice_file.file_id,
                         format = %voice_file.format,
                         size = audio_data.len(),
@@ -322,7 +322,7 @@ pub async fn handle_message_direct(
                     match sink.transcribe_voice(&audio_data, &voice_file.format).await {
                         Ok(transcribed) => {
                             debug!(
-                                account_id,
+                                account_handle,
                                 text_len = transcribed.len(),
                                 "voice transcription successful"
                             );
@@ -336,7 +336,7 @@ pub async fn handle_message_direct(
                             (body, Vec::new())
                         },
                         Err(e) => {
-                            warn!(account_id, error = %e, "voice transcription failed");
+                            warn!(account_handle, error = %e, "voice transcription failed");
                             // Fall back to caption or indicate transcription failed
                             (
                                 text.clone().unwrap_or_else(|| {
@@ -348,7 +348,7 @@ pub async fn handle_message_direct(
                     }
                 },
                 Err(e) => {
-                    warn!(account_id, error = %e, "failed to download voice file");
+                    warn!(account_handle, error = %e, "failed to download voice file");
                     (
                         text.clone()
                             .unwrap_or_else(|| "[Voice message - download failed]".to_string()),
@@ -369,7 +369,7 @@ pub async fn handle_message_direct(
         match download_telegram_file(bot, &photo_file.file_id).await {
             Ok(image_data) => {
                 debug!(
-                    account_id,
+                    account_handle,
                     file_id = %photo_file.file_id,
                     size = image_data.len(),
                     "downloaded photo"
@@ -383,7 +383,7 @@ pub async fn handle_message_direct(
                     Ok(optimized) => {
                         if optimized.was_resized {
                             info!(
-                                account_id,
+                                account_handle,
                                 original_size = image_data.len(),
                                 final_size = optimized.data.len(),
                                 original_dims = %format!("{}x{}", optimized.original_width, optimized.original_height),
@@ -394,7 +394,7 @@ pub async fn handle_message_direct(
                         (optimized.data, optimized.media_type)
                     },
                     Err(e) => {
-                        warn!(account_id, error = %e, "failed to optimize image, using original");
+                        warn!(account_handle, error = %e, "failed to optimize image, using original");
                         (image_data, photo_file.media_type)
                     },
                 };
@@ -408,7 +408,7 @@ pub async fn handle_message_direct(
                 (caption, vec![attachment])
             },
             Err(e) => {
-                warn!(account_id, error = %e, "failed to download photo");
+                warn!(account_handle, error = %e, "failed to download photo");
                 (
                     text.clone()
                         .unwrap_or_else(|| "[Photo - download failed]".to_string()),
@@ -424,8 +424,8 @@ pub async fn handle_message_direct(
         let resolved = if let Some(ref sink) = event_sink {
             let reply_target = ChannelReplyTarget {
                 channel_type: ChannelType::Telegram,
-                account_id: account_id.to_string(),
-                account_handle: account_handle.clone(),
+                account_handle: account_handle.to_string(),
+                bot_handle: bot_handle.clone(),
                 chat_id: msg.chat.id.0.to_string(),
                 message_id: Some(msg.id.0.to_string()),
             };
@@ -435,7 +435,7 @@ pub async fn handle_message_direct(
         };
 
         info!(
-            account_id,
+            account_handle,
             chat_id = msg.chat.id.0,
             message_id = msg.id.0,
             lat,
@@ -449,14 +449,14 @@ pub async fn handle_message_direct(
             // Pending tool request was resolved — the LLM will respond via the tool flow.
             if let Err(e) = outbound
                 .send_text_silent(
-                    account_id,
+                    account_handle,
                     &msg.chat.id.0.to_string(),
                     "Location updated.",
                     None,
                 )
                 .await
             {
-                warn!(account_id, "failed to send location confirmation: {e}");
+                warn!(account_handle, "failed to send location confirmation: {e}");
             }
             return Ok(());
         }
@@ -466,14 +466,14 @@ pub async fn handle_message_direct(
             // as EditedMessage and are handled by handle_edited_location().
             if let Err(e) = outbound
                 .send_text_silent(
-                    account_id,
+                    account_handle,
                     &msg.chat.id.0.to_string(),
                     "Live location tracking started. Your location will be updated automatically.",
                     None,
                 )
                 .await
             {
-                warn!(account_id, "failed to send live location ack: {e}");
+                warn!(account_handle, "failed to send live location ack: {e}");
             }
             return Ok(());
         }
@@ -484,7 +484,7 @@ pub async fn handle_message_direct(
         // Log unhandled media types so we know when users are sending attachments we don't process
         if let Some(media_type) = describe_media_kind(&msg) {
             info!(
-                account_id,
+                account_handle,
                 peer_id, media_type, "received unhandled attachment type"
             );
         }
@@ -499,14 +499,14 @@ pub async fn handle_message_direct(
     {
         let reply_target = ChannelReplyTarget {
             channel_type: ChannelType::Telegram,
-            account_id: account_id.to_string(),
-            account_handle: account_handle.clone(),
+            account_handle: account_handle.to_string(),
+            bot_handle: bot_handle.clone(),
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
         };
 
         info!(
-            account_id,
+            account_handle,
             chat_id = %reply_target.chat_id,
             message_id = ?reply_target.message_id,
             body_len = body.len(),
@@ -563,7 +563,7 @@ pub async fn handle_message_direct(
                         sink.dispatch_command("context", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-                        accts.get(account_id).map(|s| s.bot.clone())
+                        accts.get(account_handle).map(|s| s.bot.clone())
                     };
                     if let Some(bot) = bot {
                         match context_result {
@@ -588,7 +588,7 @@ pub async fn handle_message_direct(
                     let list_result = sink.dispatch_command("model", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-                        accts.get(account_id).map(|s| s.bot.clone())
+                        accts.get(account_handle).map(|s| s.bot.clone())
                     };
                     if let Some(bot) = bot {
                         match list_result {
@@ -613,7 +613,7 @@ pub async fn handle_message_direct(
                     let list_result = sink.dispatch_command("sandbox", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-                        accts.get(account_id).map(|s| s.bot.clone())
+                        accts.get(account_handle).map(|s| s.bot.clone())
                     };
                     if let Some(bot) = bot {
                         match list_result {
@@ -640,7 +640,7 @@ pub async fn handle_message_direct(
                         .await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-                        accts.get(account_id).map(|s| s.bot.clone())
+                        accts.get(account_handle).map(|s| s.bot.clone())
                     };
                     if let Some(bot) = bot {
                         match list_result {
@@ -671,19 +671,19 @@ pub async fn handle_message_direct(
                 // Get the outbound Arc before awaiting (avoid holding RwLockReadGuard across await).
                 let outbound = {
                     let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-                    accts.get(account_id).map(|s| Arc::clone(&s.outbound))
+                    accts.get(account_handle).map(|s| Arc::clone(&s.outbound))
                 };
                 if let Some(outbound) = outbound
                     && let Err(e) = outbound
                         .send_text(
-                            account_id,
+                            account_handle,
                             &reply_target.chat_id,
                             &response,
                             reply_target.message_id.as_deref(),
                         )
                         .await
                 {
-                    warn!(account_id, "failed to send command response: {e}");
+                    warn!(account_handle, "failed to send command response: {e}");
                 }
                 return Ok(());
             }
@@ -697,19 +697,19 @@ pub async fn handle_message_direct(
             let response = format!("Unknown command: /{cmd_name_raw}. {help_hint}");
             let outbound = {
                 let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-                accts.get(account_id).map(|s| Arc::clone(&s.outbound))
+                accts.get(account_handle).map(|s| Arc::clone(&s.outbound))
             };
             if let Some(outbound) = outbound
                 && let Err(e) = outbound
                     .send_text(
-                        account_id,
+                        account_handle,
                         &reply_target.chat_id,
                         &response,
                         reply_target.message_id.as_deref(),
                     )
                     .await
             {
-                warn!(account_id, "failed to send command response: {e}");
+                warn!(account_handle, "failed to send command response: {e}");
             }
             return Ok(());
         }
@@ -720,7 +720,7 @@ pub async fn handle_message_direct(
                 strip_self_mention_from_message(&msg, &body, bot_user_id, bot_username);
             if stripped {
                 debug!(
-                    account_id,
+                    account_handle,
                     before_len = body.len(),
                     after_len = rewritten.len(),
                     "telegram: stripped self-mention from user text"
@@ -731,19 +731,19 @@ pub async fn handle_message_direct(
                 if body.trim().is_empty() && attachments.is_empty() {
                     let outbound = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-                        accts.get(account_id).map(|s| Arc::clone(&s.outbound))
+                        accts.get(account_handle).map(|s| Arc::clone(&s.outbound))
                     };
                     if let Some(outbound) = outbound
                         && let Err(e) = outbound
                             .send_text(
-                                account_id,
+                                account_handle,
                                 &reply_target.chat_id,
                                 "我在。",
                                 reply_target.message_id.as_deref(),
                             )
                             .await
                     {
-                        warn!(account_id, "failed to send presence reply: {e}");
+                        warn!(account_handle, "failed to send presence reply: {e}");
                     }
                     return Ok(());
                 }
@@ -790,7 +790,7 @@ pub(crate) const OTP_CHALLENGE_MSG: &str = "To use this bot, please enter the ve
 #[allow(clippy::too_many_arguments)]
 async fn handle_otp_flow(
     accounts: &AccountStateMap,
-    account_id: &str,
+    account_handle: &str,
     peer_id: &str,
     username: Option<&str>,
     sender_name: Option<&str>,
@@ -803,7 +803,7 @@ async fn handle_otp_flow(
     // Resolve bot early (needed for sending messages).
     let bot = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-        accts.get(account_id).map(|s| s.bot.clone())
+        accts.get(account_handle).map(|s| s.bot.clone())
     };
     let bot = match bot {
         Some(b) => b,
@@ -814,7 +814,7 @@ async fn handle_otp_flow(
     let has_pending = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
         accts
-            .get(account_id)
+            .get(account_handle)
             .map(|s| {
                 let otp = s.otp.lock().unwrap_or_else(|e| e.into_inner());
                 otp.has_pending(peer_id)
@@ -835,7 +835,7 @@ async fn handle_otp_flow(
         // Verify the code.
         let result = {
             let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-            match accts.get(account_id) {
+            match accts.get(account_handle) {
                 Some(s) => {
                     let mut otp = s.otp.lock().unwrap_or_else(|e| e.into_inner());
                     otp.verify(peer_id, body)
@@ -849,7 +849,7 @@ async fn handle_otp_flow(
                 // Auto-approve: add to allowlist via the event sink.
                 let identifier = username.unwrap_or(peer_id);
                 if let Some(sink) = event_sink {
-                    sink.request_sender_approval("telegram", account_id, identifier)
+                    sink.request_sender_approval("telegram", account_handle, identifier)
                         .await;
                 }
 
@@ -861,7 +861,7 @@ async fn handle_otp_flow(
                 if let Some(sink) = event_sink {
                     sink.emit(ChannelEvent::OtpResolved {
                         channel_type: ChannelType::Telegram,
-                        account_id: account_id.to_string(),
+                        account_handle: account_handle.to_string(),
                         peer_id: peer_id.to_string(),
                         username: username.map(String::from),
                         resolution: "approved".into(),
@@ -899,7 +899,7 @@ async fn handle_otp_flow(
                 if let Some(sink) = event_sink {
                     sink.emit(ChannelEvent::OtpResolved {
                         channel_type: ChannelType::Telegram,
-                        account_id: account_id.to_string(),
+                        account_handle: account_handle.to_string(),
                         peer_id: peer_id.to_string(),
                         username: username.map(String::from),
                         resolution: "locked_out".into(),
@@ -922,7 +922,7 @@ async fn handle_otp_flow(
                 if let Some(sink) = event_sink {
                     sink.emit(ChannelEvent::OtpResolved {
                         channel_type: ChannelType::Telegram,
-                        account_id: account_id.to_string(),
+                        account_handle: account_handle.to_string(),
                         peer_id: peer_id.to_string(),
                         username: username.map(String::from),
                         resolution: "expired".into(),
@@ -941,7 +941,7 @@ async fn handle_otp_flow(
         // No pending challenge — initiate one.
         let init_result = {
             let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-            match accts.get(account_id) {
+            match accts.get(account_handle) {
                 Some(s) => {
                     let mut otp = s.otp.lock().unwrap_or_else(|e| e.into_inner());
                     otp.initiate(
@@ -972,7 +972,7 @@ async fn handle_otp_flow(
 
                     sink.emit(ChannelEvent::OtpChallenge {
                         channel_type: ChannelType::Telegram,
-                        account_id: account_id.to_string(),
+                        account_handle: account_handle.to_string(),
                         peer_id: peer_id.to_string(),
                         username: username.map(String::from),
                         sender_name: sender_name.map(String::from),
@@ -999,7 +999,7 @@ async fn handle_otp_flow(
 /// re-checking access (the user was already approved on the initial share).
 pub async fn handle_edited_location(
     msg: Message,
-    account_id: &str,
+    account_handle: &str,
     accounts: &AccountStateMap,
 ) -> anyhow::Result<()> {
     let Some(loc_info) = extract_location(&msg) else {
@@ -1010,14 +1010,14 @@ pub async fn handle_edited_location(
     let lon = loc_info.longitude;
 
     debug!(
-        account_id,
+        account_handle,
         lat,
         lon,
         chat_id = msg.chat.id.0,
         "live location update"
     );
     info!(
-        account_id,
+        account_handle,
         chat_id = msg.chat.id.0,
         message_id = msg.id.0,
         lat,
@@ -1025,19 +1025,22 @@ pub async fn handle_edited_location(
         "telegram live location update received"
     );
 
-    let (event_sink, account_handle) = {
+    let (event_sink, bot_handle) = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
         let handle = accts
-            .get(account_id)
+            .get(account_handle)
             .and_then(|s| s.bot_username.as_deref().map(|u| format!("@{u}")));
-        (accts.get(account_id).and_then(|s| s.event_sink.clone()), handle)
+        (
+            accts.get(account_handle).and_then(|s| s.event_sink.clone()),
+            handle,
+        )
     };
 
     if let Some(ref sink) = event_sink {
         let reply_target = ChannelReplyTarget {
             channel_type: ChannelType::Telegram,
-            account_id: account_id.to_string(),
-            account_handle,
+            account_handle: account_handle.to_string(),
+            bot_handle,
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
         };
@@ -1053,7 +1056,7 @@ async fn handle_message(
     bot: Bot,
     ctx: Arc<HandlerContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    handle_message_direct(msg, &bot, &ctx.account_id, &ctx.accounts)
+    handle_message_direct(msg, &bot, &ctx.account_handle, &ctx.accounts)
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1722,7 +1725,7 @@ fn escape_html_simple(s: &str) -> String {
 pub async fn handle_callback_query(
     query: CallbackQuery,
     _bot: &Bot,
-    account_id: &str,
+    account_handle: &str,
     accounts: &AccountStateMap,
 ) -> anyhow::Result<()> {
     let data = match query.data {
@@ -1733,7 +1736,7 @@ pub async fn handle_callback_query(
     // Answer the callback to dismiss the loading spinner.
     let bot = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-        accts.get(account_id).map(|s| s.bot.clone())
+        accts.get(account_handle).map(|s| s.bot.clone())
     };
 
     // Determine which command this callback is for.
@@ -1765,9 +1768,9 @@ pub async fn handle_callback_query(
         return Ok(());
     }
 
-    let (event_sink, outbound, account_handle) = {
+    let (event_sink, outbound, bot_handle) = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-        let state = match accts.get(account_id) {
+        let state = match accts.get(account_handle) {
             Some(s) => s,
             None => return Ok(()),
         };
@@ -1780,8 +1783,8 @@ pub async fn handle_callback_query(
 
     let reply_target = moltis_channels::ChannelReplyTarget {
         channel_type: ChannelType::Telegram,
-        account_id: account_id.to_string(),
-        account_handle,
+        account_handle: account_handle.to_string(),
+        bot_handle,
         chat_id: chat_id.clone(),
         message_id: None, // Callback queries don't have a message to reply-thread to.
     };
@@ -1801,10 +1804,10 @@ pub async fn handle_callback_query(
                 },
                 Err(e) => {
                     if let Err(err) = outbound
-                        .send_text(account_id, &chat_id, &format!("Error: {e}"), None)
+                        .send_text(account_handle, &chat_id, &format!("Error: {e}"), None)
                         .await
                     {
-                        warn!(account_id, "failed to send callback response: {err}");
+                        warn!(account_handle, "failed to send callback response: {err}");
                     }
                 },
             }
@@ -1829,10 +1832,10 @@ pub async fn handle_callback_query(
 
         // Also send as a regular message for visibility.
         if let Err(e) = outbound
-            .send_text(account_id, &chat_id, &response, None)
+            .send_text(account_handle, &chat_id, &response, None)
             .await
         {
-            warn!(account_id, "failed to send callback response: {e}");
+            warn!(account_handle, "failed to send callback response: {e}");
         }
     } else if let Some(ref bot) = bot {
         let _ = bot.answer_callback_query(&query.id).await;
@@ -2488,19 +2491,14 @@ fn strip_self_mention_from_message(
 /// Build a session key.
 #[allow(dead_code)]
 fn build_session_key(
-    account_id: &str,
-    chat_type: &ChatType,
-    peer_id: &str,
-    group_id: Option<&str>,
+    account_handle: &str,
+    chat_id: &str,
+    thread_id: Option<&str>,
 ) -> String {
-    let chan_user_id = account_id.strip_prefix("telegram:").unwrap_or(account_id);
-    match chat_type {
-        ChatType::Dm => format!("telegram:{chan_user_id}:dm:{peer_id}"),
-        ChatType::Group | ChatType::Channel => {
-            let gid = group_id.unwrap_or("unknown");
-            format!("telegram:{chan_user_id}:group:{gid}")
-        },
-    }
+    let chan_user_id = account_handle
+        .strip_prefix("telegram:")
+        .unwrap_or(account_handle);
+    moltis_common::identity::format_session_key("telegram", chan_user_id, chat_id, thread_id)
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2711,7 +2709,7 @@ mod tests {
         async fn request_disable_account(
             &self,
             _channel_type: &str,
-            _account_id: &str,
+            _account_handle: &str,
             _reason: &str,
         ) {
         }
@@ -2729,14 +2727,20 @@ mod tests {
 
     #[test]
     fn session_key_dm() {
-        let key = build_session_key("bot1", &ChatType::Dm, "user123", None);
-        assert_eq!(key, "telegram:bot1:dm:user123");
+        let key = build_session_key("telegram:bot1", "1001", None);
+        assert_eq!(key, "telegram:bot1:1001");
     }
 
     #[test]
     fn session_key_group() {
-        let key = build_session_key("bot1", &ChatType::Group, "user123", Some("-100999"));
-        assert_eq!(key, "telegram:bot1:group:-100999");
+        let key = build_session_key("telegram:bot1", "-100999", None);
+        assert_eq!(key, "telegram:bot1:-100999");
+    }
+
+    #[test]
+    fn session_key_thread() {
+        let key = build_session_key("telegram:bot1", "-100999", Some("12"));
+        assert_eq!(key, "telegram:bot1:-100999:12");
     }
 
     /// Security: the OTP challenge message sent to the Telegram user must
@@ -2838,15 +2842,15 @@ mod tests {
             accounts: Arc::clone(&accounts),
         });
         let sink = Arc::new(MockSink::default());
-        let account_id = "test-account";
+        let account_handle = "telegram:test-account";
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            map.insert(account_id.to_string(), AccountState {
+            map.insert(account_handle.to_string(), AccountState {
                 bot: bot.clone(),
                 bot_user_id: None,
                 bot_username: Some("test_bot".into()),
-                account_id: account_id.to_string(),
+                account_handle: account_handle.to_string(),
                 config: TelegramAccountConfig {
                     token: Secret::new("test-token".to_string()),
                     ..Default::default()
@@ -2883,7 +2887,7 @@ mod tests {
             "message should contain voice media"
         );
 
-        handle_message_direct(msg, &bot, account_id, &accounts)
+        handle_message_direct(msg, &bot, account_handle, &accounts)
             .await
             .expect("handle message");
 
@@ -2945,18 +2949,18 @@ mod tests {
             accounts: Arc::clone(&accounts),
         });
         let sink = Arc::new(MockSink::default());
-        let account_id = "test-account";
+        let account_handle = "telegram:test-account";
         let bot = teloxide::Bot::new("test-token");
 
         {
             let mut map = accounts.write().expect("accounts write lock");
             map.insert(
-                account_id.to_string(),
+                account_handle.to_string(),
                 AccountState {
                     bot: bot.clone(),
                     bot_user_id: None,
                     bot_username: Some("test_bot".into()),
-                    account_id: account_id.to_string(),
+                    account_handle: account_handle.to_string(),
                     config: TelegramAccountConfig {
                         token: Secret::new("test-token".to_string()),
                         ..Default::default()
@@ -2987,7 +2991,7 @@ mod tests {
         }))
         .expect("deserialize message");
 
-        handle_message_direct(msg, &bot, account_id, &accounts)
+        handle_message_direct(msg, &bot, account_handle, &accounts)
             .await
             .expect("handle message");
 
@@ -3037,15 +3041,15 @@ mod tests {
             accounts: Arc::clone(&accounts),
         });
         let sink = Arc::new(MockSink::default());
-        let account_id = "test-account";
+        let account_handle = "telegram:test-account";
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            map.insert(account_id.to_string(), AccountState {
+            map.insert(account_handle.to_string(), AccountState {
                 bot: bot.clone(),
                 bot_user_id: None,
                 bot_username: Some("test_bot".into()),
-                account_id: account_id.to_string(),
+                account_handle: account_handle.to_string(),
                 config: TelegramAccountConfig {
                     token: Secret::new("test-token".to_string()),
                     ..Default::default()
@@ -3075,7 +3079,7 @@ mod tests {
         }))
         .expect("deserialize message");
 
-        handle_message_direct(msg, &bot, account_id, &accounts)
+        handle_message_direct(msg, &bot, account_handle, &accounts)
             .await
             .expect("handle message");
 
@@ -3110,7 +3114,7 @@ mod tests {
             accounts: Arc::clone(&accounts),
         });
         let sink = Arc::new(MockSink::default());
-        let account_id = "test-account";
+        let account_handle = "telegram:test-account";
         let bot = teloxide::Bot::new("test-token");
 
         {
@@ -3120,12 +3124,12 @@ mod tests {
                 ..Default::default()
             };
             map.insert(
-                account_id.to_string(),
+                account_handle.to_string(),
                 AccountState {
                     bot: bot.clone(),
                     bot_user_id: None,
                     bot_username: Some("test_bot".into()),
-                    account_id: account_id.to_string(),
+                    account_handle: account_handle.to_string(),
                     config: cfg,
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
@@ -3150,7 +3154,7 @@ mod tests {
         }))
         .expect("deserialize message");
 
-        handle_message_direct(msg, &bot, account_id, &accounts)
+        handle_message_direct(msg, &bot, account_handle, &accounts)
             .await
             .expect("handle message");
 
@@ -3176,7 +3180,7 @@ mod tests {
             accounts: Arc::clone(&accounts),
         });
         let sink = Arc::new(MockSink::default());
-        let account_id = "test-account";
+        let account_handle = "telegram:test-account";
         let bot = teloxide::Bot::new("test-token");
 
         {
@@ -3186,12 +3190,12 @@ mod tests {
                 ..Default::default()
             };
             map.insert(
-                account_id.to_string(),
+                account_handle.to_string(),
                 AccountState {
                     bot: bot.clone(),
                     bot_user_id: None,
                     bot_username: Some("test_bot".into()),
-                    account_id: account_id.to_string(),
+                    account_handle: account_handle.to_string(),
                     config: cfg,
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
@@ -3219,7 +3223,7 @@ mod tests {
         }))
         .expect("deserialize message");
 
-        handle_message_direct(msg, &bot, account_id, &accounts)
+        handle_message_direct(msg, &bot, account_handle, &accounts)
             .await
             .expect("handle message");
 
@@ -3275,15 +3279,15 @@ mod tests {
             accounts: Arc::clone(&accounts),
         });
         let sink = Arc::new(MockSink::default());
-        let account_id = "test-account";
+        let account_handle = "telegram:test-account";
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            map.insert(account_id.to_string(), AccountState {
+            map.insert(account_handle.to_string(), AccountState {
                 bot: bot.clone(),
                 bot_user_id: None,
                 bot_username: Some("test_bot".into()),
-                account_id: account_id.to_string(),
+                account_handle: account_handle.to_string(),
                 config: TelegramAccountConfig {
                     token: Secret::new("test-token".to_string()),
                     ..Default::default()
@@ -3310,7 +3314,7 @@ mod tests {
         }))
         .expect("deserialize message");
 
-        handle_message_direct(msg, &bot, account_id, &accounts)
+        handle_message_direct(msg, &bot, account_handle, &accounts)
             .await
             .expect("handle message");
 
@@ -3375,15 +3379,15 @@ mod tests {
             accounts: Arc::clone(&accounts),
         });
         let sink = Arc::new(MockSink::default());
-        let account_id = "test-account";
+        let account_handle = "telegram:test-account";
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            map.insert(account_id.to_string(), AccountState {
+            map.insert(account_handle.to_string(), AccountState {
                 bot: bot.clone(),
                 bot_user_id: None,
                 bot_username: Some("test_bot".into()),
-                account_id: account_id.to_string(),
+                account_handle: account_handle.to_string(),
                 config: TelegramAccountConfig {
                     token: Secret::new("test-token".to_string()),
                     ..Default::default()
@@ -3410,7 +3414,7 @@ mod tests {
         }))
         .expect("deserialize message");
 
-        handle_message_direct(msg, &bot, account_id, &accounts)
+        handle_message_direct(msg, &bot, account_handle, &accounts)
             .await
             .expect("handle message");
 
