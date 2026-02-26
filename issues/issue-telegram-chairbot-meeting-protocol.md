@@ -32,21 +32,22 @@
 - ✅ 代码积木（现状）：
   - `ChannelEventSink::dispatch_to_chat(...)`：触发一次发言（有出站）
   - `ChannelEventSink::ingest_only(...)`：只写入 session，不触发 LLM、不出站
-  - session metadata 已有 `parent_session_key` 字段：适合用于 `#meeting=<id>` 派生 session 的血缘关系
+  - session metadata 已有父指针字段（当前实现可能仍为 legacy `parent_session_key`）：会议派生会话应收敛为 `parent_session_id` / `parentSessionId`
 
 ### B) 外部准备（非代码，但实施前必须完成）
 - [ ] 新建一个 Telegram bot（chairbot）并获取 token（BotFather）
-- [ ] 在 Moltis 配置中新增一个 Telegram account（建议 `account_id="chair"`），并把 chairbot 拉进目标群
+- [ ] 在 Moltis 中接入 chairbot（Channels UI / token-only），并把 chairbot 拉进目标群
+  - 验证点：Channels 详情可见 `chanAccountKey`（内部主键为 `chan_account_key`）以及 `chanUserId/chanUserName/chanNickname`
 - [ ] 平台投递前提满足（Privacy Mode/权限/管理员等按你的群情况配置）：确保 chairbot 能收到群消息 update
 
 ### C) 本单阻断缺口（必须在本单实现）
-- [ ] meeting registry（in-memory）+ meeting lock（按 `chat_id`）：同群同一时刻只允许一个活跃会议
+- [ ] meeting registry（in-memory）+ meeting lock（按 `chatId`）：同群同一时刻只允许一个活跃会议
 - [ ] chairbot 专用 handler：自然语言解析 → 预览 → 等待确认 → 严格轮询推进
 - [ ] 严格轮询调度器：一次只触发一个 speaker 出站，等待该轮完成再进入下一位
 - [ ] Director Control 落地：Chair Notes（插话/纠偏/改下一问/暂停/继续/结束）记录与注入规则（不触发抢答）
 - [ ] out-of-turn 治理：会议期间绕过 chairbot 直接 `@botX ...`（固定提示 + 记为 Chair Note + 节流）
-- [ ] 会议派生 session：为每个参会 agent 创建 `telegram:<agent>:<chat_id>#meeting=<id>` 并写入 metadata（label/parent_session_key/channel_binding）
-- [ ] 全量记录 fan-out：会议相关消息写入所有参会 agent 的会议派生 session（带来源标记与 metadata）
+- [ ] 会议派生 session：为每个参会 agent 创建新的 `sessionId`（会议会话桶），并写入 metadata（label/meetingId/parentSessionId/chanReplyTarget 等；不再把 meeting 信息编码进 key）
+- [ ] 全量记录 fan-out：会议相关消息写入所有参会 agent 的会议派生 `sessionId`（带来源标记与 metadata）
 
 ### D) 已有相关 issue（本单实现时需要参考/可能复用）
 - `issues/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md`：per-agent profile/persona/capabilities（本单要求“按 agent 能力集”最终要靠这张落地；V1 可先按 Telegram bot identity 作为 agent 身份，能力集先沿用全局或 channel 默认）
@@ -64,14 +65,19 @@
 - Telegram Bot API **不会**把 “其他 bot 发送的消息”作为 update 投递给另一个 bot。因此 bot-to-bot 的“可见性/互聊”不能依赖 Telegram 投递，只能由 Moltis 网关内部同步补偿。
 
 ## 概念与口径（Glossary & Semantics）【概念收敛/避免歧义】
+> 权威口径：`docs/src/concepts-and-ids.md`。
+>
+> 本单正文使用冻结概念：`sessionId` / `chanChatKey` / `chanAccountKey` / `chanReplyTarget` / `chatId`。
+> 文中出现的 `chat_id/account_id/parent_session_key/channel_binding` 等仅作为 legacy 字段名（As-is 证据）引用。
+
 - **Agent**：群里一个可被点名、可发言的 bot（平级；差异只体现在 capabilities 与风格配置）。对用户只暴露“agent”这个概念。
 - **chairbot**：一个专用 agent（也是平级 agent），承担会议编排与秩序执行；默认**不发表观点**，只做组织与总结。
-- **Meeting**：一次群内会议，会占用该 `chat_id` 的一个“会议锁”（同群同一时刻只允许一个活跃会议）。
+- **Meeting**：一次群内会议，会占用该 `chatId` 的一个“会议锁”（同群同一时刻只允许一个活跃会议）。
 - **导演权（Director Control）**：你可以随时插话/纠偏/改下一问/暂停/结束；但不得破坏严格轮询，也不得让其它 agent 抢答。
 - **Strict turn-taking（严格轮询）**：任何时刻只允许一个“当前 speaker”发言；每轮每人最多 1 条。
-- **会议派生 session（meeting-derived session）**：每个参会 agent 在同一群内，为本次会议创建独立会话桶：
-  - `telegram:<agent_account_id>:<chat_id>#meeting=<meeting_id>`
-  - 会议过程全量写入这些派生 session，不污染日常群 session。
+- **会议派生 session（meeting-derived session）**：每个参会 agent 在同一群内，为本次会议创建独立持久会话桶（`sessionId`）。
+  - `chanChatKey` 仍用于定位“渠道对话坐标”（`telegram:<chanUserId>:<chatId>[:<threadId>]`）。
+  - 会议过程全量写入这些派生 `sessionId`，不污染日常群 `sessionId`。
 
 ## 目标（Desired Behavior）
 ### 高层目标
@@ -143,16 +149,16 @@ chairbot 行为冻结：
 > 目标：先把“秩序/可控/不乱”跑通，再做“全量记录与可回放”，最后再补“按能力集严格约束”。
 
 #### Milestone 1：会议协议最小闭环（先控秩序）
-- meeting registry + lock（按 `chat_id`）
+- meeting registry + lock（按 `chatId`）
 - chairbot 自然语言触发 → 预览 → 确认
 - 严格轮询执行（一次只触发一个 speaker）
 - Director Control：Chair Notes（插话/纠偏/改下一问/暂停/继续/结束）
 - out-of-turn 治理（提示 + 记 note + 节流）
 
 #### Milestone 2：会议派生 session + 全量记录 fan-out（你已选择）
-- 创建 `#meeting=<id>` 派生 session（每个参会 agent 一份）
-- 会议过程（你/预览/每轮发言/summary）全量写入所有参会派生 session
-- （可选）结束后仅把 summary/行动项同步回日常群 session（不复制全量过程）
+- 为每个参会 agent 创建会议派生 `sessionId`（每个参会 agent 一份；不把 meeting 信息编码进 key）
+- 会议过程（你/预览/每轮发言/summary）全量写入所有参会派生 `sessionId`
+- （可选）结束后仅把 summary/行动项同步回日常群 `sessionId`（不复制全量过程）
 
 #### Milestone 3：按 agent 能力集严格约束（后续增强）
 - per-agent capabilities（工具 allow/deny、sandbox/web 等）并在会议触发发言时强制执行
@@ -160,7 +166,7 @@ chairbot 行为冻结：
 
 ### Phase 1：最小可用会议（先控秩序）
 1) 新增 meeting registry（in-memory）
-   - key：`chat_id`（同群单会议锁）
+   - key：`chatId`（同群单会议锁）
    - state：`IDLE/PLANNING/READY/RUNNING/PAUSED/SUMMARY/ENDED`
 2) chairbot 专用 handler（Telegram inbound）
    - 识别 `@chairbot` 自然语言 meeting 触发（关键词 + mention entity）
@@ -177,10 +183,10 @@ chairbot 行为冻结：
    - chairbot 输出总结 + 行动项 + @你
 
 ### Phase 2：会议派生 session + 全量记录 fan-out（你已选择）
-1) 为每个参会 agent 创建会议派生 session（label：`Meeting <id> (<chat_id>)`）
+1) 为每个参会 agent 创建会议派生 `sessionId`（label：`Meeting <id> (<chatId>)`）
 2) 每条会议相关消息（你的输入、chairbot预览、每位agent发言、summary）：
-   - 写入每个参会 agent 的会议派生 session（全量、带来源标记与 metadata）
-3) 可选：会议结束后把 summary 同步回日常群 session（避免复制全量过程）
+   - 写入每个参会 agent 的会议派生 `sessionId`（全量、带来源标记与 metadata）
+3) 可选：会议结束后把 summary 同步回日常群 `sessionId`（避免复制全量过程）
 
 ### Phase 3：per-agent 配置（能力集 + 风格）【依赖后续单子】
 - agent 的 profile/capabilities 独立配置与强制执行（对用户仍只称“agent”）
@@ -192,14 +198,14 @@ chairbot 行为冻结：
 - gateway 已具备：
   - `chat.send` 的 run 序列化（session semaphore）
   - channel reply targets 与错误回执/drain（避免串线）
-  - session_metadata 可创建/label/parent_session_key
+  - session_metadata 可创建/label/父指针字段（目标为 `parent_session_id` / `parentSessionId`；当前实现可能仍为 legacy `parent_session_key`）
 
 ### 仍需补齐的关键缺口（本单覆盖）
-- meeting registry（chat_id 锁 + 状态机）
+- meeting registry（chatId 锁 + 状态机）
 - chairbot handler：自然语言解析 → 预览 → 确认 → 轮询触发
 - 轮询触发的“内部调度”：chairbot 能触发 bot2/bot3 各自发言（不依赖 Telegram bot-to-bot update）
 - out-of-turn 抑制：会议期间禁止非当前 speaker 发言（提示节流 + 记录为 Chair Notes）
-- 会议派生 session 的统一写入与 fan-out（全量过程写入）
+- 会议派生 `sessionId` 的统一写入与 fan-out（全量过程写入）
 
 ## 验收标准（Acceptance Criteria）【不可省略】
 - [ ] 入口：只有 `@chairbot` 才能发起会议；其他 bot 不会误触发开会。
@@ -207,16 +213,16 @@ chairbot 行为冻结：
 - [ ] 严格轮询：会议中每次只允许一个 speaker 发言；其他 bot 不得抢答。
 - [ ] 导演权：你插话会被记录为 Chair Note，并在下一位发言 prompt 中强制体现。
 - [ ] 暂停/继续/结束：`暂停` 后不再触发任何发言；`继续` 恢复；`结束会议` 后释放锁。
-- [ ] 全量记录：会议过程写入所有参会 agent 的会议派生 session；日常群 session 不被污染。
+- [ ] 全量记录：会议过程写入所有参会 agent 的会议派生 `sessionId`；日常群 `sessionId` 不被污染。
 - [ ] 乱序点名：会议中直接 `@bot2 ...` 会收到固定提示且该内容被记录为 Chair Note（不触发 bot2 发言）。
 
 ## 测试计划（Test Plan）【不可省略】
 ### Unit（建议优先 gateway 层 mock）
-- [ ] meeting registry：同 chat_id 只能一个活跃会议；结束释放锁。
+- [ ] meeting registry：同 chatId 只能一个活跃会议；结束释放锁。
 - [ ] preview/confirm：未确认不进入 RUNNING；修改会重新生成预览。
 - [ ] strict turn：非当前 speaker 的触发被拒绝（提示节流 + 记录 note）。
 - [ ] chair notes：note 注入下一轮 prompt 的字段存在且顺序正确。
-- [ ] derived session：为每个参会 agent 创建 `#meeting=<id>` 派生 session，且写入 fan-out 正确。
+- [ ] derived session：为每个参会 agent 创建会议派生 `sessionId`，且写入 fan-out 正确。
 
 ### Integration（可选）
 - [ ] Telegram 手工：真实群内开会流程跑通（含插话/暂停/结束）。

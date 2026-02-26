@@ -285,7 +285,7 @@ WebSocket and REST connections.
 
 Conversations are stored as append-only JSONL files under
 `~/.moltis/agents/<agent>/sessions/`. A SQLite database tracks metadata
-(message counts, model selection, project bindings, channel bindings).
+(message counts, model selection, project bindings, channel reply targets).
 When token usage approaches 95% of the context window, the session is
 auto-compacted: history is summarized and important facts are persisted to the
 memory store.

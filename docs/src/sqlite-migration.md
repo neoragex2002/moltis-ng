@@ -120,7 +120,7 @@ touch crates/sessions/migrations/20240302100000_session_bookmarks.sql
 -- 20240302100000_session_bookmarks.sql
 CREATE TABLE IF NOT EXISTS session_bookmarks (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_key TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
     name       TEXT NOT NULL,
     message_id INTEGER NOT NULL,
     created_at INTEGER NOT NULL

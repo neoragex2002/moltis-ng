@@ -5,6 +5,10 @@ conversation at any point. The new session diverges without affecting the
 original — useful for exploring alternative approaches, running "what if"
 scenarios, or preserving a checkpoint before a risky prompt.
 
+In channel-bound sessions, forking creates a new `sessionId` (persistent session
+bucket) while keeping the same `chanChatKey` (deterministic channel chat
+coordinate).
+
 ## Forking from the UI
 
 There are two ways to fork a session in the web UI:
@@ -36,17 +40,17 @@ The agent can also fork programmatically using the `branch_session` tool:
   If omitted, all messages are copied.
 - **`label`** — optional human-readable label for the new session.
 
-The tool returns the new session key.
+The tool returns the new session ID (`sessionId`).
 
 ## RPC Method
 
 The `sessions.fork` RPC method is the underlying mechanism:
 
 ```json
-{ "key": "main", "at_message": 5, "label": "my-fork" }
+{ "sessionId": "main", "at_message": 5, "label": "my-fork" }
 ```
 
-On success the response payload contains `{ "sessionKey": "session:<uuid>" }`.
+On success the response payload contains `{ "sessionId": "session:<uuid>" }`.
 
 ## What Gets Inherited
 
@@ -56,14 +60,14 @@ When forking, the new session inherits:
 |-----------|---------------|
 | Messages (up to fork point) | Worktree branch |
 | Model selection | Sandbox settings |
-| Project assignment | Channel binding |
+| Project assignment | Channel reply target (`chanReplyTarget`) |
 | MCP disabled flag | |
 
 ## Parent-Child Relationships
 
 Fork relationships are stored directly on the `sessions` table:
 
-- **`parent_session_key`** — the key of the session this was forked from.
+- **`parent_session_id`** — the parent `sessionId` this session was forked from.
 - **`fork_point`** — the message index where the fork occurred.
 
 These fields drive the tree rendering in the sidebar. Sessions with a parent

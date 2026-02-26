@@ -5,8 +5,12 @@ and the agent itself to persist context across messages within a session.
 
 ## Overview
 
-Session state is scoped to a `(session_key, namespace, key)` triple, backed by
+Session state is scoped to a `(sessionId, namespace, key)` triple, backed by
 SQLite. Each entry stores a string value and is automatically timestamped.
+
+`sessionId` is not provided by the caller; it's injected via tool context (see
+`docs/src/concepts-and-ids.md`). Internally, the SQLite schema uses `snake_case`
+column names (e.g. `session_id`).
 
 The agent accesses state through the `session_state` tool, which supports three
 operations: `get`, `set`, and `list`.

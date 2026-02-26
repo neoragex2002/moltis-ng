@@ -50,7 +50,7 @@
 - 兼容性：
   - 默认配置下行为与当前尽量接近，只在“明显应当重试”的错误上改善稳定性。
 - 可观测性：
-  - 关键字段：`run_id/session_key/provider/model/attempt/max_attempts/backoff_ms/retry_after/err_kind`。
+- 关键字段（主称呼；口径见 `docs/src/concepts-and-ids.md`）：`runId/sessionId/provider/model/attempt/maxAttempts/backoffMs/retryAfter/errKind`。
 
 ## 问题陈述（Problem Statement）
 ### 现象（Symptoms）
@@ -94,13 +94,13 @@
 - 规则 4：attempt 与 backoff 记录为结构化字段（日志/Debug 可见，不泄露敏感信息）。
 
 #### 失败模式与降级（Failure modes & Degrade）
-- `Retry-After` 无法解析：记录 debug 字段（例如 `retry_after_parse_failed=true`），回退到默认 backoff。
+- `Retry-After` 无法解析：记录 debug 字段（例如 `retryAfterParseFailed=true`），回退到默认 backoff。
 - 达到上限：以统一错误语义失败（由 single egress 负责渠道回执与去重）。
 
 ## 验收标准（Acceptance Criteria）【不可省略】
 - [ ] 429（带 `Retry-After: 3`）时：attempt=1 的 backoff >= 3s，且有 jitter（但单测可固定 RNG）。
 - [ ] 429（无 Retry-After）时：使用默认 backoff（可配置）+ jitter。
-- [ ] 网络超时/5xx：指数退避递增且有上限；达到 `max_attempts` 或总耗时上限后停止。
+- [ ] 网络超时/5xx：指数退避递增且有上限；达到 `maxAttempts` 或总耗时上限后停止。
 - [ ] 日志/Debug 可见 attempt/backoff/reason 字段，且不重复发送多条渠道错误回执（依赖 single egress）。
 
 ## 测试计划（Test Plan）【不可省略】
@@ -119,7 +119,7 @@
 
 ## 实施拆分（Implementation Outline）
 - Step 1: 在 runner 中抽出 `BackoffPolicy`（可注入 RNG/clock），并引入 `RetryAfter` 解析。
-- Step 2: 为 429/5xx/network 分类应用策略；冻结默认参数（initial/max/max_attempts/deadline）。
+- Step 2: 为 429/5xx/network 分类应用策略；冻结默认参数（initial/max/maxAttempts/deadline）。
 - Step 3: 增补结构化日志字段与单测。
 
 ## 交叉引用（Cross References）

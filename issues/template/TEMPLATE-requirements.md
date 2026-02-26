@@ -20,7 +20,7 @@
   - authoritative（权威值：provider 返回 usage / 回包）
   - estimate（估算值：启发式/推导，必须标注 method）
   - configured / effective / as-sent（配置值/生效值/实际发送值）
-- 对 token/usage/estimate/session_key/prompt_cache_key/tool/tool_result 等关键概念，必须有统一口径。
+- 对 token/usage/estimate/`sessionId`/`chanChatKey`/prompt-cache bucket key/tool/tool_result 等关键概念，必须有统一口径（权威口径优先引用 `docs/src/concepts-and-ids.md`）。
 
 ### 4) 概念收敛、清晰直观（Concept convergence & intuitive）
 - 同一概念在正文只允许一个“主称呼”；别名只可在术语表记录，不可在正文混用。
@@ -64,4 +64,3 @@
 - 单 Issue：`issues/template/TEMPLATE-issue-single.md`
 - 多 Issue：`issues/template/TEMPLATE-overall-multi.md`
 - 增量更新指南：`issues/template/TEMPLATE-update-guide.md`
-

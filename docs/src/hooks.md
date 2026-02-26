@@ -79,11 +79,13 @@ Fires before each LLM API call. The payload includes the full message array, pro
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `session_key` | string | Session identifier |
+| `sessionId` | string | Persistent session bucket identifier |
+| `chanChatKey` | string/null | Deterministic channel chat coordinate (channel-bound sessions only) |
+| `chanAccountKey` | string/null | Channel account stable key (channel-bound sessions only) |
 | `provider` | string | Provider name (e.g. "openai", "anthropic") |
 | `model` | string | Model ID (e.g. "gpt-5.2-codex", "qwen2.5-coder-7b-q4_k_m") |
 | `messages` | array | Serialized message array (OpenAI format) |
-| `tool_count` | number | Number of tool schemas sent to the LLM |
+| `toolCount` | number | Number of tool schemas sent to the LLM |
 | `iteration` | number | 1-based loop iteration |
 
 ### AfterLLMCall
@@ -94,13 +96,15 @@ Fires after the LLM response is received but before tool calls execute. For stre
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `session_key` | string | Session identifier |
+| `sessionId` | string | Persistent session bucket identifier |
+| `chanChatKey` | string/null | Deterministic channel chat coordinate (channel-bound sessions only) |
+| `chanAccountKey` | string/null | Channel account stable key (channel-bound sessions only) |
 | `provider` | string | Provider name |
 | `model` | string | Model ID |
 | `text` | string/null | LLM response text |
-| `tool_calls` | array | Tool calls requested by the LLM |
-| `input_tokens` | number | Tokens consumed by the prompt |
-| `output_tokens` | number | Tokens in the response |
+| `toolCalls` | array | Tool calls requested by the LLM |
+| `inputTokens` | number | Tokens consumed by the prompt |
+| `outputTokens` | number | Tokens in the response |
 | `iteration` | number | 1-based loop iteration |
 
 ### Example: Block Suspicious Tool Calls
@@ -113,7 +117,7 @@ event=$(echo "$payload" | jq -r '.event')
 
 if [ "$event" = "AfterLLMCall" ]; then
     # Check if tool calls contain suspicious patterns
-    tool_names=$(echo "$payload" | jq -r '.tool_calls[].name')
+    tool_names=$(echo "$payload" | jq -r '.toolCalls[].name')
 
     for name in $tool_names; do
         # Block unexpected tool calls that might come from injection

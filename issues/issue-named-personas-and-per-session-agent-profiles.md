@@ -107,7 +107,7 @@
   2) load effective persona（identity/soul/agents/tools）
   3) 注入 system prompt
 - `spawn_agent` 工具：
-  - 默认继承 `_session_key` 所绑定 persona（或父调用传入 persona_id）
+- 默认继承 `_sessionId` 所绑定 persona（或父调用传入 personaId）
   - 支持显式指定 `persona`（与 `model` 类似，作为可选参数）
 
 ### Phase 2：RPC 与 UI（最小可用）
@@ -160,4 +160,3 @@
 - `USER.md` 是否应参与 persona（通常不建议：用户信息是全局一致的）
 - persona 是否允许“继承/叠加”（例如 base persona + per-project rules），还是只做单一绑定
 - 子代理是否应继承 history（目前不继承；会影响 persona 一致性与成本）
-

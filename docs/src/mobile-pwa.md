@@ -117,7 +117,7 @@ Push notifications include:
   "title": "moltis",
   "body": "New response available",
   "url": "/chats",
-  "sessionKey": "session-id"
+  "sessionId": "session-id"
 }
 ```
 

@@ -1,4 +1,4 @@
-# Issue: `spawn_agent` 子代理异常（session_key 语义 / model 选择与 unknown model / 长程超时与 “stream ended unexpectedly” 错误可观测性）
+# Issue: `spawn_agent` 子代理异常（`sessionId` 语义 / model 选择与 unknown model / 长程超时与 “stream ended unexpectedly” 错误可观测性）
 
 ## 实施现状（Status）【增量更新主入口】
 - Status: TODO（待核实与修复）
@@ -22,15 +22,22 @@
 - 子代理长程运行后异常结束，报 `OpenAI Responses API stream ended unexpectedly`
 - 主 run 最终触发 gateway 600s 超时（`agent run timed out`）
 - `spawn_agent` 有时报 `unknown model:`（model 字段为空）
-- 对“子代理是否复用父 session_key”产生疑问：这会影响 prompt cache bucket、debug 可观测性与隔离性
+- 对“子代理是否复用父 `sessionId`（prompt-cache bucket）”产生疑问：这会影响 prompt cache bucket、debug 可观测性与隔离性
 此外，经代码核查，`spawn_agent` 还存在多处“语义不一致/上下文不继承/可观测性不足”的潜在问题：即使修复了空 model，这个工具在实际使用中仍可能出现“用错模型、sandbox 行为漂移、绕过 hooks、长程拖死父 run、错误无法归因”等表现。
 
 ## 概念与口径（Glossary & Semantics）【概念收敛/避免歧义】
-- **父 session_key**：触发本次主 run 的 session（例如 `telegram:...`）。
-- **子代理 session_key**：子代理对上游 LLM 请求使用的 `LlmRequestContext.session_key`（用于 prompt cache key、hooks 归属等）。
+> 权威口径：`docs/src/concepts-and-ids.md`。
+>
+> 本单正文使用冻结概念：`sessionId` / `chanChatKey` / `chanAccountKey`。
+> `session_key/_session_key` 等仅作为当前实现（As-is / Evidence）的 legacy 字段名引用。
+
+- **父 `sessionId`**：触发本次主 run 的持久会话桶（prompt-cache bucket）。
+- **父 `chanChatKey`（如适用）**：当本次主 run 来自渠道（Telegram 等）时，对应的确定性对话坐标。
+- **子代理 `sessionId`**：子代理对上游 LLM 请求使用的会话桶标识（用于 prompt-cache bucket、hooks 归属等）。
+  - 注：当前内部结构体字段名可能仍叫 `LlmRequestContext.session_key`（legacy 命名），但其语义必须收敛为 `sessionId`。
 - **model（tool 参数）**：`spawn_agent` 的可选参数，用于指定子代理使用的 model id（注册表中的 key）。
 - **default_provider（spawn_agent 内部）**：若 tool 参数未指定 model，当前实现使用启动时 registry 的 `first_with_tools()`，并非“父 run 的当前 provider/model”。
-- **tool_context（注入参数）**：gateway 在一次 run 中注入到所有 tool 调用参数的运行态字段（例如 `_session_key/_sandbox/_accept_language/_conn_id`）。
+- **tool_context（注入参数）**：gateway 在一次 run 中注入到所有 tool 调用参数的运行态字段（目标冻结键：`_sessionId/_chanChatKey/_connId`；以及 `_sandbox/_acceptLanguage` 等运行态字段）。
 - **filtered tool registry（本轮有效工具集）**：gateway 在本次 run 中基于 persona/skills/MCP/禁用开关等计算出的“实际可用工具集”（与 server 启动时注册的静态工具集不同）。
 - **hooks**：gateway 为主 run 提供的 BeforeLLMCall/AfterLLMCall/BeforeToolCall/AfterToolCall 等钩子（可用于审计/阻断/观测）；子代理是否继承 hooks 会影响安全与一致性。
 - **gateway agent_timeout_secs**：gateway 对整次 `chat.send` 的超时（默认 600s）；超时会 broadcast error，但不会把“更底层的 LLM/tool 失败语义”统一给 Telegram（另见相关 error 收敛 issue）。
@@ -38,17 +45,17 @@
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [ ] 明确并修正 `spawn_agent` 的 session_key 语义：
-  - 是否应继承父 session_key（共享 prompt cache bucket）？
-  - 还是应使用派生 key（例如 `parent + ":spawn:<uuid>"`）以隔离缓存与观测？
-  - UI/debug 中必须能看出子代理的 effective session_key（至少对开发者可见）。
+- [ ] 明确并修正 `spawn_agent` 的 `sessionId` 语义（prompt-cache bucket）：
+  - 是否应继承父 `sessionId`（共享 prompt-cache bucket）？
+  - 还是应使用派生 `sessionId`（例如 `parent + ":spawn:<uuid>"` 或新的 `session:<uuid>`）以隔离缓存与观测？
+  - UI/debug 中必须能看出子代理的 effective `sessionId`（至少对开发者可见）。
 - [ ] 修复 `unknown model:` 这类“空字符串 model”导致的误报：
   - `model=""` 应视为未提供（fallback 到默认 provider），或提供更明确错误（含可用 model 列表/提示）。
 - [ ] 子代理的 provider/model 默认行为必须与文案一致：
   - 当前描述：“未指定则使用父 session 的 current model”
   - 当前实现：使用启动时 `first_with_tools()`（可能与父 run 不一致）
   - 两者必须收敛（要么改实现、要么改描述并显式说明）。
-- [ ] 子代理必须继承父 run 的关键 tool_context（至少 `_sandbox/_accept_language/_conn_id/_session_key`），避免同一 session 内“主代理与子代理的工具行为口径不一致”。
+- [ ] 子代理必须继承父 run 的关键 tool_context（至少 `_sandbox/_acceptLanguage/_connId/_sessionId`，以及 channel-bound 场景下的 `_chanChatKey`），避免同一 session 内“主代理与子代理的工具行为口径不一致”。
 - [ ] 子代理必须使用“本轮有效工具集”（filtered registry）或明确声明差异；不得因为使用静态 registry 而出现“父能用、子不能用”或“父禁用、子仍可用”的不一致。
 - [ ] hooks 语义必须明确并收敛：
   - 子代理是否继承父 run 的 hooks（默认建议继承，至少继承审计/阻断类 hooks）。
@@ -59,12 +66,12 @@
 - [ ] 错误可观测性增强：
   - `OpenAI Responses API stream ended unexpectedly` 必须补充可定位信息（request id / 发生阶段 / 是否超时/取消），至少在 debug/日志可见。
   - gateway 超时（600s）与 tool/LLM error 的关系要可解释，避免“只看到一个泛化错误”。
-  - 子代理生命周期事件必须可归因到具体父 run（至少包含 `run_id`/`session_key`/`tool_call_id` 之一）。
+- 子代理生命周期事件必须可归因到具体父 run（至少包含 `runId`/`sessionId`/`toolCallId` 之一）。
 
 ### 非功能目标（Non-functional）
 - 不得破坏现有 tool 调用链（保持 `spawn_agent` 仍是普通 tool call）。
-- 安全隐私：错误提示不得泄露 Authorization、原始请求 body 等敏感字段；可记录 OpenAI request id（若有）与 run_id。
-- 可回滚：优先以增量方式改动（先修空 model、改日志；再做 session_key 语义调整）。
+- 安全隐私：错误提示不得泄露 Authorization、原始请求 body 等敏感字段；可记录 OpenAI request id（若有）与 runId。
+- 可回滚：优先以增量方式改动（先修空 model、改日志；再做 `sessionId` 语义调整）。
 
 ## 问题陈述（Problem Statement）
 ### 现象（Symptoms）
@@ -111,7 +118,7 @@
   - 子代理工具集：`crates/tools/src/spawn_agent.rs:138`–`crates/tools/src/spawn_agent.rs:140`（从 SpawnAgentTool 持有的 registry clone）
   - 主 run 工具集：`crates/gateway/src/chat.rs:4314`（传入 `filtered_registry`）
 - 子代理生命周期事件缺少与父 run 的关联字段（UI 难归因）：
-  - gateway 注册 spawn_tool 时广播子代理 start/end，但 payload 不含 `runId/sessionKey/tool_call_id`：`crates/gateway/src/server.rs:2360`–`crates/gateway/src/server.rs:2385`
+- gateway 注册 spawn_tool 时广播子代理 start/end，但 payload 不含 `runId/sessionId/toolCallId`：`crates/gateway/src/server.rs:2360`–`crates/gateway/src/server.rs:2385`
 - gateway run 超时（600s）：
   - `crates/gateway/src/chat.rs:2596`：`tokio::time::timeout(Duration::from_secs(agent_timeout_secs), agent_fut)`
 
@@ -121,7 +128,7 @@
 - B) **tool 参数空字符串**：LLM 或上游调用者可能把 “未指定 model” 表达为 `""`，触发 `unknown model:` 误报。
 - C) **openai-responses complete 采用 streaming collect**：任何中间层断流、超时、或协议不完整都会变成 “stream ended unexpectedly”，错误缺乏上下文。
 - D) **超时口径分散**：gateway 的 600s 超时与子代理内部错误没有统一的错误语义出口（见 error taxonomy issue），Telegram 侧更难得到可理解回执。
-- E) **tool_context 继承不完整**：子代理只继承 `_session_key`，导致 sandbox/locale/conn 等运行态信息丢失，出现“同一 session 内工具行为漂移”。
+- E) **tool_context 继承不完整**：子代理只继承 legacy `_session_key`，导致 sandbox/locale/conn 等运行态信息丢失，出现“同一 session 内工具行为漂移”。
 - F) **hooks 绕过**：子代理不继承 hooks，可能绕过阻断/审计/策略层，导致安全与一致性风险。
 - G) **工具集不一致**：子代理工具集来自静态快照而非本轮 filtered registry，导致“父能用、子不能用/父禁用、子仍可用”的差异。
 - H) **长程缺少 tool-level 超时/取消**：`spawn_agent` 作为 tool call 没有独立超时，容易拖死父 run，最终只能靠 gateway 600s 超时兜底。
@@ -131,23 +138,23 @@
 - 必须：
   - `spawn_agent` 的默认 model 行为与文案一致（“父 session 当前 model”或“全局默认 model”必须二选一并写清）。
   - `model=""` 不得产生 `unknown model:`（应当当作未提供或返回更明确错误）。
-  - `stream ended unexpectedly` 需要可定位上下文（至少 provider/model/run_id/stage/是否超时或取消）。
-  - 子代理必须继承父 run 的关键 tool_context（至少 `_sandbox/_accept_language/_conn_id/_session_key`），或明确声明“子代理不继承哪些字段”并在 UI/debug 可见。
+- `stream ended unexpectedly` 需要可定位上下文（至少 provider/model/runId/stage/是否超时或取消）。
+- 子代理必须继承父 run 的关键 tool_context（至少 `_sandbox/_acceptLanguage/_connId/_sessionId`，以及 `_chanChatKey` 如适用），或明确声明“子代理不继承哪些字段”并在 UI/debug 可见。
   - 子代理不得绕过 hooks（至少不得绕过审计/阻断类 hooks）；若出于隔离目的不继承，也必须可配置且默认安全。
   - 子代理的“有效工具集”必须与父 run 一致（或在结果/事件中明确标注差异）。
 - 应当：
-  - 子代理 session_key 策略可配置：继承父 session_key（共享 cache bucket） vs 派生子 key（隔离）。
+- 子代理 `sessionId` 策略可配置：继承父 `sessionId`（共享 cache bucket） vs 派生子 `sessionId`（隔离）。
   - 为 `spawn_agent` 增加 tool-level timeout（例如默认 120s，可配置），并把“超时”作为结构化错误返回给父代理与渠道用户。
 
 ## 方案（Proposed Solution）
 ### Phase 0（止血，低风险）
 - 修复空字符串 `model`：把 `model=""` 视为 None（与 schema“可选”语义一致）。
-- 透传关键 tool_context：`_sandbox/_accept_language/_conn_id/_session_key`（至少保证与父 run 的工具行为一致）。
+- 透传关键 tool_context：`_sandbox/_acceptLanguage/_connId/_sessionId`（以及 `_chanChatKey` 如适用；至少保证与父 run 的工具行为一致）。
 - 改善 `unknown model` 错误信息：
   - 输出 `unknown model: <id>`（对空值明确显示 `<empty>`）
   - 并在 tool result 中附带 “可用 models 提示/如何使用 /model 切换”。
 - 增补可观测性（不改变行为）：
-  - 子代理 start/end 事件补齐 `runId/sessionKey/tool_call_id`（至少其一），便于 UI 归因。
+- 子代理 start/end 事件补齐 `runId/sessionId/toolCallId`（至少其一），便于 UI 归因。
   - 对 `stream ended unexpectedly` 增加上下文（content-type/stream 模式/已接收事件数/可能的 request id header）。
 
 ### Phase 1（语义收敛：默认 provider/model）
@@ -160,10 +167,10 @@
 
 建议：优先选 1（按父 session），否则当前行为容易出现“父模型正常但子代理模型不可用/工具不支持”的隐性失败。
 
-### Phase 2（session_key 语义）
+### Phase 2（`sessionId` 语义）
 提供配置项或默认策略：
-- 默认：子代理使用派生 session_key（例如 `${parent}:spawn:${tool_call_id}`），避免 prompt cache bucket 与 debug 归属混淆。
-- 可选：显式配置 `inherit_session_key=true` 以共享 prompt cache bucket（如果用户希望复用缓存）。
+- 默认：子代理使用派生 `sessionId`（例如 `${parent}:spawn:${toolCallId}` 或新的 `session:<uuid>`），避免 prompt cache bucket 与 debug 归属混淆。
+- 可选：显式配置 `inheritSessionId=true` 以共享 prompt cache bucket（如果用户希望复用缓存）。
 
 ### Phase 3（工具集/ hooks / timeout 收敛）
 - 工具集收敛：
@@ -183,8 +190,8 @@
 ## 验收标准（Acceptance Criteria）【不可省略】
 - [ ] `spawn_agent` 在 `model=""` 时不再报 `unknown model:`，并能正常 fallback 执行。
 - [ ] 未指定 model 时，子代理默认模型行为清晰且与实现一致（doc+debug 可见）。
-- [ ] 子代理 session_key 策略明确且可观察（inherit vs derived）。
-- [ ] 子代理继承关键 tool_context（至少 `_sandbox/_accept_language/_conn_id/_session_key`），并有回归测试覆盖。
+- [ ] 子代理 `sessionId` 策略明确且可观察（inherit vs derived）。
+- [ ] 子代理继承关键 tool_context（至少 `_sandbox/_acceptLanguage/_connId/_sessionId`，以及 `_chanChatKey` 如适用），并有回归测试覆盖。
 - [ ] 子代理不会绕过 hooks（或可配置，且默认安全），并能在 debug/log 中明确说明是否继承。
 - [ ] 子代理有效工具集与父 run 一致（或差异可见），避免“父能用、子不能用/父禁用、子仍可用”。
 - [ ] `spawn_agent` 有独立可控的 timeout/取消语义，避免长程无限拖死父 run。
@@ -195,7 +202,7 @@
 ### Unit
 - [ ] `spawn_agent`：`model=""` 视为 None 的单测
 - [ ] `spawn_agent`：unknown model 错误信息包含可诊断信息（至少不为空）
-- [ ] `spawn_agent`：tool_context 透传（断言 `_sandbox/_accept_language/_conn_id` 在子代理工具调用参数中可见；至少覆盖 `_sandbox`）
+- [ ] `spawn_agent`：tool_context 透传（断言 `_sandbox/_acceptLanguage/_connId` 在子代理工具调用参数中可见；至少覆盖 `_sandbox`）
 - [ ] `spawn_agent`：hooks 继承（若实现为默认继承，新增单测/模拟 hook 断言生效）
 
 ### Integration（可选）
@@ -209,7 +216,7 @@
   - `issues/done/issue-chat-debug-panel-llm-session-sandbox-compaction.md`（run/debug 可观测性口径先例）
 
 ## Close Checklist（关单清单）【不可省略】
-- [ ] 行为已按 Spec 实现（model/session_key/timeout 语义明确）
+- [ ] 行为已按 Spec 实现（model/`sessionId`/timeout 语义明确）
 - [ ] 已补齐自动化测试（覆盖空 model/错误信息）
 - [ ] 错误可观测性增强到位（不泄露敏感数据）
 - [ ] 文档/描述已更新（避免 “实现与文案不一致”）

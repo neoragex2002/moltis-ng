@@ -116,7 +116,7 @@ project-specific instructions override workspace-level ones.
 Injected as compact key=value lines under a `## Runtime` heading:
 
 ```
-Host: host=moltis-devbox | os=macos | arch=aarch64 | shell=zsh | provider=openai | model=gpt-5 | session=main | sudo_non_interactive=true | timezone=Europe/Paris
+Host: host=moltis-devbox | os=macos | arch=aarch64 | shell=zsh | provider=openai | model=gpt-5 | sessionId=main | sudo_non_interactive=true | timezone=Europe/Paris
 Sandbox(exec): enabled=true | mode=all | backend=docker | scope=session | image=moltis-sandbox:abc123 | workspace_mount=ro | network=disabled
 ```
 
@@ -127,7 +127,7 @@ The runtime context is populated at request time in `chat.rs` by detecting:
 
 - Host name, OS, architecture, shell
 - Active LLM provider and model
-- Session key
+- Session ID (`sessionId`)
 - Sudo availability
 - Timezone and accept-language from the browser
 - Geolocation (from browser or `USER.md`)
