@@ -2477,7 +2477,7 @@ function VoiceSection() {
 
 					try {
 						var resp = await fetch(
-							`/api/sessions/${encodeURIComponent(S.activeSessionKey)}/upload?transcribe=true&provider=${encodeURIComponent(providerId)}`,
+							`/api/sessions/${encodeURIComponent(S.activeSessionId)}/upload?transcribe=true&provider=${encodeURIComponent(providerId)}`,
 							{
 								method: "POST",
 								headers: { "Content-Type": audioBlob.type || "audio/webm" },

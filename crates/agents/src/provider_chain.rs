@@ -392,7 +392,7 @@ impl LlmProvider for ProviderChain {
                     }
 
                     return Ok(resp);
-                }
+                },
                 Err(e) => {
                     let kind = classify_error(&e);
                     entry.state.record_failure();
@@ -421,7 +421,7 @@ impl LlmProvider for ProviderChain {
                         "provider failed, trying next in chain"
                     );
                     errors.push(format!("{}: {e}", entry.provider.id()));
-                }
+                },
             }
         }
 

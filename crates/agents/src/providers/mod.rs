@@ -36,7 +36,9 @@ use {moltis_config::schema::ProvidersConfig, secrecy::ExposeSecret, tokio_stream
 
 use crate::model::{ChatMessage, LlmProvider, StreamEvent};
 
-pub use models_dev::{cached_openai_model_limits, spawn_refresh_models_dev_cache, OpenAiModelLimits};
+pub use models_dev::{
+    OpenAiModelLimits, cached_openai_model_limits, spawn_refresh_models_dev_cache,
+};
 
 /// A model discovered from a provider API (e.g. `/v1/models`).
 ///
@@ -323,7 +325,10 @@ impl LlmProvider for RegistryModelProvider {
             .stream_with_tools_with_context(ctx, messages, tools)
     }
 
-    fn debug_request_overrides(&self, ctx: Option<&crate::model::LlmRequestContext>) -> serde_json::Value {
+    fn debug_request_overrides(
+        &self,
+        ctx: Option<&crate::model::LlmRequestContext>,
+    ) -> serde_json::Value {
         self.inner.debug_request_overrides(ctx)
     }
 }
@@ -341,7 +346,9 @@ fn resolve_api_key(
         .or_else(|| {
             let primary = std::env::var(env_key).ok().filter(|k| !k.is_empty());
             let legacy = if provider == "gemini" && env_key == "GEMINI_API_KEY" {
-                std::env::var("GOOGLE_API_KEY").ok().filter(|k| !k.is_empty())
+                std::env::var("GOOGLE_API_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
             } else {
                 None
             };
@@ -1774,7 +1781,10 @@ mod tests {
     #[test]
     fn provider_context_window_uses_lookup() {
         let provider = openai::OpenAiProvider::new(secret("k"), "gpt-4o".into(), "u".into());
-        assert_eq!(provider.context_window(), super::context_window_for_model("gpt-4o"));
+        assert_eq!(
+            provider.context_window(),
+            super::context_window_for_model("gpt-4o")
+        );
 
         let anthropic = anthropic::AnthropicProvider::new(
             secret("k"),
@@ -1953,10 +1963,13 @@ mod tests {
 
     #[test]
     fn merge_discovered_with_fallback_uses_fallback_when_discovered_empty() {
-        let merged = merge_discovered_with_fallback_catalog(Vec::new(), vec![
-            DiscoveredModel::new("fallback-a", "Fallback A"),
-            DiscoveredModel::new("fallback-b", "Fallback B"),
-        ]);
+        let merged = merge_discovered_with_fallback_catalog(
+            Vec::new(),
+            vec![
+                DiscoveredModel::new("fallback-a", "Fallback A"),
+                DiscoveredModel::new("fallback-b", "Fallback B"),
+            ],
+        );
 
         let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["fallback-a", "fallback-b"]);
@@ -2114,12 +2127,13 @@ mod tests {
     #[test]
     fn mistral_registers_with_api_key() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("mistral".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "mistral".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test-mistral".into())),
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         // Should have registered Mistral models
@@ -2141,12 +2155,13 @@ mod tests {
     #[test]
     fn cerebras_registers_with_api_key() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("cerebras".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "cerebras".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test-cerebras".into())),
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         let cerebras_models: Vec<_> = reg
@@ -2160,12 +2175,13 @@ mod tests {
     #[test]
     fn minimax_registers_with_api_key() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("minimax".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "minimax".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test-minimax".into())),
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(reg.list_models().iter().any(|m| m.provider == "minimax"));
@@ -2174,12 +2190,13 @@ mod tests {
     #[test]
     fn moonshot_registers_with_api_key() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("moonshot".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "moonshot".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test-moonshot".into())),
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(reg.list_models().iter().any(|m| m.provider == "moonshot"));
@@ -2189,12 +2206,13 @@ mod tests {
     fn openrouter_requires_model_in_config() {
         // OpenRouter has no default models — without configured models it registers nothing.
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("openrouter".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "openrouter".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test-or".into())),
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(!reg.list_models().iter().any(|m| m.provider == "openrouter"));
@@ -2203,13 +2221,14 @@ mod tests {
     #[test]
     fn openrouter_registers_with_model_in_config() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("openrouter".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "openrouter".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test-or".into())),
                 models: vec!["anthropic/claude-3-haiku".into()],
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         let or_models: Vec<_> = reg
@@ -2225,12 +2244,13 @@ mod tests {
     fn ollama_registers_without_api_key_env() {
         // Ollama should use a dummy key if no env var is set.
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("ollama".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "ollama".into(),
+            moltis_config::schema::ProviderEntry {
                 models: vec!["llama3".into()],
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(reg.list_models().iter().any(|m| m.provider == "ollama"));
@@ -2240,12 +2260,13 @@ mod tests {
     #[test]
     fn venice_requires_model_in_config() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("venice".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "venice".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test-venice".into())),
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(!reg.list_models().iter().any(|m| m.provider == "venice"));
@@ -2254,13 +2275,14 @@ mod tests {
     #[test]
     fn disabled_provider_not_registered() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("mistral".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "mistral".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test".into())),
                 enabled: false,
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(!reg.list_models().iter().any(|m| m.provider == "mistral"));
@@ -2280,13 +2302,14 @@ mod tests {
     #[test]
     fn custom_base_url_from_config() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("mistral".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "mistral".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test".into())),
                 base_url: Some("https://custom.mistral.example.com/v1".into()),
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(reg.list_models().iter().any(|m| m.provider == "mistral"));
@@ -2295,14 +2318,15 @@ mod tests {
     #[test]
     fn provider_models_can_disable_fetch_and_pin_single_model() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("mistral".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "mistral".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test".into())),
                 models: vec!["mistral-small-latest".into()],
                 fetch_models: false,
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         let mistral_models: Vec<_> = reg
@@ -2318,13 +2342,14 @@ mod tests {
     #[test]
     fn provider_models_are_ordered_before_discovered_catalog() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("mistral".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "mistral".into(),
+            moltis_config::schema::ProviderEntry {
                 api_key: Some(secrecy::Secret::new("sk-test".into())),
                 models: vec!["codestral-latest".into()],
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         let mistral_models: Vec<&str> = reg
@@ -2406,11 +2431,12 @@ mod tests {
     fn local_llm_requires_model_in_config() {
         // local-llm is a "bring your own model" provider — without configured models it registers nothing.
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("local".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "local".into(),
+            moltis_config::schema::ProviderEntry {
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(!reg.list_models().iter().any(|m| m.provider == "local-llm"));
@@ -2420,12 +2446,13 @@ mod tests {
     #[test]
     fn local_llm_registers_with_model_in_config() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("local".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "local".into(),
+            moltis_config::schema::ProviderEntry {
                 models: vec!["qwen2.5-coder-7b-q4_k_m".into()],
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         let local_models: Vec<_> = reg
@@ -2441,13 +2468,14 @@ mod tests {
     #[test]
     fn local_llm_disabled_not_registered() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("local".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "local".into(),
+            moltis_config::schema::ProviderEntry {
                 enabled: false,
                 models: vec!["qwen2.5-coder-7b-q4_k_m".into()],
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(!reg.list_models().iter().any(|m| m.provider == "local-llm"));
@@ -2457,12 +2485,13 @@ mod tests {
     #[test]
     fn local_llm_alias_key_registers_model() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("local-llm".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "local-llm".into(),
+            moltis_config::schema::ProviderEntry {
                 models: vec!["qwen2.5-coder-7b-q4_k_m".into()],
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(
@@ -2475,13 +2504,14 @@ mod tests {
     #[test]
     fn local_llm_alias_key_respects_disabled_flag() {
         let mut config = ProvidersConfig::default();
-        config
-            .providers
-            .insert("local-llm".into(), moltis_config::schema::ProviderEntry {
+        config.providers.insert(
+            "local-llm".into(),
+            moltis_config::schema::ProviderEntry {
                 enabled: false,
                 models: vec!["qwen2.5-coder-7b-q4_k_m".into()],
                 ..Default::default()
-            });
+            },
+        );
 
         let reg = ProviderRegistry::from_env_with_config(&config);
         assert!(
@@ -2655,7 +2685,7 @@ mod tests {
             _messages: &[ChatMessage],
             _tools: &[serde_json::Value],
         ) -> anyhow::Result<CompletionResponse> {
-            if ctx.session_key.as_deref() == Some("session:test") {
+            if ctx.session_id.as_deref() == Some("session:test") {
                 self.saw_complete_ctx.store(true, Ordering::SeqCst);
             }
             Ok(CompletionResponse {
@@ -2682,7 +2712,7 @@ mod tests {
             _messages: Vec<ChatMessage>,
             _tools: Vec<serde_json::Value>,
         ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
-            if ctx.session_key.as_deref() == Some("session:test") {
+            if ctx.session_id.as_deref() == Some("session:test") {
                 self.saw_stream_ctx.store(true, Ordering::SeqCst);
             }
             Box::pin(tokio_stream::iter(vec![StreamEvent::Done(Usage {
@@ -2694,7 +2724,7 @@ mod tests {
 
         fn debug_request_overrides(&self, ctx: Option<&LlmRequestContext>) -> serde_json::Value {
             serde_json::json!({
-                "session": ctx.and_then(|c| c.session_key.as_deref()),
+                "session": ctx.and_then(|c| c.session_id.as_deref()),
                 "tag": "inner",
             })
         }
@@ -2713,7 +2743,7 @@ mod tests {
         });
 
         let ctx = LlmRequestContext {
-            session_key: Some("session:test".into()),
+            session_id: Some("session:test".into()),
         };
         let _ = wrapped
             .complete_with_context(&ctx, &[ChatMessage::user("ping")], &[])
@@ -2734,7 +2764,7 @@ mod tests {
         });
 
         let ctx = LlmRequestContext {
-            session_key: Some("session:test".into()),
+            session_id: Some("session:test".into()),
         };
         let mut stream =
             wrapped.stream_with_tools_with_context(&ctx, vec![ChatMessage::user("ping")], vec![]);
@@ -2757,7 +2787,7 @@ mod tests {
             inner,
         });
         let ctx = LlmRequestContext {
-            session_key: Some("session:test".into()),
+            session_id: Some("session:test".into()),
         };
         let dbg = wrapped.debug_request_overrides(Some(&ctx));
         assert_eq!(dbg["tag"].as_str(), Some("inner"));

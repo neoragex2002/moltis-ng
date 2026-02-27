@@ -42,11 +42,15 @@ impl std::str::FromStr for ChannelType {
 
 /// Events emitted by channel plugins for real-time UI updates.
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ChannelEvent {
     InboundMessage {
-        channel_type: ChannelType,
-        account_handle: String,
+        chan_type: ChannelType,
+        chan_account_key: String,
         peer_id: String,
         username: Option<String>,
         sender_name: Option<String>,
@@ -55,14 +59,14 @@ pub enum ChannelEvent {
     },
     /// A channel account was automatically disabled due to a runtime error.
     AccountDisabled {
-        channel_type: ChannelType,
-        account_handle: String,
+        chan_type: ChannelType,
+        chan_account_key: String,
         reason: String,
     },
     /// An OTP challenge was issued to a non-allowlisted DM user.
     OtpChallenge {
-        channel_type: ChannelType,
-        account_handle: String,
+        chan_type: ChannelType,
+        chan_account_key: String,
         peer_id: String,
         username: Option<String>,
         sender_name: Option<String>,
@@ -71,8 +75,8 @@ pub enum ChannelEvent {
     },
     /// An OTP challenge was resolved (approved, locked out, or expired).
     OtpResolved {
-        channel_type: ChannelType,
-        account_handle: String,
+        chan_type: ChannelType,
+        chan_account_key: String,
         peer_id: String,
         username: Option<String>,
         resolution: String,
@@ -101,12 +105,7 @@ pub trait ChannelEventSink: Send + Sync {
     /// This enables "listen/sidecar" group modes where only addressed
     /// messages generate replies, but all messages can still be recorded
     /// as context.
-    async fn ingest_only(
-        &self,
-        text: &str,
-        reply_to: ChannelReplyTarget,
-        meta: ChannelMessageMeta,
-    );
+    async fn ingest_only(&self, text: &str, reply_to: ChannelReplyTarget, meta: ChannelMessageMeta);
 
     /// Dispatch a slash command (e.g. "new", "clear", "compact", "context")
     /// and return a text result to send back to the channel.
@@ -120,7 +119,7 @@ pub trait ChannelEventSink: Send + Sync {
     ///
     /// This is used when the polling loop detects an unrecoverable error
     /// (e.g. another bot instance is running with the same token).
-    async fn request_disable_account(&self, channel_type: &str, account_handle: &str, reason: &str);
+    async fn request_disable_account(&self, chan_type: &str, chan_account_key: &str, reason: &str);
 
     /// Request adding a sender to the allowlist (OTP self-approval).
     ///
@@ -180,8 +179,9 @@ pub trait ChannelEventSink: Send + Sync {
 
 /// Metadata about a channel message, used for UI display.
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChannelMessageMeta {
-    pub channel_type: ChannelType,
+    pub chan_type: ChannelType,
     pub sender_name: Option<String>,
     pub username: Option<String>,
     /// Original inbound message media kind (voice, audio, photo, etc.).
@@ -217,11 +217,12 @@ pub struct ChannelAttachment {
 
 /// Where to send the LLM response back.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChannelReplyTarget {
-    pub channel_type: ChannelType,
-    pub account_handle: String,
+    pub chan_type: ChannelType,
+    pub chan_account_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bot_handle: Option<String>,
+    pub chan_user_name: Option<String>,
     /// Chat/peer ID to send the reply to.
     pub chat_id: String,
     /// Platform-specific message ID of the inbound message.
@@ -240,10 +241,14 @@ pub trait ChannelPlugin: Send + Sync {
     fn name(&self) -> &str;
 
     /// Start an account connection.
-    async fn start_account(&mut self, account_handle: &str, config: serde_json::Value) -> Result<()>;
+    async fn start_account(
+        &mut self,
+        chan_account_key: &str,
+        config: serde_json::Value,
+    ) -> Result<()>;
 
     /// Stop an account connection.
-    async fn stop_account(&mut self, account_handle: &str) -> Result<()>;
+    async fn stop_account(&mut self, chan_account_key: &str) -> Result<()>;
 
     /// Get outbound adapter for sending messages.
     fn outbound(&self) -> Option<&dyn ChannelOutbound>;
@@ -260,7 +265,7 @@ pub trait ChannelPlugin: Send + Sync {
 pub trait ChannelOutbound: Send + Sync {
     async fn send_text(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
@@ -275,18 +280,18 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation calls `send_text()` and returns `None`.
     async fn send_text_with_ref(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
-        self.send_text(account_handle, to, text, reply_to).await?;
+        self.send_text(chan_account_key, to, text, reply_to).await?;
         Ok(None)
     }
 
     async fn send_media(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         payload: &ReplyPayload,
         reply_to: Option<&str>,
@@ -297,16 +302,17 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation calls `send_media()` and returns `None`.
     async fn send_media_with_ref(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         payload: &ReplyPayload,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
-        self.send_media(account_handle, to, payload, reply_to).await?;
+        self.send_media(chan_account_key, to, payload, reply_to)
+            .await?;
         Ok(None)
     }
     /// Send a "typing" indicator. No-op by default.
-    async fn send_typing(&self, _account_handle: &str, _to: &str) -> Result<()> {
+    async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> Result<()> {
         Ok(())
     }
     /// Send a text message with a pre-formatted HTML suffix appended after the main
@@ -314,14 +320,14 @@ pub trait ChannelOutbound: Send + Sync {
     /// The default implementation ignores the suffix and calls `send_text`.
     async fn send_text_with_suffix(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         text: &str,
         suffix_html: &str,
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = suffix_html;
-        self.send_text(account_handle, to, text, reply_to).await
+        self.send_text(chan_account_key, to, text, reply_to).await
     }
 
     /// Like `send_text_with_suffix`, but returns a best-effort sent message ref.
@@ -329,24 +335,25 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation falls back to `send_text_with_ref` (ignores suffix).
     async fn send_text_with_suffix_with_ref(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         text: &str,
         suffix_html: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let _ = suffix_html;
-        self.send_text_with_ref(account_handle, to, text, reply_to).await
+        self.send_text_with_ref(chan_account_key, to, text, reply_to)
+            .await
     }
     /// Send a text message without notification (silent). Falls back to send_text by default.
     async fn send_text_silent(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<()> {
-        self.send_text(account_handle, to, text, reply_to).await
+        self.send_text(chan_account_key, to, text, reply_to).await
     }
 
     /// Like `send_text_silent`, but returns a best-effort sent message ref.
@@ -354,12 +361,13 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation falls back to `send_text_with_ref`.
     async fn send_text_silent_with_ref(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
-        self.send_text_with_ref(account_handle, to, text, reply_to).await
+        self.send_text_with_ref(chan_account_key, to, text, reply_to)
+            .await
     }
     /// Send a native location pin to the channel.
     ///
@@ -371,14 +379,14 @@ pub trait ChannelOutbound: Send + Sync {
     /// location pins are unaffected.
     async fn send_location(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         latitude: f64,
         longitude: f64,
         title: Option<&str>,
         reply_to: Option<&str>,
     ) -> Result<()> {
-        let _ = (account_handle, to, latitude, longitude, title, reply_to);
+        let _ = (chan_account_key, to, latitude, longitude, title, reply_to);
         Ok(())
     }
 
@@ -387,14 +395,14 @@ pub trait ChannelOutbound: Send + Sync {
     /// Default implementation calls `send_location()` and returns `None`.
     async fn send_location_with_ref(
         &self,
-        account_handle: &str,
+        chan_account_key: &str,
         to: &str,
         latitude: f64,
         longitude: f64,
         title: Option<&str>,
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
-        self.send_location(account_handle, to, latitude, longitude, title, reply_to)
+        self.send_location(chan_account_key, to, latitude, longitude, title, reply_to)
             .await?;
         Ok(None)
     }
@@ -409,14 +417,14 @@ pub struct SentMessageRef {
 /// Probe channel account health.
 #[async_trait]
 pub trait ChannelStatus: Send + Sync {
-    async fn probe(&self, account_handle: &str) -> Result<ChannelHealthSnapshot>;
+    async fn probe(&self, chan_account_key: &str) -> Result<ChannelHealthSnapshot>;
 }
 
 /// Channel health snapshot.
 #[derive(Debug, Clone)]
 pub struct ChannelHealthSnapshot {
     pub connected: bool,
-    pub account_handle: String,
+    pub chan_account_key: String,
     pub details: Option<String>,
 }
 
@@ -441,7 +449,12 @@ pub type StreamSender = mpsc::Sender<StreamEvent>;
 #[async_trait]
 pub trait ChannelStreamOutbound: Send + Sync {
     /// Send a streaming response that updates a message in place.
-    async fn send_stream(&self, account_handle: &str, to: &str, stream: StreamReceiver) -> Result<()>;
+    async fn send_stream(
+        &self,
+        chan_account_key: &str,
+        to: &str,
+        stream: StreamReceiver,
+    ) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -497,9 +510,9 @@ mod tests {
     async fn default_update_location_returns_false() {
         let sink = DummySink;
         let target = ChannelReplyTarget {
-            channel_type: ChannelType::Telegram,
-            account_handle: "telegram:1".into(),
-            bot_handle: None,
+            chan_type: ChannelType::Telegram,
+            chan_account_key: "telegram:1".into(),
+            chan_user_name: None,
             chat_id: "42".into(),
             message_id: None,
         };

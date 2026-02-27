@@ -63,9 +63,9 @@ const routeCases = [
 	},
 	{
 		path: "/settings",
-		expectedUrl: /\/settings\/identity$/,
+		expectedUrl: /\/settings\/personas$/,
 		settingsActive: true,
-		heading: "Identity",
+		heading: "Personas",
 	},
 ];
 

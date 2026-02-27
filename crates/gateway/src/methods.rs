@@ -7,38 +7,38 @@ use {
     moltis_protocol::{ErrorShape, ResponseFrame, error_codes},
 };
 
-fn validate_account_handle_for_channel(channel_type: &str, account_handle: &str) -> Result<(), String> {
-    let parts = moltis_common::identity::parse_account_handle(account_handle)
-        .ok_or_else(|| format!("invalid accountHandle: expected '{channel_type}:<chan_user_id>'"))?;
+fn validate_chan_account_key_for_channel(
+    chan_type: &str,
+    chan_account_key: &str,
+) -> Result<(), String> {
+    let parts = moltis_common::identity::parse_chan_account_key(chan_account_key)
+        .ok_or_else(|| format!("invalid chanAccountKey: expected '{chan_type}:<chan_user_id>'"))?;
 
-    if parts.channel != channel_type {
+    if parts.channel != chan_type {
         return Err(format!(
-            "invalid accountHandle: expected '{channel_type}:<chan_user_id>', got '{}:<...>'",
+            "invalid chanAccountKey: expected '{chan_type}:<chan_user_id>', got '{}:<...>'",
             parts.channel
         ));
     }
 
     // Enforce Telegram account handles as `telegram:<numeric_chan_user_id>`.
-    if channel_type == "telegram" {
-        let id = parts
-            .chan_user_id
-            .parse::<u64>()
-            .map_err(|_| "invalid accountHandle: telegram chan_user_id must be numeric".to_string())?;
+    if chan_type == "telegram" {
+        let id = parts.chan_user_id.parse::<u64>().map_err(|_| {
+            "invalid chanAccountKey: telegram chan_user_id must be numeric".to_string()
+        })?;
         if id == 0 {
-            return Err("invalid accountHandle: telegram chan_user_id must be > 0".to_string());
+            return Err("invalid chanAccountKey: telegram chan_user_id must be > 0".to_string());
         }
     }
 
     Ok(())
 }
 
-fn require_account_handle_param(params: &serde_json::Value) -> Result<&str, ErrorShape> {
+fn require_chan_account_key_param(params: &serde_json::Value) -> Result<&str, ErrorShape> {
     params
-        .get("accountHandle")
-        .or_else(|| params.get("accountId"))
-        .or_else(|| params.get("account_id"))
+        .get("chanAccountKey")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ErrorShape::new(error_codes::INVALID_REQUEST, "missing accountHandle"))
+        .ok_or_else(|| ErrorShape::new(error_codes::INVALID_REQUEST, "missing chanAccountKey"))
 }
 
 use crate::{
@@ -1496,11 +1496,13 @@ impl MethodRegistry {
             "sessions.patch",
             Box::new(|ctx| {
                 Box::pin(async move {
-                    let key = ctx
+                    let session_id = ctx
                         .params
-                        .get("key")
+                        .get("sessionId")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("")
+                        .ok_or_else(|| {
+                            ErrorShape::new(error_codes::INVALID_REQUEST, "missing sessionId")
+                        })?
                         .to_string();
                     let result = ctx
                         .state
@@ -1515,7 +1517,7 @@ impl MethodRegistry {
                         "session",
                         serde_json::json!({
                             "kind": "patched",
-                            "sessionKey": key,
+                            "sessionId": session_id,
                             "version": version,
                         }),
                         BroadcastOpts::default(),
@@ -1650,10 +1652,9 @@ impl MethodRegistry {
             "channels.remove",
             Box::new(|ctx| {
                 Box::pin(async move {
-                    let account_handle = require_account_handle_param(&ctx.params)?;
-                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
-                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
-                    })?;
+                    let chan_account_key = require_chan_account_key_param(&ctx.params)?;
+                    validate_chan_account_key_for_channel("telegram", chan_account_key)
+                        .map_err(|e| ErrorShape::new(error_codes::INVALID_REQUEST, e))?;
                     ctx.state
                         .services
                         .channel
@@ -1667,10 +1668,9 @@ impl MethodRegistry {
             "channels.update",
             Box::new(|ctx| {
                 Box::pin(async move {
-                    let account_handle = require_account_handle_param(&ctx.params)?;
-                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
-                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
-                    })?;
+                    let chan_account_key = require_chan_account_key_param(&ctx.params)?;
+                    validate_chan_account_key_for_channel("telegram", chan_account_key)
+                        .map_err(|e| ErrorShape::new(error_codes::INVALID_REQUEST, e))?;
                     ctx.state
                         .services
                         .channel
@@ -1697,10 +1697,9 @@ impl MethodRegistry {
             "channels.senders.list",
             Box::new(|ctx| {
                 Box::pin(async move {
-                    let account_handle = require_account_handle_param(&ctx.params)?;
-                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
-                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
-                    })?;
+                    let chan_account_key = require_chan_account_key_param(&ctx.params)?;
+                    validate_chan_account_key_for_channel("telegram", chan_account_key)
+                        .map_err(|e| ErrorShape::new(error_codes::INVALID_REQUEST, e))?;
                     ctx.state
                         .services
                         .channel
@@ -1714,10 +1713,9 @@ impl MethodRegistry {
             "channels.senders.approve",
             Box::new(|ctx| {
                 Box::pin(async move {
-                    let account_handle = require_account_handle_param(&ctx.params)?;
-                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
-                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
-                    })?;
+                    let chan_account_key = require_chan_account_key_param(&ctx.params)?;
+                    validate_chan_account_key_for_channel("telegram", chan_account_key)
+                        .map_err(|e| ErrorShape::new(error_codes::INVALID_REQUEST, e))?;
                     ctx.state
                         .services
                         .channel
@@ -1731,10 +1729,9 @@ impl MethodRegistry {
             "channels.senders.deny",
             Box::new(|ctx| {
                 Box::pin(async move {
-                    let account_handle = require_account_handle_param(&ctx.params)?;
-                    validate_account_handle_for_channel("telegram", account_handle).map_err(|e| {
-                        ErrorShape::new(error_codes::INVALID_REQUEST, e)
-                    })?;
+                    let chan_account_key = require_chan_account_key_param(&ctx.params)?;
+                    validate_chan_account_key_for_channel("telegram", chan_account_key)
+                        .map_err(|e| ErrorShape::new(error_codes::INVALID_REQUEST, e))?;
                     ctx.state
                         .services
                         .channel
@@ -2123,26 +2120,26 @@ impl MethodRegistry {
         );
 
         // Chat (uses chat_override if set, otherwise falls back to services.chat)
-        // Inject _conn_id and _accept_language so the chat service can resolve
+        // Inject _connId and _acceptLanguage so the chat service can resolve
         // the active session and forward the user's locale to web tools.
         self.register(
             "chat.send",
             Box::new(|ctx| {
                 Box::pin(async move {
                     let mut params = ctx.params.clone();
-                    params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
+                    params["_connId"] = serde_json::json!(ctx.client_conn_id);
                     // Forward client Accept-Language, public remote IP, and timezone.
                     {
                         let inner = ctx.state.inner.read().await;
                         if let Some(client) = inner.clients.get(&ctx.client_conn_id) {
                             if let Some(ref lang) = client.accept_language {
-                                params["_accept_language"] = serde_json::json!(lang);
+                                params["_acceptLanguage"] = serde_json::json!(lang);
                             }
                             if let Some(ref ip) = client.remote_ip {
-                                params["_remote_ip"] = serde_json::json!(ip);
+                                params["_remoteIp"] = serde_json::json!(ip);
                             }
                             if let Some(ref tz) = client.timezone {
-                                params["_timezone"] = serde_json::json!(tz);
+                                params["_timeZone"] = serde_json::json!(tz);
                             }
                         }
                     }
@@ -2186,7 +2183,7 @@ impl MethodRegistry {
             Box::new(|ctx| {
                 Box::pin(async move {
                     let mut params = ctx.params.clone();
-                    params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
+                    params["_connId"] = serde_json::json!(ctx.client_conn_id);
                     ctx.state
                         .chat()
                         .await
@@ -2214,7 +2211,7 @@ impl MethodRegistry {
             Box::new(|ctx| {
                 Box::pin(async move {
                     let mut params = ctx.params.clone();
-                    params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
+                    params["_connId"] = serde_json::json!(ctx.client_conn_id);
                     ctx.state
                         .chat()
                         .await
@@ -2229,7 +2226,7 @@ impl MethodRegistry {
             Box::new(|ctx| {
                 Box::pin(async move {
                     let mut params = ctx.params.clone();
-                    params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
+                    params["_connId"] = serde_json::json!(ctx.client_conn_id);
                     ctx.state
                         .chat()
                         .await
@@ -2245,7 +2242,7 @@ impl MethodRegistry {
             Box::new(|ctx| {
                 Box::pin(async move {
                     let mut params = ctx.params.clone();
-                    params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
+                    params["_connId"] = serde_json::json!(ctx.client_conn_id);
                     ctx.state
                         .chat()
                         .await
@@ -2261,19 +2258,19 @@ impl MethodRegistry {
             Box::new(|ctx| {
                 Box::pin(async move {
                     let mut params = ctx.params.clone();
-                    params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
+                    params["_connId"] = serde_json::json!(ctx.client_conn_id);
                     // Forward client Accept-Language, public remote IP, and timezone.
                     {
                         let inner = ctx.state.inner.read().await;
                         if let Some(client) = inner.clients.get(&ctx.client_conn_id) {
                             if let Some(ref lang) = client.accept_language {
-                                params["_accept_language"] = serde_json::json!(lang);
+                                params["_acceptLanguage"] = serde_json::json!(lang);
                             }
                             if let Some(ref ip) = client.remote_ip {
-                                params["_remote_ip"] = serde_json::json!(ip);
+                                params["_remoteIp"] = serde_json::json!(ip);
                             }
                             if let Some(ref tz) = client.timezone {
-                                params["_timezone"] = serde_json::json!(tz);
+                                params["_timeZone"] = serde_json::json!(tz);
                             }
                         }
                     }
@@ -2292,19 +2289,19 @@ impl MethodRegistry {
             Box::new(|ctx| {
                 Box::pin(async move {
                     let mut params = ctx.params.clone();
-                    params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
+                    params["_connId"] = serde_json::json!(ctx.client_conn_id);
                     // Forward client Accept-Language, public remote IP, and timezone.
                     {
                         let inner = ctx.state.inner.read().await;
                         if let Some(client) = inner.clients.get(&ctx.client_conn_id) {
                             if let Some(ref lang) = client.accept_language {
-                                params["_accept_language"] = serde_json::json!(lang);
+                                params["_acceptLanguage"] = serde_json::json!(lang);
                             }
                             if let Some(ref ip) = client.remote_ip {
-                                params["_remote_ip"] = serde_json::json!(ip);
+                                params["_remoteIp"] = serde_json::json!(ip);
                             }
                             if let Some(ref tz) = client.timezone {
-                                params["_timezone"] = serde_json::json!(tz);
+                                params["_timeZone"] = serde_json::json!(tz);
                             }
                         }
                     }
@@ -2323,12 +2320,12 @@ impl MethodRegistry {
             "sessions.switch",
             Box::new(|ctx| {
                 Box::pin(async move {
-                    let key = ctx
+                    let session_id = ctx
                         .params
-                        .get("key")
+                        .get("sessionId")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| {
-                            ErrorShape::new(error_codes::INVALID_REQUEST, "missing 'key' parameter")
+                            ErrorShape::new(error_codes::INVALID_REQUEST, "missing sessionId")
                         })?;
 
                     // Store the active session (and project if provided) for this connection.
@@ -2336,10 +2333,10 @@ impl MethodRegistry {
                         let mut inner = ctx.state.inner.write().await;
                         inner
                             .active_sessions
-                            .insert(ctx.client_conn_id.clone(), key.to_string());
+                            .insert(ctx.client_conn_id.clone(), session_id.to_string());
 
                         if let Some(project_id) =
-                            ctx.params.get("project_id").and_then(|v| v.as_str())
+                            ctx.params.get("projectId").and_then(|v| v.as_str())
                         {
                             if project_id.is_empty() {
                                 inner.active_projects.remove(&ctx.client_conn_id);
@@ -2357,7 +2354,7 @@ impl MethodRegistry {
                         .state
                         .services
                         .session
-                        .resolve(serde_json::json!({ "key": key }))
+                        .resolve(serde_json::json!({ "sessionId": session_id }))
                         .await
                         .map_err(|e| {
                             tracing::error!("session resolve failed: {e}");
@@ -2368,14 +2365,14 @@ impl MethodRegistry {
                         })?;
 
                     // Mark the session as seen so unread state clears.
-                    ctx.state.services.session.mark_seen(key).await;
+                    ctx.state.services.session.mark_seen(session_id).await;
 
-                    if let Some(pid) = ctx.params.get("project_id").and_then(|v| v.as_str()) {
+                    if let Some(pid) = ctx.params.get("projectId").and_then(|v| v.as_str()) {
                         let _ = ctx
                             .state
                             .services
                             .session
-                            .patch(serde_json::json!({ "key": key, "project_id": pid }))
+                            .patch(serde_json::json!({ "sessionId": session_id, "projectId": pid }))
                             .await;
 
                         // Auto-create worktree if project has auto_worktree enabled.
@@ -2401,14 +2398,17 @@ impl MethodRegistry {
                                     Ok(base) => {
                                         moltis_projects::WorktreeManager::create_from_base(
                                             project_dir,
-                                            key,
+                                            session_id,
                                             &base,
                                         )
                                         .await
                                     },
                                     Err(_) => {
-                                        moltis_projects::WorktreeManager::create(project_dir, key)
-                                            .await
+                                        moltis_projects::WorktreeManager::create(
+                                            project_dir,
+                                            session_id,
+                                        )
+                                        .await
                                     },
                                 };
                             match create_result {
@@ -2418,14 +2418,14 @@ impl MethodRegistry {
                                         .and_then(|v| v.as_str())
                                         .filter(|s| !s.is_empty())
                                         .unwrap_or("moltis");
-                                    let branch = format!("{prefix}/{key}");
+                                    let branch = format!("{prefix}/{session_id}");
                                     let _ = ctx
                                         .state
                                         .services
                                         .session
                                         .patch(serde_json::json!({
-                                            "key": key,
-                                            "worktree_branch": branch,
+                                            "sessionId": session_id,
+                                            "worktreeBranch": branch,
                                         }))
                                         .await;
 
@@ -2444,7 +2444,7 @@ impl MethodRegistry {
                                             &wt_dir,
                                             cmd,
                                             project_dir,
-                                            key,
+                                            session_id,
                                         )
                                         .await
                                     {
@@ -2567,7 +2567,7 @@ impl MethodRegistry {
                                     )),
                                 ];
                                 let llm_context = moltis_agents::model::LlmRequestContext {
-                                    session_key: Some(format!("tts.generate_phrase:{context}")),
+                                    session_id: Some(format!("tts.generate_phrase:{context}")),
                                 };
                                 let result = tokio::time::timeout(
                                     Duration::from_secs(3),
@@ -3858,13 +3858,12 @@ impl MethodRegistry {
                 "voice.override.session.set",
                 Box::new(|ctx| {
                     Box::pin(async move {
-                        let session_key = ctx
+                        let session_id = ctx
                             .params
-                            .get("sessionKey")
-                            .or_else(|| ctx.params.get("session_key"))
+                            .get("sessionId")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
-                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing sessionKey")
+                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing sessionId")
                             })?
                             .to_string();
 
@@ -3892,11 +3891,13 @@ impl MethodRegistry {
                             .write()
                             .await
                             .tts_session_overrides
-                            .insert(session_key.clone(), override_cfg.clone());
+                            .insert(session_id.clone(), override_cfg.clone());
 
-                        Ok(serde_json::to_value(override_cfg).unwrap_or_else(
-                            |_| serde_json::json!({ "ok": true, "sessionKey": session_key }),
-                        ))
+                        Ok(serde_json::json!({
+                            "ok": true,
+                            "sessionId": session_id,
+                            "override": override_cfg,
+                        }))
                     })
                 }),
             );
@@ -3904,13 +3905,12 @@ impl MethodRegistry {
                 "voice.override.session.clear",
                 Box::new(|ctx| {
                     Box::pin(async move {
-                        let session_key = ctx
+                        let session_id = ctx
                             .params
-                            .get("sessionKey")
-                            .or_else(|| ctx.params.get("session_key"))
+                            .get("sessionId")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
-                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing sessionKey")
+                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing sessionId")
                             })?
                             .to_string();
 
@@ -3919,8 +3919,8 @@ impl MethodRegistry {
                             .write()
                             .await
                             .tts_session_overrides
-                            .remove(&session_key);
-                        Ok(serde_json::json!({ "ok": true, "sessionKey": session_key }))
+                            .remove(&session_id);
+                        Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
                     })
                 }),
             );
@@ -3928,27 +3928,27 @@ impl MethodRegistry {
                 "voice.override.channel.set",
                 Box::new(|ctx| {
                     Box::pin(async move {
-                        let channel_type = ctx
+                        let chan_account_key = ctx
                             .params
-                            .get("channelType")
-                            .or_else(|| ctx.params.get("channel_type"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("telegram");
-                        let account_handle = ctx
-                            .params
-                            .get("accountHandle")
-                            .or_else(|| ctx.params.get("accountId"))
-                            .or_else(|| ctx.params.get("account_id"))
+                            .get("chanAccountKey")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
-                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing accountHandle")
+                                ErrorShape::new(
+                                    error_codes::INVALID_REQUEST,
+                                    "missing chanAccountKey",
+                                )
                             })?;
-
-                        validate_account_handle_for_channel(channel_type, account_handle).map_err(|e| {
-                            ErrorShape::new(error_codes::INVALID_REQUEST, e)
-                        })?;
-
-                        let key = format!("{}:{}", channel_type, account_handle);
+                        let chan_type =
+                            moltis_common::identity::parse_chan_account_key(chan_account_key)
+                                .ok_or_else(|| {
+                                    ErrorShape::new(
+                                        error_codes::INVALID_REQUEST,
+                                        "invalid chanAccountKey",
+                                    )
+                                })?
+                                .channel;
+                        validate_chan_account_key_for_channel(chan_type, chan_account_key)
+                            .map_err(|e| ErrorShape::new(error_codes::INVALID_REQUEST, e))?;
                         let override_cfg = crate::state::TtsRuntimeOverride {
                             provider: ctx
                                 .params
@@ -3973,9 +3973,13 @@ impl MethodRegistry {
                             .write()
                             .await
                             .tts_channel_overrides
-                            .insert(key.clone(), override_cfg.clone());
+                            .insert(chan_account_key.to_string(), override_cfg.clone());
 
-                        Ok(serde_json::json!({ "ok": true, "key": key, "override": override_cfg }))
+                        Ok(serde_json::json!({
+                            "ok": true,
+                            "chanAccountKey": chan_account_key,
+                            "override": override_cfg,
+                        }))
                     })
                 }),
             );
@@ -3983,34 +3987,34 @@ impl MethodRegistry {
                 "voice.override.channel.clear",
                 Box::new(|ctx| {
                     Box::pin(async move {
-                        let channel_type = ctx
+                        let chan_account_key = ctx
                             .params
-                            .get("channelType")
-                            .or_else(|| ctx.params.get("channel_type"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("telegram");
-                        let account_handle = ctx
-                            .params
-                            .get("accountHandle")
-                            .or_else(|| ctx.params.get("accountId"))
-                            .or_else(|| ctx.params.get("account_id"))
+                            .get("chanAccountKey")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
-                                ErrorShape::new(error_codes::INVALID_REQUEST, "missing accountHandle")
+                                ErrorShape::new(
+                                    error_codes::INVALID_REQUEST,
+                                    "missing chanAccountKey",
+                                )
                             })?;
-
-                        validate_account_handle_for_channel(channel_type, account_handle).map_err(|e| {
-                            ErrorShape::new(error_codes::INVALID_REQUEST, e)
-                        })?;
-
-                        let key = format!("{}:{}", channel_type, account_handle);
+                        let chan_type =
+                            moltis_common::identity::parse_chan_account_key(chan_account_key)
+                                .ok_or_else(|| {
+                                    ErrorShape::new(
+                                        error_codes::INVALID_REQUEST,
+                                        "invalid chanAccountKey",
+                                    )
+                                })?
+                                .channel;
+                        validate_chan_account_key_for_channel(chan_type, chan_account_key)
+                            .map_err(|e| ErrorShape::new(error_codes::INVALID_REQUEST, e))?;
                         ctx.state
                             .inner
                             .write()
                             .await
                             .tts_channel_overrides
-                            .remove(&key);
-                        Ok(serde_json::json!({ "ok": true, "key": key }))
+                            .remove(chan_account_key);
+                        Ok(serde_json::json!({ "ok": true, "chanAccountKey": chan_account_key }))
                     })
                 }),
             );
@@ -5702,19 +5706,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_account_handle_for_channel_rejects_invalid_formats() {
-        assert!(validate_account_handle_for_channel("telegram", "123").is_err());
-        assert!(validate_account_handle_for_channel("telegram", "telegram:").is_err());
-        assert!(validate_account_handle_for_channel("telegram", "discord:123").is_err());
-        assert!(validate_account_handle_for_channel("telegram", "telegram:abc").is_err());
-        assert!(validate_account_handle_for_channel("telegram", "telegram:0").is_err());
-        assert!(validate_account_handle_for_channel("telegram", "telegram:-1").is_err());
-        assert!(validate_account_handle_for_channel("telegram", "telegram:123:456").is_err());
+    fn validate_chan_account_key_for_channel_rejects_invalid_formats() {
+        assert!(validate_chan_account_key_for_channel("telegram", "123").is_err());
+        assert!(validate_chan_account_key_for_channel("telegram", "telegram:").is_err());
+        assert!(validate_chan_account_key_for_channel("telegram", "discord:123").is_err());
+        assert!(validate_chan_account_key_for_channel("telegram", "telegram:abc").is_err());
+        assert!(validate_chan_account_key_for_channel("telegram", "telegram:0").is_err());
+        assert!(validate_chan_account_key_for_channel("telegram", "telegram:-1").is_err());
+        assert!(validate_chan_account_key_for_channel("telegram", "telegram:123:456").is_err());
     }
 
     #[test]
-    fn validate_account_handle_for_channel_accepts_telegram_numeric_id() {
-        assert!(validate_account_handle_for_channel("telegram", "telegram:123").is_ok());
+    fn validate_chan_account_key_for_channel_accepts_telegram_numeric_id() {
+        assert!(validate_chan_account_key_for_channel("telegram", "telegram:123").is_ok());
     }
 
     fn test_voice_provider(id: VoiceProviderId) -> VoiceProviderInfo {
@@ -5785,10 +5789,10 @@ mod tests {
             VoiceProviderId::parse_tts_list_id,
         );
         let ids: Vec<_> = filtered.into_iter().map(|p| p.id).collect();
-        assert_eq!(ids, vec![
-            VoiceProviderId::OpenaiTts,
-            VoiceProviderId::Piper
-        ]);
+        assert_eq!(
+            ids,
+            vec![VoiceProviderId::OpenaiTts, VoiceProviderId::Piper]
+        );
     }
 
     #[test]

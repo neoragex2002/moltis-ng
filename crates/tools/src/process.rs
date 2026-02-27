@@ -403,8 +403,11 @@ impl AgentTool for ProcessTool {
         #[cfg(feature = "metrics")]
         let start = Instant::now();
 
+        // Prefer deterministic channel chat coordinate when available, but fall back
+        // to sessionId for non-channel tool calls.
         let session_key = params
-            .get("_session_key")
+            .get("_chanChatKey")
+            .or_else(|| params.get("_sessionId"))
             .and_then(|v| v.as_str())
             .unwrap_or("main");
 

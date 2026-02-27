@@ -7,7 +7,7 @@ export var connected = false;
 export var reconnectDelay = 1000;
 export var pending = {};
 export var models = [];
-export var activeSessionKey = localStorage.getItem("moltis-session") || "main";
+export var activeSessionId = localStorage.getItem("moltis-sessionId") || "main";
 export var activeProjectId = localStorage.getItem("moltis-project") || "";
 export var sessions = [];
 export var projects = [];
@@ -112,8 +112,8 @@ export function setModels(v) {
 	models = v;
 	// Store signal is now owned by model-store.js; don't overwrite here.
 }
-export function setActiveSessionKey(v) {
-	activeSessionKey = v;
+export function setActiveSessionId(v) {
+	activeSessionId = v;
 	// Store signal is now owned by session-store.js; don't overwrite here.
 }
 export function setActiveProjectId(v) {

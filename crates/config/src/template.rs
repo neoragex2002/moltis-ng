@@ -148,8 +148,8 @@ models = ["gpt-5.2", "gpt-5.2-chat-latest", "gpt-5-mini"] # Preferred models sho
  # [providers.openai-responses.prompt_cache]
  # enabled = true
  # bucket_hash = "auto"                     # "auto" | true | false
- #                                           # NOTE: "auto" only hashes when session_key is > 64 UTF-8 bytes.
- #                                           # If you don't want short session keys (e.g. "main") sent verbatim,
+ #                                           # NOTE: "auto" only hashes when sessionId is > 64 UTF-8 bytes.
+ #                                           # If you don't want short session ids (e.g. "main") sent verbatim,
  #                                           # set bucket_hash = true.
 
 # ── Google Gemini ─────────────────────────────────────────────
@@ -246,9 +246,9 @@ mode = "all"                      # Which commands to sandbox:
                                   #   "off"      - No sandboxing (commands run on host)
                                   #   "non-main" - Sandbox all except main session
                                   #   "all"      - Sandbox everything (recommended)
-scope = "session"                 # Container lifecycle:
-                                  #   "session" - Container per session (recommended)
-                                  #   "chat"    - Container per chat (e.g. Telegram group)
+scope = "chat"                    # Container lifecycle:
+                                  #   "session" - Container per session (most isolated)
+                                  #   "chat"    - Container per chat (default; e.g. Telegram group)
                                   #   "bot"     - Container per bot/account
                                   #   "global"  - Single shared container
 idle_ttl_secs = 0                 # Idle container TTL (seconds):

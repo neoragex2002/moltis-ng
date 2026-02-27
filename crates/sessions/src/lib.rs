@@ -1,7 +1,7 @@
 //! Session storage and management.
 //!
 //! Sessions are stored as JSONL files (one message per line) at
-//! ~/.clawdbot/agents/<agentId>/sessions/<sessionKey>.jsonl
+//! ~/.clawdbot/agents/<agentId>/sessions/<sessionId>.jsonl
 //! with file locking for concurrent access.
 
 pub mod compaction;
@@ -23,10 +23,11 @@ pub use {
 /// at application startup after [`moltis_projects::run_migrations`] (sessions
 /// has a foreign key to projects).
 pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
-    let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('channel_sessions')")
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+    let cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('channel_sessions')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
 
     if cols.iter().any(|c| c == "session_key") && !cols.iter().any(|c| c == "session_id") {
         sqlx::query("ALTER TABLE channel_sessions RENAME COLUMN session_key TO session_id")
@@ -34,10 +35,11 @@ pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
             .await?;
     }
 
-    let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('channel_sessions')")
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+    let cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('channel_sessions')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
     if cols.iter().any(|c| c == "account_id") && !cols.iter().any(|c| c == "account_handle") {
         sqlx::query("ALTER TABLE channel_sessions RENAME COLUMN account_id TO account_handle")
             .execute(pool)

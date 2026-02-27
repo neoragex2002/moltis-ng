@@ -59,9 +59,9 @@ pub struct PushPayload {
     /// URL to open when clicked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Session key for deduplication.
-    #[serde(rename = "sessionKey", skip_serializing_if = "Option::is_none")]
-    pub session_key: Option<String>,
+    /// Session ID for deduplication.
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Stored push data (VAPID keys + subscriptions).

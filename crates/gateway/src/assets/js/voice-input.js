@@ -245,9 +245,9 @@ function sendTranscribedMessage(text) {
 	if (selectedModel) {
 		chatParams.model = selectedModel;
 	}
-	bumpSessionCount(S.activeSessionKey, 1);
-	seedSessionPreviewFromUserText(S.activeSessionKey, text);
-	setSessionReplying(S.activeSessionKey, true);
+	bumpSessionCount(S.activeSessionId, 1);
+	seedSessionPreviewFromUserText(S.activeSessionId, text);
+	setSessionReplying(S.activeSessionId, true);
 	sendRpc("chat.send", chatParams).then((sendRes) => {
 		if (sendRes && !sendRes.ok && sendRes.error) {
 			chatAddMsg("error", sendRes.error.message || "Request failed");
@@ -273,7 +273,7 @@ async function transcribeAudio() {
 		var blob = new Blob(audioChunks, { type: "audio/webm" });
 		audioChunks = [];
 
-		var resp = await fetch(`/api/sessions/${encodeURIComponent(S.activeSessionKey)}/upload?transcribe=true`, {
+	var resp = await fetch(`/api/sessions/${encodeURIComponent(S.activeSessionId)}/upload?transcribe=true`, {
 			method: "POST",
 			headers: { "Content-Type": blob.type || "audio/webm" },
 			body: blob,

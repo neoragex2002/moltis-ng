@@ -1,8 +1,8 @@
 use std::{
     net::TcpListener,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU32, Ordering},
     sync::Mutex,
+    sync::atomic::{AtomicU32, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -1446,11 +1446,7 @@ name = "Rex"
         set_data_dir(dir.path().to_path_buf());
 
         std::fs::create_dir_all(agents_path().parent().unwrap()).unwrap();
-        std::fs::write(
-            agents_path(),
-            "\nLocal workspace instructions\n",
-        )
-        .unwrap();
+        std::fs::write(agents_path(), "\nLocal workspace instructions\n").unwrap();
         assert_eq!(
             load_agents_md().as_deref(),
             Some("Local workspace instructions")

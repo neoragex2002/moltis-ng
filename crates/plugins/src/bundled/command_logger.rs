@@ -54,7 +54,7 @@ impl HookHandler for CommandLoggerHook {
 
     async fn handle(&self, _event: HookEvent, payload: &HookPayload) -> Result<HookAction> {
         if let HookPayload::Command {
-            session_key,
+            session_id,
             action,
             sender_id,
         } = payload
@@ -69,9 +69,9 @@ impl HookHandler for CommandLoggerHook {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
-                "session_key": session_key,
+                "sessionId": session_id,
                 "action": action,
-                "sender_id": sender_id,
+                "senderId": sender_id,
             });
 
             use std::io::Write;
@@ -88,7 +88,7 @@ impl HookHandler for CommandLoggerHook {
     fn handle_sync(&self, _event: HookEvent, payload: &HookPayload) -> Result<HookAction> {
         // Synchronous variant for hot-path use.
         if let HookPayload::Command {
-            session_key,
+            session_id,
             action,
             sender_id,
         } = payload
@@ -99,9 +99,9 @@ impl HookHandler for CommandLoggerHook {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
-                "session_key": session_key,
+                "sessionId": session_id,
                 "action": action,
-                "sender_id": sender_id,
+                "senderId": sender_id,
             });
             use std::io::Write;
             let mut guard = self.file.lock().unwrap_or_else(|e| e.into_inner());
@@ -125,7 +125,7 @@ mod tests {
         let hook = CommandLoggerHook::new(log_path.clone());
 
         let payload = HookPayload::Command {
-            session_key: "sess-1".into(),
+            session_id: "sess-1".into(),
             action: "new".into(),
             sender_id: Some("user-1".into()),
         };
@@ -138,7 +138,7 @@ mod tests {
 
         let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(entry["action"], "new");
-        assert_eq!(entry["session_key"], "sess-1");
+        assert_eq!(entry["sessionId"], "sess-1");
     }
 
     #[tokio::test]
@@ -148,7 +148,7 @@ mod tests {
         let hook = CommandLoggerHook::new(log_path.clone());
 
         let payload = HookPayload::SessionStart {
-            session_key: "test".into(),
+            session_id: "test".into(),
         };
         hook.handle(HookEvent::Command, &payload).await.unwrap();
         // File shouldn't even be created

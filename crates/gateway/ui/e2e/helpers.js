@@ -106,13 +106,13 @@ async function createSession(page) {
 
 					const pathname = window.location.pathname || "";
 					if (!pathname.startsWith("/chats/")) return false;
-					const expectedKey = decodeURIComponent(pathname.slice("/chats/".length)).replace(/\//g, ":");
-
-					const activeKey = store.activeSessionKey?.value || "";
-					if (activeKey !== expectedKey) return false;
-
-					const activeSession = store.getByKey ? store.getByKey(activeKey) : store.activeSession?.value;
-					return Boolean(activeSession && activeSession.key === activeKey);
+					const expectedSessionId = decodeURIComponent(pathname.slice("/chats/".length)).replace(/\//g, ":");
+					
+					const activeSessionId = store.activeSessionId?.value || "";
+					if (activeSessionId !== expectedSessionId) return false;
+					
+					const activeSession = store.getById ? store.getById(activeSessionId) : store.activeSession?.value;
+					return Boolean(activeSession && activeSession.sessionId === activeSessionId);
 				}),
 			{ timeout: 10_000 },
 		)

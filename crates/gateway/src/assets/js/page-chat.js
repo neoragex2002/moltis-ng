@@ -761,7 +761,7 @@ function toggleMcp() {
 	var label = S.$("mcpToggleLabel");
 	var isEnabled = label && label.textContent === "MCP";
 	var newDisabled = isEnabled;
-	sendRpc("sessions.patch", { key: S.activeSessionKey, mcp_disabled: newDisabled }).then((res) => {
+	sendRpc("sessions.patch", { sessionId: S.activeSessionId, mcpDisabled: newDisabled }).then((res) => {
 		if (res?.ok) {
 			updateMcpToggleUI(!newDisabled);
 		}
@@ -796,7 +796,7 @@ function handleSlashCommand(cmdName) {
 		chatAddMsg("system", "Compacting conversation\u2026");
 		sendRpc("chat.compact", {}).then((res) => {
 			if (res?.ok) {
-				switchSession(S.activeSessionKey);
+				switchSession(S.activeSessionId);
 			} else {
 				chatAddMsg("error", res?.error?.message || "Compact failed");
 			}
@@ -879,14 +879,14 @@ function sendChat() {
 	var selectedModel = S.selectedModelId;
 	if (selectedModel) {
 		chatParams.model = selectedModel;
-		setSessionModel(S.activeSessionKey, selectedModel);
+		setSessionModel(S.activeSessionId, selectedModel);
 	}
-	bumpSessionCount(S.activeSessionKey, 1);
-	seedSessionPreviewFromUserText(S.activeSessionKey, text);
-	setSessionReplying(S.activeSessionKey, true);
+	bumpSessionCount(S.activeSessionId, 1);
+	seedSessionPreviewFromUserText(S.activeSessionId, text);
+	setSessionReplying(S.activeSessionId, true);
 	sendRpc("chat.send", chatParams).then((res) => {
 		if (res?.payload?.queued) {
-			markMessageQueued(userEl, S.activeSessionKey);
+			markMessageQueued(userEl, S.activeSessionId);
 		} else if (res && !res.ok && res.error) {
 			chatAddMsg("error", res.error.message || "Request failed");
 		}
@@ -894,11 +894,11 @@ function sendChat() {
 	maybeRefreshFullContext();
 }
 
-function markMessageQueued(el, sessionKey) {
+function markMessageQueued(el, sessionId) {
 	if (!el) return;
 	var tray = document.getElementById("queuedMessages");
 	if (!tray) return;
-	console.debug("[queued] marking user message as queued, moving to tray", { sessionKey });
+	console.debug("[queued] marking user message as queued, moving to tray", { sessionId });
 	// Move the user message from the main chat into the queued tray.
 	el.classList.add("queued");
 	var badge = document.createElement("div");
@@ -912,7 +912,7 @@ function markMessageQueued(el, sessionKey) {
 	btn.textContent = "\u2715";
 	btn.addEventListener("click", (e) => {
 		e.stopPropagation();
-		sendRpc("chat.cancel_queued", { sessionKey });
+		sendRpc("chat.cancel_queued", { sessionId });
 	});
 	badge.appendChild(label);
 	badge.appendChild(btn);
@@ -1036,7 +1036,7 @@ function handleChatCopy(e) {
 
 registerPrefix(
 	routes.chats,
-	function initChat(container, sessionKeyFromUrl) {
+	function initChat(container, sessionIdFromUrl) {
 		container.style.cssText = "position:relative";
 		// Safe: chatPageHTML is a static hardcoded template with no user input.
 		// This is a compile-time constant defined above — no dynamic or user data.
@@ -1086,18 +1086,17 @@ registerPrefix(
 			}
 		}
 
-		// Determine session key from URL or localStorage
-		var sessionKey;
-		if (sessionKeyFromUrl) {
-			sessionKey = sessionKeyFromUrl;
+		var sessionId;
+		if (sessionIdFromUrl) {
+			sessionId = sessionIdFromUrl;
 		} else {
-			sessionKey = localStorage.getItem("moltis-session") || "main";
-			history.replaceState(null, "", sessionPath(sessionKey));
+			sessionId = localStorage.getItem("moltis-sessionId") || "main";
+			history.replaceState(null, "", sessionPath(sessionId));
 		}
 
 		if (S.connected) {
 			S.chatSendBtn.disabled = false;
-			switchSession(sessionKey);
+			switchSession(sessionId);
 		}
 
 		S.chatInput.addEventListener("input", () => {

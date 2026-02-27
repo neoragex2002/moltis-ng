@@ -103,7 +103,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionKey: "main",
+				sessionId: "main",
 				state: "tool_call_end",
 				toolCallId: "echo-test",
 				success: true,
@@ -114,7 +114,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionKey: "main",
+				sessionId: "main",
 				state: "delta",
 				text: finalText,
 			},
@@ -123,7 +123,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionKey: "main",
+				sessionId: "main",
 				state: "final",
 				text: finalText,
 				messageIndex: 999,
@@ -153,7 +153,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionKey: "main",
+				sessionId: "main",
 				state: "tool_call_end",
 				toolCallId,
 				toolName: "exec",
@@ -165,7 +165,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionKey: "main",
+				sessionId: "main",
 				state: "tool_call_start",
 				toolCallId,
 				toolName: "exec",
@@ -192,7 +192,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionKey: "main",
+				sessionId: "main",
 				state: "tool_call_start",
 				toolCallId,
 				toolName: "exec",
@@ -205,7 +205,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionKey: "main",
+				sessionId: "main",
 				state: "final",
 				text: "done",
 				messageIndex: 999999,

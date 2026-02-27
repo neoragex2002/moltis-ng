@@ -259,9 +259,14 @@ impl AgentTool for ExecTool {
             .min(1800); // cap at 30 minutes
 
         // Check sandbox state early — we need it for working_dir resolution.
-        let session_key = params.get("_session_key").and_then(|v| v.as_str());
+        // Prefer deterministic channel chat coordinate when available, but fall back
+        // to sessionId for non-channel tool calls (avoids incorrectly defaulting to "main").
+        let sandbox_key = params
+            .get("_chanChatKey")
+            .or_else(|| params.get("_sessionId"))
+            .and_then(|v| v.as_str());
         let is_sandboxed = if let Some(ref router) = self.sandbox_router {
-            router.is_sandboxed(session_key.unwrap_or("main")).await
+            router.is_sandboxed(sandbox_key.unwrap_or("main")).await
         } else {
             self.sandbox_id.is_some()
         };
@@ -367,7 +372,7 @@ impl AgentTool for ExecTool {
 
         // Resolve sandbox: dynamic per-session router takes priority over static sandbox.
         let result = if let Some(ref router) = self.sandbox_router {
-            let sk = session_key.unwrap_or("main");
+            let sk = sandbox_key.unwrap_or("main");
             if is_sandboxed {
                 let _lease = router.acquire_lease(sk);
                 router.touch(sk);
@@ -842,11 +847,40 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_tool_with_sandbox_router_session_key() {
-        use crate::sandbox::{NoSandbox, SandboxConfig, SandboxRouter};
+        use crate::sandbox::{SandboxConfig, SandboxMode, SandboxRouter, SandboxScope};
+
+        struct MarkerSandbox;
+
+        #[async_trait]
+        impl Sandbox for MarkerSandbox {
+            fn backend_name(&self) -> &'static str {
+                "marker"
+            }
+
+            async fn ensure_ready(&self, _id: &SandboxId, _image_override: Option<&str>) -> Result<()> {
+                Ok(())
+            }
+
+            async fn exec(&self, id: &SandboxId, _command: &str, _opts: &ExecOpts) -> Result<ExecResult> {
+                Ok(ExecResult {
+                    stdout: format!("sandboxed:{}", id.key),
+                    stderr: String::new(),
+                    exit_code: 0,
+                })
+            }
+
+            async fn cleanup(&self, _id: &SandboxId) -> Result<()> {
+                Ok(())
+            }
+        }
 
         let router = Arc::new(SandboxRouter::with_backend(
-            SandboxConfig::default(),
-            Arc::new(NoSandbox),
+            SandboxConfig {
+                mode: SandboxMode::Off,
+                scope: SandboxScope::Session,
+                ..Default::default()
+            },
+            Arc::new(MarkerSandbox),
         ));
         // Override to enable sandbox for this session (NoSandbox backend → still executes directly).
         router.set_override("session:abc", true).await;
@@ -856,11 +890,14 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({
                 "command": "echo routed",
-                "_session_key": "session:abc"
+                "_sessionId": "session:abc"
             }))
             .await
             .unwrap();
-        assert_eq!(result["stdout"].as_str().unwrap().trim(), "routed");
+        assert_eq!(
+            result["stdout"].as_str().unwrap().trim(),
+            "sandboxed:session-abc"
+        );
     }
 
     /// Regression test: when SandboxMode=All (the default) but the backend is

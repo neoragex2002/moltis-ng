@@ -20,9 +20,8 @@ pub use {
         load_heartbeat_md, load_identity, load_identity_md_raw, load_persona_agents_md,
         load_persona_identity, load_persona_identity_md_raw, load_persona_soul,
         load_persona_tools_md, load_soul, load_tools_md, load_user, people_path, personas_dir,
-        save_config,
-        save_identity, save_raw_config, save_soul, save_user, set_config_dir, set_data_dir,
-        soul_path, tools_path, update_config, user_global_config_dir,
+        save_config, save_identity, save_raw_config, save_soul, save_user, set_config_dir,
+        set_data_dir, soul_path, tools_path, update_config, user_global_config_dir,
         user_global_config_dir_if_different, user_path,
     },
     schema::{

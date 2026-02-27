@@ -87,11 +87,11 @@ export function bindSandboxToggleEvents() {
 		if (!sandboxRuntimeAvailable()) return;
 		var newVal = !S.sessionSandboxEnabled;
 		sendRpc("sessions.patch", {
-			key: S.activeSessionKey,
-			sandbox_enabled: newVal,
+			sessionId: S.activeSessionId,
+			sandboxEnabled: newVal,
 		}).then((res) => {
-			if (res?.result) {
-				updateSandboxUI(res.result.sandbox_enabled);
+			if (res?.ok && res.payload) {
+				updateSandboxUI(res.payload.sandboxEnabled);
 			} else {
 				updateSandboxUI(newVal);
 			}
@@ -198,11 +198,11 @@ function selectImage(tag) {
 	if (!perSessionImageSupported()) return;
 	var value = tag || "";
 	sendRpc("sessions.patch", {
-		key: S.activeSessionKey,
-		sandbox_image: value,
+		sessionId: S.activeSessionId,
+		sandboxImage: value,
 	}).then((res) => {
-		if (res?.result) {
-			updateSandboxImageUI(res.result.sandbox_image);
+		if (res?.ok && res.payload) {
+			updateSandboxImageUI(res.payload.sandboxImage);
 		} else {
 			updateSandboxImageUI(tag);
 		}

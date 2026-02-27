@@ -126,18 +126,18 @@ self.addEventListener("push", (event) => {
     data = { body: event.data ? event.data.text() : "New message from moltis" };
   }
 
-  var options = {
-    body: data.body || "New response available",
-    icon: "/assets/icons/icon-192.png",
-    badge: "/assets/icons/icon-72.png",
-    tag: data.sessionKey || "moltis-notification",
-    data: {
-      url: data.url || "/chats",
-      sessionKey: data.sessionKey,
-    },
-    actions: [
-      { action: "open", title: "View" },
-      { action: "dismiss", title: "Dismiss" },
+	var options = {
+		body: data.body || "New response available",
+		icon: "/assets/icons/icon-192.png",
+		badge: "/assets/icons/icon-72.png",
+		tag: data.sessionId || "moltis-notification",
+		data: {
+			url: data.url || "/chats",
+			sessionId: data.sessionId,
+		},
+		actions: [
+			{ action: "open", title: "View" },
+			{ action: "dismiss", title: "Dismiss" },
     ],
     vibrate: [100, 50, 100],
     requireInteraction: false,

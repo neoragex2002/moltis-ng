@@ -30,7 +30,6 @@ pub mod mcp_health;
 pub mod mcp_service;
 pub mod message_log_store;
 pub mod methods;
-pub mod people;
 #[cfg(feature = "metrics")]
 pub mod metrics_middleware;
 #[cfg(feature = "metrics")]
@@ -39,15 +38,16 @@ pub mod nodes;
 pub mod onboarding;
 pub mod owner;
 pub mod pairing;
+pub mod people;
+pub mod personas;
 pub mod project;
 pub mod provider_setup;
 #[cfg(feature = "push-notifications")]
 pub mod push;
 #[cfg(feature = "push-notifications")]
 pub mod push_routes;
-pub mod personas;
-pub mod run_failure;
 pub mod request_throttle;
+pub mod run_failure;
 pub mod server;
 pub mod services;
 pub mod session;
@@ -76,10 +76,11 @@ pub(crate) mod test_support;
 /// env_variables, message_log, and channels tables. Should be called at application
 /// startup after the other crate migrations (projects, sessions, cron).
 pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
-    let channels_cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('channels')")
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+    let channels_cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('channels')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
     if channels_cols.iter().any(|c| c == "account_id")
         && !channels_cols.iter().any(|c| c == "account_handle")
     {

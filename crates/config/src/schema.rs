@@ -1478,7 +1478,7 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             mode: "all".into(),
-            scope: "session".into(),
+            scope: "chat".into(),
             idle_ttl_secs: 0,
             workspace_mount: "ro".into(),
             mounts: Vec::new(),

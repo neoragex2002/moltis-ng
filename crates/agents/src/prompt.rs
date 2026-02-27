@@ -240,7 +240,7 @@ pub struct PromptHostRuntimeContext {
     pub shell: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
-    pub session_key: Option<String>,
+    pub session_id: Option<String>,
     /// Channel type for channel-bound sessions (e.g. "telegram").
     pub channel: Option<String>,
     /// Channel account ID (e.g. Telegram account key like "fluffy").
@@ -590,7 +590,7 @@ fn format_host_runtime_line(host: &PromptHostRuntimeContext) -> Option<String> {
     push_str(&mut parts, "shell", host.shell.as_deref());
     push_str(&mut parts, "provider", host.provider.as_deref());
     push_str(&mut parts, "model", host.model.as_deref());
-    push_str(&mut parts, "session", host.session_key.as_deref());
+    push_str(&mut parts, "sessionId", host.session_id.as_deref());
     push_str(&mut parts, "channel", host.channel.as_deref());
     push_str(
         &mut parts,
@@ -602,7 +602,11 @@ fn format_host_runtime_line(host: &PromptHostRuntimeContext) -> Option<String> {
         "channel_account_handle",
         host.channel_account_handle.as_deref(),
     );
-    push_str(&mut parts, "channel_chat_id", host.channel_chat_id.as_deref());
+    push_str(
+        &mut parts,
+        "channel_chat_id",
+        host.channel_chat_id.as_deref(),
+    );
     if let Some(v) = host.sudo_non_interactive {
         parts.push(format!("sudo_non_interactive={v}"));
     }
@@ -903,7 +907,7 @@ mod tests {
                 shell: Some("zsh".into()),
                 provider: Some("openai".into()),
                 model: Some("gpt-5".into()),
-                session_key: Some("main".into()),
+                session_id: Some("main".into()),
                 channel: None,
                 channel_account_id: None,
                 channel_account_handle: None,
@@ -1049,8 +1053,8 @@ mod tests {
     }
 
     #[test]
-    fn build_openai_responses_developer_prompts_includes_expected_sections_and_redacts_sensitive_runtime(
-    ) {
+    fn build_openai_responses_developer_prompts_includes_expected_sections_and_redacts_sensitive_runtime()
+     {
         let mut tools = ToolRegistry::new();
 
         struct DummyTool {
@@ -1119,7 +1123,7 @@ mod tests {
                 shell: Some("bash".into()),
                 provider: Some("openai-responses".into()),
                 model: Some("openai-responses::gpt-5.2".into()),
-                session_key: Some("telegram:lovely:8454363355".into()),
+                session_id: Some("telegram:lovely:8454363355".into()),
                 channel: Some("telegram".into()),
                 channel_account_id: Some("lovely".into()),
                 channel_account_handle: Some("@lovely_apple_bot".into()),
@@ -1179,11 +1183,27 @@ mod tests {
         assert!(prompts.persona.contains("## Agents"));
         assert!(prompts.persona.contains("# AGENTS.md"));
 
-        assert!(prompts.runtime_snapshot.contains("## Runtime (snapshot, may change)"));
+        assert!(
+            prompts
+                .runtime_snapshot
+                .contains("## Runtime (snapshot, may change)")
+        );
         assert!(prompts.runtime_snapshot.contains("Host: host=DESKTOP"));
-        assert!(prompts.runtime_snapshot.contains("provider=openai-responses"));
-        assert!(prompts.runtime_snapshot.contains("model=openai-responses::gpt-5.2"));
-        assert!(prompts.runtime_snapshot.contains("channel_account_handle=@lovely_apple_bot"));
+        assert!(
+            prompts
+                .runtime_snapshot
+                .contains("provider=openai-responses")
+        );
+        assert!(
+            prompts
+                .runtime_snapshot
+                .contains("model=openai-responses::gpt-5.2")
+        );
+        assert!(
+            prompts
+                .runtime_snapshot
+                .contains("channel_account_handle=@lovely_apple_bot")
+        );
         assert!(!prompts.runtime_snapshot.contains("remote_ip="));
         assert!(!prompts.runtime_snapshot.contains("location="));
         assert!(prompts.runtime_snapshot.contains("## Long-Term Memory"));

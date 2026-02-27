@@ -280,7 +280,7 @@ impl SseFrameParser {
                 } else {
                     (b, 4)
                 }
-            }
+            },
             (Some(a), None) => (a, 2),
             (None, Some(b)) => (b, 4),
             (None, None) => return None,
@@ -402,7 +402,7 @@ pub fn process_openai_sse_line(data: &str, state: &mut StreamingToolState) -> Ss
                             name: name.to_string(),
                             index,
                         });
-                    }
+                    },
                     std::collections::hash_map::Entry::Occupied(mut o) => {
                         let (existing_id, existing_name, _) = o.get_mut();
                         if existing_id.is_empty() {
@@ -411,7 +411,7 @@ pub fn process_openai_sse_line(data: &str, state: &mut StreamingToolState) -> Ss
                         if existing_name.is_empty() {
                             *existing_name = name.to_string();
                         }
-                    }
+                    },
                 }
             }
 
@@ -728,9 +728,10 @@ mod tests {
 
         let events = finalize_stream(&state);
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], StreamEvent::ToolCallComplete {
-            index: 0
-        }));
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ToolCallComplete { index: 0 }
+        ));
         assert!(matches!(
             &events[1],
             StreamEvent::Done(usage) if usage.input_tokens == 10 && usage.output_tokens == 5

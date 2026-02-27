@@ -343,9 +343,7 @@ impl std::fmt::Display for SandboxMode {
 /// Scope determines sandbox container reuse boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[derive(Default)]
 pub enum SandboxScope {
-    #[default]
     Session,
     /// Reuse sandbox per chat (e.g. a Telegram group).
     Chat,
@@ -353,6 +351,12 @@ pub enum SandboxScope {
     Bot,
     /// Single shared sandbox for the whole instance.
     Global,
+}
+
+impl Default for SandboxScope {
+    fn default() -> Self {
+        Self::Chat
+    }
 }
 
 impl std::fmt::Display for SandboxScope {
@@ -493,7 +497,7 @@ impl From<&moltis_config::schema::SandboxConfig> for SandboxConfig {
                         "unknown tools.exec.sandbox.scope; falling back to session"
                     );
                     SandboxScope::Session
-                }
+                },
             },
             idle_ttl_secs: cfg.idle_ttl_secs,
             workspace_mount: match cfg.workspace_mount.as_str() {
@@ -863,7 +867,10 @@ impl DockerSandbox {
                 );
             }
             let canonical = std::fs::canonicalize(root).with_context(|| {
-                format!("canonicalize sandbox mount_allowlist entry: {}", root.display())
+                format!(
+                    "canonicalize sandbox mount_allowlist entry: {}",
+                    root.display()
+                )
             })?;
             if !canonical.is_dir() {
                 anyhow::bail!(
@@ -885,20 +892,22 @@ impl DockerSandbox {
                     mount.host_dir.display()
                 );
             }
-            let canonical_host =
-                std::fs::canonicalize(&mount.host_dir).with_context(|| {
-                    format!(
-                        "canonicalize sandbox mounts[{i}].host_dir: {}",
-                        mount.host_dir.display()
-                    )
-                })?;
+            let canonical_host = std::fs::canonicalize(&mount.host_dir).with_context(|| {
+                format!(
+                    "canonicalize sandbox mounts[{i}].host_dir: {}",
+                    mount.host_dir.display()
+                )
+            })?;
             if !canonical_host.is_dir() {
                 anyhow::bail!(
                     "sandbox mounts[{i}].host_dir must be a directory: {}",
                     canonical_host.display()
                 );
             }
-            if !allow_roots.iter().any(|root| canonical_host.starts_with(root)) {
+            if !allow_roots
+                .iter()
+                .any(|root| canonical_host.starts_with(root))
+            {
                 anyhow::bail!(
                     "sandbox mounts[{i}].host_dir is outside mount_allowlist: {}",
                     canonical_host.display()
@@ -920,15 +929,19 @@ impl DockerSandbox {
                     "sandbox mounts[{i}].guest_dir must be under {GUEST_PREFIX} (got: {guest_str})"
                 );
             }
-            if guest_str == "/" || guest_str == "/proc" || guest_str == "/sys" || guest_str == "/dev"
+            if guest_str == "/"
+                || guest_str == "/proc"
+                || guest_str == "/sys"
+                || guest_str == "/dev"
             {
                 anyhow::bail!("sandbox mounts[{i}].guest_dir is a protected path: {guest_str}");
             }
-            if mount
-                .guest_dir
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir))
-            {
+            if mount.guest_dir.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            }) {
                 anyhow::bail!(
                     "sandbox mounts[{i}].guest_dir must not contain '.' or '..': {guest_str}"
                 );
@@ -939,7 +952,7 @@ impl DockerSandbox {
                 WorkspaceMount::Rw => "rw",
                 WorkspaceMount::None => {
                     anyhow::bail!("sandbox mounts[{i}].mode must be \"ro\" or \"rw\"")
-                }
+                },
             };
 
             args.push("-v".to_string());
@@ -1665,7 +1678,9 @@ impl Sandbox for AppleContainerSandbox {
 
     async fn ensure_ready(&self, id: &SandboxId, image_override: Option<&str>) -> Result<()> {
         if !self.config.mounts.is_empty() {
-            anyhow::bail!("external sandbox mounts are not supported on the apple-container backend");
+            anyhow::bail!(
+                "external sandbox mounts are not supported on the apple-container backend"
+            );
         }
         let mut name = self.container_name(id).await;
         let image = image_override.unwrap_or_else(|| self.image());
@@ -2160,10 +2175,7 @@ pub struct SandboxLease {
 
 impl Drop for SandboxLease {
     fn drop(&mut self) {
-        let mut leases = self
-            .lease_counts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut leases = self.lease_counts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(n) = leases.get_mut(&self.key) {
             *n = n.saturating_sub(1);
             if *n == 0 {
@@ -2658,14 +2670,10 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let args = docker.resource_args();
-        assert_eq!(args, vec![
-            "--memory",
-            "256M",
-            "--cpus",
-            "0.5",
-            "--pids-limit",
-            "50"
-        ]);
+        assert_eq!(
+            args,
+            vec!["--memory", "256M", "--cpus", "0.5", "--pids-limit", "50"]
+        );
     }
 
     #[test]
@@ -3001,7 +3009,10 @@ mod tests {
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
-        assert_eq!(router.effective_sandbox_key("telegram:lovely:-1"), "telegram:lovely:-1");
+        assert_eq!(
+            router.effective_sandbox_key("telegram:lovely:-1"),
+            "telegram:lovely:-1"
+        );
     }
 
     #[test]
@@ -3064,7 +3075,10 @@ mod tests {
 
         let effective_key = router.effective_sandbox_key("main");
         {
-            let mut last = router.last_used_ms.lock().unwrap_or_else(|e| e.into_inner());
+            let mut last = router
+                .last_used_ms
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             last.insert(effective_key.clone(), 0);
         }
 
@@ -3097,7 +3111,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_image_session_override() {
-        let config = SandboxConfig::default();
+        let config = SandboxConfig {
+            scope: SandboxScope::Session,
+            ..Default::default()
+        };
         let router = SandboxRouter::new(config);
         router
             .set_image_override("sess1", "custom:latest".into())
@@ -3108,7 +3125,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_image_skill_beats_session() {
-        let config = SandboxConfig::default();
+        let config = SandboxConfig {
+            scope: SandboxScope::Session,
+            ..Default::default()
+        };
         let router = SandboxRouter::new(config);
         router
             .set_image_override("sess1", "custom:latest".into())
@@ -3214,7 +3234,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_router_global_image_override() {
-        let config = SandboxConfig::default();
+        let config = SandboxConfig {
+            scope: SandboxScope::Session,
+            ..Default::default()
+        };
         let router = SandboxRouter::new(config);
 
         // Default
@@ -3420,28 +3443,30 @@ mod tests {
 
     #[test]
     fn test_host_package_name_candidates_t64_to_base() {
-        assert_eq!(host_package_name_candidates("libgtk-3-0t64"), vec![
-            "libgtk-3-0t64".to_string(),
-            "libgtk-3-0".to_string()
-        ]);
+        assert_eq!(
+            host_package_name_candidates("libgtk-3-0t64"),
+            vec!["libgtk-3-0t64".to_string(), "libgtk-3-0".to_string()]
+        );
     }
 
     #[test]
     fn test_host_package_name_candidates_base_to_t64_for_soname() {
-        assert_eq!(host_package_name_candidates("libcups2"), vec![
-            "libcups2".to_string(),
-            "libcups2t64".to_string()
-        ]);
+        assert_eq!(
+            host_package_name_candidates("libcups2"),
+            vec!["libcups2".to_string(), "libcups2t64".to_string()]
+        );
     }
 
     #[test]
     fn test_host_package_name_candidates_non_library_stays_single() {
-        assert_eq!(host_package_name_candidates("curl"), vec![
-            "curl".to_string()
-        ]);
-        assert_eq!(host_package_name_candidates("libreoffice-core"), vec![
-            "libreoffice-core".to_string()
-        ]);
+        assert_eq!(
+            host_package_name_candidates("curl"),
+            vec!["curl".to_string()]
+        );
+        assert_eq!(
+            host_package_name_candidates("libreoffice-core"),
+            vec!["libreoffice-core".to_string()]
+        );
     }
 
     #[tokio::test]

@@ -108,7 +108,7 @@ fn replace_file(tmp: &Path, path: &Path) -> anyhow::Result<()> {
                     )
                 })?;
                 Ok(())
-            }
+            },
         }
     }
 
@@ -240,8 +240,8 @@ async fn refresh_models_dev_cache_inner(data_dir: &Path) -> anyhow::Result<()> {
     }
     let body = resp.text().await.context("read models.dev body")?;
 
-    let root: HashMap<String, ModelsDevProvider> = serde_json::from_str(&body)
-        .context("parse models.dev api.json")?;
+    let root: HashMap<String, ModelsDevProvider> =
+        serde_json::from_str(&body).context("parse models.dev api.json")?;
     if !root.contains_key("openai") {
         anyhow::bail!("models.dev schema missing openai provider");
     }

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 INPUT=$(cat)
-TOOL_NAME=$(echo "$INPUT" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+TOOL_NAME=$(echo "$INPUT" | grep -o '"toolName":"[^"]*"' | head -1 | cut -d'"' -f4)
 
 # Only inspect exec tool calls.
 if [ "$TOOL_NAME" != "exec" ]; then

@@ -12,27 +12,27 @@ import { confirmDialog } from "../ui.js";
 
 function nextSessionKey(currentKey) {
 	var allSessions = sessionStore.sessions.value;
-	var s = allSessions.find((x) => x.key === currentKey);
-	if (s?.parentSessionKey) return s.parentSessionKey;
-	var idx = allSessions.findIndex((x) => x.key === currentKey);
-	if (idx >= 0 && idx + 1 < allSessions.length) return allSessions[idx + 1].key;
-	if (idx > 0) return allSessions[idx - 1].key;
+	var s = allSessions.find((x) => x.sessionId === currentKey);
+	if (s?.parentSessionId) return s.parentSessionId;
+	var idx = allSessions.findIndex((x) => x.sessionId === currentKey);
+	if (idx >= 0 && idx + 1 < allSessions.length) return allSessions[idx + 1].sessionId;
+	if (idx > 0) return allSessions[idx - 1].sessionId;
 	return "main";
 }
 
 export function SessionHeader() {
 	var session = sessionStore.activeSession.value;
-	var currentKey = sessionStore.activeSessionKey.value;
+	var currentKey = sessionStore.activeSessionId.value;
 
 	var [renaming, setRenaming] = useState(false);
 	var [clearing, setClearing] = useState(false);
 	var inputRef = useRef(null);
 
-	var fullName = session ? session.label || session.key : currentKey;
+	var fullName = session ? session.label || session.sessionId : currentKey;
 	var displayName = fullName.length > 20 ? `${fullName.slice(0, 20)}\u2026` : fullName;
 
 	var isMain = currentKey === "main";
-	var isChannel = session?.channelBinding || currentKey.startsWith("telegram:");
+	var isChannel = session?.chanReplyTarget || currentKey.startsWith("telegram:");
 	var isCron = currentKey.startsWith("cron:");
 	var canRename = !(isMain || isChannel || isCron);
 
@@ -52,7 +52,7 @@ export function SessionHeader() {
 		var val = inputRef.current?.value.trim() || "";
 		setRenaming(false);
 		if (val && val !== fullName) {
-			sendRpc("sessions.patch", { key: currentKey, label: val }).then((res) => {
+			sendRpc("sessions.patch", { sessionId: currentKey, label: val }).then((res) => {
 				if (res?.ok) fetchSessions();
 			});
 		}
@@ -72,10 +72,10 @@ export function SessionHeader() {
 	);
 
 	var onFork = useCallback(() => {
-		sendRpc("sessions.fork", { key: currentKey }).then((res) => {
-			if (res?.ok && res.payload?.sessionKey) {
+		sendRpc("sessions.fork", { sessionId: currentKey }).then((res) => {
+			if (res?.ok && res.payload?.sessionId) {
 				fetchSessions();
-				switchSession(res.payload.sessionKey);
+				switchSession(res.payload.sessionId);
 			}
 		});
 	}, [currentKey]);
@@ -84,11 +84,11 @@ export function SessionHeader() {
 		var msgCount = session ? session.messageCount || 0 : 0;
 		var nextKey = nextSessionKey(currentKey);
 		var doDelete = () => {
-			sendRpc("sessions.delete", { key: currentKey }).then((res) => {
+			sendRpc("sessions.delete", { sessionId: currentKey }).then((res) => {
 				if (res && !res.ok && res.error && res.error.indexOf("uncommitted changes") !== -1) {
 					confirmDialog("Worktree has uncommitted changes. Force delete?").then((yes) => {
 						if (!yes) return;
-						sendRpc("sessions.delete", { key: currentKey, force: true }).then(() => {
+						sendRpc("sessions.delete", { sessionId: currentKey, force: true }).then(() => {
 							switchSession(nextKey);
 							fetchSessions();
 						});

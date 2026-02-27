@@ -27,7 +27,9 @@ fn can_bind_localhost() -> bool {
 macro_rules! skip_if_cannot_bind_localhost {
     () => {
         if !can_bind_localhost() {
-            eprintln!("skipping chat UI integration test — cannot bind localhost in this environment");
+            eprintln!(
+                "skipping chat UI integration test — cannot bind localhost in this environment"
+            );
             return;
         }
     };

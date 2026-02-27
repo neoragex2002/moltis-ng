@@ -82,39 +82,39 @@ impl LiveChannelService {
 impl ChannelService for LiveChannelService {
     async fn status(&self) -> ServiceResult {
         let tg = self.telegram.read().await;
-        let account_handles = tg.account_handles();
+        let chan_account_keys = tg.account_handles();
         let mut channels = Vec::new();
 
         if let Some(status) = tg.status() {
-            for account_handle in &account_handles {
-                match status.probe(account_handle).await {
+            for chan_account_key in &chan_account_keys {
+                match status.probe(chan_account_key).await {
                     Ok(snap) => {
                         let mut entry = serde_json::json!({
-                            "type": "telegram",
-                            "name": format!("Telegram ({})", account_handle),
-                            "accountHandle": account_handle,
+                            "chanType": "telegram",
+                            "name": format!("Telegram ({})", chan_account_key),
+                            "chanAccountKey": chan_account_key,
                             "status": if snap.connected { "connected" } else { "disconnected" },
                             "details": snap.details,
                         });
-                        if let Some(cfg) = tg.account_config(account_handle) {
+                        if let Some(cfg) = tg.account_config(chan_account_key) {
                             entry["config"] = cfg;
                         }
 
                         // Include bound sessions and active session mappings.
                         let bound = self
                             .session_metadata
-                            .list_account_sessions("telegram", account_handle)
+                            .list_account_sessions("telegram", chan_account_key)
                             .await;
                         let active_map = self
                             .session_metadata
-                            .list_active_sessions("telegram", account_handle)
+                            .list_active_sessions("telegram", chan_account_key)
                             .await;
                         let sessions: Vec<_> = bound
                             .iter()
                             .map(|s| {
                                 let is_active = active_map.iter().any(|(_, sk)| sk == &s.key);
                                 serde_json::json!({
-                                    "key": s.key,
+                                    "sessionId": s.key,
                                     "label": s.label,
                                     "messageCount": s.message_count,
                                     "active": is_active,
@@ -129,9 +129,9 @@ impl ChannelService for LiveChannelService {
                     },
                     Err(e) => {
                         channels.push(serde_json::json!({
-                            "type": "telegram",
-                            "name": format!("Telegram ({})", account_handle),
-                            "accountHandle": account_handle,
+                            "chanType": "telegram",
+                            "name": format!("Telegram ({})", chan_account_key),
+                            "chanAccountKey": chan_account_key,
                             "status": "error",
                             "details": e.to_string(),
                         }));
@@ -167,15 +167,15 @@ impl ChannelService for LiveChannelService {
         let identity = moltis_telegram::bot::probe_bot_identity(tg_cfg.token.expose_secret())
             .await
             .map_err(|e| format!("telegram getMe failed: {e}"))?;
-        let account_handle = format!("telegram:{}", identity.chan_user_id);
+        let chan_account_key = format!("telegram:{}", identity.chan_user_id);
 
-        if let Some(supplied) = params.get("accountHandle").and_then(|v| v.as_str())
-            && supplied != account_handle
+        if let Some(supplied) = params.get("chanAccountKey").and_then(|v| v.as_str())
+            && supplied != chan_account_key
         {
             warn!(
                 supplied,
-                derived = %account_handle,
-                "telegram channel add: ignoring supplied accountHandle and using derived identity handle"
+                derived = %chan_account_key,
+                "telegram channel add: ignoring supplied chanAccountKey and using derived identity handle"
             );
         }
 
@@ -185,13 +185,13 @@ impl ChannelService for LiveChannelService {
 
         let config = serde_json::to_value(tg_cfg).map_err(|e| e.to_string())?;
 
-        info!(account_handle, "adding telegram channel account");
+        info!(chan_account_key, "adding telegram channel account");
 
         let mut tg = self.telegram.write().await;
-        tg.start_account(&account_handle, config.clone())
+        tg.start_account(&chan_account_key, config.clone())
             .await
             .map_err(|e| {
-                error!(error = %e, account_handle, "failed to start telegram account");
+                error!(error = %e, chan_account_key, "failed to start telegram account");
                 e.to_string()
             })?;
 
@@ -199,7 +199,7 @@ impl ChannelService for LiveChannelService {
         if let Err(e) = self
             .store
             .upsert(StoredChannel {
-                account_handle: account_handle.to_string(),
+                account_handle: chan_account_key.to_string(),
                 channel_type: "telegram".into(),
                 config,
                 created_at: now,
@@ -207,7 +207,7 @@ impl ChannelService for LiveChannelService {
             })
             .await
         {
-            warn!(error = %e, account_handle, "failed to persist channel");
+            warn!(error = %e, chan_account_key, "failed to persist channel");
         }
 
         if let Ok(channels) = self.store.list().await {
@@ -216,25 +216,25 @@ impl ChannelService for LiveChannelService {
             }
         }
 
-        Ok(serde_json::json!({ "added": account_handle }))
+        Ok(serde_json::json!({ "chanAccountKey": chan_account_key }))
     }
 
     async fn remove(&self, params: Value) -> ServiceResult {
-        let account_handle = params
-            .get("accountHandle")
+        let chan_account_key = params
+            .get("chanAccountKey")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'accountHandle'".to_string())?;
+            .ok_or_else(|| "missing 'chanAccountKey'".to_string())?;
 
-        info!(account_handle, "removing telegram channel account");
+        info!(chan_account_key, "removing telegram channel account");
 
         let mut tg = self.telegram.write().await;
-        tg.stop_account(account_handle).await.map_err(|e| {
-            error!(error = %e, account_handle, "failed to stop telegram account");
+        tg.stop_account(chan_account_key).await.map_err(|e| {
+            error!(error = %e, chan_account_key, "failed to stop telegram account");
             e.to_string()
         })?;
 
-        if let Err(e) = self.store.delete(account_handle).await {
-            warn!(error = %e, account_handle, "failed to delete channel from store");
+        if let Err(e) = self.store.delete(chan_account_key).await {
+            warn!(error = %e, chan_account_key, "failed to delete channel from store");
         }
 
         if let Ok(channels) = self.store.list().await {
@@ -243,7 +243,7 @@ impl ChannelService for LiveChannelService {
             }
         }
 
-        Ok(serde_json::json!({ "removed": account_handle }))
+        Ok(serde_json::json!({ "chanAccountKey": chan_account_key }))
     }
 
     async fn logout(&self, params: Value) -> ServiceResult {
@@ -251,25 +251,25 @@ impl ChannelService for LiveChannelService {
     }
 
     async fn update(&self, params: Value) -> ServiceResult {
-        let account_handle = params
-            .get("accountHandle")
+        let chan_account_key = params
+            .get("chanAccountKey")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'accountHandle'".to_string())?;
+            .ok_or_else(|| "missing 'chanAccountKey'".to_string())?;
 
         let patch = params
             .get("config")
             .cloned()
             .ok_or_else(|| "missing 'config'".to_string())?;
 
-        info!(account_handle, "updating telegram channel account");
+        info!(chan_account_key, "updating telegram channel account");
 
         // Merge patch into stored config so UI updates don't reset unseen fields (token, etc).
         let stored = self
             .store
-            .get(account_handle)
+            .get(chan_account_key)
             .await
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("channel '{account_handle}' not found in store"))?;
+            .ok_or_else(|| format!("channel '{chan_account_key}' not found in store"))?;
 
         if !patch.is_object() {
             return Err("config patch must be an object".into());
@@ -288,15 +288,15 @@ impl ChannelService for LiveChannelService {
         let mut tg = self.telegram.write().await;
 
         // Stop then restart with new config
-        tg.stop_account(account_handle).await.map_err(|e| {
-            error!(error = %e, account_handle, "failed to stop telegram account for update");
+        tg.stop_account(chan_account_key).await.map_err(|e| {
+            error!(error = %e, chan_account_key, "failed to stop telegram account for update");
             e.to_string()
         })?;
 
-        tg.start_account(account_handle, merged.clone())
+        tg.start_account(chan_account_key, merged.clone())
             .await
             .map_err(|e| {
-                error!(error = %e, account_handle, "failed to restart telegram account after update");
+                error!(error = %e, chan_account_key, "failed to restart telegram account after update");
                 e.to_string()
             })?;
 
@@ -304,7 +304,7 @@ impl ChannelService for LiveChannelService {
         if let Err(e) = self
             .store
             .upsert(StoredChannel {
-                account_handle: account_handle.to_string(),
+                account_handle: chan_account_key.to_string(),
                 channel_type: "telegram".into(),
                 config: merged,
                 created_at: stored.created_at,
@@ -312,7 +312,7 @@ impl ChannelService for LiveChannelService {
             })
             .await
         {
-            warn!(error = %e, account_handle, "failed to persist channel update");
+            warn!(error = %e, chan_account_key, "failed to persist channel update");
         }
 
         if let Ok(channels) = self.store.list().await {
@@ -321,7 +321,7 @@ impl ChannelService for LiveChannelService {
             }
         }
 
-        Ok(serde_json::json!({ "updated": account_handle }))
+        Ok(serde_json::json!({ "chanAccountKey": chan_account_key }))
     }
 
     async fn send(&self, _params: Value) -> ServiceResult {
@@ -329,21 +329,21 @@ impl ChannelService for LiveChannelService {
     }
 
     async fn senders_list(&self, params: Value) -> ServiceResult {
-        let account_handle = params
-            .get("accountHandle")
+        let chan_account_key = params
+            .get("chanAccountKey")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'accountHandle'".to_string())?;
+            .ok_or_else(|| "missing 'chanAccountKey'".to_string())?;
 
         let senders = self
             .message_log
-            .unique_senders(account_handle)
+            .unique_senders(chan_account_key)
             .await
             .map_err(|e| e.to_string())?;
 
         // Read allowlist from current config to tag each sender.
         let tg = self.telegram.read().await;
         let allowlist: Vec<String> = tg
-            .account_config(account_handle)
+            .account_config(chan_account_key)
             .and_then(|cfg| cfg.get("allowlist").cloned())
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
@@ -351,7 +351,7 @@ impl ChannelService for LiveChannelService {
         // Query pending OTP challenges for this account.
         let otp_challenges = {
             let tg_inner = self.telegram.read().await;
-            tg_inner.pending_otp_challenges(account_handle)
+            tg_inner.pending_otp_challenges(chan_account_key)
         };
 
         let list: Vec<Value> = senders
@@ -365,18 +365,18 @@ impl ChannelService for LiveChannelService {
                             .is_some_and(|u| a_lower == u.to_lowercase())
                 });
                 let mut entry = serde_json::json!({
-                    "peer_id": s.peer_id,
+                    "peerId": s.peer_id,
                     "username": s.username,
-                    "sender_name": s.sender_name,
-                    "message_count": s.message_count,
-                    "last_seen": s.last_seen,
+                    "senderName": s.sender_name,
+                    "messageCount": s.message_count,
+                    "lastSeen": s.last_seen,
                     "allowed": is_allowed,
                 });
                 // Attach OTP info if a challenge is pending for this peer.
                 if let Some(otp) = otp_challenges.iter().find(|c| c.peer_id == s.peer_id) {
-                    entry["otp_pending"] = serde_json::json!({
+                    entry["otpPending"] = serde_json::json!({
                         "code": otp.code,
-                        "expires_at": otp.expires_at,
+                        "expiresAt": otp.expires_at,
                     });
                 }
                 entry
@@ -387,10 +387,10 @@ impl ChannelService for LiveChannelService {
     }
 
     async fn sender_approve(&self, params: Value) -> ServiceResult {
-        let account_handle = params
-            .get("accountHandle")
+        let chan_account_key = params
+            .get("chanAccountKey")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'accountHandle'".to_string())?;
+            .ok_or_else(|| "missing 'chanAccountKey'".to_string())?;
 
         let identifier = params
             .get("identifier")
@@ -400,10 +400,10 @@ impl ChannelService for LiveChannelService {
         // Read current stored config, add identifier to allowlist, persist & restart.
         let stored = self
             .store
-            .get(account_handle)
+            .get(chan_account_key)
             .await
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("channel '{account_handle}' not found in store"))?;
+            .ok_or_else(|| format!("channel '{chan_account_key}' not found in store"))?;
 
         let mut config = stored.config.clone();
         let allowlist = config
@@ -434,7 +434,7 @@ impl ChannelService for LiveChannelService {
         if let Err(e) = self
             .store
             .upsert(StoredChannel {
-                account_handle: account_handle.to_string(),
+                account_handle: chan_account_key.to_string(),
                 channel_type: "telegram".into(),
                 config: config.clone(),
                 created_at: stored.created_at,
@@ -442,25 +442,25 @@ impl ChannelService for LiveChannelService {
             })
             .await
         {
-            warn!(error = %e, account_handle, "failed to persist sender approval");
+            warn!(error = %e, chan_account_key, "failed to persist sender approval");
         }
 
         // Hot-update the in-memory config (no bot restart, preserves polling
         // offset so Telegram doesn't re-deliver the OTP code message).
         let tg = self.telegram.read().await;
-        if let Err(e) = tg.update_account_config(account_handle, config) {
-            warn!(error = %e, account_handle, "failed to hot-update config for sender approval");
+        if let Err(e) = tg.update_account_config(chan_account_key, config) {
+            warn!(error = %e, chan_account_key, "failed to hot-update config for sender approval");
         }
 
-        info!(account_handle, identifier, "sender approved");
+        info!(chan_account_key, identifier, "sender approved");
         Ok(serde_json::json!({ "approved": identifier }))
     }
 
     async fn sender_deny(&self, params: Value) -> ServiceResult {
-        let account_handle = params
-            .get("accountHandle")
+        let chan_account_key = params
+            .get("chanAccountKey")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'accountHandle'".to_string())?;
+            .ok_or_else(|| "missing 'chanAccountKey'".to_string())?;
 
         let identifier = params
             .get("identifier")
@@ -469,10 +469,10 @@ impl ChannelService for LiveChannelService {
 
         let stored = self
             .store
-            .get(account_handle)
+            .get(chan_account_key)
             .await
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("channel '{account_handle}' not found in store"))?;
+            .ok_or_else(|| format!("channel '{chan_account_key}' not found in store"))?;
 
         let mut config = stored.config.clone();
         if let Some(arr) = config
@@ -489,7 +489,7 @@ impl ChannelService for LiveChannelService {
         if let Err(e) = self
             .store
             .upsert(StoredChannel {
-                account_handle: account_handle.to_string(),
+                account_handle: chan_account_key.to_string(),
                 channel_type: "telegram".into(),
                 config: config.clone(),
                 created_at: stored.created_at,
@@ -497,16 +497,16 @@ impl ChannelService for LiveChannelService {
             })
             .await
         {
-            warn!(error = %e, account_handle, "failed to persist sender denial");
+            warn!(error = %e, chan_account_key, "failed to persist sender denial");
         }
 
         // Hot-update the in-memory config (no bot restart needed for allowlist removal).
         let tg = self.telegram.read().await;
-        if let Err(e) = tg.update_account_config(account_handle, config) {
-            warn!(error = %e, account_handle, "failed to hot-update config for sender denial");
+        if let Err(e) = tg.update_account_config(chan_account_key, config) {
+            warn!(error = %e, chan_account_key, "failed to hot-update config for sender denial");
         }
 
-        info!(account_handle, identifier, "sender denied");
+        info!(chan_account_key, identifier, "sender denied");
         Ok(serde_json::json!({ "denied": identifier }))
     }
 
@@ -522,9 +522,10 @@ impl ChannelService for LiveChannelService {
         tg.bus_accounts_snapshot()
     }
 
-    async fn telegram_account_persona_id(&self, account_handle: &str) -> Option<String> {
-        let stored = self.store.get(account_handle).await.ok().flatten()?;
-        let cfg: moltis_telegram::TelegramAccountConfig = serde_json::from_value(stored.config).ok()?;
+    async fn telegram_account_persona_id(&self, chan_account_key: &str) -> Option<String> {
+        let stored = self.store.get(chan_account_key).await.ok().flatten()?;
+        let cfg: moltis_telegram::TelegramAccountConfig =
+            serde_json::from_value(stored.config).ok()?;
         cfg.persona_id
     }
 }

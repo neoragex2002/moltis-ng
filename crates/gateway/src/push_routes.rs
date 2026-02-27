@@ -280,13 +280,13 @@ pub async fn send_push_notification(
     title: &str,
     body: &str,
     url: Option<&str>,
-    session_key: Option<&str>,
+    session_id: Option<&str>,
 ) -> anyhow::Result<usize> {
     let payload = PushPayload {
         title: title.to_string(),
         body: body.to_string(),
         url: url.map(String::from),
-        session_key: session_key.map(String::from),
+        session_id: session_id.map(String::from),
     };
 
     push_service.send_to_all(&payload).await

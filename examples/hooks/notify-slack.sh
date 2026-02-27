@@ -12,7 +12,7 @@ if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
 fi
 
 INPUT=$(cat)
-SESSION=$(echo "$INPUT" | grep -o '"session_key":"[^"]*"' | head -1 | cut -d'"' -f4)
+SESSION=$(echo "$INPUT" | grep -o '"sessionId":"[^"]*"' | head -1 | cut -d'"' -f4)
 
 curl -s -X POST "$SLACK_WEBHOOK_URL" \
     -H 'Content-Type: application/json' \

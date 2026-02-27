@@ -617,11 +617,13 @@ impl LlmProvider for OpenAiCodexProvider {
                     evt.get("output_index")
                         .and_then(|v| v.as_u64())
                         .and_then(|output_index| {
-                            evt.get("item_id").and_then(|v| v.as_str()).and_then(|item_id| {
-                                tool_index_by_item_key
-                                    .get(&(output_index, item_id.to_string()))
-                                    .copied()
-                            })
+                            evt.get("item_id")
+                                .and_then(|v| v.as_str())
+                                .and_then(|item_id| {
+                                    tool_index_by_item_key
+                                        .get(&(output_index, item_id.to_string()))
+                                        .copied()
+                                })
                         })
                         .or_else(|| {
                             evt.get("call_id")
@@ -720,9 +722,16 @@ impl LlmProvider for OpenAiCodexProvider {
             let Some((id, name)) = tool_calls_by_index.get(&index).cloned() else {
                 continue;
             };
-            let args_str = tool_args_by_index.get(&index).map(String::as_str).unwrap_or("");
+            let args_str = tool_args_by_index
+                .get(&index)
+                .map(String::as_str)
+                .unwrap_or("");
             let arguments = serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
-            tool_calls.push(ToolCall { id, name, arguments });
+            tool_calls.push(ToolCall {
+                id,
+                name,
+                arguments,
+            });
         }
 
         let text = if text_buf.is_empty() {
@@ -1063,11 +1072,14 @@ mod tests {
     #[test]
     fn convert_messages_tool_call_and_result() {
         let messages = vec![
-            ChatMessage::assistant_with_tools(None, vec![ToolCall {
-                id: "call_1".to_string(),
-                name: "get_time".to_string(),
-                arguments: serde_json::json!({}),
-            }]),
+            ChatMessage::assistant_with_tools(
+                None,
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_time".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+            ),
             ChatMessage::tool("call_1", "12:00"),
         ];
         let converted = OpenAiCodexProvider::convert_messages(&messages);
@@ -1192,11 +1204,14 @@ mod tests {
         .to_string();
         let messages = vec![
             ChatMessage::user("Take a screenshot"),
-            ChatMessage::assistant_with_tools(None, vec![ToolCall {
-                id: "call_screenshot".to_string(),
-                name: "browser_screenshot".to_string(),
-                arguments: serde_json::json!({}),
-            }]),
+            ChatMessage::assistant_with_tools(
+                None,
+                vec![ToolCall {
+                    id: "call_screenshot".to_string(),
+                    name: "browser_screenshot".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+            ),
             ChatMessage::tool("call_screenshot", &tool_output),
             ChatMessage::assistant("Here is the screenshot."),
         ];

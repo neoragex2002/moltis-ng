@@ -110,8 +110,8 @@ fn extract_preview(history: &[Value]) -> Option<String> {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ChannelReplyTargetCompat {
     pub channel_type: moltis_channels::ChannelType,
-    #[serde(alias = "account_id")]
-    pub account_handle: String,
+    #[serde(rename = "account_handle", alias = "account_id")]
+    pub chan_account_key: String,
     pub chat_id: String,
 }
 
@@ -119,13 +119,27 @@ struct ChannelReplyTargetCompat {
 /// from a persisted `channel_binding` JSON blob (best-effort).
 ///
 /// This key is intentionally *not* the opaque persistent `session:<uuid>`.
-pub(crate) fn sandbox_session_key_for_channel_binding(binding_json: &str) -> Option<String> {
+pub(crate) fn sandbox_chan_chat_key_for_channel_binding(binding_json: &str) -> Option<String> {
+    if let Ok(target) =
+        serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
+    {
+        let chan_user_id = moltis_common::identity::chan_user_id_from_chan_account_key(
+            &target.chan_account_key,
+            Some(target.chan_type.as_str()),
+        )?;
+        return Some(moltis_common::identity::format_chan_chat_key(
+            target.chan_type.as_str(),
+            chan_user_id,
+            &target.chat_id,
+            None,
+        ));
+    }
     let target: ChannelReplyTargetCompat = serde_json::from_str(binding_json).ok()?;
-    let chan_user_id = moltis_common::identity::chan_user_id_from_account_handle(
-        &target.account_handle,
+    let chan_user_id = moltis_common::identity::chan_user_id_from_chan_account_key(
+        &target.chan_account_key,
         Some(target.channel_type.as_str()),
     )?;
-    Some(moltis_common::identity::format_session_key(
+    Some(moltis_common::identity::format_chan_chat_key(
         target.channel_type.as_str(),
         chan_user_id,
         &target.chat_id,
@@ -133,11 +147,13 @@ pub(crate) fn sandbox_session_key_for_channel_binding(binding_json: &str) -> Opt
     ))
 }
 
-pub(crate) fn sandbox_router_key_for_entry(entry: &moltis_sessions::metadata::SessionEntry) -> String {
+pub(crate) fn sandbox_router_key_for_entry(
+    entry: &moltis_sessions::metadata::SessionEntry,
+) -> String {
     entry
         .channel_binding
         .as_deref()
-        .and_then(sandbox_session_key_for_channel_binding)
+        .and_then(sandbox_chan_chat_key_for_channel_binding)
         .unwrap_or_else(|| entry.key.clone())
 }
 
@@ -197,10 +213,21 @@ impl LiveSessionService {
 #[async_trait]
 impl SessionService for LiveSessionService {
     async fn list(&self) -> ServiceResult {
+        if self.metadata.get("main").await.is_none() {
+            let _ = self.metadata.upsert("main", None).await;
+        }
         let all = self.metadata.list().await;
 
         let mut entries: Vec<Value> = Vec::with_capacity(all.len());
         for e in all {
+            let chan_reply_target = e
+                .channel_binding
+                .as_ref()
+                .and_then(|binding_json| {
+                    serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json).ok()
+                })
+                .and_then(|target| serde_json::to_value(target).ok());
+
             // Check if this session is the active one for its channel binding.
             let active_channel = if let Some(ref binding_json) = e.channel_binding {
                 if let Ok(target) =
@@ -208,8 +235,8 @@ impl SessionService for LiveSessionService {
                 {
                     self.metadata
                         .get_active_session_id(
-                            target.channel_type.as_str(),
-                            &target.account_handle,
+                            target.chan_type.as_str(),
+                            &target.chan_account_key,
                             &target.chat_id,
                         )
                         .await
@@ -224,7 +251,7 @@ impl SessionService for LiveSessionService {
 
             entries.push(serde_json::json!({
                 "id": e.id,
-                "key": e.key,
+                "sessionId": e.key,
                 "label": e.label,
                 "model": e.model,
                 "createdAt": e.created_at,
@@ -232,12 +259,12 @@ impl SessionService for LiveSessionService {
                 "messageCount": e.message_count,
                 "lastSeenMessageCount": e.last_seen_message_count,
                 "projectId": e.project_id,
-                "sandbox_enabled": e.sandbox_enabled,
-                "sandbox_image": e.sandbox_image,
-                "worktree_branch": e.worktree_branch,
-                "channelBinding": e.channel_binding,
+                "sandboxEnabled": e.sandbox_enabled,
+                "sandboxImage": e.sandbox_image,
+                "worktreeBranch": e.worktree_branch,
+                "chanReplyTarget": chan_reply_target,
                 "activeChannel": active_channel,
-                "parentSessionKey": e.parent_session_key,
+                "parentSessionId": e.parent_session_key,
                 "forkPoint": e.fork_point,
                 "mcpDisabled": e.mcp_disabled,
                 "preview": e.preview,
@@ -248,39 +275,45 @@ impl SessionService for LiveSessionService {
     }
 
     async fn preview(&self, params: Value) -> ServiceResult {
-        let key = params
-            .get("key")
+        let session_id = params
+            .get("sessionId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'key' parameter".to_string())?;
+            .ok_or_else(|| "missing 'sessionId' parameter".to_string())?;
         let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
         let messages = self
             .store
-            .read_last_n(key, limit)
+            .read_last_n(session_id, limit)
             .await
             .map_err(|e| e.to_string())?;
         Ok(serde_json::json!({ "messages": filter_ui_history(messages) }))
     }
 
     async fn resolve(&self, params: Value) -> ServiceResult {
-        let key = params
-            .get("key")
+        let session_id = params
+            .get("sessionId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'key' parameter".to_string())?;
+            .ok_or_else(|| "missing 'sessionId' parameter".to_string())?;
 
         let entry = self
             .metadata
-            .upsert(key, None)
+            .upsert(session_id, None)
             .await
             .map_err(|e| e.to_string())?;
-        let history = self.store.read(key).await.map_err(|e| e.to_string())?;
+        let history = self
+            .store
+            .read(session_id)
+            .await
+            .map_err(|e| e.to_string())?;
 
         // Recompute preview from combined messages every time resolve runs,
         // so sessions get the latest multi-message preview algorithm.
         if !history.is_empty() {
             let new_preview = extract_preview(&history);
             if new_preview.as_deref() != entry.preview.as_deref() {
-                self.metadata.set_preview(key, new_preview.as_deref()).await;
+                self.metadata
+                    .set_preview(session_id, new_preview.as_deref())
+                    .await;
             }
         }
 
@@ -289,17 +322,17 @@ impl SessionService for LiveSessionService {
             && let Some(ref hooks) = self.hook_registry
         {
             let payload = moltis_common::hooks::HookPayload::SessionStart {
-                session_key: key.to_string(),
+                session_id: session_id.to_string(),
             };
             if let Err(e) = hooks.dispatch(&payload).await {
-                warn!(session = %key, error = %e, "SessionStart hook failed");
+                warn!(session = %session_id, error = %e, "SessionStart hook failed");
             }
         }
 
         Ok(serde_json::json!({
             "entry": {
                 "id": entry.id,
-                "key": entry.key,
+                "sessionId": entry.key,
                 "label": entry.label,
                 "model": entry.model,
                 "createdAt": entry.created_at,
@@ -307,9 +340,9 @@ impl SessionService for LiveSessionService {
                 "messageCount": entry.message_count,
                 "projectId": entry.project_id,
                 "archived": entry.archived,
-                "sandbox_enabled": entry.sandbox_enabled,
-                "sandbox_image": entry.sandbox_image,
-                "worktree_branch": entry.worktree_branch,
+                "sandboxEnabled": entry.sandbox_enabled,
+                "sandboxImage": entry.sandbox_image,
+                "worktreeBranch": entry.worktree_branch,
                 "mcpDisabled": entry.mcp_disabled,
                 "version": entry.version,
             },
@@ -318,10 +351,10 @@ impl SessionService for LiveSessionService {
     }
 
     async fn patch(&self, params: Value) -> ServiceResult {
-        let key = params
-            .get("key")
+        let session_id = params
+            .get("sessionId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'key' parameter".to_string())?;
+            .ok_or_else(|| "missing 'sessionId' parameter".to_string())?;
         let label = params
             .get("label")
             .and_then(|v| v.as_str())
@@ -333,40 +366,40 @@ impl SessionService for LiveSessionService {
 
         let entry = self
             .metadata
-            .get(key)
+            .get(session_id)
             .await
-            .ok_or_else(|| format!("session '{key}' not found"))?;
+            .ok_or_else(|| format!("session '{session_id}' not found"))?;
         if label.is_some() {
             if entry.channel_binding.is_some() {
                 return Err("cannot rename a channel-bound session".to_string());
             }
-            let _ = self.metadata.upsert(key, label).await;
+            let _ = self.metadata.upsert(session_id, label).await;
         }
         if model.is_some() {
-            self.metadata.set_model(key, model).await;
+            self.metadata.set_model(session_id, model).await;
         }
-        if params.get("project_id").is_some() {
+        if params.get("projectId").is_some() {
             let project_id = params
-                .get("project_id")
+                .get("projectId")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(String::from);
-            self.metadata.set_project_id(key, project_id).await;
+            self.metadata.set_project_id(session_id, project_id).await;
         }
         // Update worktree_branch if provided.
-        if params.get("worktree_branch").is_some() {
+        if params.get("worktreeBranch").is_some() {
             let worktree_branch = params
-                .get("worktree_branch")
+                .get("worktreeBranch")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(String::from);
             self.metadata
-                .set_worktree_branch(key, worktree_branch)
+                .set_worktree_branch(session_id, worktree_branch)
                 .await;
         }
 
         // Update sandbox_image if provided.
-        if params.get("sandbox_image").is_some() {
+        if params.get("sandboxImage").is_some() {
             if let Some(ref router) = self.sandbox_router {
                 if router.config().scope != moltis_tools::sandbox::SandboxScope::Session {
                     return Err(
@@ -376,16 +409,16 @@ impl SessionService for LiveSessionService {
                 }
             }
             let sandbox_image = params
-                .get("sandbox_image")
+                .get("sandboxImage")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(String::from);
             self.metadata
-                .set_sandbox_image(key, sandbox_image.clone())
+                .set_sandbox_image(session_id, sandbox_image.clone())
                 .await;
-            let router_key = match self.metadata.get(key).await {
+            let router_key = match self.metadata.get(session_id).await {
                 Some(entry) => sandbox_router_key_for_entry(&entry),
-                None => key.to_string(),
+                None => session_id.to_string(),
             };
             // Push image override to sandbox router.
             if let Some(ref router) = self.sandbox_router {
@@ -398,20 +431,22 @@ impl SessionService for LiveSessionService {
         }
 
         // Update mcp_disabled if provided.
-        if params.get("mcp_disabled").is_some() {
-            let mcp_disabled = params.get("mcp_disabled").and_then(|v| v.as_bool());
-            self.metadata.set_mcp_disabled(key, mcp_disabled).await;
+        if params.get("mcpDisabled").is_some() {
+            let mcp_disabled = params.get("mcpDisabled").and_then(|v| v.as_bool());
+            self.metadata
+                .set_mcp_disabled(session_id, mcp_disabled)
+                .await;
         }
 
         // Update sandbox_enabled if provided.
-        if params.get("sandbox_enabled").is_some() {
-            let sandbox_enabled = params.get("sandbox_enabled").and_then(|v| v.as_bool());
+        if params.get("sandboxEnabled").is_some() {
+            let sandbox_enabled = params.get("sandboxEnabled").and_then(|v| v.as_bool());
             self.metadata
-                .set_sandbox_enabled(key, sandbox_enabled)
+                .set_sandbox_enabled(session_id, sandbox_enabled)
                 .await;
-            let router_key = match self.metadata.get(key).await {
+            let router_key = match self.metadata.get(session_id).await {
                 Some(entry) => sandbox_router_key_for_entry(&entry),
-                None => key.to_string(),
+                None => session_id.to_string(),
             };
             // Push override to sandbox router.
             if let Some(ref router) = self.sandbox_router {
@@ -425,42 +460,46 @@ impl SessionService for LiveSessionService {
 
         let entry = self
             .metadata
-            .get(key)
+            .get(session_id)
             .await
-            .ok_or_else(|| format!("session '{key}' not found after update"))?;
+            .ok_or_else(|| format!("session '{session_id}' not found after update"))?;
         Ok(serde_json::json!({
             "id": entry.id,
-            "key": entry.key,
+            "sessionId": entry.key,
             "label": entry.label,
             "model": entry.model,
-            "sandbox_enabled": entry.sandbox_enabled,
-            "sandbox_image": entry.sandbox_image,
-            "worktree_branch": entry.worktree_branch,
+            "projectId": entry.project_id,
+            "sandboxEnabled": entry.sandbox_enabled,
+            "sandboxImage": entry.sandbox_image,
+            "worktreeBranch": entry.worktree_branch,
             "mcpDisabled": entry.mcp_disabled,
             "version": entry.version,
         }))
     }
 
     async fn reset(&self, params: Value) -> ServiceResult {
-        let key = params
-            .get("key")
+        let session_id = params
+            .get("sessionId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'key' parameter".to_string())?;
+            .ok_or_else(|| "missing 'sessionId' parameter".to_string())?;
 
-        self.store.clear(key).await.map_err(|e| e.to_string())?;
-        self.metadata.touch(key, 0).await;
-        self.metadata.set_preview(key, None).await;
+        self.store
+            .clear(session_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.metadata.touch(session_id, 0).await;
+        self.metadata.set_preview(session_id, None).await;
 
         Ok(serde_json::json!({}))
     }
 
     async fn delete(&self, params: Value) -> ServiceResult {
-        let key = params
-            .get("key")
+        let session_id = params
+            .get("sessionId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'key' parameter".to_string())?;
+            .ok_or_else(|| "missing 'sessionId' parameter".to_string())?;
 
-        if key == "main" {
+        if session_id == "main" {
             return Err("cannot delete the main session".to_string());
         }
 
@@ -469,7 +508,7 @@ impl SessionService for LiveSessionService {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let deleted_entry = self.metadata.get(key).await;
+        let deleted_entry = self.metadata.get(session_id).await;
 
         // Check for worktree cleanup before deleting metadata.
         if let Some(entry) = deleted_entry.as_ref()
@@ -479,7 +518,7 @@ impl SessionService for LiveSessionService {
             && let Ok(Some(project)) = project_store.get(project_id).await
         {
             let project_dir = &project.directory;
-            let wt_dir = project_dir.join(".moltis-worktrees").join(key);
+            let wt_dir = project_dir.join(".moltis-worktrees").join(session_id);
 
             // Safety checks unless force is set.
             if !force
@@ -496,25 +535,33 @@ impl SessionService for LiveSessionService {
             // Run teardown command if configured.
             if let Some(ref cmd) = project.teardown_command
                 && wt_dir.exists()
-                && let Err(e) =
-                    moltis_projects::WorktreeManager::run_teardown(&wt_dir, cmd, project_dir, key)
-                        .await
+                && let Err(e) = moltis_projects::WorktreeManager::run_teardown(
+                    &wt_dir,
+                    cmd,
+                    project_dir,
+                    session_id,
+                )
+                .await
             {
                 tracing::warn!("worktree teardown failed: {e}");
             }
 
-            if let Err(e) = moltis_projects::WorktreeManager::cleanup(project_dir, key).await {
+            if let Err(e) = moltis_projects::WorktreeManager::cleanup(project_dir, session_id).await
+            {
                 tracing::warn!("worktree cleanup failed: {e}");
             }
         }
 
-        self.store.clear(key).await.map_err(|e| e.to_string())?;
+        self.store
+            .clear(session_id)
+            .await
+            .map_err(|e| e.to_string())?;
 
         // Clean up sandbox resources for this session.
         let deleted_router_key = deleted_entry
             .as_ref()
             .map(sandbox_router_key_for_entry)
-            .unwrap_or_else(|| key.to_string());
+            .unwrap_or_else(|| session_id.to_string());
         let deleted_effective_sandbox_key = self
             .sandbox_router
             .as_ref()
@@ -535,12 +582,12 @@ impl SessionService for LiveSessionService {
 
         // Cascade-delete session state.
         if let Some(ref state_store) = self.state_store
-            && let Err(e) = state_store.delete_session(key).await
+            && let Err(e) = state_store.delete_session(session_id).await
         {
-            tracing::warn!("session state cleanup for {key}: {e}");
+            tracing::warn!("session state cleanup for {session_id}: {e}");
         }
 
-        self.metadata.remove(key).await;
+        self.metadata.remove(session_id).await;
 
         // Shared scopes: if TTL is disabled, cleanup the shared sandbox when no remaining
         // sandboxed sessions reference this effective key.
@@ -574,10 +621,10 @@ impl SessionService for LiveSessionService {
         // Dispatch SessionEnd hook (read-only).
         if let Some(ref hooks) = self.hook_registry {
             let payload = moltis_common::hooks::HookPayload::SessionEnd {
-                session_key: key.to_string(),
+                session_id: session_id.to_string(),
             };
             if let Err(e) = hooks.dispatch(&payload).await {
-                warn!(session = %key, error = %e, "SessionEnd hook failed");
+                warn!(session = %session_id, error = %e, "SessionEnd hook failed");
             }
         }
 
@@ -589,10 +636,10 @@ impl SessionService for LiveSessionService {
     }
 
     async fn fork(&self, params: Value) -> ServiceResult {
-        let parent_key = params
-            .get("key")
+        let parent_session_id = params
+            .get("sessionId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'key' parameter".to_string())?;
+            .ok_or_else(|| "missing 'sessionId' parameter".to_string())?;
         let label = params
             .get("label")
             .and_then(|v| v.as_str())
@@ -600,7 +647,7 @@ impl SessionService for LiveSessionService {
 
         let messages = self
             .store
-            .read(parent_key)
+            .read(parent_session_id)
             .await
             .map_err(|e| e.to_string())?;
         let msg_count = messages.len();
@@ -634,7 +681,7 @@ impl SessionService for LiveSessionService {
         self.metadata.touch(&new_key, fork_point as u32).await;
 
         // Inherit model, project, and mcp_disabled from parent.
-        if let Some(parent) = self.metadata.get(parent_key).await {
+        if let Some(parent) = self.metadata.get(parent_session_id).await {
             if parent.model.is_some() {
                 self.metadata.set_model(&new_key, parent.model).await;
             }
@@ -654,7 +701,7 @@ impl SessionService for LiveSessionService {
         self.metadata
             .set_parent(
                 &new_key,
-                Some(parent_key.to_string()),
+                Some(parent_session_id.to_string()),
                 Some(fork_point as u32),
             )
             .await;
@@ -666,7 +713,7 @@ impl SessionService for LiveSessionService {
             .await
             .ok_or_else(|| format!("forked session '{new_key}' not found after creation"))?;
         Ok(serde_json::json!({
-            "sessionKey": new_key,
+            "sessionId": new_key,
             "id": final_entry.id,
             "label": final_entry.label,
             "forkPoint": fork_point,
@@ -676,17 +723,17 @@ impl SessionService for LiveSessionService {
     }
 
     async fn branches(&self, params: Value) -> ServiceResult {
-        let key = params
-            .get("key")
+        let session_id = params
+            .get("sessionId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'key' parameter".to_string())?;
+            .ok_or_else(|| "missing 'sessionId' parameter".to_string())?;
 
-        let children = self.metadata.list_children(key).await;
+        let children = self.metadata.list_children(session_id).await;
         let items: Vec<Value> = children
             .into_iter()
             .map(|e| {
                 serde_json::json!({
-                    "key": e.key,
+                    "sessionId": e.key,
                     "label": e.label,
                     "forkPoint": e.fork_point,
                     "messageCount": e.message_count,
@@ -725,7 +772,7 @@ impl SessionService for LiveSessionService {
                     .await
                     .and_then(|e| e.label);
                 out.push(serde_json::json!({
-                    "sessionKey": r.session_key,
+                    "sessionId": r.session_key,
                     "snippet": r.snippet,
                     "role": r.role,
                     "messageIndex": r.message_index,
@@ -757,7 +804,7 @@ impl SessionService for LiveSessionService {
             }
 
             // Reuse delete logic via params.
-            let params = serde_json::json!({ "key": entry.key, "force": true });
+            let params = serde_json::json!({ "sessionId": entry.key, "force": true });
             if let Err(e) = self.delete(params).await {
                 warn!(session = %entry.key, error = %e, "clear_all: failed to delete session");
                 continue;
@@ -781,19 +828,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sandbox_session_key_for_channel_binding_parses_account_handle() {
-        let binding = r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#;
+    fn sandbox_chan_chat_key_for_channel_binding_parses_chan_reply_target() {
+        let binding = r#"{"chanType":"telegram","chanAccountKey":"telegram:bot1","chatId":"123"}"#;
         assert_eq!(
-            sandbox_session_key_for_channel_binding(binding),
+            sandbox_chan_chat_key_for_channel_binding(binding),
             Some("telegram:bot1:123".to_string())
         );
     }
 
     #[test]
-    fn sandbox_session_key_for_channel_binding_parses_legacy_account_id() {
+    fn sandbox_chan_chat_key_for_channel_binding_parses_account_handle() {
+        let binding =
+            r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#;
+        assert_eq!(
+            sandbox_chan_chat_key_for_channel_binding(binding),
+            Some("telegram:bot1:123".to_string())
+        );
+    }
+
+    #[test]
+    fn sandbox_chan_chat_key_for_channel_binding_parses_legacy_account_id() {
         let binding = r#"{"channel_type":"telegram","account_id":"telegram:bot1","chat_id":"123"}"#;
         assert_eq!(
-            sandbox_session_key_for_channel_binding(binding),
+            sandbox_chan_chat_key_for_channel_binding(binding),
             Some("telegram:bot1:123".to_string())
         );
     }

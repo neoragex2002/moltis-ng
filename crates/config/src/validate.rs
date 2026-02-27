@@ -975,7 +975,8 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
                     severity: Severity::Error,
                     category: "security",
                     path: guest_path,
-                    message: "guest_dir must be under /mnt/host/ (fixed prefix for auditability)".into(),
+                    message: "guest_dir must be under /mnt/host/ (fixed prefix for auditability)"
+                        .into(),
                 });
             }
 
@@ -1749,8 +1750,7 @@ mounts = [{ host_dir = "/mnt/c/dev/myproj", guest_dir = "/tmp/myproj", mode = "r
         let result = validate_toml_str(toml);
         assert!(
             result.diagnostics.iter().any(|d| {
-                d.severity == Severity::Error
-                    && d.path == "tools.exec.sandbox.mounts[0].guest_dir"
+                d.severity == Severity::Error && d.path == "tools.exec.sandbox.mounts[0].guest_dir"
             }),
             "expected error for guest_dir prefix constraint, got: {:?}",
             result.diagnostics

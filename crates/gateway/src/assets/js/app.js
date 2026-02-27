@@ -41,8 +41,8 @@ import "./session-search.js";
 import "./time-format.js";
 
 function preferredChatPath() {
-	var key = localStorage.getItem("moltis-session") || "main";
-	return sessionPath(key);
+	var sessionId = localStorage.getItem("moltis-sessionId") || "main";
+	return sessionPath(sessionId);
 }
 
 // Redirect root to the active/default chat session.
@@ -88,7 +88,7 @@ onEvent("update.available", showUpdateBanner);
 initUpdateBannerDismiss();
 onEvent("session", (payload) => {
 	fetchSessions();
-	if (payload && payload.kind === "patched" && payload.sessionKey === S.activeSessionKey) {
+	if (payload && payload.kind === "patched" && payload.sessionId === S.activeSessionId) {
 		refreshActiveSession();
 	}
 });

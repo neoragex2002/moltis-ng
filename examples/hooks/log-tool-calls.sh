@@ -8,8 +8,8 @@ set -euo pipefail
 LOG_FILE="${HOOK_LOG_FILE:-/tmp/moltis-tool-calls.log}"
 INPUT=$(cat)
 
-TOOL_NAME=$(echo "$INPUT" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4)
-SESSION=$(echo "$INPUT" | grep -o '"session_key":"[^"]*"' | head -1 | cut -d'"' -f4)
+TOOL_NAME=$(echo "$INPUT" | grep -o '"toolName":"[^"]*"' | head -1 | cut -d'"' -f4)
+SESSION=$(echo "$INPUT" | grep -o '"sessionId":"[^"]*"' | head -1 | cut -d'"' -f4)
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 echo "${TIMESTAMP} session=${SESSION} tool=${TOOL_NAME}" >> "$LOG_FILE"

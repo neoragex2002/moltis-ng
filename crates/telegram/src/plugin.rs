@@ -116,7 +116,10 @@ impl TelegramPlugin {
     }
 
     /// List pending OTP challenges for a specific account.
-    pub fn pending_otp_challenges(&self, account_handle: &str) -> Vec<crate::otp::OtpChallengeInfo> {
+    pub fn pending_otp_challenges(
+        &self,
+        account_handle: &str,
+    ) -> Vec<crate::otp::OtpChallengeInfo> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
             .get(account_handle)
@@ -144,7 +147,11 @@ impl ChannelPlugin for TelegramPlugin {
         "Telegram"
     }
 
-    async fn start_account(&mut self, account_handle: &str, config: serde_json::Value) -> Result<()> {
+    async fn start_account(
+        &mut self,
+        account_handle: &str,
+        config: serde_json::Value,
+    ) -> Result<()> {
         let tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
 
         if tg_config.token.expose_secret().is_empty() {
@@ -212,7 +219,7 @@ impl ChannelStatus for TelegramPlugin {
             Some(bot) => match bot.get_me().await {
                 Ok(me) => ChannelHealthSnapshot {
                     connected: true,
-                    account_handle: account_handle.to_string(),
+                    chan_account_key: account_handle.to_string(),
                     details: Some(format!(
                         "Bot: @{}",
                         me.username.as_deref().unwrap_or("unknown")
@@ -220,13 +227,13 @@ impl ChannelStatus for TelegramPlugin {
                 },
                 Err(e) => ChannelHealthSnapshot {
                     connected: false,
-                    account_handle: account_handle.to_string(),
+                    chan_account_key: account_handle.to_string(),
                     details: Some(format!("API error: {e}")),
                 },
             },
             None => ChannelHealthSnapshot {
                 connected: false,
-                account_handle: account_handle.to_string(),
+                chan_account_key: account_handle.to_string(),
                 details: Some("account not started".into()),
             },
         };

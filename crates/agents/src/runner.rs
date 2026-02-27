@@ -642,7 +642,7 @@ pub async fn run_agent_loop(
 }
 
 /// Like `run_agent_loop` but accepts optional context values that are injected
-/// into every tool call's parameters (e.g. `_session_key`).
+/// into every tool call's parameters (e.g. `_sessionId`).
 pub async fn run_agent_loop_with_context(
     provider: Arc<dyn LlmProvider>,
     tools: &ToolRegistry,
@@ -715,13 +715,25 @@ pub async fn run_agent_loop_with_context_prefix(
         &vec![]
     };
 
-    // Extract session key once for hook payloads.
-    let session_key_for_hooks = tool_context
+    let session_id_for_hooks = tool_context
         .as_ref()
-        .and_then(|ctx| ctx.get("_session_key"))
+        .and_then(|ctx| ctx.get("_sessionId"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+
+    let chan_chat_key_for_hooks = tool_context
+        .as_ref()
+        .and_then(|ctx| ctx.get("_chanChatKey"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let chan_account_key_for_hooks = chan_chat_key_for_hooks
+        .as_deref()
+        .and_then(moltis_common::identity::parse_chan_chat_key)
+        .map(|parts| format!("{}:{}", parts.channel, parts.chan_user_id));
 
     let mut iterations = 0;
     let mut total_tool_calls = 0;
@@ -756,7 +768,9 @@ pub async fn run_agent_loop_with_context_prefix(
             let msgs_json: Vec<serde_json::Value> =
                 messages.iter().map(|m| m.to_openai_value()).collect();
             let payload = HookPayload::BeforeLLMCall {
-                session_key: session_key_for_hooks.clone(),
+                session_id: session_id_for_hooks.clone(),
+                chan_chat_key: chan_chat_key_for_hooks.clone(),
+                chan_account_key: chan_account_key_for_hooks.clone(),
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 messages: serde_json::Value::Array(msgs_json),
@@ -785,38 +799,36 @@ pub async fn run_agent_loop_with_context_prefix(
         }
 
         let llm_context = crate::model::LlmRequestContext {
-            session_key: (!session_key_for_hooks.is_empty())
-                .then_some(session_key_for_hooks.clone()),
+            session_id: (!session_id_for_hooks.is_empty()).then_some(session_id_for_hooks.clone()),
         };
 
-        let mut response: CompletionResponse =
-            match provider
-                .complete_with_context(&llm_context, &messages, schemas_for_api)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    let msg = e.to_string();
-                    if is_context_window_error(&msg) {
-                        return Err(AgentRunError::ContextWindowExceeded(msg));
+        let mut response: CompletionResponse = match provider
+            .complete_with_context(&llm_context, &messages, schemas_for_api)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = e.to_string();
+                if is_context_window_error(&msg) {
+                    return Err(AgentRunError::ContextWindowExceeded(msg));
+                }
+                if retries_remaining > 0 && is_retryable_server_error(&msg) {
+                    retries_remaining -= 1;
+                    iterations -= 1;
+                    warn!(
+                        error = %msg,
+                        retries_remaining,
+                        "transient LLM error, retrying after delay"
+                    );
+                    if let Some(cb) = on_event {
+                        cb(RunnerEvent::RetryingAfterError(msg));
                     }
-                    if retries_remaining > 0 && is_retryable_server_error(&msg) {
-                        retries_remaining -= 1;
-                        iterations -= 1;
-                        warn!(
-                            error = %msg,
-                            retries_remaining,
-                            "transient LLM error, retrying after delay"
-                        );
-                        if let Some(cb) = on_event {
-                            cb(RunnerEvent::RetryingAfterError(msg));
-                        }
-                        tokio::time::sleep(RETRY_DELAY).await;
-                        continue;
-                    }
-                    return Err(AgentRunError::Other(e));
-                },
-            };
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    continue;
+                }
+                return Err(AgentRunError::Other(e));
+            },
+        };
 
         if let Some(cb) = on_event {
             cb(RunnerEvent::ThinkingDone);
@@ -824,8 +836,10 @@ pub async fn run_agent_loop_with_context_prefix(
 
         total_input_tokens = total_input_tokens.saturating_add(response.usage.input_tokens);
         total_output_tokens = total_output_tokens.saturating_add(response.usage.output_tokens);
-        total_cache_read_tokens = total_cache_read_tokens.saturating_add(response.usage.cache_read_tokens);
-        total_cache_write_tokens = total_cache_write_tokens.saturating_add(response.usage.cache_write_tokens);
+        total_cache_read_tokens =
+            total_cache_read_tokens.saturating_add(response.usage.cache_read_tokens);
+        total_cache_write_tokens =
+            total_cache_write_tokens.saturating_add(response.usage.cache_write_tokens);
 
         info!(
             iteration = iterations,
@@ -897,7 +911,9 @@ pub async fn run_agent_loop_with_context_prefix(
                 })
                 .collect();
             let payload = HookPayload::AfterLLMCall {
-                session_key: session_key_for_hooks.clone(),
+                session_id: session_id_for_hooks.clone(),
+                chan_chat_key: chan_chat_key_for_hooks.clone(),
+                chan_account_key: chan_account_key_for_hooks.clone(),
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 text: response.text.clone(),
@@ -982,7 +998,7 @@ pub async fn run_agent_loop_with_context_prefix(
 
                 // Dispatch BeforeToolCall hook — may block or modify arguments.
                 let hook_registry = hook_registry.clone();
-                let session_key = session_key_for_hooks.clone();
+                let session_id = session_id_for_hooks.clone();
                 let tc_name = tc.name.clone();
                 let _tc_id = tc.id.clone();
 
@@ -997,7 +1013,7 @@ pub async fn run_agent_loop_with_context_prefix(
                     // Run BeforeToolCall hook.
                     if let Some(ref hooks) = hook_registry {
                         let payload = HookPayload::BeforeToolCall {
-                            session_key: session_key.clone(),
+                            session_id: session_id.clone(),
                             tool_name: tc_name.clone(),
                             arguments: args.clone(),
                         };
@@ -1039,7 +1055,7 @@ pub async fn run_agent_loop_with_context_prefix(
                                 // Dispatch AfterToolCall hook.
                                 if let Some(ref hooks) = hook_registry {
                                     let payload = HookPayload::AfterToolCall {
-                                        session_key: session_key.clone(),
+                                        session_id: session_id.clone(),
                                         tool_name: tc_name.clone(),
                                         success: !has_error,
                                         result: Some(val.clone()),
@@ -1061,7 +1077,7 @@ pub async fn run_agent_loop_with_context_prefix(
                                 // Dispatch AfterToolCall hook on failure.
                                 if let Some(ref hooks) = hook_registry {
                                     let payload = HookPayload::AfterToolCall {
-                                        session_key: session_key.clone(),
+                                        session_id: session_id.clone(),
                                         tool_name: tc_name.clone(),
                                         success: false,
                                         result: None,
@@ -1133,7 +1149,7 @@ pub async fn run_agent_loop_with_context_prefix(
 }
 
 /// Convenience wrapper matching the old stub signature.
-pub async fn run_agent(_agent_id: &str, _session_key: &str, _message: &str) -> Result<String> {
+pub async fn run_agent(_agent_id: &str, _session_id: &str, _message: &str) -> Result<String> {
     bail!("run_agent requires a configured provider and tool registry; use run_agent_loop instead")
 }
 
@@ -1220,13 +1236,25 @@ pub async fn run_agent_loop_streaming_with_prefix(
         "schemas_for_api prepared for streaming"
     );
 
-    // Extract session key once for hook payloads.
-    let session_key_for_hooks = tool_context
+    let session_id_for_hooks = tool_context
         .as_ref()
-        .and_then(|ctx| ctx.get("_session_key"))
+        .and_then(|ctx| ctx.get("_sessionId"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+
+    let chan_chat_key_for_hooks = tool_context
+        .as_ref()
+        .and_then(|ctx| ctx.get("_chanChatKey"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let chan_account_key_for_hooks = chan_chat_key_for_hooks
+        .as_deref()
+        .and_then(moltis_common::identity::parse_chan_chat_key)
+        .map(|parts| format!("{}:{}", parts.channel, parts.chan_user_id));
 
     let mut iterations = 0;
     let mut total_tool_calls = 0;
@@ -1264,7 +1292,9 @@ pub async fn run_agent_loop_streaming_with_prefix(
             let msgs_json: Vec<serde_json::Value> =
                 messages.iter().map(|m| m.to_openai_value()).collect();
             let payload = HookPayload::BeforeLLMCall {
-                session_key: session_key_for_hooks.clone(),
+                session_id: session_id_for_hooks.clone(),
+                chan_chat_key: chan_chat_key_for_hooks.clone(),
+                chan_account_key: chan_account_key_for_hooks.clone(),
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 messages: serde_json::Value::Array(msgs_json),
@@ -1296,8 +1326,7 @@ pub async fn run_agent_loop_streaming_with_prefix(
         #[cfg(feature = "metrics")]
         let iter_start = std::time::Instant::now();
         let llm_context = crate::model::LlmRequestContext {
-            session_key: (!session_key_for_hooks.is_empty())
-                .then_some(session_key_for_hooks.clone()),
+            session_id: (!session_id_for_hooks.is_empty()).then_some(session_id_for_hooks.clone()),
         };
         let mut stream = provider.stream_with_tools_with_context(
             &llm_context,
@@ -1357,7 +1386,10 @@ pub async fn run_agent_loop_streaming_with_prefix(
                     output_tokens = usage.output_tokens;
                     cache_read_tokens = usage.cache_read_tokens;
                     cache_write_tokens = usage.cache_write_tokens;
-                    debug!(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "stream done");
+                    debug!(
+                        input_tokens,
+                        output_tokens, cache_read_tokens, cache_write_tokens, "stream done"
+                    );
 
                     #[cfg(feature = "metrics")]
                     {
@@ -1511,7 +1543,9 @@ pub async fn run_agent_loop_streaming_with_prefix(
                 })
                 .collect();
             let payload = HookPayload::AfterLLMCall {
-                session_key: session_key_for_hooks.clone(),
+                session_id: session_id_for_hooks.clone(),
+                chan_chat_key: chan_chat_key_for_hooks.clone(),
+                chan_account_key: chan_account_key_for_hooks.clone(),
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 text: if accumulated_text.is_empty() {
@@ -1599,7 +1633,7 @@ pub async fn run_agent_loop_streaming_with_prefix(
                 let mut args = tc.arguments.clone();
 
                 let hook_registry = hook_registry.clone();
-                let session_key = session_key_for_hooks.clone();
+                let session_id = session_id_for_hooks.clone();
                 let tc_name = tc.name.clone();
 
                 if let Some(ref ctx) = tool_context
@@ -1613,7 +1647,7 @@ pub async fn run_agent_loop_streaming_with_prefix(
                     // Run BeforeToolCall hook.
                     if let Some(ref hooks) = hook_registry {
                         let payload = HookPayload::BeforeToolCall {
-                            session_key: session_key.clone(),
+                            session_id: session_id.clone(),
                             tool_name: tc_name.clone(),
                             arguments: args.clone(),
                         };
@@ -1654,7 +1688,7 @@ pub async fn run_agent_loop_streaming_with_prefix(
 
                                 if let Some(ref hooks) = hook_registry {
                                     let payload = HookPayload::AfterToolCall {
-                                        session_key: session_key.clone(),
+                                        session_id: session_id.clone(),
                                         tool_name: tc_name.clone(),
                                         success: !has_error,
                                         result: Some(val.clone()),
@@ -1674,7 +1708,7 @@ pub async fn run_agent_loop_streaming_with_prefix(
                                 let err_str = e.to_string();
                                 if let Some(ref hooks) = hook_registry {
                                     let payload = HookPayload::AfterToolCall {
-                                        session_key: session_key.clone(),
+                                        session_id: session_id.clone(),
                                         tool_name: tc_name.clone(),
                                         success: false,
                                         result: None,
@@ -1754,6 +1788,7 @@ mod tests {
             ChatMessage, CompletionResponse, LlmProvider, StreamEvent, ToolCall, Usage,
         },
         async_trait::async_trait,
+        moltis_common::hooks::{HookEvent, HookHandler},
         std::pin::Pin,
         tokio_stream::Stream,
     };
@@ -2093,6 +2128,66 @@ mod tests {
         assert_eq!(result.text, "Hello!");
         assert_eq!(result.iterations, 1);
         assert_eq!(result.tool_calls_made, 0);
+    }
+
+    #[tokio::test]
+    async fn before_llm_call_hook_payload_includes_channel_keys() {
+        struct CaptureHook {
+            seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl HookHandler for CaptureHook {
+            fn name(&self) -> &str {
+                "capture"
+            }
+
+            fn events(&self) -> &[HookEvent] {
+                &[HookEvent::BeforeLLMCall]
+            }
+
+            async fn handle(&self, _event: HookEvent, payload: &HookPayload) -> Result<HookAction> {
+                let json = serde_json::to_string(payload).unwrap();
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(json);
+                Ok(HookAction::Continue)
+            }
+        }
+
+        let provider = Arc::new(MockProvider {
+            response_text: "Hello!".into(),
+        });
+        let tools = ToolRegistry::new();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = HookRegistry::new();
+        registry.register(Arc::new(CaptureHook { seen: Arc::clone(&seen) }));
+
+        let uc = UserContent::text("Hi");
+        run_agent_loop_with_context(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &uc,
+            None,
+            None,
+            Some(serde_json::json!({
+                "_sessionId": "session:abc",
+                "_chanChatKey": "telegram:123:-100",
+            })),
+            Some(Arc::new(registry)),
+        )
+        .await
+        .unwrap();
+
+        let captured = seen.lock().unwrap_or_else(|e| e.into_inner());
+        let json = captured.first().expect("expected BeforeLLMCall hook payload");
+        assert!(json.contains("\"chanChatKey\""));
+        assert!(json.contains("\"chanAccountKey\""));
+        assert!(json.contains("\"chanChatKey\":\"telegram:123:-100\""));
+        assert!(json.contains("\"chanAccountKey\":\"telegram:123\""));
     }
 
     #[tokio::test]

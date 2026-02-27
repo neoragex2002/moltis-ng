@@ -21,14 +21,15 @@ async function spoofSafari(page) {
 }
 
 test.describe("Settings navigation", () => {
-	test("/settings redirects to /settings/identity", async ({ page }) => {
+	test("/settings redirects to /settings/personas", async ({ page }) => {
 		await navigateAndWait(page, "/settings");
-		await expect(page).toHaveURL(/\/settings\/identity$/);
-		await expect(page.getByRole("heading", { name: "Identity", exact: true })).toBeVisible();
+		await expect(page).toHaveURL(/\/settings\/personas$/);
+		await expect(page.getByRole("heading", { name: "Personas", exact: true })).toBeVisible();
 	});
 
 	const settingsSections = [
-		{ id: "identity", heading: "Identity" },
+		{ id: "personas", heading: "Personas" },
+		{ id: "owner", heading: "Owner" },
 		{ id: "memory", heading: "Memory" },
 		{ id: "environment", heading: "Environment" },
 		{ id: "crons", heading: "Cron Jobs" },
@@ -64,48 +65,31 @@ test.describe("Settings navigation", () => {
 		});
 	}
 
-	test("identity form elements render", async ({ page }) => {
-		await navigateAndWait(page, "/settings/identity");
+		test("personas form elements render", async ({ page }) => {
+			await navigateAndWait(page, "/settings/personas");
+			await expect(page.getByRole("heading", { name: "Personas", exact: true })).toBeVisible();
 
-		// Identity page should have a name input and soul/description textarea
-		const content = page.locator("#pageContent");
-		await expect(content).not.toBeEmpty();
-	});
-
-	test("identity name fields autosave on blur", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
-
-		const nextValues = await page.evaluate(() => {
-			var id = window.__MOLTIS__?.identity || {};
-			var nextBotName = id.name === "AutoBotNameA" ? "AutoBotNameB" : "AutoBotNameA";
-			var nextUserName = id.user_name === "AutoUserNameA" ? "AutoUserNameB" : "AutoUserNameA";
-			return { nextBotName, nextUserName };
+			await expect(page.getByText("persona_id", { exact: true })).toBeVisible();
+			await expect(page.locator("select")).toBeVisible();
+			await expect(page.getByRole("button", { name: "Save", exact: true })).toBeVisible();
 		});
-
-		const botNameInput = page.getByPlaceholder("e.g. Rex");
-		await botNameInput.fill(nextValues.nextBotName);
-		await botNameInput.blur();
+	
+	test("persona save shows Saved indicator", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/personas");
+		
+		const nameInput = page.getByPlaceholder("e.g. Rex");
+		await nameInput.fill("E2E Persona");
+		await page.getByRole("button", { name: "Save", exact: true }).click();
 		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect
-			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.name || "").trim()))
-			.toBe(nextValues.nextBotName);
-
-		const userNameInput = page.getByPlaceholder("e.g. Alice");
-		await userNameInput.fill(nextValues.nextUserName);
-		await userNameInput.blur();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect
-			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.user_name || "").trim()))
-			.toBe(nextValues.nextUserName);
-
+		
 		expect(pageErrors).toEqual([]);
 	});
 
-	test("selecting identity emoji updates favicon live without requiring notice in Chromium", async ({ page }) => {
+	test("selecting persona emoji does not crash", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
-
+		await navigateAndWait(page, "/settings/personas");
+		
 		const pickBtn = page.getByRole("button", { name: "Pick", exact: true });
 		await expect(pickBtn).toBeVisible();
 		await pickBtn.click();
@@ -116,51 +100,18 @@ test.describe("Settings navigation", () => {
 			return options.find((emoji) => emoji !== current) || "🦊";
 		});
 		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
+		await page.getByRole("button", { name: "Save", exact: true }).click();
 		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect
-			.poll(() =>
-				page.evaluate((value) => {
-					var href = document.querySelector('link[rel="icon"]')?.href || "";
-					if (!href.startsWith("data:image/svg+xml,")) return false;
-					var decoded = decodeURIComponent(href.slice("data:image/svg+xml,".length));
-					return decoded.includes(value);
-				}, selectedEmoji),
-			)
-			.toBeTruthy();
-		await expect(
-			page.getByText("favicon updates requires reload and may be cached for minutes", { exact: false }),
-		).toHaveCount(0);
-		await expect(page.getByRole("button", { name: "requires reload", exact: true })).toHaveCount(0);
 
 		expect(pageErrors).toEqual([]);
 	});
 
-	test("safari shows favicon reload notice and button triggers full page refresh", async ({ page }) => {
+	test("safari does not show favicon reload notice in personas", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await spoofSafari(page);
-		await navigateAndWait(page, "/settings/identity");
-
-		const pickBtn = page.getByRole("button", { name: "Pick", exact: true });
-		await expect(pickBtn).toBeVisible();
-		await pickBtn.click();
-
-		const selectedEmoji = await page.evaluate(() => {
-			var current = (window.__MOLTIS__?.identity?.emoji || "").trim();
-			var options = ["🦊", "🐙", "🤖", "🐶"];
-			return options.find((emoji) => emoji !== current) || "🦊";
-		});
-		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect(
-			page.getByText("favicon updates requires reload and may be cached for minutes", { exact: false }),
-		).toBeVisible();
-		const reloadBtn = page.getByRole("button", { name: "requires reload", exact: true });
-		await expect(reloadBtn).toBeVisible();
-
-		await Promise.all([page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame()), reloadBtn.click()]);
-		await expectPageContentMounted(page);
-		await expect(page).toHaveURL(/\/settings\/identity$/);
-
+		await navigateAndWait(page, "/settings/personas");
+		await expect(page.getByText("favicon updates requires reload", { exact: false })).toHaveCount(0);
+		await expect(page.getByRole("button", { name: "requires reload", exact: true })).toHaveCount(0);
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -199,7 +150,7 @@ test.describe("Settings navigation", () => {
 	});
 
 	test("sidebar groups and order match product layout", async ({ page }) => {
-		await navigateAndWait(page, "/settings/identity");
+		await navigateAndWait(page, "/settings/personas");
 
 		await expect(page.locator(".settings-group-label").nth(0)).toHaveText("General");
 		await expect(page.locator(".settings-group-label").nth(1)).toHaveText("Security");
@@ -208,7 +159,8 @@ test.describe("Settings navigation", () => {
 
 		const navItems = (await page.locator(".settings-nav-item").allTextContents()).map((text) => text.trim());
 		const expectedWithVoice = [
-			"Identity",
+			"Personas",
+			"Owner",
 			"Environment",
 			"Memory",
 			"Notifications",

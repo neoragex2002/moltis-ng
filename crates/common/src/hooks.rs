@@ -98,26 +98,34 @@ impl HookEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 pub enum HookPayload {
+    #[serde(rename_all = "camelCase")]
     BeforeAgentStart {
-        session_key: String,
+        session_id: String,
         model: String,
     },
+    #[serde(rename_all = "camelCase")]
     AgentEnd {
-        session_key: String,
+        session_id: String,
         text: String,
         iterations: usize,
         tool_calls: usize,
     },
+    #[serde(rename_all = "camelCase")]
     BeforeLLMCall {
-        session_key: String,
+        session_id: String,
+        chan_chat_key: Option<String>,
+        chan_account_key: Option<String>,
         provider: String,
         model: String,
         messages: Value,
         tool_count: usize,
         iteration: usize,
     },
+    #[serde(rename_all = "camelCase")]
     AfterLLMCall {
-        session_key: String,
+        session_id: String,
+        chan_chat_key: Option<String>,
+        chan_account_key: Option<String>,
         provider: String,
         model: String,
         text: Option<String>,
@@ -126,55 +134,66 @@ pub enum HookPayload {
         output_tokens: u32,
         iteration: usize,
     },
+    #[serde(rename_all = "camelCase")]
     BeforeCompaction {
-        session_key: String,
+        session_id: String,
         message_count: usize,
     },
+    #[serde(rename_all = "camelCase")]
     AfterCompaction {
-        session_key: String,
+        session_id: String,
         summary_len: usize,
     },
+    #[serde(rename_all = "camelCase")]
     MessageReceived {
-        session_key: String,
+        session_id: String,
         content: String,
         channel: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
     MessageSending {
-        session_key: String,
+        session_id: String,
         content: String,
     },
+    #[serde(rename_all = "camelCase")]
     MessageSent {
-        session_key: String,
+        session_id: String,
         content: String,
     },
+    #[serde(rename_all = "camelCase")]
     BeforeToolCall {
-        session_key: String,
+        session_id: String,
         tool_name: String,
         arguments: Value,
     },
+    #[serde(rename_all = "camelCase")]
     AfterToolCall {
-        session_key: String,
+        session_id: String,
         tool_name: String,
         success: bool,
         result: Option<Value>,
     },
+    #[serde(rename_all = "camelCase")]
     ToolResultPersist {
-        session_key: String,
+        session_id: String,
         tool_name: String,
         result: Value,
     },
+    #[serde(rename_all = "camelCase")]
     SessionStart {
-        session_key: String,
+        session_id: String,
     },
+    #[serde(rename_all = "camelCase")]
     SessionEnd {
-        session_key: String,
+        session_id: String,
     },
     GatewayStart {
         address: String,
     },
     GatewayStop,
+    #[serde(rename_all = "camelCase")]
     Command {
-        session_key: String,
+        session_id: String,
         action: String,
         sender_id: Option<String>,
     },
@@ -690,7 +709,7 @@ mod tests {
 
     fn modifying_payload() -> HookPayload {
         HookPayload::BeforeToolCall {
-            session_key: "test".into(),
+            session_id: "test".into(),
             tool_name: "exec".into(),
             arguments: serde_json::json!({}),
         }
@@ -698,7 +717,7 @@ mod tests {
 
     fn read_only_payload() -> HookPayload {
         HookPayload::SessionStart {
-            session_key: "test".into(),
+            session_id: "test".into(),
         }
     }
 
@@ -820,7 +839,7 @@ mod tests {
     #[test]
     fn command_event_and_payload() {
         let payload = HookPayload::Command {
-            session_key: "test".into(),
+            session_id: "test".into(),
             action: "new".into(),
             sender_id: None,
         };
@@ -856,7 +875,9 @@ mod tests {
     #[test]
     fn before_llm_call_payload_event() {
         let payload = HookPayload::BeforeLLMCall {
-            session_key: "sess-1".into(),
+            session_id: "sess-1".into(),
+            chan_chat_key: None,
+            chan_account_key: None,
             provider: "openai".into(),
             model: "gpt-4o".into(),
             messages: serde_json::json!([{"role": "user", "content": "hello"}]),
@@ -869,7 +890,9 @@ mod tests {
     #[test]
     fn after_llm_call_payload_event() {
         let payload = HookPayload::AfterLLMCall {
-            session_key: "sess-1".into(),
+            session_id: "sess-1".into(),
+            chan_chat_key: None,
+            chan_account_key: None,
             provider: "anthropic".into(),
             model: "claude-sonnet-4-20250514".into(),
             text: Some("Hello!".into()),
@@ -891,7 +914,9 @@ mod tests {
     #[test]
     fn llm_hook_payloads_serialize_round_trip() {
         let before = HookPayload::BeforeLLMCall {
-            session_key: "s".into(),
+            session_id: "s".into(),
+            chan_chat_key: None,
+            chan_account_key: None,
             provider: "p".into(),
             model: "m".into(),
             messages: serde_json::json!([]),
@@ -903,7 +928,9 @@ mod tests {
         assert_eq!(deser.event(), HookEvent::BeforeLLMCall);
 
         let after = HookPayload::AfterLLMCall {
-            session_key: "s".into(),
+            session_id: "s".into(),
+            chan_chat_key: None,
+            chan_account_key: None,
             provider: "p".into(),
             model: "m".into(),
             text: None,
@@ -915,5 +942,38 @@ mod tests {
         let json = serde_json::to_string(&after).unwrap();
         let deser: HookPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.event(), HookEvent::AfterLLMCall);
+    }
+
+    #[test]
+    fn llm_hook_payloads_include_channel_keys_in_json() {
+        let before = HookPayload::BeforeLLMCall {
+            session_id: "s".into(),
+            chan_chat_key: None,
+            chan_account_key: None,
+            provider: "p".into(),
+            model: "m".into(),
+            messages: serde_json::json!([]),
+            tool_count: 0,
+            iteration: 1,
+        };
+        let json = serde_json::to_string(&before).unwrap();
+        assert!(json.contains("\"chanChatKey\""));
+        assert!(json.contains("\"chanAccountKey\""));
+
+        let after = HookPayload::AfterLLMCall {
+            session_id: "s".into(),
+            chan_chat_key: None,
+            chan_account_key: None,
+            provider: "p".into(),
+            model: "m".into(),
+            text: None,
+            tool_calls: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            iteration: 1,
+        };
+        let json = serde_json::to_string(&after).unwrap();
+        assert!(json.contains("\"chanChatKey\""));
+        assert!(json.contains("\"chanAccountKey\""));
     }
 }

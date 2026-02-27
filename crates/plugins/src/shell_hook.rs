@@ -177,7 +177,7 @@ mod tests {
 
     fn test_payload() -> HookPayload {
         HookPayload::SessionStart {
-            session_key: "test-123".into(),
+            session_id: "test-123".into(),
         }
     }
 
@@ -239,8 +239,7 @@ mod tests {
     async fn shell_hook_receives_payload_on_stdin() {
         let handler = ShellHookHandler::new(
             "test-stdin",
-            // Read stdin, parse, and emit modify with the session_key from payload.
-            r#"INPUT=$(cat); KEY=$(echo "$INPUT" | grep -o '"session_key":"[^"]*"' | head -1 | cut -d'"' -f4); echo "{\"action\":\"modify\",\"data\":{\"key\":\"$KEY\"}}"  "#,
+            r#"INPUT=$(cat); SESSION_ID=$(echo "$INPUT" | grep -o '"sessionId":"[^"]*"' | head -1 | cut -d'"' -f4); echo "{\"action\":\"modify\",\"data\":{\"sessionId\":\"$SESSION_ID\"}}"  "#,
             vec![HookEvent::SessionStart],
             Duration::from_secs(5),
             HashMap::new(),
@@ -250,7 +249,7 @@ mod tests {
             .await
             .unwrap();
         match result {
-            HookAction::ModifyPayload(v) => assert_eq!(v["key"], "test-123"),
+            HookAction::ModifyPayload(v) => assert_eq!(v["sessionId"], "test-123"),
             _ => panic!("expected ModifyPayload, got: {result:?}"),
         }
     }

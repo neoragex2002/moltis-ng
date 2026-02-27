@@ -30,16 +30,15 @@ fn format_context_v1_payload(payload: serde_json::Value) -> String {
     .to_string()
 }
 
-/// Default (deterministic) session key for a channel chat.
-fn default_channel_session_key(target: &ChannelReplyTarget) -> String {
-    let chan_user_id = match target.channel_type {
+fn default_chan_chat_key(target: &ChannelReplyTarget) -> String {
+    let chan_user_id = match target.chan_type {
         ChannelType::Telegram => target
-            .account_handle
+            .chan_account_key
             .strip_prefix("telegram:")
-            .unwrap_or(&target.account_handle),
+            .unwrap_or(&target.chan_account_key),
     };
-    identity::format_session_key(
-        target.channel_type.as_str(),
+    identity::format_chan_chat_key(
+        target.chan_type.as_str(),
         chan_user_id,
         &target.chat_id,
         None,
@@ -52,8 +51,8 @@ async fn resolve_channel_session_id(
 ) -> Option<String> {
     metadata
         .get_active_session_id(
-            target.channel_type.as_str(),
-            &target.account_handle,
+            target.chan_type.as_str(),
+            &target.chan_account_key,
             &target.chat_id,
         )
         .await
@@ -69,8 +68,8 @@ async fn ensure_channel_session_id(
     let new_id = format!("session:{}", uuid::Uuid::new_v4());
     metadata
         .set_active_session_id(
-            target.channel_type.as_str(),
-            &target.account_handle,
+            target.chan_type.as_str(),
+            &target.chan_account_key,
             &target.chat_id,
             &new_id,
         )
@@ -103,10 +102,15 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     return;
                 },
             };
-            broadcast(state, "channel", payload, BroadcastOpts {
-                drop_if_slow: true,
-                ..Default::default()
-            })
+            broadcast(
+                state,
+                "channel",
+                payload,
+                BroadcastOpts {
+                    drop_if_slow: true,
+                    ..Default::default()
+                },
+            )
             .await;
         }
     }
@@ -118,11 +122,11 @@ impl ChannelEventSink for GatewayChannelEventSink {
         meta: ChannelMessageMeta,
     ) {
         if let Some(state) = self.state.get() {
-            let session_key = default_channel_session_key(&reply_to);
+            let chan_chat_key = default_chan_chat_key(&reply_to);
             let session_id = if let Some(ref sm) = state.services.session_metadata {
                 ensure_channel_session_id(&reply_to, sm).await
             } else {
-                session_key.clone()
+                chan_chat_key.clone()
             };
 
             // Broadcast a "chat" event so the web UI shows the user message
@@ -138,18 +142,25 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 "text": text,
                 "channel": &meta,
                 "sessionId": &session_id,
-                "sessionKey": &session_key,
+                "chanChatKey": &chan_chat_key,
                 "messageIndex": msg_index,
             });
-            broadcast(state, "chat", payload, BroadcastOpts {
-                drop_if_slow: true,
-                ..Default::default()
-            })
+            broadcast(
+                state,
+                "chat",
+                payload,
+                BroadcastOpts {
+                    drop_if_slow: true,
+                    ..Default::default()
+                },
+            )
             .await;
 
             // Register the reply target so the chat "final" broadcast can
             // route the response back to the originating channel.
-            state.push_channel_reply(&session_id, reply_to.clone()).await;
+            state
+                .push_channel_reply(&session_id, reply_to.clone())
+                .await;
 
             // Persist channel binding so web UI messages on this session
             // can be echoed back to the channel.
@@ -161,24 +172,26 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 // before we can set the binding column.
                 let entry = session_meta.get(&session_id).await;
                 if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
-                    let label = if reply_to.channel_type == ChannelType::Telegram {
-                        let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+                    let label = if reply_to.chan_type == ChannelType::Telegram {
+                        let snapshots = state
+                            .services
+                            .channel
+                            .telegram_bus_accounts_snapshot()
+                            .await;
                         let u = crate::session_labels::resolve_telegram_bot_username(
                             &snapshots,
-                            &reply_to.account_handle,
+                            &reply_to.chan_account_key,
                         )
-                        .or(reply_to.bot_handle.as_deref());
+                        .or(reply_to.chan_user_name.as_deref());
                         crate::session_labels::format_telegram_session_label(
-                            &reply_to.account_handle,
+                            &reply_to.chan_account_key,
                             u,
                             &reply_to.chat_id,
                         )
                     } else {
                         session_id.clone()
                     };
-                    let _ = session_meta
-                        .upsert(&session_id, Some(label))
-                        .await;
+                    let _ = session_meta.upsert(&session_id, Some(label)).await;
                 }
                 session_meta
                     .set_channel_binding(&session_id, Some(binding_json))
@@ -189,8 +202,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
             let mut params = serde_json::json!({
                 "text": text,
                 "channel": &meta,
-                "_session_id": &session_id,
-                "_session_key": &session_key,
+                "_sessionId": &session_id,
+                "_chanChatKey": &chan_chat_key,
             });
             // Forward the channel's default model to chat.send() if configured.
             // If no channel model is set, check if the session already has a model.
@@ -212,7 +225,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .services
                         .session
                         .patch(serde_json::json!({
-                            "key": &session_id,
+                            "sessionId": &session_id,
                             "model": model,
                         }))
                         .await;
@@ -250,7 +263,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .services
                         .session
                         .patch(serde_json::json!({
-                            "key": &session_id,
+                            "sessionId": &session_id,
                             "model": id,
                         }))
                         .await;
@@ -269,24 +282,24 @@ impl ChannelEventSink for GatewayChannelEventSink {
             // completes. Telegram's typing status expires after ~5s.
             let send_result = if let Some(outbound) = state.services.channel_outbound_arc() {
                 let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-                let account_handle = reply_to.account_handle.clone();
+                let chan_account_key = reply_to.chan_account_key.clone();
                 let chat_id = reply_to.chat_id.clone();
                 tokio::spawn(async move {
                     debug!(
-                        account_handle = account_handle,
+                        chan_account_key = chan_account_key,
                         chat_id = chat_id,
                         "starting typing indicator loop"
                     );
                     loop {
-                        if let Err(e) = outbound.send_typing(&account_handle, &chat_id).await {
+                        if let Err(e) = outbound.send_typing(&chan_account_key, &chat_id).await {
                             debug!(
-                                account_handle = account_handle,
+                                chan_account_key = chan_account_key,
                                 chat_id = chat_id,
                                 "typing indicator failed: {e}"
                             );
                         } else {
                             debug!(
-                                account_handle = account_handle,
+                                chan_account_key = chan_account_key,
                                 chat_id = chat_id,
                                 "typing indicator sent"
                             );
@@ -294,14 +307,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         tokio::select! {
                             _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {
                                 debug!(
-                                    account_handle = account_handle,
+                                    chan_account_key = chan_account_key,
                                     chat_id = chat_id,
                                     "typing loop: 4s elapsed, sending again"
                                 );
                             },
                             _ = &mut done_rx => {
                                 debug!(
-                                    account_handle = account_handle,
+                                    chan_account_key = chan_account_key,
                                     chat_id = chat_id,
                                     "typing loop: chat completed, stopping"
                                 );
@@ -325,7 +338,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     let error_msg = format!("⚠️ {e}");
                     if let Err(send_err) = outbound
                         .send_text(
-                            &reply_to.account_handle,
+                            &reply_to.chan_account_key,
                             &reply_to.chat_id,
                             &error_msg,
                             reply_to.message_id.as_deref(),
@@ -356,11 +369,11 @@ impl ChannelEventSink for GatewayChannelEventSink {
             return;
         };
 
-        let session_key = default_channel_session_key(&reply_to);
+        let chan_chat_key = default_chan_chat_key(&reply_to);
         let session_id = if let Some(ref sm) = state.services.session_metadata {
             ensure_channel_session_id(&reply_to, sm).await
         } else {
-            session_key.clone()
+            chan_chat_key.clone()
         };
 
         // Real-time UI: show the inbound message as "channel_user", but mark it ingest-only.
@@ -374,14 +387,19 @@ impl ChannelEventSink for GatewayChannelEventSink {
             "text": text,
             "channel": &meta,
             "sessionId": &session_id,
-            "sessionKey": &session_key,
+            "chanChatKey": &chan_chat_key,
             "messageIndex": msg_index,
             "ingestOnly": true,
         });
-        broadcast(state, "chat", payload, BroadcastOpts {
-            drop_if_slow: true,
-            ..Default::default()
-        })
+        broadcast(
+            state,
+            "chat",
+            payload,
+            BroadcastOpts {
+                drop_if_slow: true,
+                ..Default::default()
+            },
+        )
         .await;
 
         // Persist channel binding so the session is treated as channel-bound.
@@ -391,24 +409,26 @@ impl ChannelEventSink for GatewayChannelEventSink {
             // Ensure the session row exists and label it on first use.
             let entry = session_meta.get(&session_id).await;
             if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
-                let label = if reply_to.channel_type == ChannelType::Telegram {
-                    let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+                let label = if reply_to.chan_type == ChannelType::Telegram {
+                    let snapshots = state
+                        .services
+                        .channel
+                        .telegram_bus_accounts_snapshot()
+                        .await;
                     let u = crate::session_labels::resolve_telegram_bot_username(
                         &snapshots,
-                        &reply_to.account_handle,
+                        &reply_to.chan_account_key,
                     )
-                    .or(reply_to.bot_handle.as_deref());
+                    .or(reply_to.chan_user_name.as_deref());
                     crate::session_labels::format_telegram_session_label(
-                        &reply_to.account_handle,
+                        &reply_to.chan_account_key,
                         u,
                         &reply_to.chat_id,
                     )
                 } else {
                     session_id.clone()
                 };
-                let _ = session_meta
-                    .upsert(&session_id, Some(label))
-                    .await;
+                let _ = session_meta.upsert(&session_id, Some(label)).await;
             }
             session_meta
                 .set_channel_binding(&session_id, Some(binding_json))
@@ -428,7 +448,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .services
                     .session
                     .patch(serde_json::json!({
-                        "key": &session_id,
+                        "sessionId": &session_id,
                         "model": model,
                     }))
                     .await;
@@ -436,7 +456,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
         }
 
         let Some(store) = state.services.session_store.as_ref() else {
-            warn!(session_id, "channel ingest_only: session store not available");
+            warn!(
+                session_id,
+                "channel ingest_only: session store not available"
+            );
             return;
         };
 
@@ -445,7 +468,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             Err(e) => {
                 warn!(session_id, error = %e, "channel ingest_only: failed to serialize channel meta");
                 return;
-            }
+            },
         };
         let user_msg = moltis_sessions::PersistedMessage::user_with_channel(text, channel_meta);
 
@@ -484,7 +507,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             // cancel itself after this call returns.
 
             // Broadcast an event so the UI can update.
-            let channel_type: moltis_channels::ChannelType = match channel_type.parse() {
+            let chan_type: moltis_channels::ChannelType = match channel_type.parse() {
                 Ok(ct) => ct,
                 Err(e) => {
                     warn!("request_disable_account: {e}");
@@ -492,8 +515,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 },
             };
             let event = ChannelEvent::AccountDisabled {
-                channel_type,
-                account_handle: account_handle.to_string(),
+                chan_type,
+                chan_account_key: account_handle.to_string(),
                 reason: reason.to_string(),
             };
             let payload = match serde_json::to_value(&event) {
@@ -503,10 +526,15 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     return;
                 },
             };
-            broadcast(state, "channel", payload, BroadcastOpts {
-                drop_if_slow: true,
-                ..Default::default()
-            })
+            broadcast(
+                state,
+                "channel",
+                payload,
+                BroadcastOpts {
+                    drop_if_slow: true,
+                    ..Default::default()
+                },
+            )
             .await;
         } else {
             warn!("request_disable_account: gateway not ready");
@@ -521,12 +549,15 @@ impl ChannelEventSink for GatewayChannelEventSink {
     ) {
         if let Some(state) = self.state.get() {
             let params = serde_json::json!({
-                "accountHandle": account_handle,
+                "chanAccountKey": account_handle,
                 "identifier": identifier,
             });
             match state.services.channel.sender_approve(params).await {
                 Ok(_) => {
-                    info!(account_handle, identifier, "OTP self-approval: sender approved");
+                    info!(
+                        account_handle,
+                        identifier, "OTP self-approval: sender approved"
+                    );
                 },
                 Err(e) => {
                     warn!(
@@ -597,7 +628,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         let session_id = if let Some(ref sm) = state.services.session_metadata {
             ensure_channel_session_id(reply_to, sm).await
         } else {
-            default_channel_session_key(reply_to)
+            default_chan_chat_key(reply_to)
         };
 
         // Update in-memory cache.
@@ -653,11 +684,11 @@ impl ChannelEventSink for GatewayChannelEventSink {
             return;
         };
 
-        let session_key = default_channel_session_key(&reply_to);
+        let chan_chat_key = default_chan_chat_key(&reply_to);
         let session_id = if let Some(ref sm) = state.services.session_metadata {
             ensure_channel_session_id(&reply_to, sm).await
         } else {
-            session_key.clone()
+            chan_chat_key.clone()
         };
 
         // Build multimodal content array (OpenAI format)
@@ -687,7 +718,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         }
 
         debug!(
-            session_key = %session_key,
+            chan_chat_key = %chan_chat_key,
             text_len = text.len(),
             attachment_count = attachments.len(),
             "dispatching multimodal message to chat"
@@ -706,18 +737,25 @@ impl ChannelEventSink for GatewayChannelEventSink {
             "text": if text.is_empty() { "[Image]" } else { text },
             "channel": &meta,
             "sessionId": &session_id,
-            "sessionKey": &session_key,
+            "chanChatKey": &chan_chat_key,
             "messageIndex": msg_index,
             "hasAttachments": true,
         });
-        broadcast(state, "chat", payload, BroadcastOpts {
-            drop_if_slow: true,
-            ..Default::default()
-        })
+        broadcast(
+            state,
+            "chat",
+            payload,
+            BroadcastOpts {
+                drop_if_slow: true,
+                ..Default::default()
+            },
+        )
         .await;
 
         // Register the reply target
-        state.push_channel_reply(&session_id, reply_to.clone()).await;
+        state
+            .push_channel_reply(&session_id, reply_to.clone())
+            .await;
 
         // Persist channel binding (ensure session row exists first —
         // set_channel_binding is an UPDATE so the row must already be present).
@@ -726,24 +764,26 @@ impl ChannelEventSink for GatewayChannelEventSink {
         {
             let entry = session_meta.get(&session_id).await;
             if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
-                let label = if reply_to.channel_type == ChannelType::Telegram {
-                    let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+                let label = if reply_to.chan_type == ChannelType::Telegram {
+                    let snapshots = state
+                        .services
+                        .channel
+                        .telegram_bus_accounts_snapshot()
+                        .await;
                     let u = crate::session_labels::resolve_telegram_bot_username(
                         &snapshots,
-                        &reply_to.account_handle,
+                        &reply_to.chan_account_key,
                     )
-                    .or(reply_to.bot_handle.as_deref());
+                    .or(reply_to.chan_user_name.as_deref());
                     crate::session_labels::format_telegram_session_label(
-                        &reply_to.account_handle,
+                        &reply_to.chan_account_key,
                         u,
                         &reply_to.chat_id,
                     )
                 } else {
                     session_id.clone()
                 };
-                let _ = session_meta
-                    .upsert(&session_id, Some(label))
-                    .await;
+                let _ = session_meta.upsert(&session_id, Some(label)).await;
             }
             session_meta
                 .set_channel_binding(&session_id, Some(binding_json))
@@ -754,8 +794,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
         let mut params = serde_json::json!({
             "content": content_parts,
             "channel": &meta,
-            "_session_id": &session_id,
-            "_session_key": &session_key,
+            "_sessionId": &session_id,
+            "_chanChatKey": &chan_chat_key,
         });
 
         // Forward the channel's default model if configured
@@ -772,7 +812,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .services
                     .session
                     .patch(serde_json::json!({
-                        "key": &session_id,
+                        "sessionId": &session_id,
                         "model": model,
                     }))
                     .await;
@@ -809,7 +849,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .services
                     .session
                     .patch(serde_json::json!({
-                        "key": &session_id,
+                        "sessionId": &session_id,
                         "model": id,
                     }))
                     .await;
@@ -826,12 +866,12 @@ impl ChannelEventSink for GatewayChannelEventSink {
         // Send typing indicator and dispatch to chat
         let send_result = if let Some(outbound) = state.services.channel_outbound_arc() {
             let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-            let account_handle = reply_to.account_handle.clone();
+            let chan_account_key = reply_to.chan_account_key.clone();
             let chat_id = reply_to.chat_id.clone();
             tokio::spawn(async move {
                 loop {
-                    if let Err(e) = outbound.send_typing(&account_handle, &chat_id).await {
-                        debug!(account_handle, chat_id, "typing indicator failed: {e}");
+                    if let Err(e) = outbound.send_typing(&chan_account_key, &chat_id).await {
+                        debug!(chan_account_key, chat_id, "typing indicator failed: {e}");
                     }
                     tokio::select! {
                         _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {},
@@ -852,7 +892,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 let error_msg = format!("⚠️ {e}");
                 if let Err(send_err) = outbound
                     .send_text(
-                        &reply_to.account_handle,
+                        &reply_to.chan_account_key,
                         &reply_to.chat_id,
                         &error_msg,
                         reply_to.message_id.as_deref(),
@@ -883,7 +923,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             .session_metadata
             .as_ref()
             .ok_or_else(|| anyhow!("session metadata not available"))?;
-        let session_key = default_channel_session_key(&reply_to);
+        let chan_chat_key = default_chan_chat_key(&reply_to);
         let session_id = ensure_channel_session_id(&reply_to, session_metadata).await;
         let chat = state.chat().await;
 
@@ -898,15 +938,19 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 let binding_json = serde_json::to_string(&reply_to)
                     .map_err(|e| anyhow!("failed to serialize binding: {e}"))?;
 
-                let label = if reply_to.channel_type == ChannelType::Telegram {
-                    let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+                let label = if reply_to.chan_type == ChannelType::Telegram {
+                    let snapshots = state
+                        .services
+                        .channel
+                        .telegram_bus_accounts_snapshot()
+                        .await;
                     let u = crate::session_labels::resolve_telegram_bot_username(
                         &snapshots,
-                        &reply_to.account_handle,
+                        &reply_to.chan_account_key,
                     )
-                    .or(reply_to.bot_handle.as_deref());
+                    .or(reply_to.chan_user_name.as_deref());
                     crate::session_labels::format_telegram_session_label(
-                        &reply_to.account_handle,
+                        &reply_to.chan_account_key,
                         u,
                         &reply_to.chat_id,
                     )
@@ -938,15 +982,15 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 // Update forward mapping.
                 session_metadata
                     .set_active_session_id(
-                        reply_to.channel_type.as_str(),
-                        &reply_to.account_handle,
+                        reply_to.chan_type.as_str(),
+                        &reply_to.chan_account_key,
                         &reply_to.chat_id,
                         &new_id,
                     )
                     .await;
 
                 info!(
-                    session_key = %session_key,
+                    chan_chat_key = %chan_chat_key,
                     old_session_id = %session_id,
                     new_session_id = %new_id,
                     "channel /new: created new session"
@@ -960,8 +1004,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         channels
                             .iter()
                             .find(|ch| {
-                                ch.get("accountHandle").and_then(|v| v.as_str())
-                                    == Some(reply_to.account_handle.as_str())
+                                ch.get("chanAccountKey").and_then(|v| v.as_str())
+                                    == Some(reply_to.chan_account_key.as_str())
                             })
                             .and_then(|ch| {
                                 ch.get("config")?.get("model")?.as_str().map(String::from)
@@ -1000,7 +1044,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .services
                         .session
                         .patch(serde_json::json!({
-                            "key": &new_id,
+                            "sessionId": &new_id,
                             "model": mid,
                         }))
                         .await;
@@ -1012,7 +1056,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     "session",
                     serde_json::json!({
                         "kind": "created",
-                        "sessionKey": &new_id,
+                        "sessionId": &new_id,
                     }),
                     BroadcastOpts {
                         drop_if_slow: true,
@@ -1030,24 +1074,24 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 }
             },
             "clear" => {
-				let params = serde_json::json!({ "_session_id": &session_id, "_session_key": &session_key });
+                let params = serde_json::json!({ "_sessionId": &session_id });
                 chat.clear(params).await.map_err(|e| anyhow!("{e}"))?;
                 Ok("Session cleared.".to_string())
             },
             "compact" => {
-				let params = serde_json::json!({ "_session_id": &session_id, "_session_key": &session_key });
+                let params = serde_json::json!({ "_sessionId": &session_id });
                 chat.compact(params).await.map_err(|e| anyhow!("{e}"))?;
                 Ok("Session compacted.".to_string())
             },
             "context" => {
-				let params = serde_json::json!({ "_session_id": &session_id, "_session_key": &session_key });
+                let params = serde_json::json!({ "_sessionId": &session_id });
                 let res = chat.context(params).await.map_err(|e| anyhow!("{e}"))?;
 
                 // Telegram renders /context via a structured HTML card. Returning a stable,
                 // versioned JSON contract avoids brittle markdown label parsing.
                 //
                 // Other channels may still expect plain text; for now we only switch Telegram.
-                if reply_to.channel_type.as_str() == "telegram" {
+                if reply_to.chan_type.as_str() == "telegram" {
                     return Ok(format_context_v1_payload(res));
                 }
 
@@ -1075,9 +1119,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
                 let context_window = next.get("contextWindow").and_then(|v| v.as_u64());
                 let prompt_est = next.get("promptInputToksEst").and_then(|v| v.as_u64());
-                let compact_thred = next
-                    .get("autoCompactToksThred")
-                    .and_then(|v| v.as_u64());
+                let compact_thred = next.get("autoCompactToksThred").and_then(|v| v.as_u64());
                 let compact_pct = match (prompt_est, compact_thred) {
                     (Some(p), Some(t)) if t > 0 => Some(((p.saturating_mul(100)) + (t / 2)) / t),
                     _ => None,
@@ -1121,7 +1163,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     last_out.map_or("?".to_string(), |v| v.to_string()),
                     last_cached.map_or("?".to_string(), |v| v.to_string()),
                 );
-                let cw_suffix = context_window.map(|cw| format!(" (cw {cw})")).unwrap_or_default();
+                let cw_suffix = context_window
+                    .map(|cw| format!(" (cw {cw})"))
+                    .unwrap_or_default();
                 let next_line = format!(
                     "**Next (est):** prompt={} · compact={}{}",
                     prompt_est.map_or("?".to_string(), |v| v.to_string()),
@@ -1130,14 +1174,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 );
 
                 Ok(format!(
-                    "**Session:** `{session_key}`\n**Messages:** {msg_count}\n**Provider:** {provider}\n**Model:** `{model}`\n{sandbox_line}\n{skills_line}\n{last_line}\n{next_line}"
+                    "**SessionId:** `{session_id}`\n**ChanChatKey:** `{chan_chat_key}`\n**Messages:** {msg_count}\n**Provider:** {provider}\n**Model:** `{model}`\n{sandbox_line}\n{skills_line}\n{last_line}\n{next_line}"
                 ))
             },
             "sessions" => {
                 let sessions = session_metadata
                     .list_channel_sessions(
-                        reply_to.channel_type.as_str(),
-                        &reply_to.account_handle,
+                        reply_to.chan_type.as_str(),
+                        &reply_to.chan_account_key,
                         &reply_to.chat_id,
                     )
                     .await;
@@ -1179,8 +1223,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     // Update forward mapping.
                     session_metadata
                         .set_active_session_id(
-                            reply_to.channel_type.as_str(),
-                            &reply_to.account_handle,
+                            reply_to.chan_type.as_str(),
+                            &reply_to.chan_account_key,
                             &reply_to.chat_id,
                             &target_session.key,
                         )
@@ -1200,7 +1244,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         "session",
                         serde_json::json!({
                             "kind": "switched",
-                            "sessionKey": &target_session.key,
+                            "sessionId": &target_session.key,
                         }),
                         BroadcastOpts {
                             drop_if_slow: true,
@@ -1298,7 +1342,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .services
                         .session
                         .patch(serde_json::json!({
-                            "key": &session_id,
+                            "sessionId": &session_id,
                             "model": model_id,
                         }))
                         .await
@@ -1313,7 +1357,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         "session",
                         serde_json::json!({
                             "kind": "patched",
-                            "sessionKey": &session_id,
+                            "sessionId": &session_id,
                             "version": version,
                         }),
                         BroadcastOpts {
@@ -1328,26 +1372,22 @@ impl ChannelEventSink for GatewayChannelEventSink {
             },
             "sandbox" => {
                 let is_enabled = if let Some(ref router) = state.sandbox_router {
-                    router.is_sandboxed(&session_id).await
+                    router.is_sandboxed(&chan_chat_key).await
                 } else {
                     false
                 };
 
                 if args.is_empty() {
                     // Show current status and image list.
-                    let current_image = {
-                        let entry = session_metadata.get(&session_id).await;
-                        let session_img = entry.and_then(|e| e.sandbox_image.clone());
-                        match session_img {
-                            Some(img) if !img.is_empty() => img,
-                            _ => {
-                                if let Some(ref router) = state.sandbox_router {
-                                    router.default_image().await
-                                } else {
-                                    moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string()
-                                }
-                            },
-                        }
+                    let default_img = if let Some(ref router) = state.sandbox_router {
+                        router.default_image().await
+                    } else {
+                        moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string()
+                    };
+                    let current_image = if let Some(ref router) = state.sandbox_router {
+                        router.resolve_image(&chan_chat_key, None).await
+                    } else {
+                        default_img.clone()
                     };
 
                     let status = if is_enabled {
@@ -1360,10 +1400,12 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     let builder = moltis_tools::image_cache::DockerImageBuilder::new();
                     let cached = builder.list_cached().await.unwrap_or_default();
 
-                    let default_img = moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string();
                     let mut images: Vec<(String, Option<String>)> =
                         vec![(default_img.clone(), None)];
                     for img in &cached {
+                        if img.tag == default_img {
+                            continue;
+                        }
                         images.push((
                             img.tag.clone(),
                             Some(format!("{} ({})", img.skill_name, img.size)),
@@ -1391,8 +1433,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .services
                         .session
                         .patch(serde_json::json!({
-                            "key": &session_id,
-                            "sandbox_enabled": new_val,
+                            "sessionId": &session_id,
+                            "sandboxEnabled": new_val,
                         }))
                         .await
                         .map_err(|e| anyhow!("{e}"))?;
@@ -1405,7 +1447,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         "session",
                         serde_json::json!({
                             "kind": "patched",
-                            "sessionKey": &session_id,
+                            "sessionId": &session_id,
                             "version": version,
                         }),
                         BroadcastOpts {
@@ -1425,11 +1467,18 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .parse()
                         .map_err(|_| anyhow!("usage: /sandbox image [number]"))?;
 
-                    let default_img = moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string();
+                    let default_img = if let Some(ref router) = state.sandbox_router {
+                        router.default_image().await
+                    } else {
+                        moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string()
+                    };
                     let builder = moltis_tools::image_cache::DockerImageBuilder::new();
                     let cached = builder.list_cached().await.unwrap_or_default();
                     let mut images: Vec<String> = vec![default_img];
                     for img in &cached {
+                        if img.tag == images[0] {
+                            continue;
+                        }
                         images.push(img.tag.clone());
                     }
 
@@ -1448,8 +1497,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .services
                         .session
                         .patch(serde_json::json!({
-                            "key": &session_id,
-                            "sandbox_image": patch_value,
+                            "sessionId": &session_id,
+                            "sandboxImage": patch_value,
                         }))
                         .await
                         .map_err(|e| anyhow!("{e}"))?;
@@ -1463,7 +1512,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         "session",
                         serde_json::json!({
                             "kind": "patched",
-                            "sessionKey": &session_id,
+                            "sessionId": &session_id,
                             "version": version,
                         }),
                         BroadcastOpts {
@@ -1522,11 +1571,9 @@ mod tests {
         moltis_channels::{ChannelType, plugin::ChannelOutbound},
         moltis_common::types::ReplyPayload,
         moltis_telegram::config::TelegramBusAccountSnapshot,
-        std::{
-            sync::{
-                atomic::{AtomicUsize, Ordering},
-                Arc,
-            },
+        std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         tokio::sync::OnceCell,
     };
@@ -1557,15 +1604,18 @@ mod tests {
         });
         let out = format_context_v1_payload(payload.clone());
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-        assert_eq!(parsed.get("format").and_then(|v| v.as_str()), Some("context.v1"));
+        assert_eq!(
+            parsed.get("format").and_then(|v| v.as_str()),
+            Some("context.v1")
+        );
         assert_eq!(parsed.get("payload"), Some(&payload));
     }
 
     #[test]
     fn channel_event_serialization() {
         let event = ChannelEvent::InboundMessage {
-            channel_type: ChannelType::Telegram,
-            account_handle: "telegram:bot1".into(),
+            chan_type: ChannelType::Telegram,
+            chan_account_key: "telegram:bot1".into(),
             peer_id: "123".into(),
             username: Some("alice".into()),
             sender_name: Some("Alice".into()),
@@ -1574,62 +1624,56 @@ mod tests {
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["kind"], "inbound_message");
-        assert_eq!(json["channel_type"], "telegram");
-        assert_eq!(json["account_handle"], "telegram:bot1");
-        assert_eq!(json["peer_id"], "123");
+        assert_eq!(json["chanType"], "telegram");
+        assert_eq!(json["chanAccountKey"], "telegram:bot1");
+        assert_eq!(json["peerId"], "123");
         assert_eq!(json["username"], "alice");
-        assert_eq!(json["sender_name"], "Alice");
-        assert_eq!(json["message_count"], 5);
-        assert_eq!(json["access_granted"], true);
+        assert_eq!(json["senderName"], "Alice");
+        assert_eq!(json["messageCount"], 5);
+        assert_eq!(json["accessGranted"], true);
     }
 
     #[test]
     fn channel_session_key_format() {
         let target = ChannelReplyTarget {
-            channel_type: ChannelType::Telegram,
-            account_handle: "telegram:bot1".into(),
-            bot_handle: None,
+            chan_type: ChannelType::Telegram,
+            chan_account_key: "telegram:bot1".into(),
+            chan_user_name: None,
             chat_id: "12345".into(),
             message_id: None,
         };
-        assert_eq!(default_channel_session_key(&target), "telegram:bot1:12345");
+        assert_eq!(default_chan_chat_key(&target), "telegram:bot1:12345");
     }
 
     #[test]
     fn channel_session_key_strips_telegram_prefix_from_account_id() {
         let target = ChannelReplyTarget {
-            channel_type: ChannelType::Telegram,
-            account_handle: "telegram:8576199590".into(),
-            bot_handle: None,
+            chan_type: ChannelType::Telegram,
+            chan_account_key: "telegram:8576199590".into(),
+            chan_user_name: None,
             chat_id: "12345".into(),
             message_id: None,
         };
-        assert_eq!(
-            default_channel_session_key(&target),
-            "telegram:8576199590:12345"
-        );
+        assert_eq!(default_chan_chat_key(&target), "telegram:8576199590:12345");
     }
 
     #[test]
     fn channel_session_key_group() {
         let target = ChannelReplyTarget {
-            channel_type: ChannelType::Telegram,
-            account_handle: "telegram:bot1".into(),
-            bot_handle: None,
+            chan_type: ChannelType::Telegram,
+            chan_account_key: "telegram:bot1".into(),
+            chan_user_name: None,
             chat_id: "-100999".into(),
             message_id: None,
         };
-        assert_eq!(
-            default_channel_session_key(&target),
-            "telegram:bot1:-100999"
-        );
+        assert_eq!(default_chan_chat_key(&target), "telegram:bot1:-100999");
     }
 
     #[test]
     fn channel_event_serialization_nulls() {
         let event = ChannelEvent::InboundMessage {
-            channel_type: ChannelType::Telegram,
-            account_handle: "telegram:bot1".into(),
+            chan_type: ChannelType::Telegram,
+            chan_account_key: "telegram:bot1".into(),
             peer_id: "123".into(),
             username: None,
             sender_name: None,
@@ -1639,7 +1683,7 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["kind"], "inbound_message");
         assert!(json["username"].is_null());
-        assert_eq!(json["access_granted"], false);
+        assert_eq!(json["accessGranted"], false);
     }
 
     struct ErrChatService;
@@ -1654,7 +1698,10 @@ mod tests {
             Ok(serde_json::json!({}))
         }
 
-        async fn cancel_queued(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+        async fn cancel_queued(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
             Ok(serde_json::json!({ "cleared": 0 }))
         }
 
@@ -1697,13 +1744,13 @@ mod tests {
     impl ChannelOutbound for RecordingOutbound {
         async fn send_text(
             &self,
-            account_handle: &str,
+            chan_account_key: &str,
             to: &str,
             text: &str,
             reply_to: Option<&str>,
         ) -> anyhow::Result<()> {
             self.texts.lock().await.push((
-                account_handle.to_string(),
+                chan_account_key.to_string(),
                 to.to_string(),
                 text.to_string(),
                 reply_to.map(|s| s.to_string()),
@@ -1713,7 +1760,7 @@ mod tests {
 
         async fn send_media(
             &self,
-            _account_id: &str,
+            _chan_account_key: &str,
             _to: &str,
             _payload: &ReplyPayload,
             _reply_to: Option<&str>,
@@ -1721,7 +1768,7 @@ mod tests {
             Ok(())
         }
 
-        async fn send_typing(&self, _account_handle: &str, _to: &str) -> anyhow::Result<()> {
+        async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> anyhow::Result<()> {
             self.typings.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -1745,9 +1792,9 @@ mod tests {
         ));
 
         // Pre-seed a log line to ensure it's drained on failure.
-        let session_key = "telegram:acct:123";
+        let chan_chat_key = "telegram:acct:123";
         state
-            .push_channel_status_log(session_key, "tool status".to_string())
+            .push_channel_status_log(chan_chat_key, "tool status".to_string())
             .await;
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
@@ -1759,14 +1806,14 @@ mod tests {
         sink.dispatch_to_chat(
             "hi",
             ChannelReplyTarget {
-                channel_type: ChannelType::Telegram,
-                account_handle: "telegram:acct".into(),
-                bot_handle: None,
+                chan_type: ChannelType::Telegram,
+                chan_account_key: "telegram:acct".into(),
+                chan_user_name: None,
                 chat_id: "123".into(),
                 message_id: Some("1".into()),
             },
             ChannelMessageMeta {
-                channel_type: ChannelType::Telegram,
+                chan_type: ChannelType::Telegram,
                 sender_name: None,
                 username: None,
                 message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
@@ -1775,8 +1822,13 @@ mod tests {
         )
         .await;
 
-        assert!(state.peek_channel_replies(session_key).await.is_empty());
-        assert!(state.drain_channel_status_log(session_key).await.is_empty());
+        assert!(state.peek_channel_replies(chan_chat_key).await.is_empty());
+        assert!(
+            state
+                .drain_channel_status_log(chan_chat_key)
+                .await
+                .is_empty()
+        );
 
         let texts = rec.texts.lock().await;
         assert_eq!(texts.len(), 1);
@@ -1875,14 +1927,14 @@ mod tests {
         sink.dispatch_to_chat(
             "hi",
             ChannelReplyTarget {
-                channel_type: ChannelType::Telegram,
-                account_handle: "telegram:845".into(),
-                bot_handle: None,
+                chan_type: ChannelType::Telegram,
+                chan_account_key: "telegram:845".into(),
+                chan_user_name: None,
                 chat_id: "123".into(),
                 message_id: None,
             },
             ChannelMessageMeta {
-                channel_type: ChannelType::Telegram,
+                chan_type: ChannelType::Telegram,
                 sender_name: None,
                 username: None,
                 message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
@@ -1937,14 +1989,14 @@ mod tests {
         sink.dispatch_to_chat(
             "hi",
             ChannelReplyTarget {
-                channel_type: ChannelType::Telegram,
-                account_handle: "telegram:845".into(),
-                bot_handle: None,
+                chan_type: ChannelType::Telegram,
+                chan_account_key: "telegram:845".into(),
+                chan_user_name: None,
                 chat_id: "-100".into(),
                 message_id: None,
             },
             ChannelMessageMeta {
-                channel_type: ChannelType::Telegram,
+                chan_type: ChannelType::Telegram,
                 sender_name: None,
                 username: None,
                 message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
@@ -1965,7 +2017,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_to_chat_labels_telegram_session_falls_back_to_chan_user_id_when_username_missing() {
+    async fn dispatch_to_chat_labels_telegram_session_falls_back_to_chan_user_id_when_username_missing()
+     {
         let metadata = sqlite_metadata().await;
 
         let mut services = crate::services::GatewayServices::noop()
@@ -1999,14 +2052,14 @@ mod tests {
         sink.dispatch_to_chat(
             "hi",
             ChannelReplyTarget {
-                channel_type: ChannelType::Telegram,
-                account_handle: "telegram:845".into(),
-                bot_handle: None,
+                chan_type: ChannelType::Telegram,
+                chan_account_key: "telegram:845".into(),
+                chan_user_name: None,
                 chat_id: "123".into(),
                 message_id: None,
             },
             ChannelMessageMeta {
-                channel_type: ChannelType::Telegram,
+                chan_type: ChannelType::Telegram,
                 sender_name: None,
                 username: None,
                 message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),

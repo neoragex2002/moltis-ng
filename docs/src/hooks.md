@@ -224,14 +224,14 @@ The event payload is passed as JSON on stdin:
 ```json
 {
   "event": "BeforeToolCall",
-  "data": {
-    "tool": "bash",
-    "arguments": {
-      "command": "ls -la"
-    }
-  },
-  "session_id": "abc123",
-  "timestamp": "2024-01-15T10:30:00Z"
+  "sessionId": "session:abc",
+  "toolName": "exec",
+  "arguments": {
+    "command": "ls -la",
+    "_sessionId": "session:abc",
+    "_chanChatKey": "telegram:123:-100",
+    "_connId": "ws-conn-1"
+  }
 }
 ```
 
@@ -240,7 +240,7 @@ The event payload is passed as JSON on stdin:
 | Exit Code | Stdout | Result |
 |-----------|--------|--------|
 | `0` | (empty) | Continue normally |
-| `0` | `{"action":"modify","data":{...}}` | Replace payload data |
+| `0` | `{"action":"modify","data":{...}}` | Modify (event-specific) |
 | `1` | — | Block (stderr = reason) |
 
 ### Example: Modify Tool Arguments
@@ -248,12 +248,13 @@ The event payload is passed as JSON on stdin:
 ```bash
 #!/bin/bash
 payload=$(cat)
-tool=$(echo "$payload" | jq -r '.data.tool')
+event=$(echo "$payload" | jq -r '.event')
+tool=$(echo "$payload" | jq -r '.toolName // ""')
 
-if [ "$tool" = "bash" ]; then
-    # Add safety flag to all bash commands
-    modified=$(echo "$payload" | jq '.data.arguments.command = "set -e; " + .data.arguments.command')
-    echo "{\"action\":\"modify\",\"data\":$(echo "$modified" | jq '.data')}"
+if [ "$event" = "BeforeToolCall" ] && [ "$tool" = "exec" ]; then
+    # Replace the tool arguments object (preserving injected context keys).
+    modified_args=$(echo "$payload" | jq -c '.arguments.command = ("set -e; " + (.arguments.command // "")) | .arguments')
+    echo "{\"action\":\"modify\",\"data\":$modified_args}"
 fi
 
 exit 0
@@ -264,12 +265,16 @@ exit 0
 ```bash
 #!/bin/bash
 payload=$(cat)
-command=$(echo "$payload" | jq -r '.data.arguments.command // ""')
+event=$(echo "$payload" | jq -r '.event')
+tool=$(echo "$payload" | jq -r '.toolName // ""')
+command=$(echo "$payload" | jq -r '.arguments.command // ""')
 
 # Block rm -rf /
-if echo "$command" | grep -qE 'rm\s+-rf\s+/'; then
-    echo "Blocked dangerous rm command" >&2
-    exit 1
+if [ "$event" = "BeforeToolCall" ] && [ "$tool" = "exec" ]; then
+    if echo "$command" | grep -qE 'rm\s+-rf\s+/'; then
+        echo "Blocked dangerous rm command" >&2
+        exit 1
+    fi
 fi
 
 exit 0
@@ -289,20 +294,20 @@ Project-local hooks take precedence over global hooks with the same name.
 You can also define hooks directly in the config file:
 
 ```toml
-[[hooks]]
+[hooks]
+[[hooks.hooks]]
 name = "audit-log"
 command = "./hooks/audit.sh"
 events = ["BeforeToolCall", "AfterToolCall"]
 timeout = 5
-priority = 100  # Higher = runs first
 
-[[hooks]]
+[[hooks.hooks]]
 name = "llm-filter"
 command = "./hooks/filter-injection.sh"
 events = ["BeforeLLMCall", "AfterLLMCall"]
 timeout = 10
 
-[[hooks]]
+[[hooks.hooks]]
 name = "notify-slack"
 command = "./hooks/slack-notify.sh"
 events = ["SessionEnd"]
@@ -326,7 +331,7 @@ If requirements aren't met, the hook is skipped (not an error).
 
 Hooks that fail repeatedly are automatically disabled:
 
-- **Threshold**: 5 consecutive failures
+- **Threshold**: 3 consecutive failures
 - **Cooldown**: 60 seconds
 - **Recovery**: Auto-re-enabled after cooldown
 
@@ -397,12 +402,11 @@ Logs all `Command` events to a JSONL file for auditing.
 #!/bin/bash
 # slack-notify.sh
 payload=$(cat)
-session_id=$(echo "$payload" | jq -r '.session_id')
-message_count=$(echo "$payload" | jq -r '.data.message_count')
+session_id=$(echo "$payload" | jq -r '.sessionId')
 
 curl -X POST "$SLACK_WEBHOOK_URL" \
   -H 'Content-Type: application/json' \
-  -d "{\"text\":\"Session $session_id ended with $message_count messages\"}"
+  -d "{\"text\":\"Moltis session ended: ${session_id}\"}"
 
 exit 0
 ```
@@ -414,14 +418,12 @@ exit 0
 # redact-secrets.sh
 payload=$(cat)
 
-# Redact common secret patterns
-redacted=$(echo "$payload" | sed -E '
-  s/sk-[a-zA-Z0-9]{32,}/[REDACTED]/g
-  s/ghp_[a-zA-Z0-9]{36}/[REDACTED]/g
-  s/password=[^&\s]+/password=[REDACTED]/g
-')
-
-echo "{\"action\":\"modify\",\"data\":$(echo "$redacted" | jq '.data')}"
+event=$(echo "$payload" | jq -r '.event')
+if [ "$event" = "ToolResultPersist" ]; then
+    # Modify output replaces the persisted `result` value.
+    redacted_result=$(echo "$payload" | jq -c '.result |= (.. | strings |= gsub("sk-[A-Za-z0-9]{20,}"; "[REDACTED]")) | .result')
+    echo "{\"action\":\"modify\",\"data\":$redacted_result}"
+fi
 exit 0
 ```
 
@@ -431,10 +433,10 @@ exit 0
 #!/bin/bash
 # sandbox-writes.sh
 payload=$(cat)
-tool=$(echo "$payload" | jq -r '.data.tool')
+tool=$(echo "$payload" | jq -r '.toolName // ""')
 
 if [ "$tool" = "write_file" ]; then
-    path=$(echo "$payload" | jq -r '.data.arguments.path')
+    path=$(echo "$payload" | jq -r '.arguments.path // \"\"')
 
     # Only allow writes under current project
     if [[ ! "$path" =~ ^/workspace/ ]]; then
@@ -448,7 +450,7 @@ exit 0
 
 ## Best Practices
 
-1. **Keep hooks fast** — Set appropriate timeouts (default: 5s)
+1. **Keep hooks fast** — Set appropriate timeouts (default: 10s)
 2. **Handle errors gracefully** — Use `exit 0` unless you want to block
 3. **Log for debugging** — Write to a log file, not stdout
 4. **Test locally first** — Pipe sample JSON through your script

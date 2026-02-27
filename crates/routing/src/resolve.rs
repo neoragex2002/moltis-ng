@@ -4,7 +4,7 @@ use moltis_common::types::MsgContext;
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute {
     pub agent_id: String,
-    pub session_key: moltis_sessions::SessionKey,
+    pub session_id: String,
 }
 
 /// Resolve which agent should handle a message, following the binding cascade.

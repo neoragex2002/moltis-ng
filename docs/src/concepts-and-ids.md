@@ -57,8 +57,10 @@
 ```admonish important title="内部命名也要对齐（snake_case 版本）"
 内部实现（Rust/DB/schema）允许使用 `snake_case`，但**概念名必须与本文档对齐**。
 
-- `chanAccountKey` 的内部主称呼必须是 `chan_account_key`，禁止继续使用历史名
-  `account_handle` / `account_id`。
+- Rust 代码（变量/struct 字段）优先使用 `chan_account_key`（语义 = `chanAccountKey`），避免新增
+  `account_handle/account_id` 这类历史名。
+- DB/schema 现存列名可能仍是 `account_handle/channel_type/session_key`（legacy 存储名）。短期允许
+  保留以减少迁移 churn，但它们不得向上层协议/服务层传播；对外仍只使用冻结字段名。
 - 同理：`chanChatKey`→`chan_chat_key`，`chanType`→`chan_type`，`chanReplyTarget`→`chan_reply_target`。
 ```
 
@@ -313,7 +315,7 @@ UI 展示友好的信息。
 它不是核心概念的一部分，但它的字段需要明确映射到冻结概念。
 
 - `channel` → 语义等价 `chanType`（平台类型），不应理解为“channel 对象”。
-- `account_handle` → 语义等价 `chanAccountKey`（内部应改为 `chan_account_key`）。
+- `account_handle` → 语义等价 `chanAccountKey`（Rust 上层应优先使用 `chan_account_key`；DB 列名可能仍为 legacy）。
 - `session_key` → **历史漂移字段**：必须拆分为 `sessionId` + `chanChatKey`。
 - `reply_to_id` → 语义等价 `messageId`。
 - `from`（PeerId）→ 语义等价 `peerId`（发送者，不是 bot）。
@@ -326,7 +328,7 @@ UI 展示友好的信息。
 
 `crates/common/src/types.rs` 中存在一些历史 type alias，其语义应按冻结概念理解：
 
-- `AccountHandle` → 语义等价 `chanAccountKey`（内部应逐步改名，不再叫 handle）
+- `AccountHandle` → 语义等价 `chanAccountKey`（内部应逐步改名，不再叫 handle；允许 DB 层 legacy 名继续存在一段时间）
 - `ChannelId` → 语义等价 `chanType`
 - `PeerId` → 语义等价 `peerId`
 
@@ -356,15 +358,14 @@ UI 展示友好的信息。
 
 ### Sandbox Scope
 
-**结论：sandbox scope 默认 = `chat`（按 `chanChatKey` 复用）。**
+**结论：sandbox scope 默认 = `chat`（按 chat 复用；由 `chanChatKey` 派生）。**
 
 - 意义：同一 chat/thread 内的多条指令可以复用同一套 sandbox 环境，提高连续操作效率。
-- 注意：如果你需要完全隔离（例如高风险命令、或不希望同一 chat 内共享环境），可以将 scope
-  设置为 `session`（按 `sessionId` 隔离）。
+- 注意：如果你需要更强隔离（例如高风险命令、或不希望同一 chat 内共享环境），可以将 scope
+  设置为 `session`（channel-bound 场景按 `chanChatKey`；非 channel 场景按 `sessionId`）。
 
 ```admonish note title="当前实现差异"
-当前代码中的 `SandboxScope` 默认值可能仍为 `session`（需要后续实现清理时一起改到
-`chat`），但本文档冻结的“产品口径默认值”是 `chat`。
+当前实现已对齐：`SandboxScope` 默认值为 `chat`。
 ```
 
 ## 过载词汇（Overloaded Words）【必须避免】

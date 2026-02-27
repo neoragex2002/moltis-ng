@@ -9,7 +9,7 @@ PROMPTS_DIR="${PROMPTS_DIR:-./prompts}"
 mkdir -p "$PROMPTS_DIR"
 
 INPUT=$(cat)
-SESSION=$(echo "$INPUT" | grep -o '"session_key":"[^"]*"' | head -1 | cut -d'"' -f4)
+SESSION=$(echo "$INPUT" | grep -o '"sessionId":"[^"]*"' | head -1 | cut -d'"' -f4)
 DATE=$(date +%Y-%m-%d)
 
 FILENAME="${PROMPTS_DIR}/session-${DATE}-${SESSION}.md"

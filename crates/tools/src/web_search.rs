@@ -181,10 +181,13 @@ impl WebSearchTool {
                 let now = Instant::now();
                 cache.retain(|_, e| e.expires_at > now);
             }
-            cache.insert(key, CacheEntry {
-                value,
-                expires_at: Instant::now() + self.cache_ttl,
-            });
+            cache.insert(
+                key,
+                CacheEntry {
+                    value,
+                    expires_at: Instant::now() + self.cache_ttl,
+                },
+            );
         }
     }
 
@@ -597,7 +600,7 @@ impl AgentTool for WebSearchTool {
             return Ok(cached);
         }
 
-        let accept_language = params.get("_accept_language").and_then(|v| v.as_str());
+        let accept_language = params.get("_acceptLanguage").and_then(|v| v.as_str());
 
         debug!("web_search: {query} (count={count})");
 

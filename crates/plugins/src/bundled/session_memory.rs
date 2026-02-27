@@ -55,9 +55,7 @@ impl HookHandler for SessionMemoryHook {
 
     async fn handle(&self, _event: HookEvent, payload: &HookPayload) -> Result<HookAction> {
         let HookPayload::Command {
-            session_key,
-            action,
-            ..
+            session_id, action, ..
         } = payload
         else {
             return Ok(HookAction::Continue);
@@ -69,16 +67,16 @@ impl HookHandler for SessionMemoryHook {
         }
 
         // Read the session's message history.
-        let messages = match self.session_store.read(session_key).await {
+        let messages = match self.session_store.read(session_id).await {
             Ok(msgs) => msgs,
             Err(e) => {
-                warn!(error = %e, session = %session_key, "session-memory: failed to read history");
+                warn!(error = %e, session = %session_id, "session-memory: failed to read history");
                 return Ok(HookAction::Continue);
             },
         };
 
         if messages.is_empty() {
-            debug!(session = %session_key, "session-memory: empty session, skipping");
+            debug!(session = %session_id, "session-memory: empty session, skipping");
             return Ok(HookAction::Continue);
         }
 
@@ -90,7 +88,7 @@ impl HookHandler for SessionMemoryHook {
 
         // Generate a simple slug from the session key.
         let date = utc_date_string();
-        let slug = session_key
+        let slug = session_id
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '-')
             .take(30)
@@ -100,7 +98,7 @@ impl HookHandler for SessionMemoryHook {
 
         // Build markdown from conversation history.
         let mut content = format!(
-            "# Session Log\n\n- **Session**: {session_key}\n- **Date**: {date}\n- **Action**: {action}\n- **Messages**: {}\n\n",
+            "# Session Log\n\n- **Session**: {session_id}\n- **Date**: {date}\n- **Action**: {action}\n- **Messages**: {}\n\n",
             messages.len()
         );
 
@@ -135,7 +133,7 @@ impl HookHandler for SessionMemoryHook {
         }
 
         debug!(
-            session = %session_key,
+            session = %session_id,
             file = %filename,
             "session-memory hook completed"
         );
@@ -173,7 +171,7 @@ mod tests {
         let hook = SessionMemoryHook::new(tmp.path().to_path_buf(), session_store);
 
         let payload = HookPayload::Command {
-            session_key: "test-session-123".into(),
+            session_id: "test-session-123".into(),
             action: "new".into(),
             sender_id: None,
         };
@@ -201,7 +199,7 @@ mod tests {
         let hook = SessionMemoryHook::new(tmp.path().to_path_buf(), session_store);
 
         let payload = HookPayload::Command {
-            session_key: "test".into(),
+            session_id: "test".into(),
             action: "stop".into(),
             sender_id: None,
         };
@@ -221,7 +219,7 @@ mod tests {
         let hook = SessionMemoryHook::new(tmp.path().to_path_buf(), session_store);
 
         let payload = HookPayload::Command {
-            session_key: "empty-session".into(),
+            session_id: "empty-session".into(),
             action: "new".into(),
             sender_id: None,
         };
@@ -250,7 +248,7 @@ mod tests {
         let hook = SessionMemoryHook::new(tmp.path().to_path_buf(), session_store);
 
         let payload = HookPayload::Command {
-            session_key: "test".into(),
+            session_id: "test".into(),
             action: "reset".into(),
             sender_id: None,
         };

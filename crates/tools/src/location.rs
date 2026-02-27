@@ -103,7 +103,7 @@ pub trait LocationRequester: Send + Sync {
     ///
     /// Sends a message asking the user to share their location via the channel's
     /// native location-sharing feature, then waits for the result.
-    async fn request_channel_location(&self, _session_key: &str) -> Result<LocationResult> {
+    async fn request_channel_location(&self, _session_id: &str) -> Result<LocationResult> {
         Ok(LocationResult {
             location: None,
             error: Some(LocationError::NotSupported),
@@ -337,7 +337,7 @@ impl moltis_agents::tool_registry::AgentTool for LocationTool {
             .unwrap_or_default();
 
         // Try browser geolocation if a connection ID is available.
-        if let Some(conn_id) = params.get("_conn_id").and_then(|v| v.as_str()) {
+        if let Some(conn_id) = params.get("_connId").and_then(|v| v.as_str()) {
             let result = self.requester.request_location(conn_id, precision).await?;
             return match result.location {
                 Some(loc) => {
@@ -365,17 +365,14 @@ impl moltis_agents::tool_registry::AgentTool for LocationTool {
         }
 
         // No browser connection — try channel-based location request.
-        if let Some(session_key) = params.get("_session_key").and_then(|v| v.as_str())
-            && (session_key.starts_with("telegram:") || session_key.starts_with("discord:"))
+        if let Some(chan_chat_key) = params.get("_chanChatKey").and_then(|v| v.as_str())
+            && (chan_chat_key.starts_with("telegram:") || chan_chat_key.starts_with("discord:"))
         {
-            // Use the persistent session id for tool ↔ gateway coordination (pending invokes,
-            // session metadata), while still using the deterministic channel session key for
-            // detecting channel origin.
-            let request_key = params
-                .get("_session_id")
+            let session_id = params
+                .get("_sessionId")
                 .and_then(|v| v.as_str())
-                .unwrap_or(session_key);
-            let result = self.requester.request_channel_location(request_key).await?;
+                .ok_or_else(|| anyhow::anyhow!("missing '_sessionId' context"))?;
+            let result = self.requester.request_channel_location(session_id).await?;
             return match result.location {
                 Some(loc) => {
                     let geocoded = reverse_geocode(loc.latitude, loc.longitude).await;
@@ -439,7 +436,7 @@ mod tests {
             self.cached.clone()
         }
 
-        async fn request_channel_location(&self, _session_key: &str) -> Result<LocationResult> {
+        async fn request_channel_location(&self, _session_id: &str) -> Result<LocationResult> {
             match &self.channel_response {
                 Some(r) => Ok(r.clone()),
                 None => Ok(LocationResult {
@@ -518,7 +515,7 @@ mod tests {
         }));
 
         let result = tool
-            .execute(serde_json::json!({ "_conn_id": "test-conn" }))
+            .execute(serde_json::json!({ "_connId": "test-conn" }))
             .await
             .unwrap();
         assert_eq!(result["latitude"], 40.7128);
@@ -538,7 +535,7 @@ mod tests {
         }));
 
         let result = tool
-            .execute(serde_json::json!({ "_conn_id": "test-conn" }))
+            .execute(serde_json::json!({ "_connId": "test-conn" }))
             .await
             .unwrap();
         assert_eq!(result["available"], false);
@@ -613,7 +610,7 @@ mod tests {
             captured: std::sync::Mutex::new(None),
         });
         let tool = LocationTool::new(req.clone());
-        tool.execute(serde_json::json!({ "_conn_id": "c1" }))
+        tool.execute(serde_json::json!({ "_connId": "c1" }))
             .await
             .unwrap();
         assert_eq!(
@@ -628,7 +625,7 @@ mod tests {
             captured: std::sync::Mutex::new(None),
         });
         let tool = LocationTool::new(req.clone());
-        tool.execute(serde_json::json!({ "_conn_id": "c2", "precision": "coarse" }))
+        tool.execute(serde_json::json!({ "_connId": "c2", "precision": "coarse" }))
             .await
             .unwrap();
         assert_eq!(
@@ -656,7 +653,7 @@ mod tests {
         }));
 
         let result = tool
-            .execute(serde_json::json!({ "_session_key": "telegram:bot1:12345" }))
+            .execute(serde_json::json!({ "_sessionId": "session:abc", "_chanChatKey": "telegram:bot1:12345" }))
             .await
             .unwrap();
         assert_eq!(result["latitude"], 51.5074);
@@ -681,16 +678,13 @@ mod tests {
 
         let _ = tool
             .execute(serde_json::json!({
-                "_session_key": "telegram:bot1:12345",
-                "_session_id": "session:abc",
+                "_sessionId": "session:abc",
+                "_chanChatKey": "telegram:bot1:12345",
             }))
             .await
             .unwrap();
 
-        assert_eq!(
-            *req.seen.lock().unwrap(),
-            Some("session:abc".to_string())
-        );
+        assert_eq!(*req.seen.lock().unwrap(), Some("session:abc".to_string()));
     }
 
     #[tokio::test]
@@ -706,7 +700,7 @@ mod tests {
 
         // Non-channel session key should not attempt channel location.
         let err = tool
-            .execute(serde_json::json!({ "_session_key": "web:session:123" }))
+            .execute(serde_json::json!({ "_chanChatKey": "web:session:123" }))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no client connection"));
@@ -723,7 +717,6 @@ mod tests {
             channel_response: None,
         }));
 
-        // No _session_key and no _conn_id — should error.
         let err = tool.execute(serde_json::json!({})).await.unwrap_err();
         assert!(err.to_string().contains("no client connection"));
     }
@@ -752,10 +745,7 @@ mod tests {
         }
 
         let req = MinimalRequester;
-        let result = req
-            .request_channel_location("telegram:bot1:123")
-            .await
-            .unwrap();
+        let result = req.request_channel_location("session:abc").await.unwrap();
         assert!(result.location.is_none());
         assert!(matches!(result.error, Some(LocationError::NotSupported)));
     }

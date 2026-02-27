@@ -121,7 +121,10 @@ pub async fn start_polling(
     let aid = account_handle.clone();
     let poll_accounts = Arc::clone(&accounts);
     tokio::spawn(async move {
-        info!(account_handle = aid, "starting telegram manual polling loop");
+        info!(
+            account_handle = aid,
+            "starting telegram manual polling loop"
+        );
         let mut offset: i32 = 0;
 
         loop {
@@ -207,7 +210,10 @@ pub async fn start_polling(
                                 }
                             },
                             other => {
-                                debug!(account_handle = aid, "ignoring non-message update: {other:?}");
+                                debug!(
+                                    account_handle = aid,
+                                    "ignoring non-message update: {other:?}"
+                                );
                             },
                         }
                     }

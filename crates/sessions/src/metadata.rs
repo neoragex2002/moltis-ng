@@ -935,7 +935,8 @@ mod tests {
         meta.upsert("tg:bot1:123", None);
         assert!(meta.get("tg:bot1:123").unwrap().channel_binding.is_none());
 
-        let binding = r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#;
+        let binding =
+            r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#;
         meta.set_channel_binding("tg:bot1:123", Some(binding.to_string()));
         assert_eq!(
             meta.get("tg:bot1:123").unwrap().channel_binding.as_deref(),
@@ -1005,9 +1006,11 @@ mod tests {
         let meta = SqliteSessionMetadata::new(pool);
 
         let binding =
-            r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#.to_string();
+            r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#
+                .to_string();
         let legacy_binding =
-            r#"{"channel_type":"telegram","account_id":"telegram:bot1","chat_id":"123"}"#.to_string();
+            r#"{"channel_type":"telegram","account_id":"telegram:bot1","chat_id":"123"}"#
+                .to_string();
 
         // Create two sessions with the same channel binding.
         meta.upsert("telegram:bot1:123", Some("Session 1".into()))
@@ -1039,9 +1042,9 @@ mod tests {
         assert!(keys.contains(&"session:legacy1"));
 
         // Different chat should return empty.
-		let other = meta
-			.list_channel_sessions("telegram", "telegram:bot1", "999")
-			.await;
+        let other = meta
+            .list_channel_sessions("telegram", "telegram:bot1", "999")
+            .await;
         assert!(other.is_empty());
     }
 
@@ -1051,12 +1054,15 @@ mod tests {
         let meta = SqliteSessionMetadata::new(pool);
 
         let binding =
-            r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#.to_string();
+            r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#
+                .to_string();
         let legacy_binding =
-            r#"{"channel_type":"telegram","account_id":"telegram:bot1","chat_id":"456"}"#.to_string();
+            r#"{"channel_type":"telegram","account_id":"telegram:bot1","chat_id":"456"}"#
+                .to_string();
 
         meta.upsert("session:acct1", None).await.unwrap();
-        meta.set_channel_binding("session:acct1", Some(binding)).await;
+        meta.set_channel_binding("session:acct1", Some(binding))
+            .await;
 
         meta.upsert("session:acct_legacy", None).await.unwrap();
         meta.set_channel_binding("session:acct_legacy", Some(legacy_binding))
@@ -1084,7 +1090,8 @@ mod tests {
                 .is_none()
         );
 
-        let binding = r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#;
+        let binding =
+            r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"123"}"#;
         meta.set_channel_binding("tg:bot1:123", Some(binding.to_string()))
             .await;
         assert_eq!(

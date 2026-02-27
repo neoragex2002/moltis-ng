@@ -71,8 +71,8 @@ impl ChannelStore for SqliteChannelStore {
         let row =
             sqlx::query_as::<_, ChannelRow>("SELECT * FROM channels WHERE account_handle = ?")
                 .bind(account_handle)
-            .fetch_optional(&self.pool)
-            .await?;
+                .fetch_optional(&self.pool)
+                .await?;
         row.map(TryInto::try_into).transpose()
     }
 

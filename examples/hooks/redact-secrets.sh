@@ -5,27 +5,21 @@
 
 set -euo pipefail
 
-INPUT=$(cat)
+payload=$(cat)
+event=$(echo "$payload" | jq -r '.event')
 
-# Extract the result field, redact tokens/keys, and emit a modify action.
-RESULT=$(echo "$INPUT" | grep -o '"result":{[^}]*}' | head -1 || echo "")
-
-if [ -z "$RESULT" ]; then
-    # No result to redact.
+if [ "$event" != "ToolResultPersist" ]; then
     exit 0
 fi
 
-# Redact common patterns: API keys, tokens, passwords.
-REDACTED=$(echo "$INPUT" | sed -E \
-    -e 's/(sk-[a-zA-Z0-9]{20,})/[REDACTED]/g' \
-    -e 's/(ghp_[a-zA-Z0-9]{36,})/[REDACTED]/g' \
-    -e 's/(xoxb-[a-zA-Z0-9-]+)/[REDACTED]/g' \
-    -e 's/("password"\s*:\s*")[^"]+/\1[REDACTED]/g')
+# Replace the persisted `result` value with a redacted copy.
+redacted_result=$(echo "$payload" | jq -c '
+  .result |= (.. | strings |= (
+    gsub("sk-[A-Za-z0-9]{20,}"; "[REDACTED]") |
+    gsub("ghp_[A-Za-z0-9]{36,}"; "[REDACTED]") |
+    gsub("xoxb-[A-Za-z0-9-]+"; "[REDACTED]")
+  )) |
+  .result
+')
 
-# Check if anything was redacted.
-if [ "$REDACTED" = "$INPUT" ]; then
-    exit 0
-fi
-
-# Parse the result from the redacted input and emit modify action.
-echo "{\"action\":\"modify\",\"data\":${REDACTED}}"
+echo "{\"action\":\"modify\",\"data\":$redacted_result}"

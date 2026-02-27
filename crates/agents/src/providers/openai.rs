@@ -752,9 +752,9 @@ mod tests {
                 SseLineResult::Done => {
                     events.extend(finalize_stream(&state));
                     break;
-                }
+                },
                 SseLineResult::Events(mut evs) => events.append(&mut evs),
-                SseLineResult::Skip => {}
+                SseLineResult::Skip => {},
             }
         }
 
@@ -1002,7 +1002,7 @@ mod tests {
             match ev {
                 StreamEvent::Delta(t) => text_deltas.push(t),
                 StreamEvent::ToolCallStart { name, .. } => tool_starts.push(name),
-                _ => {}
+                _ => {},
             }
         }
 

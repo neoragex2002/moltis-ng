@@ -36,8 +36,8 @@ var BASE_STEP_LABELS = ["Security", "Identity", "LLM", "Channel", "Summary"];
 var VOICE_STEP_LABELS = ["Security", "Identity", "LLM", "Voice", "Channel", "Summary"];
 
 function preferredChatPath() {
-	var key = localStorage.getItem("moltis-session") || "main";
-	return `/chats/${key.replace(/:/g, "/")}`;
+	var sessionId = localStorage.getItem("moltis-sessionId") || "main";
+	return `/chats/${sessionId.replace(/:/g, "/")}`;
 }
 
 function ErrorPanel({ message }) {
@@ -1802,7 +1802,7 @@ function VoiceStep({ onNext, onBack }) {
 
 					try {
 						var resp = await fetch(
-							`/api/sessions/${encodeURIComponent(S.activeSessionKey)}/upload?transcribe=true&provider=${encodeURIComponent(providerId)}`,
+							`/api/sessions/${encodeURIComponent(S.activeSessionId)}/upload?transcribe=true&provider=${encodeURIComponent(providerId)}`,
 							{
 								method: "POST",
 								headers: { "Content-Type": audioBlob.type || "audio/webm" },
@@ -2039,7 +2039,12 @@ function ChannelStep({ onNext, onBack }) {
 					<label class="text-xs text-[var(--muted)] mb-1 block">Your Telegram username(s)</label>
 					<textarea class="provider-key-input w-full" rows="2"
 						value=${allowlist} onInput=${(e) => setAllowlist(e.target.value)}
-						placeholder="your_username" style="resize:vertical;font-family:var(--font-body);" />
+						placeholder="your_username" style="resize:vertical;font-family:var(--font-body);"
+						autocomplete="off"
+						autocapitalize="none"
+						autocorrect="off"
+						spellcheck="false"
+						name="telegram_allowlist" />
 					<div class="text-xs text-[var(--muted)] mt-1">One username per line, without the @ sign. These users can DM your bot.</div>
 				</div>
 				${error && html`<${ErrorPanel} message=${error} />`}
@@ -2202,9 +2207,9 @@ function SummaryStep({ onBack, onFinish }) {
 						${data.channels.map((ch) => {
 							var statusColor =
 								ch.status === "connected" ? "var(--ok)" : ch.status === "error" ? "var(--error)" : "var(--warn)";
-							return html`<div key=${ch.accountHandle} class="flex items-center gap-1">
+							return html`<div key=${ch.chanAccountKey} class="flex items-center gap-1">
 								<span style="color:${statusColor}">\u25CF</span>
-								<span class="font-medium text-[var(--text)]">${ch.type}</span>: ${ch.name || ch.accountHandle}
+								<span class="font-medium text-[var(--text)]">${ch.chanType}</span>: ${ch.name || ch.chanAccountKey}
 								<span>(${ch.status})</span>
 							</div>`;
 						})}

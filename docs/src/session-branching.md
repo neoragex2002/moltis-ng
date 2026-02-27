@@ -31,12 +31,12 @@ The agent can also fork programmatically using the `branch_session` tool:
 
 ```json
 {
-  "at_message": 5,
+  "fork_point": 5,
   "label": "explore-alternative"
 }
 ```
 
-- **`at_message`** — the message index to fork at (messages 0..N are copied).
+- **`fork_point`** — the message index to fork at (messages `0..fork_point` are copied).
   If omitted, all messages are copied.
 - **`label`** — optional human-readable label for the new session.
 
@@ -47,7 +47,7 @@ The tool returns the new session ID (`sessionId`).
 The `sessions.fork` RPC method is the underlying mechanism:
 
 ```json
-{ "sessionId": "main", "at_message": 5, "label": "my-fork" }
+{ "sessionId": "main", "forkPoint": 5, "label": "my-fork" }
 ```
 
 On success the response payload contains `{ "sessionId": "session:<uuid>" }`.
@@ -65,10 +65,10 @@ When forking, the new session inherits:
 
 ## Parent-Child Relationships
 
-Fork relationships are stored directly on the `sessions` table:
+Fork relationships are stored in session metadata:
 
-- **`parent_session_id`** — the parent `sessionId` this session was forked from.
-- **`fork_point`** — the message index where the fork occurred.
+- **`parentSessionId`** — the parent `sessionId` this session was forked from.
+- **`forkPoint`** — the message index where the fork occurred.
 
 These fields drive the tree rendering in the sidebar. Sessions with a parent
 appear indented under it; deeply nested forks indent further.

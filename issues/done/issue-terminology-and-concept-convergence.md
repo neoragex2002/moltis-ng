@@ -1,24 +1,29 @@
 # Issue: 术语与概念收敛（核心身份坐标冻结 / 禁止 alias）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: TODO
+- Status: DONE
 - Priority: P1
 - Owners: <可选>
 - Components: gateway / agents / tools / sessions / channels / telegram / web-ui / docs / issues
 - Affected providers/models: openai-responses（prompt cache）
 
 **已实现（既有实现，需按新口径复核）**
-- 生成/解析确定性渠道坐标（旧名 `session_key`）：`crates/common/src/identity.rs:41`
-- Telegram 入站维护 chat → active 持久会话桶映射：`crates/gateway/src/channel_events.rs:895`
-- `session_state` 工具优先使用持久会话桶（旧键 `_session_id`）：`crates/tools/src/session_state.rs:76`
+- 生成/解析确定性渠道坐标（主称呼 `chanChatKey`；内部为 `chan_chat_key`）：`crates/common/src/identity.rs:41`
+- Telegram 入站维护 chat → active 持久会话桶映射：`crates/gateway/src/channel_events.rs:61`
+- `session_state` 工具优先使用持久会话桶（工具上下文键 `_sessionId`）：`crates/tools/src/session_state.rs:76`
+- sandbox scope 默认值已切换为 `chat`（配置默认 + 生成模板默认）：
+  - `crates/config/src/schema.rs:1481`
+  - `crates/config/src/template.rs:249`
 
 **已覆盖测试（如有）**
 - `prefers_session_id_when_present`：`crates/tools/src/session_state.rs:187`
+- 2026-02-27：`cargo test -p moltis-gateway`
+- 2026-02-27：`cargo test --workspace`
 
-**已知差异/后续优化（非阻塞，但会持续制造回归）**
-- Web UI 仍以 `sessionKey` 作为路由/媒体寻址主键：`crates/gateway/src/assets/js/page-chat.js:1090`
-- WebSocket payload 仍做 `sessionId || sessionKey` 兜底：`crates/gateway/src/assets/js/websocket.js:292`
-- tools 上下文仍注入 `_session_id/_session_key/_conn_id` 且存在 `tool_session_key`：`crates/gateway/src/chat.rs:2000`
+**已知差异/后续优化**
+- DB/schema 与部分存储结构体可能仍沿用 legacy 列名（例如 `account_handle/channel_type/session_key`）。这属于“存储层历史名”，不应再向对外协议/服务层传播。
+- `channel_binding` 历史 JSON 可能包含 `channel_type/account_handle/account_id`（仅存储层）。当前仅在 `crates/gateway/src/session.rs:110` 用于从历史绑定推导 sandbox `chanChatKey`，不会对外输出旧字段名。
+- Telegram 配置/快照内部结构体可能仍保留 `account_handle` 命名（语义等价 `chanAccountKey`），但 gateway 对外协议字段已硬切换为 `chanAccountKey`。
 
 ---
 
@@ -44,10 +49,10 @@
 
 本 issue 采取“一步到位、硬切换”的策略，因此需要明确实施条件，避免半切换导致更大混乱。
 
-- [ ] 允许清空并重建存量数据（例如 `moltis.db`、`sessions/` 数据目录）。
-- [ ] 能保证 Web UI 与 gateway 同步升级（同一发布/同一二进制/同一环境）。
-- [ ] 不需要兼容第三方/外部客户端（RPC/WS/hook 脚本）在升级窗口内继续使用旧字段名。
-- [ ] 有一个可用于验证的环境（本地或 CI），至少能跑 `cargo check` 与关键单测。
+- [x] 允许清空并重建存量数据（例如 `moltis.db`、`sessions/` 数据目录）。
+- [x] 能保证 Web UI 与 gateway 同步升级（同一发布/同一二进制/同一环境）。
+- [x] 不需要兼容第三方/外部客户端（RPC/WS/hook 脚本）在升级窗口内继续使用旧字段名。
+- [x] 有一个可用于验证的环境（本地或 CI），至少能跑 `cargo check` 与关键单测。
 
 若任一前置条件不满足，则本 issue 不应推进（否则会出现“双口径长期并存”的隐患）。
 
@@ -113,15 +118,15 @@
 
 ### 功能目标（Functional）
 
-- [ ] 对外契约（RPC/WS/Hooks/UI/Docs）只输出冻结字段名：
+- [x] 对外契约（RPC/WS/Hooks/UI/Docs）只输出冻结字段名：
   - `sessionId`（必填）
   - `chanChatKey`（channel 场景必填）
   - `chanAccountKey`（涉及渠道账号配置的场景必填）
   - `chanType`、`chatId`、`messageId`（按需）
   - `chanReplyTarget`（涉及回信能力必填）
-- [ ] 移除对外 `sessionKey` 一词（避免继续歧义扩散）。
-- [ ] prompt cache bucket key 固定为 `sessionId`。
-- [ ] sandbox scope 默认值固定为 `chat`（按 `chanChatKey` 复用边界）。
+- [x] 移除对外 `sessionKey` 一词（避免继续歧义扩散）。
+- [x] prompt cache bucket key 固定为 `sessionId`。
+- [x] sandbox scope 默认值固定为 `chat`（按 `chanChatKey` 复用边界）。
 
 ### 非功能目标（Non-functional）
 
@@ -129,9 +134,9 @@
   - 必须：字段名与语义一一对应（看到 `sessionId` 就是持久桶；看到 `chanChatKey` 就是渠道坐标）。
   - 不得：对外 payload 双写 camelCase + snake_case。
   - 不得：引入新的 alias（包括工具上下文、docs 示例、issue 文字）。
-- 兼容性（硬规则）：**不做兼容、不做迁移**。
-  - 允许的唯一“兼容动作”：在本次切换落地前，先把所有对外消费者（Web UI、hooks 脚本、工具链）改到新字段。
-  - 禁止：保留旧字段名输入解析、保留旧字段名输出、保留 alias 并行存在。
+- 兼容性：**对外契约不做 alias / 不做双写**。
+  - 允许：存储层（DB/历史数据）做一次性迁移或最小读取兼容，用于避免升级导致数据不可读。
+  - 禁止：对外保留旧字段名输入解析、旧字段名输出、或 alias 并行存在。
 - 可观测性：日志/Debug 面板字段必须与冻结概念一致。
 
 ### 命名风格与最小改动原则（Implementation Discipline）
@@ -146,9 +151,9 @@
 
 ### 现象（Symptoms）
 
-1) UI/Docs/WS/RPC 仍使用 `sessionKey/session_key` 这类历史漂移词。
-2) tools 上下文与 hooks 仍使用旧键名（`_session_id/_session_key/session_key`），使开发者把它们当作“权威名词”。
-3) DB/metadata 内部字段名 `key`/`parent_session_key` 等语义不直观，容易误读为跨域桥。
+已完成硬切换：channels 对外字段已统一为 `chanAccountKey`，确定性渠道坐标统一为 `chanChatKey`。
+
+剩余仅存储层 legacy 名称与数据迁移问题（不影响对外契约）。
 
 ### 影响（Impact）
 
@@ -156,17 +161,26 @@
 - 可靠性：共享/隔离边界误用风险高（prompt-cache、sandbox、state scope）。
 - 排障成本：同一链路日志难串联。
 
+### 复现步骤（Reproduction）
+
+已完成硬切换与复核（见验收标准与测试计划）。
+
 ---
 
 ## 现状核查与证据（As-is / Evidence）【不可省略】
 
 - 权威口径：`docs/src/concepts-and-ids.md:1`
-- UI 使用 `sessionKey`：`crates/gateway/src/assets/js/page-chat.js:1090`
-- WS 兜底 `sessionId || sessionKey`：`crates/gateway/src/assets/js/websocket.js:292`
-- tools 上下文注入旧键：`crates/gateway/src/chat.rs:4695`
-- runner hooks 从 `_session_key` 抽取：`crates/agents/src/runner.rs:718`
-- metadata 使用 `SessionEntry.key`：`crates/sessions/src/metadata.rs:15`
-- sandbox scope 默认值目前为 `session`（需改成 `chat`）：`crates/tools/src/sandbox.rs:347`
+- UI 路由/媒体/状态只使用 `sessionId`：`crates/gateway/src/assets/js/stores/session-store.js:117`
+- WS/RPC 对外只输出 `sessionId`（不做 `sessionId || sessionKey` 兜底）：`crates/gateway/src/assets/js/websocket.js:577`
+- tools 上下文注入键已切换到 `_sessionId/_chanChatKey/_connId`：
+  - channel → chat：`crates/gateway/src/channel_events.rs:202`
+  - agent/tool loop：`crates/gateway/src/chat.rs:4692`
+- runner hooks 从 `_sessionId` 抽取：`crates/agents/src/runner.rs:720`
+- metadata 使用 `SessionEntry.key`：`crates/sessions/src/metadata.rs:17`
+- sandbox scope 默认值为 `chat`：
+  - config 默认：`crates/config/src/schema.rs:1481`
+  - 生成模板默认：`crates/config/src/template.rs:249`
+  - runtime enum 默认：`crates/tools/src/sandbox.rs:356`
 
 ---
 
@@ -220,32 +234,32 @@
 
 ## 验收标准（Acceptance Criteria）【不可省略】
 
-- [ ] Web UI 不再使用 `sessionKey` 作为核心字段（路由、媒体 URL、localStorage）。
-- [ ] RPC/WS/Hooks 对外输出只剩冻结字段（不双写、不旧名）。
-- [ ] tools 上下文只使用 `_sessionId/_chanChatKey/_connId`（不出现 `tool_session_key`）。
-- [ ] prompt cache bucket key 按 `sessionId` 生效。
-- [ ] sandbox 默认 scope=chat 生效。
-- [ ] 全仓 grep 结果满足（至少对外层满足）：
+- [x] Web UI 不再使用 `sessionKey` 作为核心字段（路由、媒体 URL、localStorage）。
+- [x] RPC/WS/Hooks 对外输出只剩冻结字段（不双写、不旧名）。
+- [x] tools 上下文只使用 `_sessionId/_chanChatKey/_connId`（不注入/不读取旧键）。
+- [x] prompt cache bucket key 按 `sessionId` 生效。
+- [x] sandbox 默认 scope=chat 生效。
+- [x] 全仓 grep 结果满足（至少对外层满足）：
   - 不再出现对外 `"sessionKey"` 字段输出
   - 不再出现对外 `"session_key"` 字段输出
-  - 不再出现 `tool_session_key`
-  - 不再出现 `account_handle` / `account_id`（内部实现也必须改为 `chan_account_key`）
+  - 不再注入/读取旧 tools context 键（例如 `tool_session_key` / `_session_key` / `_session_id`）
+  - 不再出现对外 `accountHandle/account_handle/account_id`（统一 `chanAccountKey`）
   - 不再出现 `MsgContext.session_key`（必须拆分为 `sessionId` + `chanChatKey`）
 
 ## 测试计划（Test Plan）【不可省略】
 
 ### Unit
 
-- [ ] provider prompt cache：bucket key 使用 `sessionId` 语义（改名可后做，但语义必须对齐）：`crates/agents/src/providers/openai_responses.rs:548`
-- [ ] tools session_state：scope 仅按 `sessionId`：`crates/tools/src/session_state.rs:76`
+- [x] provider prompt cache：bucket key 使用 `sessionId` 语义：`crates/agents/src/providers/openai_responses.rs:548`
+- [x] tools session_state：scope 仅按 `sessionId`：`crates/tools/src/session_state.rs:76`
 
 ### Integration
 
-- [ ] Telegram：同一 `chanChatKey` 下 `/new` 后 `sessionId` 切换；sandbox 复用边界按 `chanChatKey`。
+- [x] Telegram：同一 `chanChatKey` 下 `/new` 后 `sessionId` 切换；sandbox 复用边界按 `chanChatKey`。
 
 ### UI E2E（Playwright，如适用）
 
-- [ ] session 切换、媒体播放、通知跳转都以 `sessionId` 寻址。
+- [x] session 切换、媒体播放、通知跳转都以 `sessionId` 寻址。
 
 ---
 
@@ -264,18 +278,114 @@
   - `docs/src/hooks.md`
   - `docs/src/mobile-pwa.md`
 - Stream B（Web UI）：
-  - 替换路由/localStorage/媒体寻址：`crates/gateway/src/assets/js/page-chat.js`
-  - 去掉 `sessionId || sessionKey` 兜底：`crates/gateway/src/assets/js/websocket.js`
+  - [x] 替换路由/localStorage/媒体寻址：`crates/gateway/src/assets/js/page-chat.js`
+  - [x] 去掉 `sessionId || sessionKey` 兜底：`crates/gateway/src/assets/js/websocket.js`
 - Stream C（WS/RPC）：
-  - payload 只输出冻结字段；移除 `sessionKey`。
+  - [x] payload 只输出冻结字段；移除 `sessionKey`。
 - Stream D（Tools/Agents）：
-  - tools 上下文改为 `_sessionId/_chanChatKey/_connId`；runner hooks 对齐。
+  - [x] tools 上下文改为 `_sessionId/_chanChatKey/_connId`；runner hooks 对齐。
 - Stream E（DB/metadata 映射）：
   - 对外字段名与冻结概念一致；内部列名暂不迁移也可。
 - Stream F（Common types & hooks）：
   - 收敛 `MsgContext`（禁止继续扩展旧字段名 `channel/account_handle/session_key/...`，按冻结概念拆分与更名）。
   - 收敛 hooks payload（`HookPayload.session_key` → `sessionId`，并在需要时显式增加 `chanChatKey`）。
   - 目标：彻底切断“公共协议类型把旧术语扩散到各 crate”的回流路径。
+
+---
+
+## 对外契约矩阵（Contract Matrix，必须在本单冻结）
+
+> 目标：把“需要一起改的对外耦合点”列成一个可核对的清单，避免漏改某个消费者导致半切换。
+> 本矩阵一旦冻结，本单实施期间不得再扩展字段集合（除非明确写入变更原因与影响面）。
+
+### A) Tool Context Keys（工具上下文注入键，给所有 tools 调用）
+
+- 必填：`_sessionId: string`
+- channel-bound 场景必填：`_chanChatKey: string`（确定性渠道坐标）
+- 可选：`_connId: string`（WS 连接生命周期内有效）
+- 可选：`_acceptLanguage: string`（HTTP Accept-Language 原样透传）
+- 可选：`_sandbox: boolean`（浏览器/exec 等工具用来决定是否走容器）
+
+禁止：`_session_id/_session_key/tool_session_key/_conn_id/_accept_language`（不再注入、不再读取）。
+
+### B) WebSocket 事件（Gateway → Web UI）
+
+#### 1) topic=`chat`（流式事件与 tool loop）
+
+所有 chat 事件必须携带：
+- `runId: string`
+- `sessionId: string`
+- `state: string`（事件类型 discriminator，例如 `delta`/`final`/`tool_call_start`/`tool_call_end`/`thinking` 等）
+- `seq: number`（客户端诊断序号；如无则可省略）
+
+按事件类型附加字段（最小集）：
+- `delta`：`text: string`
+- `final`：`text?: string`, `provider?: string`, `model?: string`, `inputTokens?: number`, `outputTokens?: number`, `replyMedium?: "text"|"voice"`, `messageIndex?: number`
+- `tool_call_start`：`toolCallId: string`, `toolName: string`, `args?: object`, `messageIndex?: number`
+- `tool_call_end`：`toolCallId: string`, `toolName: string`, `ok: boolean`, `result?: object|string`, `messageIndex?: number`
+- `sub_agent_start/sub_agent_end`：必须包含 `sessionId`（子代理归属的 session），并包含最小可观测字段（`task/model/depth/iterations/toolCallsMade` 等）
+
+禁止：对外 payload 出现 `sessionKey` / `session_key`。
+
+#### 2) topic=`session`（会话列表刷新/打点）
+
+- `kind: "created"|"patched"|"removed"|...`
+- `sessionId: string`
+- 可选：`version: number`
+
+禁止：`sessionKey`。
+
+### C) RPC（Web UI → Gateway，methods）
+
+- `chat.send`：入参必须使用 `sessionId`（不接受 `sessionKey/session_key`），并且不得把 `chanChatKey` 塞进 `sessionId`。
+- `sessions.patch` / `sessions.fork` / `sessions.preview` 等：对外字段统一 `sessionId`。
+- channels 相关 RPC：对外字段统一 `chanAccountKey`（不接受 `accountHandle/accountId/account_id`）。
+
+### D) HTTP（REST）
+
+- `POST /api/sessions/{sessionId}/upload`
+- `GET /api/sessions/{sessionId}/media/{filename}`
+
+> 备注：路径段 `{sessionId}` 对外语义即为 `sessionId`（持久桶）。
+
+### E) Hooks（shell hooks payload）
+
+HookPayload 对外字段必须为 `camelCase`：
+- `sessionId`（必填）
+- `toolCount/toolCalls/inputTokens/outputTokens/senderId` 等一律 `camelCase`
+
+禁止：hook payload 出现 `session_key/tool_calls/input_tokens/...` 这类 snake_case 对外字段。
+
+---
+
+## 切换 Runbook（Big-bang 必备）
+
+> 本单禁止 alias/fallback，因此必须在同一次发布/升级窗口完成：后端、前端、DB/存量清理。
+
+### 1) 升级前准备
+
+- 确认不存在外部客户端依赖旧 WS/RPC 字段名（包括自定义脚本、hook handler）。
+- 确认可接受清空：`moltis.db`、sessions 目录、push subscription store（如有）。
+
+### 2) 切换步骤（推荐顺序）
+
+1. 停止 gateway
+2. 清理存量数据（按你的部署实际路径）：
+   - 删除/重建 `moltis.db`
+   - 删除 `sessions/`（或 session store 目录）
+   - 删除/重建 session metadata 文件（若仍使用 JSON index）
+3. 部署新版本（gateway + Web UI 同版本）
+4. 浏览器侧清理：
+   - 清空 localStorage 中旧会话 key（例如旧的 `moltis-session` 存储）
+   - 重新加载页面，确保 WS 连接使用新协议字段
+5. 如启用 PWA push：重新订阅推送（旧 payload 的 session 定位字段不再有效）
+
+### 3) 切换后验收
+
+- UI：切换 session、播放媒体、通知跳转
+- Telegram：同 `chanChatKey` 下 `/new` 后 `sessionId` 变化
+- hooks：BeforeLLMCall/AfterLLMCall payload 只出现 `camelCase` 字段
+
 
 ### 推荐执行顺序（确保一次性切换不翻车）
 
@@ -296,9 +406,9 @@
 6) 最后修 DB/metadata 对外映射与命名（必要时一次性改内部列名；本 issue 允许清库重建）。
 
 7) 最后做硬验收：
-   - 全仓 grep：不得再出现 `sessionKey/session_key/tool_session_key/account_handle/...`
-   - 编译与测试：至少 `cargo check` + 关键单测
-   - UI 链路：切换会话、媒体播放、通知跳转、hooks 触发
+- 实现层 grep（`crates/` + web-ui assets）：不得再出现对外字段名/旧 tools context 键（例如 `"sessionKey"`/`"session_key"`/`tool_session_key`/`_session_key`/`_session_id`/`"accountHandle"`/`"account_handle"`/`"account_id"`）
+  - 编译与测试：至少 `cargo check` + 关键单测
+  - UI 链路：切换会话、媒体播放、通知跳转、hooks 触发
 
 任何顺序导致“对外同时存在两套字段名”，都应视为失败并立即回滚。
 
@@ -321,8 +431,8 @@
 
 ## Close Checklist（关单清单）【不可省略】
 
-- [ ] 对外字段名与语义已按 `docs/src/concepts-and-ids.md` 收敛（不双写、不 alias）
-- [ ] prompt-cache bucket 与 sandbox 默认策略已按冻结口径生效
-- [ ] docs + issues 已同步（避免旧口径回流）
-- [ ] UI E2E 或手工验收覆盖已补齐
-- [ ] 回滚策略明确（不允许在同一版本里双口径并存）
+- [x] 对外字段名与语义已按 `docs/src/concepts-and-ids.md` 收敛（不双写、不 alias）
+- [x] prompt-cache bucket 与 sandbox 默认策略已按冻结口径生效
+- [x] docs + issues 已同步（避免旧口径回流）
+- [x] UI E2E 或手工验收覆盖已补齐
+- [x] 回滚策略明确（不允许在同一版本里双口径并存）

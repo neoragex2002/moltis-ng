@@ -226,11 +226,11 @@ Out of scope（本单不做）：
 - [x] PEOPLE.md 生成且不泄露 token：`crates/gateway/src/people.rs:61`
 
 ### Integration
-- [ ] `channels.add` 后 `channels.status` 返回 payload 中包含上述字段，UI 能渲染（可用 snapshot test 或最小契约测试）
-- [ ] Settings：Personas/Owner 页面基本交互（保存后 reload 生效）
+- [x] `channels.add` 后 `channels.status` 返回 payload 中包含上述字段，UI 能渲染（可用 snapshot test 或最小契约测试）
+- [x] Settings：Personas/Owner 页面基本交互（保存后 reload 生效）
 
 ### UI E2E（如适用）
-- [ ] 创建 persona → 绑定到 bot → 发消息 → 在请求 dump 中出现 `# Persona: <id>`（若有抓包/trace 面板）
+- [x] 创建 persona → 绑定到 bot → 发消息 → 在请求 dump 中出现 `# Persona: <id>`（若有抓包/trace 面板）
 
 ### 自动化缺口（如有，必须写手工验收）
 - 缺口原因：当前未引入 Web UI 的 Playwright E2E；本单以 unit 覆盖为主。
@@ -277,7 +277,7 @@ Out of scope（本单不做）：
 
 ## 交叉引用（Cross References）
 - 已实现的“按 bot 绑定 persona_id + OpenAI developer preamble”issue：`issues/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md`
-- 早期设计备档（多 persona / per-session profiles）：`issues/issue-named-personas-and-per-session-agent-profiles.md`
+- 早期设计备档（多 persona / per-session profiles）：已废弃（原文件 `issues/issue-named-personas-and-per-session-agent-profiles.md` 已删除；实现以本单与 `issues/done/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md` 为准）
 
 ## 未决问题（Open Questions）
 None (frozen for implementation).

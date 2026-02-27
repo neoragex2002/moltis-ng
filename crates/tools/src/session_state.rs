@@ -73,13 +73,10 @@ impl AgentTool for SessionStateTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'namespace' parameter"))?;
 
-        // Prefer persistent session id when provided by the gateway (e.g. channel sessions),
-        // but fall back to the deterministic session key for older callers.
-        let session_key = params
-            .get("_session_id")
+        let session_id = params
+            .get("_sessionId")
             .and_then(|v| v.as_str())
-            .or_else(|| params.get("_session_key").and_then(|v| v.as_str()))
-            .ok_or_else(|| anyhow::anyhow!("missing session context"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing '_sessionId' context"))?;
 
         match operation {
             "get" => {
@@ -87,7 +84,7 @@ impl AgentTool for SessionStateTool {
                     .get("key")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("'get' requires 'key'"))?;
-                let value = self.store.get(session_key, namespace, key).await?;
+                let value = self.store.get(session_id, namespace, key).await?;
                 Ok(json!({ "value": value }))
             },
             "set" => {
@@ -99,7 +96,7 @@ impl AgentTool for SessionStateTool {
                     .get("value")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("'set' requires 'value'"))?;
-                self.store.set(session_key, namespace, key, value).await?;
+                self.store.set(session_id, namespace, key, value).await?;
                 Ok(json!({ "ok": true }))
             },
             "delete" => {
@@ -107,11 +104,11 @@ impl AgentTool for SessionStateTool {
                     .get("key")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("'delete' requires 'key'"))?;
-                let deleted = self.store.delete(session_key, namespace, key).await?;
+                let deleted = self.store.delete(session_id, namespace, key).await?;
                 Ok(json!({ "deleted": deleted }))
             },
             "list" => {
-                let entries = self.store.list(session_key, namespace).await?;
+                let entries = self.store.list(session_id, namespace).await?;
                 let items: Vec<Value> = entries
                     .into_iter()
                     .map(|e| json!({ "key": e.key, "value": e.value }))
@@ -119,7 +116,7 @@ impl AgentTool for SessionStateTool {
                 Ok(json!({ "entries": items }))
             },
             "clear" => {
-                let count = self.store.delete_all(session_key, namespace).await?;
+                let count = self.store.delete_all(session_id, namespace).await?;
                 Ok(json!({ "deleted": count }))
             },
             _ => anyhow::bail!("unknown operation: {operation}"),
@@ -165,7 +162,7 @@ mod tests {
                 "namespace": "my-skill",
                 "key": "count",
                 "value": "42",
-                "_session_key": "session:1"
+                "_sessionId": "session:1"
             }))
             .await
             .unwrap();
@@ -176,7 +173,7 @@ mod tests {
                 "operation": "get",
                 "namespace": "my-skill",
                 "key": "count",
-                "_session_key": "session:1"
+                "_sessionId": "session:1"
             }))
             .await
             .unwrap();
@@ -184,34 +181,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prefers_session_id_when_present() {
+    async fn rejects_missing_session_id_context() {
         let pool = test_pool().await;
         let tool = make_tool(pool);
 
-        // Store under session_id even if the deterministic session key differs.
-        tool.execute(json!({
-            "operation": "set",
-            "namespace": "ns",
-            "key": "k",
-            "value": "v",
-            "_session_key": "telegram:bot1:123",
-            "_session_id": "session:1",
-        }))
-        .await
-        .unwrap();
-
-        // Read back using a different deterministic key but the same session_id.
-        let result = tool
+        let err = tool
             .execute(json!({
                 "operation": "get",
                 "namespace": "ns",
                 "key": "k",
-                "_session_key": "telegram:bot1:999",
-                "_session_id": "session:1",
+                "_chanChatKey": "telegram:bot1:123",
             }))
             .await
-            .unwrap();
-        assert_eq!(result["value"], "v");
+            .unwrap_err();
+        assert!(err.to_string().contains("_sessionId"));
     }
 
     #[tokio::test]
@@ -224,7 +207,7 @@ mod tests {
             "namespace": "ns",
             "key": "a",
             "value": "1",
-            "_session_key": "s1"
+            "_sessionId": "s1"
         }))
         .await
         .unwrap();
@@ -234,7 +217,7 @@ mod tests {
             "namespace": "ns",
             "key": "b",
             "value": "2",
-            "_session_key": "s1"
+            "_sessionId": "s1"
         }))
         .await
         .unwrap();
@@ -243,7 +226,7 @@ mod tests {
             .execute(json!({
                 "operation": "list",
                 "namespace": "ns",
-                "_session_key": "s1"
+                "_sessionId": "s1"
             }))
             .await
             .unwrap();
@@ -262,7 +245,7 @@ mod tests {
             "namespace": "ns",
             "key": "a",
             "value": "1",
-            "_session_key": "s1"
+            "_sessionId": "s1"
         }))
         .await
         .unwrap();
@@ -271,7 +254,7 @@ mod tests {
             .execute(json!({
                 "operation": "clear",
                 "namespace": "ns",
-                "_session_key": "s1"
+                "_sessionId": "s1"
             }))
             .await
             .unwrap();
@@ -279,7 +262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_missing_session_key() {
+    async fn test_missing_session_id() {
         let pool = test_pool().await;
         let tool = make_tool(pool);
 
@@ -302,7 +285,7 @@ mod tests {
             .execute(json!({
                 "operation": "nope",
                 "namespace": "ns",
-                "_session_key": "s1"
+                "_sessionId": "s1"
             }))
             .await;
         assert!(result.is_err());

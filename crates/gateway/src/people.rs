@@ -26,7 +26,7 @@ pub(crate) fn render_people_md(channels: &[StoredChannel]) -> String {
         let chan_nickname = cfg.get("chan_nickname").and_then(|v| v.as_str());
         let persona_id = cfg.get("persona_id").and_then(|v| v.as_str());
 
-        out.push_str(&format!("- account_handle: `{}`\n", ch.account_handle));
+        out.push_str(&format!("- chanAccountKey: `{}`\n", ch.account_handle));
         if let Some(id) = chan_user_id {
             out.push_str(&format!("  - chan_user_id: `{}`\n", id));
         }

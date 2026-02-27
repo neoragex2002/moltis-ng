@@ -53,13 +53,10 @@ impl AgentTool for BranchSessionTool {
     }
 
     async fn execute(&self, params: Value) -> Result<Value> {
-        // Prefer persistent session id when available (channel sessions), but keep
-        // compatibility with callers that only provide the deterministic session key.
         let parent_key = params
-            .get("_session_id")
+            .get("_sessionId")
             .and_then(|v| v.as_str())
-            .or_else(|| params.get("_session_key").and_then(|v| v.as_str()))
-            .ok_or_else(|| anyhow::anyhow!("missing session context"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing '_sessionId' context"))?;
 
         let label = params
             .get("label")
@@ -116,7 +113,7 @@ impl AgentTool for BranchSessionTool {
             .await;
 
         Ok(json!({
-            "sessionKey": new_key,
+            "sessionId": new_key,
             "id": entry.id,
             "label": label,
             "forkPoint": fork_point,
@@ -185,12 +182,12 @@ mod tests {
             .execute(json!({
                 "label": "Branch at 2",
                 "fork_point": 2,
-                "_session_key": parent_key,
+                "_sessionId": parent_key,
             }))
             .await
             .unwrap();
 
-        let new_key = result["sessionKey"].as_str().unwrap();
+        let new_key = result["sessionId"].as_str().unwrap();
         assert_eq!(result["forkPoint"], 2);
         assert_eq!(result["messageCount"], 2);
 
@@ -223,7 +220,7 @@ mod tests {
             .execute(json!({
                 "label": "Bad fork",
                 "fork_point": 99,
-                "_session_key": parent_key,
+                "_sessionId": parent_key,
             }))
             .await;
         assert!(result.is_err());
@@ -250,12 +247,12 @@ mod tests {
         let result = tool
             .execute(json!({
                 "label": "Full fork",
-                "_session_key": parent_key,
+                "_sessionId": parent_key,
             }))
             .await
             .unwrap();
 
-        let new_key = result["sessionKey"].as_str().unwrap();
+        let new_key = result["sessionId"].as_str().unwrap();
         let child_msgs = store.read(new_key).await.unwrap();
         assert_eq!(child_msgs.len(), 3);
     }
@@ -277,13 +274,13 @@ mod tests {
         let result = tool
             .execute(json!({
                 "label": "Branch",
-                "_session_key": "telegram:bot1:123",
-                "_session_id": parent_id,
+                "_sessionId": parent_id,
+                "_chanChatKey": "telegram:bot1:123",
             }))
             .await
             .unwrap();
 
-        let new_key = result["sessionKey"].as_str().unwrap();
+        let new_key = result["sessionId"].as_str().unwrap();
         let child_msgs = store.read(new_key).await.unwrap();
         assert_eq!(child_msgs.len(), 1);
     }

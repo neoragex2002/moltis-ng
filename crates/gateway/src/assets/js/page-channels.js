@@ -63,12 +63,12 @@ function loadChannels() {
 }
 
 function loadSenders() {
-	var accountHandle = sendersAccount.value;
-	if (!accountHandle) {
+	var chanAccountKey = sendersAccount.value;
+	if (!chanAccountKey) {
 		senders.value = [];
 		return;
 	}
-	sendRpc("channels.senders.list", { accountHandle }).then((res) => {
+	sendRpc("channels.senders.list", { chanAccountKey }).then((res) => {
 		if (res?.ok) senders.value = res.payload?.senders || [];
 	});
 }
@@ -120,9 +120,9 @@ function ChannelCard(props) {
 	}
 
 	function onRemove() {
-		requestConfirm(`Remove ${ch.name || ch.accountHandle}?`).then((yes) => {
+		requestConfirm(`Remove ${ch.name || ch.chanAccountKey}?`).then((yes) => {
 			if (!yes) return;
-			sendRpc("channels.remove", { accountHandle: ch.accountHandle }).then((r) => {
+			sendRpc("channels.remove", { chanAccountKey: ch.chanAccountKey }).then((r) => {
 				if (r?.ok) loadChannels();
 			});
 		});
@@ -134,7 +134,7 @@ function ChannelCard(props) {
 		var active = ch.sessions.filter((s) => s.active);
 		sessionLine =
 			active.length > 0
-				? active.map((s) => `${s.label || s.key} (${s.messageCount} msgs)`).join(", ")
+				? active.map((s) => `${s.label || s.sessionId} (${s.messageCount} msgs)`).join(", ")
 				: "No active session";
 	}
 
@@ -144,29 +144,29 @@ function ChannelCard(props) {
         <${TelegramIcon} />
       </span>
       <div style="display:flex;flex-direction:column;gap:2px;">
-					<span class="text-sm text-[var(--text-strong)]">${ch.name || ch.accountHandle || "Telegram"}</span>
+					<span class="text-sm text-[var(--text-strong)]">${ch.name || ch.chanAccountKey || "Telegram"}</span>
         ${ch.details && html`<span class="text-xs text-[var(--muted)]">${ch.details}</span>`}
         ${sessionLine && html`<span class="text-xs text-[var(--muted)]">${sessionLine}</span>`}
       </div>
       <span class="provider-item-badge ${statusClass}">${ch.status || "unknown"}</span>
     </div>
     <div class="flex gap-2">
-					<button class="provider-btn provider-btn-sm provider-btn-secondary" title="Edit ${ch.accountHandle || "channel"}"
+					<button class="provider-btn provider-btn-sm provider-btn-secondary" title="Edit ${ch.chanAccountKey || "channel"}"
         onClick=${() => {
 					editingChannel.value = ch;
 				}}>Edit</button>
-					<button class="provider-btn provider-btn-sm provider-btn-danger" title="Remove ${ch.accountHandle || "channel"}"
+					<button class="provider-btn provider-btn-sm provider-btn-danger" title="Remove ${ch.chanAccountKey || "channel"}"
         onClick=${onRemove}>Remove</button>
     </div>
 		<details style="margin-top:10px;">
 			<summary class="text-xs text-[var(--muted)]" style="cursor:pointer;user-select:none;">Details</summary>
 			<div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
-				<${DetailRow} label="account_handle" value=${ch.accountHandle} />
-				<${DetailRow} label="chan_user_id" value=${cfg.chan_user_id} />
-				<${DetailRow} label="bot_handle" value=${cfg.chan_user_name ? "@" + cfg.chan_user_name : ""} />
-				<${DetailRow} label="chan_nickname" value=${cfg.chan_nickname} />
+				<${DetailRow} label="chanAccountKey" value=${ch.chanAccountKey} />
+				<${DetailRow} label="chanUserId" value=${cfg.chan_user_id} />
+				<${DetailRow} label="chanUserName" value=${cfg.chan_user_name ? "@" + cfg.chan_user_name : ""} />
+				<${DetailRow} label="chanNickname" value=${cfg.chan_nickname} />
 				<${DetailRow}
-					label="persona_id"
+					label="personaId"
 					value=${personaMissing ? `${configuredPersona} (missing → default)` : configuredPersona}
 				/>
 			</div>
@@ -182,14 +182,14 @@ function ChannelsTab() {
       <div class="text-xs text-[var(--muted)]">Click "+ Add Telegram Bot" to connect one using a token from @BotFather.</div>
     </div>`;
 	}
-	return html`${channels.value.map((ch) => html`<${ChannelCard} key=${ch.accountHandle} channel=${ch} />`)}`;
+	return html`${channels.value.map((ch) => html`<${ChannelCard} key=${ch.chanAccountKey} channel=${ch} />`)}`;
 }
 
 // ── Senders tab ──────────────────────────────────────────────
 function SendersTab() {
 	useEffect(() => {
 		if (channels.value.length > 0 && !sendersAccount.value) {
-			sendersAccount.value = channels.value[0].accountHandle;
+			sendersAccount.value = channels.value[0].chanAccountKey;
 		}
 	}, [channels.value]);
 
@@ -204,7 +204,7 @@ function SendersTab() {
 	function onAction(identifier, action) {
 		var rpc = action === "approve" ? "channels.senders.approve" : "channels.senders.deny";
 		sendRpc(rpc, {
-			accountHandle: sendersAccount.value,
+			chanAccountKey: sendersAccount.value,
 			identifier: identifier,
 		}).then(() => {
 			loadSenders();
@@ -219,9 +219,9 @@ function SendersTab() {
         value=${sendersAccount.value} onChange=${(e) => {
 					sendersAccount.value = e.target.value;
 				}}>
-        ${channels.value.map(
-					(ch) => html`<option key=${ch.accountHandle} value=${ch.accountHandle}>${ch.name || ch.accountHandle}</option>`,
-				)}
+			${channels.value.map(
+				(ch) => html`<option key=${ch.chanAccountKey} value=${ch.chanAccountKey}>${ch.name || ch.chanAccountKey}</option>`,
+			)}
       </select>
     </div>
     ${senders.value.length === 0 && html`<div class="text-sm text-[var(--muted)] senders-empty">No messages received yet for this account.</div>`}
@@ -235,22 +235,22 @@ function SendersTab() {
       </tr></thead>
       <tbody>
         ${senders.value.map((s) => {
-					var identifier = s.username || s.peer_id;
-					var lastSeenMs = s.last_seen ? s.last_seen * 1000 : 0;
-					return html`<tr key=${s.peer_id}>
-            <td class="senders-td">${s.sender_name || s.peer_id}</td>
-            <td class="senders-td" style="color:var(--muted);">${s.username ? `@${s.username}` : "\u2014"}</td>
-            <td class="senders-td">${s.message_count}</td>
-            <td class="senders-td" style="color:var(--muted);font-size:12px;">${lastSeenMs ? html`<time data-epoch-ms="${lastSeenMs}">${new Date(lastSeenMs).toISOString()}</time>` : "\u2014"}</td>
-            <td class="senders-td">
-              ${
-								s.otp_pending
+					var identifier = s.username || s.peerId;
+					var lastSeenMs = s.lastSeen ? s.lastSeen * 1000 : 0;
+					return html`<tr key=${s.peerId}>
+						<td class="senders-td">${s.senderName || s.peerId}</td>
+						<td class="senders-td" style="color:var(--muted);">${s.username ? `@${s.username}` : "\u2014"}</td>
+						<td class="senders-td">${s.messageCount}</td>
+						<td class="senders-td" style="color:var(--muted);font-size:12px;">${lastSeenMs ? html`<time data-epoch-ms="${lastSeenMs}">${new Date(lastSeenMs).toISOString()}</time>` : "\u2014"}</td>
+						<td class="senders-td">
+							${
+								s.otpPending
 									? html`<span class="provider-item-badge cursor-pointer select-none" style="background:var(--warning-bg, #fef3c7);color:var(--warning-text, #92400e);" onClick=${() => {
-											navigator.clipboard.writeText(s.otp_pending.code).then(() => showToast("OTP code copied"));
-										}}>OTP: <code class="text-xs">${s.otp_pending.code}</code></span>`
+											navigator.clipboard.writeText(s.otpPending.code).then(() => showToast("OTP code copied"));
+										}}>OTP: <code class="text-xs">${s.otpPending.code}</code></span>`
 									: html`<span class="provider-item-badge ${s.allowed ? "configured" : "oauth"}">${s.allowed ? "Allowed" : "Denied"}</span>`
 							}
-            </td>
+						</td>
             <td class="senders-td">
               ${
 								s.allowed
@@ -479,7 +479,7 @@ function EditChannelModal() {
 			if (found?.provider) updateConfig.model_provider = found.provider;
 		}
 		sendRpc("channels.update", {
-			accountHandle: ch.accountHandle,
+			chanAccountKey: ch.chanAccountKey,
 			config: updateConfig,
 		}).then((res) => {
 			saving.value = false;
@@ -504,7 +504,7 @@ function EditChannelModal() {
 		editingChannel.value = null;
 	}} title="Edit Telegram Bot">
     <div class="channel-form">
-			<div class="text-sm text-[var(--text-strong)]">${ch.name || ch.accountHandle}</div>
+			<div class="text-sm text-[var(--text-strong)]">${ch.name || ch.chanAccountKey}</div>
       <label class="text-xs text-[var(--muted)]">Persona ID (optional)</label>
       <input data-field="personaId" type="text" value=${cfg.persona_id || ""} placeholder="e.g. default / ops / research"
         style="font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;"
@@ -565,7 +565,7 @@ function ChannelsPage() {
 			if (p.kind === "otp_resolved") {
 				loadChannels();
 			}
-			var eventAccountHandle = p.accountHandle || p.account_handle;
+			var eventAccountHandle = p.chanAccountKey;
 			if (
 				activeTab.value === "senders" &&
 				sendersAccount.value === eventAccountHandle &&

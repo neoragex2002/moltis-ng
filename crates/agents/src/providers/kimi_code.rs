@@ -424,7 +424,11 @@ mod tests {
         body
     }
 
-    fn build_request(provider: &KimiCodeProvider, token: &str, body: &serde_json::Value) -> reqwest::Request {
+    fn build_request(
+        provider: &KimiCodeProvider,
+        token: &str,
+        body: &serde_json::Value,
+    ) -> reqwest::Request {
         // We can't bind sockets in some sandboxed test environments.
         // Instead, build the request and assert on headers/body locally.
         let mut request = provider
@@ -493,8 +497,10 @@ mod tests {
     #[test]
     fn complete_sends_required_headers() {
         let provider = KimiCodeProvider::new("kimi-k2.5".into());
-        let openai_messages: Vec<serde_json::Value> =
-            [ChatMessage::user("hi")].iter().map(ChatMessage::to_openai_value).collect();
+        let openai_messages: Vec<serde_json::Value> = [ChatMessage::user("hi")]
+            .iter()
+            .map(ChatMessage::to_openai_value)
+            .collect();
         let body = build_completion_body("kimi-k2.5", &openai_messages, &[]);
         let req = build_request(&provider, "mock-kimi-token", &body);
 
@@ -521,8 +527,10 @@ mod tests {
             "https://example.invalid".into(),
         );
 
-        let openai_messages: Vec<serde_json::Value> =
-            [ChatMessage::user("hi")].iter().map(ChatMessage::to_openai_value).collect();
+        let openai_messages: Vec<serde_json::Value> = [ChatMessage::user("hi")]
+            .iter()
+            .map(ChatMessage::to_openai_value)
+            .collect();
         let body = build_completion_body("kimi-for-coding", &openai_messages, &[]);
         let req = build_request(&provider, "sk-kimi", &body);
 

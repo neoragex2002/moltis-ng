@@ -57,7 +57,7 @@ function renderSearchResults(query) {
 
 		var lbl = document.createElement("div");
 		lbl.className = "search-hit-label";
-		lbl.textContent = hit.label || hit.sessionKey;
+		lbl.textContent = hit.label || hit.sessionId;
 		el.appendChild(lbl);
 
 		// Safe: esc() escapes all HTML entities first, then we only wrap
@@ -81,9 +81,9 @@ function renderSearchResults(query) {
 			var ctx = { query: query, messageIndex: hit.messageIndex };
 			if (currentPrefix !== "/chats") {
 				sessionStorage.setItem("moltis-search-ctx", JSON.stringify(ctx));
-				navigate(sessionPath(hit.sessionKey));
+				navigate(sessionPath(hit.sessionId));
 			} else {
-				switchSession(hit.sessionKey, ctx);
+				switchSession(hit.sessionId, ctx);
 			}
 			searchInput.value = "";
 			hideSearch();
@@ -125,9 +125,9 @@ searchInput.addEventListener("keydown", (e) => {
 			};
 			if (currentPrefix !== "/chats") {
 				sessionStorage.setItem("moltis-search-ctx", JSON.stringify(ctx));
-				navigate(sessionPath(h.sessionKey));
+				navigate(sessionPath(h.sessionId));
 			} else {
-				switchSession(h.sessionKey, ctx);
+				switchSession(h.sessionId, ctx);
 			}
 			searchInput.value = "";
 			hideSearch();

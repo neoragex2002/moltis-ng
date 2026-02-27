@@ -1,6 +1,6 @@
 //! Generic session file upload endpoint.
 //!
-//! `POST /api/sessions/{session_key}/upload` accepts raw binary data.
+//! `POST /api/sessions/{sessionId}/upload` accepts raw binary data.
 //! The `Content-Type` header determines behaviour:
 //! - **Audio** (`audio/*`): stored + optionally transcribed (`?transcribe=true`)
 //! - **Images** (`image/*`): stored, URL returned
@@ -35,13 +35,13 @@ pub struct UploadQuery {
 /// Maximum upload size: 25 MB (also used as the route-level body limit).
 pub const MAX_UPLOAD_SIZE: usize = 25 * 1024 * 1024;
 
-/// `POST /api/sessions/{session_key}/upload`
+/// `POST /api/sessions/{sessionId}/upload`
 ///
 /// Accepts raw binary body. `Content-Type` header is required.
 /// Optional `X-Filename` header for custom filenames.
 pub async fn session_upload(
     State(state): State<crate::server::AppState>,
-    Path(session_key): Path<String>,
+    Path(session_id): Path<String>,
     Query(query): Query<UploadQuery>,
     headers: HeaderMap,
     body: Bytes,
@@ -107,8 +107,8 @@ pub async fn session_upload(
 
     // Save the file.
     let size = body.len();
-    if let Err(e) = store.save_media(&session_key, &filename, &body).await {
-        warn!(session_key, filename, error = %e, "failed to save uploaded media");
+    if let Err(e) = store.save_media(&session_id, &filename, &body).await {
+        warn!(session_id, filename, error = %e, "failed to save uploaded media");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "ok": false, "error": format!("failed to save file: {e}") })),
@@ -118,7 +118,7 @@ pub async fn session_upload(
 
     let url = format!(
         "/api/sessions/{}/media/{}",
-        urlencoding::encode(&session_key),
+        urlencoding::encode(&session_id),
         urlencoding::encode(&filename),
     );
 
@@ -141,7 +141,7 @@ pub async fn session_upload(
         {
             Ok(result) => Some(result),
             Err(e) => {
-                warn!(session_key, error = %e, "transcription failed for uploaded audio");
+                warn!(session_id, error = %e, "transcription failed for uploaded audio");
                 return (
                     StatusCode::OK,
                     Json(serde_json::json!({

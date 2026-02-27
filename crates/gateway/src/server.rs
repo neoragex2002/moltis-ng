@@ -129,11 +129,14 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
         {
             let mut inner_w = self.state.inner.write().await;
             let invokes = &mut inner_w.pending_invokes;
-            invokes.insert(request_id.clone(), crate::state::PendingInvoke {
-                request_id: request_id.clone(),
-                sender: tx,
-                created_at: std::time::Instant::now(),
-            });
+            invokes.insert(
+                request_id.clone(),
+                crate::state::PendingInvoke {
+                    request_id: request_id.clone(),
+                    sender: tx,
+                    created_at: std::time::Instant::now(),
+                },
+            );
         }
 
         // Wait up to 30 seconds for the user to grant/deny permission.
@@ -212,7 +215,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
 
         // Resolve to the persistent session id used for metadata + pending invokes.
         //
-        // Channel-originated tool calls often carry a deterministic `_session_key`
+        // Channel-originated tool calls often carry a deterministic `_chanChatKey`
         // (e.g. `telegram:<bot_id>:<chat_id>`). Channel sessions, however, are
         // stored under an opaque `session:<uuid>` key. Tools may pass either
         // value here, so we normalize to the active persistent session id when
@@ -225,10 +228,10 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
             .ok_or_else(|| anyhow::anyhow!("session metadata not available"))?;
         let lookup_key = if session_key.starts_with("session:") {
             session_key.to_string()
-        } else if let Some(parts) = moltis_common::identity::parse_session_key(session_key) {
-            let account_handle = format!("{}:{}", parts.channel, parts.chan_user_id);
+        } else if let Some(parts) = moltis_common::identity::parse_chan_chat_key(session_key) {
+            let chan_account_key = format!("{}:{}", parts.channel, parts.chan_user_id);
             session_meta
-                .get_active_session_id(parts.channel, &account_handle, parts.chat_id)
+                .get_active_session_id(parts.channel, &chan_account_key, parts.chat_id)
                 .await
                 .unwrap_or_else(|| session_key.to_string())
         } else {
@@ -259,7 +262,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
             .ok_or_else(|| anyhow::anyhow!("no channel outbound available"))?;
         outbound
             .send_text(
-                &reply_target.account_handle,
+                &reply_target.chan_account_key,
                 &reply_target.chat_id,
                 "Please share your location using the attachment menu (📎 → Location).",
                 None,
@@ -271,13 +274,14 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
             let mut inner = self.state.inner.write().await;
-            inner
-                .pending_invokes
-                .insert(pending_key.clone(), crate::state::PendingInvoke {
+            inner.pending_invokes.insert(
+                pending_key.clone(),
+                crate::state::PendingInvoke {
                     request_id: pending_key.clone(),
                     sender: tx,
                     created_at: std::time::Instant::now(),
-                });
+                },
+            );
         }
 
         // Wait up to 60 seconds — user needs to navigate Telegram's UI.
@@ -539,14 +543,14 @@ fn build_api_routes() -> Router<AppState> {
             axum::routing::post(crate::tools_routes::restart),
         )
         .route(
-            "/api/sessions/{session_key}/upload",
+            "/api/sessions/{sessionId}/upload",
             axum::routing::post(crate::upload_routes::session_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(
                     crate::upload_routes::MAX_UPLOAD_SIZE,
                 )),
         )
         .route(
-            "/api/sessions/{session_key}/media/{filename}",
+            "/api/sessions/{sessionId}/media/{filename}",
             get(api_session_media_handler),
         )
         .route("/api/logs/download", get(api_logs_download_handler));
@@ -1057,16 +1061,17 @@ pub async fn start_gateway(
                     "sse" => moltis_mcp::registry::TransportType::Sse,
                     _ => moltis_mcp::registry::TransportType::Stdio,
                 };
-                merged
-                    .servers
-                    .insert(name.clone(), moltis_mcp::McpServerConfig {
+                merged.servers.insert(
+                    name.clone(),
+                    moltis_mcp::McpServerConfig {
                         command: entry.command.clone(),
                         args: entry.args.clone(),
                         env: entry.env.clone(),
                         enabled: entry.enabled,
                         transport,
                         url: entry.url.clone(),
-                    });
+                    },
+                );
             }
         }
         mcp_configured_count = merged.servers.values().filter(|s| s.enabled).count();
@@ -1364,7 +1369,7 @@ pub async fn start_gateway(
             }
 
             let chat = state.chat().await;
-            let session_key = match &req.session_target {
+            let session_id = match &req.session_target {
                 moltis_cron::types::SessionTarget::Named(name) => {
                     format!("cron:{name}")
                 },
@@ -1378,21 +1383,21 @@ pub async fn start_gateway(
                 moltis_cron::types::SessionTarget::Named(_)
             ) {
                 let _ = chat
-                    .clear(serde_json::json!({ "_session_key": session_key }))
+                    .clear(serde_json::json!({ "_sessionId": session_id }))
                     .await;
             }
 
             // Apply sandbox overrides for this cron session.
             if let Some(ref router) = state.sandbox_router {
-                router.set_override(&session_key, req.sandbox.enabled).await;
+                router.set_override(&session_id, req.sandbox.enabled).await;
                 if let Some(ref image) = req.sandbox.image {
-                    router.set_image_override(&session_key, image.clone()).await;
+                    router.set_image_override(&session_id, image.clone()).await;
                 }
             }
 
             let mut params = serde_json::json!({
                 "text": req.message,
-                "_session_key": session_key,
+                "_sessionId": session_id,
             });
             if let Some(ref model) = req.model {
                 params["model"] = serde_json::Value::String(model.clone());
@@ -1401,7 +1406,7 @@ pub async fn start_gateway(
 
             // Clean up sandbox overrides.
             if let Some(ref router) = state.sandbox_router {
-                router.remove_override(&session_key).await;
+                router.remove_override(&session_id).await;
             }
 
             let val = result?;
@@ -2797,6 +2802,7 @@ pub async fn start_gateway(
     // - force process exit to avoid hanging after ctrl-c
     {
         let browser_for_shutdown = Arc::clone(&browser_for_lifecycle);
+        let state_for_shutdown = Arc::clone(&state);
         #[cfg(feature = "tailscale")]
         let reset_tailscale_on_exit =
             tailscale_mode != TailscaleMode::Off && tailscale_reset_on_exit;
@@ -2834,6 +2840,14 @@ pub async fn start_gateway(
                     grace_secs = shutdown_grace.as_secs(),
                     "browser pool shutdown exceeded grace period, forcing process exit"
                 );
+            }
+
+            // Dispatch GatewayStop hook.
+            if let Some(ref hooks) = state_for_shutdown.inner.read().await.hook_registry {
+                let payload = moltis_common::hooks::HookPayload::GatewayStop;
+                if let Err(e) = hooks.dispatch(&payload).await {
+                    tracing::warn!("GatewayStop hook dispatch failed: {e}");
+                }
             }
 
             std::process::exit(0);
@@ -2919,10 +2933,15 @@ pub async fn start_gateway(
                         }
                     };
                     if changed && let Ok(payload) = serde_json::to_value(&next) {
-                        broadcast(&update_state, "update.available", payload, BroadcastOpts {
-                            drop_if_slow: true,
-                            ..Default::default()
-                        })
+                        broadcast(
+                            &update_state,
+                            "update.available",
+                            payload,
+                            BroadcastOpts {
+                                drop_if_slow: true,
+                                ..Default::default()
+                            },
+                        )
                         .await;
                     }
                 },
@@ -2985,12 +3004,15 @@ pub async fn start_gateway(
                         .by_provider
                         .iter()
                         .map(|(name, metrics)| {
-                            (name.clone(), moltis_metrics::ProviderTokens {
-                                input_tokens: metrics.input_tokens,
-                                output_tokens: metrics.output_tokens,
-                                completions: metrics.completions,
-                                errors: metrics.errors,
-                            })
+                            (
+                                name.clone(),
+                                moltis_metrics::ProviderTokens {
+                                    input_tokens: metrics.input_tokens,
+                                    output_tokens: metrics.output_tokens,
+                                    completions: metrics.completions,
+                                    errors: metrics.errors,
+                                },
+                            )
                         })
                         .collect();
 
@@ -4282,13 +4304,13 @@ async fn onboarding_completed(gw: &GatewayState) -> bool {
 /// Serve a session media file (screenshot, audio, etc.).
 #[cfg(feature = "web-ui")]
 async fn api_session_media_handler(
-    Path((session_key, filename)): Path<(String, String)>,
+    Path((session_id, filename)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     let Some(ref store) = state.gateway.services.session_store else {
         return (StatusCode::NOT_FOUND, "session store not available").into_response();
     };
-    match store.read_media(&session_key, &filename).await {
+    match store.read_media(&session_id, &filename).await {
         Ok(data) => {
             let content_type = match filename.rsplit('.').next() {
                 Some("png") => "image/png",
@@ -4473,7 +4495,8 @@ async fn api_skills_search_handler(
     // Fast path: search from the skills manifest instead of loading full per-skill
     // metadata for every installed repo (which can be extremely slow for large
     // repos like openclaw/skills).
-    match search_skills_from_manifest(state.gateway.services.skills.as_ref(), &source, &query).await {
+    match search_skills_from_manifest(state.gateway.services.skills.as_ref(), &source, &query).await
+    {
         Ok(skills) => Json(serde_json::json!({ "skills": skills })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4490,10 +4513,7 @@ async fn search_skills_from_manifest(
     query: &str,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     use moltis_skills::{
-        formats::PluginFormat,
-        manifest::ManifestStore,
-        parse,
-        requirements::check_requirements,
+        formats::PluginFormat, manifest::ManifestStore, parse, requirements::check_requirements,
         types::SkillsManifest,
     };
 
@@ -4511,8 +4531,7 @@ async fn search_skills_from_manifest(
         .as_ref()
         .and_then(|expected| {
             let repo_dir = install_dir.join(&repo.repo_name);
-            crate::services::local_repo_head_sha(&repo_dir)
-                .map(|current| current != *expected)
+            crate::services::local_repo_head_sha(&repo_dir).map(|current| current != *expected)
         })
         .unwrap_or(false);
 
@@ -5120,7 +5139,7 @@ its decision via **exit code** and **stdout**:
 #!/usr/bin/env bash
 # handler.sh — log every tool call to a file
 payload=$(cat)
-tool=$(echo "$payload" | jq -r '.tool_name // "unknown"')
+tool=$(echo "$payload" | jq -r '.toolName // "unknown"')
 echo "$(date -Iseconds) tool=$tool" >> /tmp/moltis-hook.log
 # Exit 0 with no stdout = Continue
 ```
@@ -5131,14 +5150,14 @@ echo "$(date -Iseconds) tool=$tool" >> /tmp/moltis-hook.log
 - `BeforeAgentStart` — before a new agent run begins
 - `BeforeToolCall` — before executing a tool (inspect/modify arguments)
 - `BeforeCompaction` — before compacting chat history
-- `MessageSending` — before sending a message to the LLM
+- `MessageSending` — before sending a response
 - `ToolResultPersist` — before persisting a tool result
 
 **Read-only (parallel dispatch, Block/Modify ignored):**
 - `AgentEnd` — after an agent run completes
 - `AfterToolCall` — after a tool finishes (observe result)
 - `AfterCompaction` — after compaction completes
-- `MessageReceived` — after receiving an LLM response
+- `MessageReceived` — when a user message arrives
 - `MessageSent` — after a message is sent
 - `SessionStart` / `SessionEnd` — session lifecycle
 - `GatewayStart` / `GatewayStop` — server lifecycle
@@ -5595,7 +5614,7 @@ mod tests {
         ));
 
         let payload = moltis_common::hooks::HookPayload::Command {
-            session_key: "smoke-session".into(),
+            session_id: "smoke-session".into(),
             action: "new".into(),
             sender_id: None,
         };
@@ -6291,55 +6310,65 @@ mod tests {
     }
 
     #[cfg(feature = "web-ui")]
-    #[tokio::test]
-    async fn skills_search_uses_manifest_and_returns_matches() {
-        use moltis_skills::{
-            formats::PluginFormat,
-            types::{RepoEntry, SkillState, SkillsManifest},
-        };
-
-        let _guard = crate::test_support::TestDirsGuard::lock_only();
-
-        let tmp = tempfile::tempdir().unwrap();
-        moltis_config::set_data_dir(tmp.path().to_path_buf());
-
-        // Create installed skill dir + SKILL.md.
-        let install_dir = moltis_skills::install::default_install_dir().unwrap();
-        let skill_rel = "openclaw-skills/skills/tester/norway-roads";
-        let skill_dir = install_dir.join(skill_rel);
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: norway-roads\ndescription: Norway roads\n---\nbody\n",
-        )
-        .unwrap();
-
-        // Write manifest pointing at the skill.
-        let mut manifest = SkillsManifest::default();
-        manifest.add_repo(RepoEntry {
-            source: "openclaw/skills".into(),
-            repo_name: "openclaw-skills".into(),
-            installed_at_ms: 0,
-            commit_sha: None,
-            format: PluginFormat::Skill,
-            skills: vec![SkillState {
-                name: "norway-roads".into(),
-                relative_path: skill_rel.into(),
-                trusted: false,
-                enabled: false,
-            }],
-        });
-        let manifest_path = moltis_skills::manifest::ManifestStore::default_path().unwrap();
-        std::fs::write(manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
-
-        let svc = crate::services::NoopSkillsService;
-        let results = search_skills_from_manifest(&svc, "openclaw/skills", "norway")
-            .await
+    #[test]
+    fn skills_search_uses_manifest_and_returns_matches() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["name"].as_str(), Some("norway-roads"));
-        assert_eq!(results[0]["description"].as_str(), Some("Norway roads"));
+        rt.block_on(async {
+            use moltis_skills::{
+                formats::PluginFormat,
+                types::{RepoEntry, SkillState, SkillsManifest},
+            };
 
-        moltis_config::clear_data_dir();
+            let _guard = crate::test_support::TestDirsGuard::lock_only();
+
+            let tmp = tempfile::tempdir().unwrap();
+            moltis_config::set_data_dir(tmp.path().to_path_buf());
+
+            // Create installed skill dir + SKILL.md.
+            let install_dir = moltis_skills::install::default_install_dir().unwrap();
+            let skill_rel = "openclaw-skills/skills/tester/norway-roads";
+            let skill_dir = install_dir.join(skill_rel);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: norway-roads\ndescription: Norway roads\n---\nbody\n",
+            )
+            .unwrap();
+
+            // Write manifest pointing at the skill.
+            let mut manifest = SkillsManifest::default();
+            manifest.add_repo(RepoEntry {
+                source: "openclaw/skills".into(),
+                repo_name: "openclaw-skills".into(),
+                installed_at_ms: 0,
+                commit_sha: None,
+                format: PluginFormat::Skill,
+                skills: vec![SkillState {
+                    name: "norway-roads".into(),
+                    relative_path: skill_rel.into(),
+                    trusted: false,
+                    enabled: false,
+                }],
+            });
+            let manifest_path = moltis_skills::manifest::ManifestStore::default_path().unwrap();
+            std::fs::write(
+                manifest_path,
+                serde_json::to_string_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+
+            let svc = crate::services::NoopSkillsService;
+            let results = search_skills_from_manifest(&svc, "openclaw/skills", "norway")
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0]["name"].as_str(), Some("norway-roads"));
+            assert_eq!(results[0]["description"].as_str(), Some("Norway roads"));
+
+            moltis_config::clear_data_dir();
+        });
     }
 }

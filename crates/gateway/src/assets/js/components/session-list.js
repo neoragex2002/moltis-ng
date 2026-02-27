@@ -28,15 +28,11 @@ var spinnerFrames = [
 // ── Helpers ──────────────────────────────────────────────────
 
 function isTelegramSession(s) {
-	var key = s.key || "";
-	if (key.startsWith("telegram:")) return true;
-	var binding = s.channelBinding || null;
-	if (!binding) return false;
-	try {
-		return JSON.parse(binding).channel_type === "telegram";
-	} catch (_e) {
-		return false;
-	}
+	var sessionId = s.sessionId || "";
+	if (sessionId.startsWith("telegram:")) return true;
+	var target = s.chanReplyTarget || null;
+	if (!target) return false;
+	return target.chanType === "telegram";
 }
 
 function formatHHMM(epochMs) {
@@ -49,14 +45,14 @@ function SessionIcon({ session, isBranch }) {
 	useEffect(() => {
 		if (!iconRef.current) return;
 		iconRef.current.textContent = "";
-		var key = session.key || "";
+		var sessionId = session.sessionId || "";
 		var icon;
 		if (isBranch) icon = makeBranchIcon();
-		else if (key.startsWith("cron:")) icon = makeCronIcon();
+		else if (sessionId.startsWith("cron:")) icon = makeCronIcon();
 		else if (isTelegramSession(session)) icon = makeTelegramIcon();
 		else icon = makeChatIcon();
 		iconRef.current.appendChild(icon);
-	}, [session.key, isBranch]);
+	}, [session.sessionId, isBranch]);
 
 	var telegram = isTelegramSession(session);
 	var iconStyle = {};
@@ -78,7 +74,7 @@ function SessionIcon({ session, isBranch }) {
 			${
 				count > 0 &&
 				html`
-				<span class="session-badge" data-session-key=${session.key}>
+				<span class="session-badge" data-session-id=${session.sessionId}>
 					${count > 99 ? "99+" : String(count)}
 				</span>
 			`
@@ -97,7 +93,7 @@ function SessionMeta({ session }) {
 
 		var parts = [];
 		if (session.forkPoint != null) parts.push(`fork@${session.forkPoint}`);
-		var branch = session.worktree_branch || "";
+		var branch = session.worktreeBranch || "";
 		if (branch) parts.push(`\u2387 ${branch}`);
 
 		var projId = session.projectId || "";
@@ -116,15 +112,15 @@ function SessionMeta({ session }) {
 			ref.current.appendChild(icon);
 			ref.current.appendChild(document.createTextNode(proj.label || proj.id));
 		}
-	}, [session.projectId, session.forkPoint, session.worktree_branch]);
+	}, [session.projectId, session.forkPoint, session.worktreeBranch]);
 
-	return html`<div class="session-meta" data-session-key=${session.key} ref=${ref}></div>`;
+	return html`<div class="session-meta" data-session-id=${session.sessionId} ref=${ref}></div>`;
 }
 
 // ── SessionItem component ───────────────────────────────────
 function SessionItem({ session, activeKey, depth, keyMap }) {
 	var isBranch = depth > 0;
-	var active = session.key === activeKey;
+	var active = session.sessionId === activeKey;
 	// Read per-session signals — auto-subscribes for re-render.
 	// dataVersion triggers re-render when plain properties (preview,
 	// updatedAt, label) change. Badge updates come from badgeCount
@@ -145,24 +141,26 @@ function SessionItem({ session, activeKey, depth, keyMap }) {
 
 	var rawPreview = session.preview || "";
 	var parentPreview =
-		session.parentSessionKey && keyMap[session.parentSessionKey] ? keyMap[session.parentSessionKey].preview || "" : "";
+		session.parentSessionId && keyMap[session.parentSessionId]
+			? keyMap[session.parentSessionId].preview || ""
+			: "";
 	var preview = rawPreview && rawPreview === parentPreview ? "" : rawPreview;
 	var ts = session.updatedAt || 0;
 
 	function onClick() {
 		if (currentPrefix !== "/chats") {
-			navigate(sessionPath(session.key));
+			navigate(sessionPath(session.sessionId));
 		} else {
-			switchSession(session.key);
+			switchSession(session.sessionId);
 		}
 	}
 
 	return html`
-		<div class=${className} data-session-key=${session.key} style=${style} onClick=${onClick}>
+		<div class=${className} data-session-id=${session.sessionId} style=${style} onClick=${onClick}>
 			<div class="session-info">
 				<div class="session-label">
 					<${SessionIcon} session=${session} isBranch=${isBranch} />
-					<span data-label-text>${session.label || session.key}</span>
+					<span data-label-text>${session.label || session.sessionId}</span>
 					${
 						ts > 0 &&
 						html`
@@ -182,7 +180,7 @@ function SessionItem({ session, activeKey, depth, keyMap }) {
 // ── SessionList component ───────────────────────────────────
 export function SessionList() {
 	var allSessions = sessionStore.sessions.value;
-	var activeKey = sessionStore.activeSessionKey.value;
+	var activeKey = sessionStore.activeSessionId.value;
 	var filterId = projectStore.projectFilterId.value;
 
 	var filtered = filterId ? allSessions.filter((s) => s.projectId === filterId) : allSessions;
@@ -191,13 +189,13 @@ export function SessionList() {
 	var childrenMap = {};
 	var keyMap = {};
 	filtered.forEach((s) => {
-		keyMap[s.key] = s;
-		if (s.parentSessionKey) {
-			if (!childrenMap[s.parentSessionKey]) childrenMap[s.parentSessionKey] = [];
-			childrenMap[s.parentSessionKey].push(s);
+		keyMap[s.sessionId] = s;
+		if (s.parentSessionId) {
+			if (!childrenMap[s.parentSessionId]) childrenMap[s.parentSessionId] = [];
+			childrenMap[s.parentSessionId].push(s);
 		}
 	});
-	var roots = filtered.filter((s) => !(s.parentSessionKey && keyMap[s.parentSessionKey]));
+	var roots = filtered.filter((s) => !(s.parentSessionId && keyMap[s.parentSessionId]));
 
 	// Spinner animation via setInterval
 	var spinnersRef = useRef(null);
@@ -213,10 +211,10 @@ export function SessionList() {
 	}, []);
 
 	function renderTree(session, depth) {
-		var children = childrenMap[session.key] || [];
+		var children = childrenMap[session.sessionId] || [];
 		return html`
 			<${SessionItem}
-				key=${session.key}
+				key=${session.sessionId}
 				session=${session}
 				activeKey=${activeKey}
 				depth=${depth}

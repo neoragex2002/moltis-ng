@@ -62,9 +62,9 @@ test.describe("Session management", () => {
 		// URL should change to a new session (not main)
 		await expect(page).not.toHaveURL(/\/chats\/main$/);
 		await expect(page).toHaveURL(/\/chats\//);
-		await expect(page.locator(`#sessionList .session-item[data-session-key="${firstSessionKey}"]`)).toHaveClass(
-			/active/,
-		);
+			await expect(page.locator(`#sessionList .session-item[data-session-id="${firstSessionKey}"]`)).toHaveClass(
+				/active/,
+			);
 		await expect(sessionItems).toHaveCount(initialCount + 1);
 		await expect(page.locator("#chatInput")).toBeFocused();
 
@@ -73,9 +73,9 @@ test.describe("Session management", () => {
 		await createSession(page);
 		const secondSessionPath = new URL(page.url()).pathname;
 		const secondSessionKey = secondSessionPath.replace(/^\/chats\//, "").replace(/\//g, ":");
-		await expect(page.locator(`#sessionList .session-item[data-session-key="${secondSessionKey}"]`)).toHaveClass(
-			/active/,
-		);
+			await expect(page.locator(`#sessionList .session-item[data-session-id="${secondSessionKey}"]`)).toHaveClass(
+				/active/,
+			);
 		await expect(sessionItems).toHaveCount(initialCount + 2);
 		await expect(page.locator("#chatInput")).toBeFocused();
 
@@ -91,9 +91,9 @@ test.describe("Session management", () => {
 		const newSessionUrl = page.url();
 
 		// Click the "main" session in the list
-		const mainItem = page.locator('#sessionList .session-item[data-session-key="main"]');
-		// If data-session-key isn't set, fall back to finding by label text
-		const target = (await mainItem.count()) ? mainItem : page.locator("#sessionList .session-item").first();
+			const mainItem = page.locator('#sessionList .session-item[data-session-id="main"]');
+			// If data-session-id isn't set, fall back to finding by label text
+			const target = (await mainItem.count()) ? mainItem : page.locator("#sessionList .session-item").first();
 		await target.click();
 
 		await expect(page).not.toHaveURL(newSessionUrl);
@@ -134,7 +134,7 @@ test.describe("Session management", () => {
 				() =>
 					page.evaluate(() => {
 						const store = window.__moltis_stores?.sessionStore;
-						const main = store?.getByKey?.("main");
+						const main = store?.getById?.("main");
 						if (!main) return null;
 						return {
 							messageCount: main.messageCount || 0,
@@ -149,9 +149,9 @@ test.describe("Session management", () => {
 		await chatInput.fill(firstMessage);
 		await chatInput.press("Enter");
 
-		await expect(page.locator('#sessionList .session-item[data-session-key="main"] .session-preview')).toContainText(
-			firstMessage,
-		);
+			await expect(page.locator('#sessionList .session-item[data-session-id="main"] .session-preview')).toContainText(
+				firstMessage,
+			);
 
 		expect(pageErrors).toEqual([]);
 	});

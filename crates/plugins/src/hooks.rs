@@ -123,7 +123,7 @@ mod tests {
 
     fn test_payload() -> HookPayload {
         HookPayload::BeforeToolCall {
-            session_key: "test-session".into(),
+            session_id: "test-session".into(),
             tool_name: "exec".into(),
             arguments: serde_json::json!({"command": "ls"}),
         }

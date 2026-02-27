@@ -213,15 +213,23 @@ impl AgentTool for SpawnAgentTool {
 
         let persona = load_persona(persona_id);
 
-        // Build tool context with incremented depth and propagated session key.
         let mut tool_context = serde_json::json!({
             SPAWN_DEPTH_KEY: depth + 1,
         });
-        if let Some(session_key) = params.get("_session_key") {
-            tool_context["_session_key"] = session_key.clone();
+        if let Some(session_id) = params.get("_sessionId") {
+            tool_context["_sessionId"] = session_id.clone();
         }
-        if let Some(session_id) = params.get("_session_id") {
-            tool_context["_session_id"] = session_id.clone();
+        if let Some(chan_chat_key) = params.get("_chanChatKey") {
+            tool_context["_chanChatKey"] = chan_chat_key.clone();
+        }
+        if let Some(conn_id) = params.get("_connId") {
+            tool_context["_connId"] = conn_id.clone();
+        }
+        if let Some(accept_language) = params.get("_acceptLanguage") {
+            tool_context["_acceptLanguage"] = accept_language.clone();
+        }
+        if let Some(sandbox) = params.get("_sandbox") {
+            tool_context["_sandbox"] = sandbox.clone();
         }
 
         // Run the sub-agent loop (no event forwarding, no hooks, no history).
@@ -232,7 +240,10 @@ impl AgentTool for SpawnAgentTool {
         };
         let user_content = UserContent::text(user_text);
 
-        let is_openai_responses = provider.name().trim().eq_ignore_ascii_case("openai-responses");
+        let is_openai_responses = provider
+            .name()
+            .trim()
+            .eq_ignore_ascii_case("openai-responses");
         let result = if is_openai_responses {
             let include_tools = !sub_tools.list_schemas().is_empty();
             let persona_label = persona_id.unwrap_or("default");

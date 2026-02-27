@@ -9,9 +9,9 @@ set -euo pipefail
 LOG_FILE="${HOOK_METRICS_FILE:-/tmp/moltis-agent-metrics.jsonl}"
 INPUT=$(cat)
 
-SESSION=$(echo "$INPUT" | grep -o '"session_key":"[^"]*"' | head -1 | cut -d'"' -f4)
+SESSION=$(echo "$INPUT" | grep -o '"sessionId":"[^"]*"' | head -1 | cut -d'"' -f4)
 ITERATIONS=$(echo "$INPUT" | grep -o '"iterations":[0-9]*' | head -1 | cut -d: -f2)
-TOOL_CALLS=$(echo "$INPUT" | grep -o '"tool_calls":[0-9]*' | head -1 | cut -d: -f2)
+TOOL_CALLS=$(echo "$INPUT" | grep -o '"toolCalls":[0-9]*' | head -1 | cut -d: -f2)
 TEXT_LEN=$(echo "$INPUT" | grep -o '"text":"[^"]*"' | head -1 | wc -c)
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 

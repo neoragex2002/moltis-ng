@@ -11,7 +11,7 @@ import { sendRpc } from "../helpers.js";
 export class Session {
 	constructor(serverData) {
 		// Server fields (plain properties, set on construction/update)
-		this.key = serverData.key;
+		this.sessionId = serverData.sessionId;
 		this.label = serverData.label || "";
 		this.model = serverData.model || "";
 		this.provider = serverData.provider || "";
@@ -21,11 +21,11 @@ export class Session {
 		this.preview = serverData.preview || "";
 		this.updatedAt = serverData.updatedAt || 0;
 		this.createdAt = serverData.createdAt || 0;
-		this.worktree_branch = serverData.worktree_branch || "";
-		this.sandbox_enabled = serverData.sandbox_enabled;
-		this.sandbox_image = serverData.sandbox_image || null;
-		this.channelBinding = serverData.channelBinding || null;
-		this.parentSessionKey = serverData.parentSessionKey || "";
+		this.worktreeBranch = serverData.worktreeBranch || "";
+		this.sandboxEnabled = serverData.sandboxEnabled;
+		this.sandboxImage = serverData.sandboxImage || null;
+		this.chanReplyTarget = serverData.chanReplyTarget || null;
+		this.parentSessionId = serverData.parentSessionId || "";
 		this.forkPoint = serverData.forkPoint != null ? serverData.forkPoint : null;
 		this.mcpDisabled = serverData.mcpDisabled;
 		this.archived = serverData.archived;
@@ -74,11 +74,11 @@ export class Session {
 			this.updatedAt = serverData.updatedAt || 0;
 		}
 		this.createdAt = serverData.createdAt || 0;
-		this.worktree_branch = serverData.worktree_branch || "";
-		this.sandbox_enabled = serverData.sandbox_enabled;
-		this.sandbox_image = serverData.sandbox_image || null;
-		this.channelBinding = serverData.channelBinding || null;
-		this.parentSessionKey = serverData.parentSessionKey || "";
+		this.worktreeBranch = serverData.worktreeBranch || "";
+		this.sandboxEnabled = serverData.sandboxEnabled;
+		this.sandboxImage = serverData.sandboxImage || null;
+		this.chanReplyTarget = serverData.chanReplyTarget || null;
+		this.parentSessionId = serverData.parentSessionId || "";
 		this.forkPoint = serverData.forkPoint != null ? serverData.forkPoint : null;
 		this.mcpDisabled = serverData.mcpDisabled;
 		this.archived = serverData.archived;
@@ -91,7 +91,7 @@ export class Session {
 	/** Optimistic bump: increment total and mark seen if active. */
 	bumpCount(increment) {
 		this.messageCount = (this.messageCount || 0) + increment;
-		if (this.key === activeSessionKey.value) {
+		if (this.sessionId === activeSessionId.value) {
 			this.lastSeenMessageCount = this.messageCount;
 		}
 		this.updateBadge();
@@ -114,12 +114,12 @@ export class Session {
 
 // ── Store signals ────────────────────────────────────────────
 export var sessions = signal([]);
-export var activeSessionKey = signal(localStorage.getItem("moltis-session") || "main");
+export var activeSessionId = signal(localStorage.getItem("moltis-sessionId") || "main");
 export var switchInProgress = signal(false);
 
 export var activeSession = computed(() => {
-	var key = activeSessionKey.value;
-	return sessions.value.find((s) => s.key === key) || null;
+	var sessionId = activeSessionId.value;
+	return sessions.value.find((s) => s.sessionId === sessionId) || null;
 });
 
 // ── Methods ──────────────────────────────────────────────────
@@ -133,12 +133,12 @@ export var activeSession = computed(() => {
 export function setAll(serverSessions) {
 	var existing = {};
 	for (var s of sessions.value) {
-		existing[s.key] = s;
+		existing[s.sessionId] = s;
 	}
 
 	var result = [];
 	for (var data of serverSessions) {
-		var prev = existing[data.key];
+		var prev = existing[data.sessionId];
 		if (prev) {
 			prev.update(data);
 			// Preserve client-side flags from old patched objects
@@ -161,8 +161,8 @@ export function setAll(serverSessions) {
  * Reuses existing instance when present; creates and appends when missing.
  */
 export function upsert(serverData) {
-	if (!(serverData && serverData.key)) return null;
-	var prev = getByKey(serverData.key);
+	if (!(serverData && serverData.sessionId)) return null;
+	var prev = getById(serverData.sessionId);
 	if (prev) {
 		prev.update(serverData);
 		return prev;
@@ -185,27 +185,25 @@ export function notify() {
 	sessions.value = [...sessions.value];
 }
 
-/** Look up a session by key. */
-export function getByKey(key) {
-	return sessions.value.find((s) => s.key === key) || null;
+export function getById(sessionId) {
+	return sessions.value.find((s) => s.sessionId === sessionId) || null;
 }
 
-/** Set the active session key. Persists to localStorage. */
-export function setActive(key) {
-	activeSessionKey.value = key;
-	localStorage.setItem("moltis-session", key);
+export function setActive(sessionId) {
+	activeSessionId.value = sessionId;
+	localStorage.setItem("moltis-sessionId", sessionId);
 }
 
 export var sessionStore = {
 	sessions,
-	activeSessionKey,
+	activeSessionId,
 	activeSession,
 	switchInProgress,
 	Session,
 	setAll,
 	upsert,
 	fetch,
-	getByKey,
+	getById,
 	setActive,
 	notify,
 };

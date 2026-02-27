@@ -157,7 +157,7 @@ mod tests {
                     "skipping oauth device-flow tests: binding to ephemeral port is not permitted in this environment ({e})"
                 );
                 return None;
-            }
+            },
             Err(e) => panic!("failed to bind test listener: {e}"),
         };
         let addr = listener.local_addr().unwrap();

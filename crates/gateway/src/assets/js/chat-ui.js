@@ -82,10 +82,10 @@ export function stripChannelPrefix(text) {
 export function appendChannelFooter(el, channel) {
 	var ft = document.createElement("div");
 	ft.className = "msg-channel-footer";
-	var label = channel.channel_type || "channel";
-	var who = channel.username ? `@${channel.username}` : channel.sender_name;
+	var label = channel.chanType || "channel";
+	var who = channel.username ? `@${channel.username}` : channel.senderName;
 	if (who) label += ` \u00b7 ${who}`;
-	if (channel.message_kind === "voice") {
+	if (channel.messageKind === "voice") {
 		var icon = document.createElement("span");
 		icon.className = "voice-icon";
 		icon.setAttribute("aria-hidden", "true");

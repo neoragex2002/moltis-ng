@@ -191,7 +191,7 @@ pub async fn run_silent_memory_turn(
     let tool_context = session_key
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| serde_json::json!({ "_session_key": s }));
+        .map(|s| serde_json::json!({ "_sessionId": s }));
     let result = run_agent_loop_with_context(
         provider,
         &tools,

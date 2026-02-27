@@ -63,10 +63,7 @@ pub(crate) fn ensure_default_persona_seeded() -> anyhow::Result<()> {
 
     let tools_path = dir.join("TOOLS.md");
     if !tools_path.exists() {
-        write_string(
-            &tools_path,
-            "# TOOLS.md\n\nAdd tool usage guidance here.\n",
-        )?;
+        write_string(&tools_path, "# TOOLS.md\n\nAdd tool usage guidance here.\n")?;
     }
 
     let agents_path = dir.join("AGENTS.md");
@@ -89,7 +86,9 @@ pub(crate) fn list_personas() -> anyhow::Result<Vec<String>> {
 
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            let Ok(ft) = entry.file_type() else { continue };
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             if !ft.is_dir() {
                 continue;
             }

@@ -109,17 +109,17 @@
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [ ] 支持用户自定义多个命名 persona（可列举/可选择/可默认）。
-- [ ] 支持按 **Telegram bot identity** 绑定 persona（每个 bot 可独立 persona；不做 session 覆盖）。
+- [x] 支持用户自定义多个命名 persona（可列举/可选择/可默认）。
+- [x] 支持按 **Telegram bot identity** 绑定 persona（每个 bot 可独立 persona；不做 session 覆盖）。
   - Telegram bot identity = (`channel="telegram"`, `chan_user_id`)
-- [ ] 保留 Moltis 系统默认 persona（`default`），用于非 Telegram 场景（例如 `main`）。
-- [ ] OpenAI Responses provider：每次 run 必须显式发送 **三条** `role=developer` messages（`system > persona > runtime_snapshot`），且不得使用顶级 `instructions` 字段注入 Moltis system/persona。
-- [ ] `spawn_agent` 子代理默认使用系统 `default` persona（允许显式指定 persona/model）；不从父 session“继承 persona”（避免隐式传播与口径混乱）。
-- [ ] debug/context/raw_prompt 可见 effective persona（persona_id + 来源）。
-- [ ] agent 之间彼此“认识”（通过 `## People (reference)` 指向 `PEOPLE.md`，提供“本实例可用 agent roster”的统一来源 + 委派注意事项）。
-- [ ] agent “认识主人/用户”（来自 `USER.md` 的 owner 信息，放入 developer message 的独立小节）。
-- [ ] Telegram 接入体验收敛：Add Telegram Bot 表单不再要求手填 username；仅输入 token，后端通过 `getMe` 自动获得 `chan_user_id/chan_user_name/chan_nickname` 并生成 `account_handle=telegram:<chan_user_id>`。
-- [ ] Web UI：Telegram bot 配置页提供 persona 配置入口（最小可用：输入 `persona_id` + 保存）。
+- [x] 保留 Moltis 系统默认 persona（`default`），用于非 Telegram 场景（例如 `main`）。
+- [x] OpenAI Responses provider：每次 run 必须显式发送 **三条** `role=developer` messages（`system > persona > runtime_snapshot`），且不得使用顶级 `instructions` 字段注入 Moltis system/persona。
+- [x] `spawn_agent` 子代理默认使用系统 `default` persona（允许显式指定 persona/model）；不从父 session“继承 persona”（避免隐式传播与口径混乱）。
+- [x] debug/context/raw_prompt 可见 effective persona（persona_id + 来源）。
+- [x] agent 之间彼此“认识”（通过 `## People (reference)` 指向 `PEOPLE.md`，提供“本实例可用 agent roster”的统一来源 + 委派注意事项）。
+- [x] agent “认识主人/用户”（来自 `USER.md` 的 owner 信息，放入 developer message 的独立小节）。
+- [x] Telegram 接入体验收敛：Add Telegram Bot 表单不再要求手填 username；仅输入 token，后端通过 `getMe` 自动获得 `chan_user_id/chan_user_name/chan_nickname` 并生成 `account_handle=telegram:<chan_user_id>`。
+- [x] Web UI：Telegram bot 配置页提供 persona 配置入口（最小可用：输入 `persona_id` + 保存）。
   - UI 建议（V1 最收敛，避免引入 personas discovery API）：
     - Add Telegram Bot：不再要求输入 username；仅输入 token（后端 `getMe` 自动发现 `chan_user_id/chan_user_name/chan_nickname` 并生成 `account_handle`）。
     - Edit Telegram Bot（`EditChannelModal`）增加一个 `Persona ID` 字段（可选 string；为空视为 `default` 生效）。
@@ -570,37 +570,37 @@ You have access to a long-term memory system. Use `memory_search` to recall past
 - 日志不得打印 token/secret；persona 内容默认不全量打印（仅 debug/显式 raw_prompt 可查看）。
 
 ## 验收标准（Acceptance Criteria）【不可省略】
-- [ ] 可列举 personas（至少能从 `~/.moltis/personas/*` 发现；每个 persona 目录的约定文件为 `IDENTITY.md`/`SOUL.md`/`AGENTS.md`/`TOOLS.md`，缺失按 loader 的 fallback 策略处理）。
-- [ ] Telegram bot A/B 分别配置不同 persona_id 后，两者 raw_prompt / as-sent 请求体能看到不同的 developer persona message。
-- [ ] Telegram 接入：Add Telegram Bot 不再要求输入 username；仅 token 即可完成接入，并能在 UI/Debug 看到 `account_handle=telegram:<chan_user_id>` 与 `@{chan_user_name}`。
-- [ ] Telegram session_key：默认 key 形如 `telegram:<chan_user_id>:<chat_id>`（不出现 `telegram:telegram:` 双前缀）。
-- [ ] OpenAI Responses 请求体满足：
+- [x] 可列举 personas（至少能从 `~/.moltis/personas/*` 发现；每个 persona 目录的约定文件为 `IDENTITY.md`/`SOUL.md`/`AGENTS.md`/`TOOLS.md`，缺失按 loader 的 fallback 策略处理）。
+- [x] Telegram bot A/B 分别配置不同 persona_id 后，两者 raw_prompt / as-sent 请求体能看到不同的 developer persona message。
+- [x] Telegram 接入：Add Telegram Bot 不再要求输入 username；仅 token 即可完成接入，并能在 UI/Debug 看到 `account_handle=telegram:<chan_user_id>` 与 `@{chan_user_name}`。
+- [x] Telegram session_key：默认 key 形如 `telegram:<chan_user_id>:<chat_id>`（不出现 `telegram:telegram:` 双前缀）。
+- [x] OpenAI Responses 请求体满足：
   - `instructions` 为空/缺省
   - `input[0].role="developer"` 为 Moltis system developer message
   - `input[1].role="developer"` 为 persona developer message
   - `input[2].role="developer"` 为 runtime snapshot developer message（可变；带“snapshot/may change”标注）
   - 且三条 developer 文本均不含 `run_id`/时间戳/计数/usage/tool outputs 等 volatile 字段，也不得包含 secrets
-- [ ] developer persona text 含 `## People (reference)`，且仅包含对 `~/.moltis/PEOPLE.md` 的引用提示（不内嵌 roster 内容，以保持 prompt cache 稳定）。
-- [ ] 未配置 persona 时行为与当前一致（`default` 路径兼容）。
-- [ ] `spawn_agent` 默认使用 `default` persona，且可显式指定 persona。
-- [ ] UI：能在 Telegram bot 配置页保存 persona_id（无配置时显示 `default` 生效态）。
+- [x] developer persona text 含 `## People (reference)`，且仅包含对 `~/.moltis/PEOPLE.md` 的引用提示（不内嵌 roster 内容，以保持 prompt cache 稳定）。
+- [x] 未配置 persona 时行为与当前一致（`default` 路径兼容）。
+- [x] `spawn_agent` 默认使用 `default` persona，且可显式指定 persona。
+- [x] UI：能在 Telegram bot 配置页保存 persona_id（无配置时显示 `default` 生效态）。
 
 ## 测试计划（Test Plan）【不可省略】
 ### Unit
-- [ ] persona loader：缺文件回退/空文件行为/路径穿越拒绝
-- [ ] prompt 构建：给 persona A/B，断言 developer 文本不同且结构稳定（包含 `Owner`/`People (reference)` 小节）
-- [ ] prompt 构建：断言 developer 文本不读取/不内嵌 `PEOPLE.md` 内容（只保留引用提示）
-- [ ] OpenAI Responses provider：
+- [x] persona loader：缺文件回退/空文件行为/路径穿越拒绝
+- [x] prompt 构建：给 persona A/B，断言 developer 文本不同且结构稳定（包含 `Owner`/`People (reference)` 小节）
+- [x] prompt 构建：断言 developer 文本不读取/不内嵌 `PEOPLE.md` 内容（只保留引用提示）
+- [x] OpenAI Responses provider：
   - `instructions` 不使用
   - `ChatMessage::System` → `input[0].role="developer"`（system developer message）
   - `ChatMessage::Developer`（persona）→ `input[1].role="developer"`（persona developer message）
   - `ChatMessage::Developer`（runtime snapshot）→ `input[2].role="developer"`（runtime snapshot developer message）
-- [ ] Telegram identity：`getMe` → `chan_user_id/chan_user_name/chan_nickname`；生成 `account_handle=telegram:<chan_user_id>`（主键稳定）。
-- [ ] session_key：Telegram 默认 key = `telegram:<chan_user_id>:<chat_id>`（不包含 `account_handle` 的 `telegram:` 前缀重复）。
+- [x] Telegram identity：`getMe` → `chan_user_id/chan_user_name/chan_nickname`；生成 `account_handle=telegram:<chan_user_id>`（主键稳定）。
+- [x] session_key：Telegram 默认 key = `telegram:<chan_user_id>:<chat_id>`（不包含 `account_handle` 的 `telegram:` 前缀重复）。
 
 ### Integration
-- [ ] Gateway：persona 解析优先级（account_handle > default）；确保无 session 覆盖路径
-- [ ] `raw_prompt` / `chat.context`：展示 effective persona_id + 来源
+- [x] Gateway：persona 解析优先级（account_handle > default）；确保无 session 覆盖路径
+- [x] `raw_prompt` / `chat.context`：展示 effective persona_id + 来源
 
 ### 自动化缺口（如有，必须写手工验收）
 - 手工验证：抓取 OpenAI Responses 请求体（或 debug 面板）确认 `role=developer`。
@@ -652,10 +652,10 @@ You have access to a long-term memory system. Use `memory_search` to recall past
   - Owner：`name` + `preferred_language?` + `timezone?` + `location?`
   - People（reference）：`~/.moltis/PEOPLE.md`
 ## Close Checklist（关单清单）【不可省略】
-- [ ] 行为已按 Spec 实现（口径一致）
-- [ ] authoritative vs estimate 边界清晰（且 UI/日志标注 method/source）
-- [ ] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
-- [ ] 文档/配置示例已同步更新（避免断链）
-- [ ] 兼容性/迁移说明已写清（如涉及持久化/字段变更）
-- [ ] 安全隐私检查通过（敏感字段不泄露）
-- [ ] 回滚策略明确
+- [x] 行为已按 Spec 实现（口径一致）
+- [x] authoritative vs estimate 边界清晰（且 UI/日志标注 method/source）
+- [x] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
+- [x] 文档/配置示例已同步更新（避免断链）
+- [x] 兼容性/迁移说明已写清（如涉及持久化/字段变更）
+- [x] 安全隐私检查通过（敏感字段不泄露）
+- [x] 回滚策略明确

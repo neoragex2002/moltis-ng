@@ -1,27 +1,27 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccountHandleParts<'a> {
+pub struct ChanAccountKeyParts<'a> {
     pub channel: &'a str,
     pub chan_user_id: &'a str,
 }
 
-pub fn parse_account_handle(handle: &str) -> Option<AccountHandleParts<'_>> {
-    let (channel, chan_user_id) = handle.split_once(':')?;
+pub fn parse_chan_account_key(key: &str) -> Option<ChanAccountKeyParts<'_>> {
+    let (channel, chan_user_id) = key.split_once(':')?;
     let channel = channel.trim();
     let chan_user_id = chan_user_id.trim();
     if channel.is_empty() || chan_user_id.is_empty() {
         return None;
     }
-    Some(AccountHandleParts {
+    Some(ChanAccountKeyParts {
         channel,
         chan_user_id,
     })
 }
 
-pub fn chan_user_id_from_account_handle<'a>(
-    handle: &'a str,
+pub fn chan_user_id_from_chan_account_key<'a>(
+    key: &'a str,
     expected_channel: Option<&str>,
 ) -> Option<&'a str> {
-    let parts = parse_account_handle(handle)?;
+    let parts = parse_chan_account_key(key)?;
     if let Some(expected) = expected_channel {
         if parts.channel != expected {
             return None;
@@ -31,14 +31,14 @@ pub fn chan_user_id_from_account_handle<'a>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionKeyParts<'a> {
+pub struct ChanChatKeyParts<'a> {
     pub channel: &'a str,
     pub chan_user_id: &'a str,
     pub chat_id: &'a str,
     pub thread_id: Option<&'a str>,
 }
 
-pub fn format_session_key(
+pub fn format_chan_chat_key(
     channel: &str,
     chan_user_id: &str,
     chat_id: &str,
@@ -63,7 +63,7 @@ pub fn format_session_key(
     }
 }
 
-pub fn parse_session_key(key: &str) -> Option<SessionKeyParts<'_>> {
+pub fn parse_chan_chat_key(key: &str) -> Option<ChanChatKeyParts<'_>> {
     let trimmed = key.trim();
     if trimmed.is_empty() {
         return None;
@@ -80,7 +80,7 @@ pub fn parse_session_key(key: &str) -> Option<SessionKeyParts<'_>> {
         return None;
     }
     let thread_id = thread_id.filter(|s| !s.trim().is_empty());
-    Some(SessionKeyParts {
+    Some(ChanChatKeyParts {
         channel,
         chan_user_id,
         chat_id,
@@ -94,39 +94,39 @@ mod tests {
 
     #[test]
     fn parses_account_handle() {
-        let p = parse_account_handle("telegram:123").unwrap();
+        let p = parse_chan_account_key("telegram:123").unwrap();
         assert_eq!(p.channel, "telegram");
         assert_eq!(p.chan_user_id, "123");
         assert_eq!(
-            chan_user_id_from_account_handle("telegram:123", Some("telegram")),
+            chan_user_id_from_chan_account_key("telegram:123", Some("telegram")),
             Some("123")
         );
         assert_eq!(
-            chan_user_id_from_account_handle("telegram:123", Some("discord")),
+            chan_user_id_from_chan_account_key("telegram:123", Some("discord")),
             None
         );
     }
 
     #[test]
     fn parses_session_key_three_or_four_parts() {
-        let p = parse_session_key("telegram:123:-100").unwrap();
+        let p = parse_chan_chat_key("telegram:123:-100").unwrap();
         assert_eq!(p.channel, "telegram");
         assert_eq!(p.chan_user_id, "123");
         assert_eq!(p.chat_id, "-100");
         assert_eq!(p.thread_id, None);
 
-        let p = parse_session_key("telegram:123:-100:12").unwrap();
+        let p = parse_chan_chat_key("telegram:123:-100:12").unwrap();
         assert_eq!(p.thread_id, Some("12"));
         assert_eq!(
-            format_session_key("telegram", "123", "-100", Some("12")),
+            format_chan_chat_key("telegram", "123", "-100", Some("12")),
             "telegram:123:-100:12"
         );
     }
 
     #[test]
     fn rejects_invalid_session_key() {
-        assert!(parse_session_key("").is_none());
-        assert!(parse_session_key("a:b").is_none());
-        assert!(parse_session_key("a:b:c:d:e").is_none());
+        assert!(parse_chan_chat_key("").is_none());
+        assert!(parse_chan_chat_key("a:b").is_none());
+        assert!(parse_chan_chat_key("a:b:c:d:e").is_none());
     }
 }

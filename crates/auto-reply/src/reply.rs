@@ -16,17 +16,18 @@ pub async fn get_reply(msg: &MsgContext) -> anyhow::Result<ReplyPayload> {
     #[cfg(feature = "metrics")]
     counter!(
         auto_reply_metrics::MESSAGES_RECEIVED_TOTAL,
-        labels::CHANNEL => msg.channel.clone()
+        labels::CHANNEL => msg.chan_type.clone()
     )
     .increment(1);
 
     info!(
-        channel = %msg.channel,
-        account_handle = %msg.account_handle,
+        chan_type = %msg.chan_type,
+        chan_account_key = %msg.chan_account_key,
         from = %msg.from,
         sender = msg.sender_name.as_deref().unwrap_or("unknown"),
         chat_type = ?msg.chat_type,
-        session_key = %msg.session_key,
+        session_id = %msg.session_id,
+        chan_chat_key = %msg.chan_chat_key,
         "incoming message: {}",
         msg.body,
     );
@@ -41,14 +42,14 @@ pub async fn get_reply(msg: &MsgContext) -> anyhow::Result<ReplyPayload> {
             }
         ),
         media: None,
-        reply_to_id: msg.reply_to_id.clone(),
+        reply_to_message_id: msg.reply_to_message_id.clone(),
         silent: false,
     };
 
     #[cfg(feature = "metrics")]
     histogram!(
         auto_reply_metrics::PROCESSING_DURATION_SECONDS,
-        labels::CHANNEL => msg.channel.clone()
+        labels::CHANNEL => msg.chan_type.clone()
     )
     .record(start.elapsed().as_secs_f64());
 

@@ -30,8 +30,7 @@ use {
         prompt::{
             PromptHostRuntimeContext, PromptRuntimeContext, PromptSandboxRuntimeContext,
             VOICE_REPLY_SUFFIX, build_openai_responses_developer_prompts,
-            build_system_prompt_minimal_runtime,
-            build_system_prompt_with_session_runtime,
+            build_system_prompt_minimal_runtime, build_system_prompt_with_session_runtime,
         },
         providers::{ProviderRegistry, raw_model_id},
         runner::{RunnerEvent, run_agent_loop_streaming, run_agent_loop_streaming_with_prefix},
@@ -527,7 +526,7 @@ async fn run_single_probe(
 
     let probe = [ChatMessage::user("ping")];
     let llm_context = moltis_agents::model::LlmRequestContext {
-        session_key: Some(format!("probe:{provider_name}:{model_id}")),
+        session_id: Some(format!("probe:{provider_name}:{model_id}")),
     };
     let completion = tokio::time::timeout(
         std::time::Duration::from_secs(20),
@@ -818,14 +817,17 @@ async fn build_prompt_runtime_context(
     let sudo_fut = detect_host_sudo_access();
     let sandbox_fut = async {
         if let Some(ref router) = state.sandbox_router {
-            let is_sandboxed = router.is_sandboxed(session_key).await;
+            let router_key = session_entry
+                .map(crate::session::sandbox_router_key_for_entry)
+                .unwrap_or_else(|| session_key.to_string());
+            let is_sandboxed = router.is_sandboxed(&router_key).await;
             let config = router.config();
             Some(PromptSandboxRuntimeContext {
                 exec_sandboxed: is_sandboxed,
                 mode: Some(config.mode.to_string()),
                 backend: Some(router.backend_name().to_string()),
                 scope: Some(config.scope.to_string()),
-                image: Some(router.resolve_image(session_key, None).await),
+                image: Some(router.resolve_image(&router_key, None).await),
                 workspace_mount: Some(config.workspace_mount.to_string()),
                 no_network: Some(config.no_network),
                 session_override: session_entry.and_then(|entry| entry.sandbox_enabled),
@@ -872,15 +874,17 @@ async fn build_prompt_runtime_context(
         shell: detect_runtime_shell(),
         provider: Some(provider.name().to_string()),
         model: Some(provider.id().to_string()),
-        session_key: Some(session_key.to_string()),
+        session_id: Some(session_key.to_string()),
         channel: channel_target
             .as_ref()
-            .map(|t| t.channel_type.as_str().to_string()),
+            .map(|t| t.chan_type.as_str().to_string()),
         channel_account_id: channel_target
             .as_ref()
-            .and_then(|t| moltis_common::identity::parse_account_handle(&t.account_handle))
+            .and_then(|t| moltis_common::identity::parse_chan_account_key(&t.chan_account_key))
             .map(|p| p.chan_user_id.to_string()),
-        channel_account_handle: channel_target.as_ref().and_then(|t| t.bot_handle.clone()),
+        channel_account_handle: channel_target
+            .as_ref()
+            .and_then(|t| t.chan_user_name.clone()),
         channel_chat_id: channel_target.as_ref().map(|t| t.chat_id.clone()),
         sudo_non_interactive,
         sudo_status,
@@ -1597,7 +1601,7 @@ impl ModelService for LiveModelService {
         // provider to stop generating — effectively max_tokens: 1.
         let probe = vec![ChatMessage::user("ping")];
         let llm_context = moltis_agents::model::LlmRequestContext {
-            session_key: Some(format!("models.test:{model_id}")),
+            session_id: Some(format!("models.test:{model_id}")),
         };
         let mut stream = provider.stream_with_tools_with_context(&llm_context, probe, vec![]);
 
@@ -1979,7 +1983,7 @@ impl ChatService for LiveChatService {
         let desired_reply_medium = infer_reply_medium(&params, &text);
 
         let conn_id = params
-            .get("_conn_id")
+            .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
         let explicit_model = params.get("model").and_then(|v| v.as_str());
@@ -1997,22 +2001,16 @@ impl ChatService for LiveChatService {
             "send() mode decision"
         );
 
-        let session_key = match params.get("_session_id").and_then(|v| v.as_str()) {
+        let session_key = match params.get("_sessionId").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
-            None => match params.get("_session_key").and_then(|v| v.as_str()) {
-                Some(sk) => sk.to_string(),
-                None => self.session_key_for(conn_id.as_deref()).await,
-            },
+            None => self.session_key_for(conn_id.as_deref()).await,
         };
-        let tool_session_key = if params.get("_session_id").is_some() {
-            params
-                .get("_session_key")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&session_key)
-                .to_string()
-        } else {
-            session_key.clone()
-        };
+        let chan_chat_key_from_params = params
+            .get("_chanChatKey")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
         let queued_replay = params
             .get("_queued_replay")
             .and_then(|v| v.as_bool())
@@ -2145,7 +2143,7 @@ impl ChatService for LiveChatService {
                 .and_then(|v| v.as_str())
                 .map(String::from);
             let payload = moltis_common::hooks::HookPayload::MessageReceived {
-                session_key: session_key.clone(),
+                session_id: session_key.clone(),
                 content: text.clone(),
                 channel,
             };
@@ -2191,7 +2189,7 @@ impl ChatService for LiveChatService {
         // user message to the channel and register a reply target so the LLM
         // response is also delivered there.
         let is_web_message = conn_id.is_some()
-            && params.get("_session_key").is_none()
+            && params.get("_chanChatKey").is_none()
             && params.get("channel").is_none();
 
         if is_web_message
@@ -2204,8 +2202,8 @@ impl ChatService for LiveChatService {
             let is_active = self
                 .session_metadata
                 .get_active_session_id(
-                    target.channel_type.as_str(),
-                    &target.account_handle,
+                    target.chan_type.as_str(),
+                    &target.chan_account_key,
                     &target.chat_id,
                 )
                 .await
@@ -2246,19 +2244,26 @@ impl ChatService for LiveChatService {
         )
         .await;
         runtime_context.host.accept_language = params
-            .get("_accept_language")
+            .get("_acceptLanguage")
             .and_then(|v| v.as_str())
             .map(String::from);
         runtime_context.host.remote_ip = params
-            .get("_remote_ip")
+            .get("_remoteIp")
             .and_then(|v| v.as_str())
             .map(String::from);
         if runtime_context.host.timezone.is_none() {
             runtime_context.host.timezone = params
-                .get("_timezone")
+                .get("_timeZone")
                 .and_then(|v| v.as_str())
                 .map(String::from);
         }
+
+        let tool_chan_chat_key = chan_chat_key_from_params.clone().or_else(|| {
+            session_entry
+                .as_ref()
+                .and_then(|entry| entry.channel_binding.as_deref())
+                .and_then(crate::session::sandbox_chan_chat_key_for_channel_binding)
+        });
 
         let state = Arc::clone(&self.state);
         let active_runs = Arc::clone(&self.active_runs);
@@ -2298,9 +2303,9 @@ impl ChatService for LiveChatService {
         let session_store = Arc::clone(&self.session_store);
         let session_metadata = Arc::clone(&self.session_metadata);
         let session_key_clone = session_key.clone();
-        let tool_session_key_clone = tool_session_key.clone();
+        let tool_chan_chat_key_clone = tool_chan_chat_key.clone();
         let accept_language = params
-            .get("_accept_language")
+            .get("_acceptLanguage")
             .and_then(|v| v.as_str())
             .map(String::from);
 
@@ -2331,7 +2336,7 @@ impl ChatService for LiveChatService {
                     &self.state,
                     "chat",
                     serde_json::json!({
-                        "sessionKey": session_key,
+                        "sessionId": session_key,
                         "state": "queued",
                         "mode": format!("{queue_mode:?}").to_lowercase(),
                         "position": position,
@@ -2383,7 +2388,10 @@ impl ChatService for LiveChatService {
                 if desired_reply_medium == ReplyMedium::Voice {
                     runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
                 }
-                format!("{}\n\n{}\n\n{}", prompts.system, prompts.persona, runtime_snapshot)
+                format!(
+                    "{}\n\n{}\n\n{}",
+                    prompts.system, prompts.persona, runtime_snapshot
+                )
             } else {
                 let native_tools = provider.supports_tools();
                 let filtered_registry = {
@@ -2418,7 +2426,10 @@ impl ChatService for LiveChatService {
                 if desired_reply_medium == ReplyMedium::Voice {
                     runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
                 }
-                format!("{}\n\n{}\n\n{}", prompts.system, prompts.persona, runtime_snapshot)
+                format!(
+                    "{}\n\n{}\n\n{}",
+                    prompts.system, prompts.persona, runtime_snapshot
+                )
             }
         } else {
             let system_prompt = if stream_only {
@@ -2533,7 +2544,7 @@ impl ChatService for LiveChatService {
                 "chat",
                 serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": session_key,
+                    "sessionId": session_key,
                     "state": "error",
                     "error": error_obj,
                     "seq": client_seq,
@@ -2560,7 +2571,7 @@ impl ChatService for LiveChatService {
                 "chat",
                 serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": session_key,
+                    "sessionId": session_key,
                     "state": "auto_compact",
                     "phase": "start",
                     "reason": "budget_high_watermark",
@@ -2597,7 +2608,7 @@ impl ChatService for LiveChatService {
                         "chat",
                         serde_json::json!({
                             "runId": run_id,
-                            "sessionKey": session_key,
+                            "sessionId": session_key,
                             "state": "auto_compact",
                             "phase": "done",
                             "reason": "budget_high_watermark",
@@ -2631,7 +2642,7 @@ impl ChatService for LiveChatService {
                         "chat",
                         serde_json::json!({
                             "runId": run_id,
-                            "sessionKey": session_key,
+                            "sessionId": session_key,
                             "state": "auto_compact",
                             "phase": "error",
                             "reason": "budget_high_watermark",
@@ -2680,7 +2691,7 @@ impl ChatService for LiveChatService {
                     "chat",
                     serde_json::json!({
                         "runId": run_id_clone,
-                        "sessionKey": session_key_clone,
+                        "sessionId": session_key_clone,
                         "state": "voice_pending",
                     }),
                     BroadcastOpts::default(),
@@ -2720,7 +2731,7 @@ impl ChatService for LiveChatService {
                         &provider_name,
                         &history,
                         &session_key_clone,
-                        &tool_session_key_clone,
+                        tool_chan_chat_key_clone.as_deref(),
                         desired_reply_medium,
                         ctx_ref,
                         Some(&runtime_context),
@@ -2746,8 +2757,7 @@ impl ChatService for LiveChatService {
                 {
                     Ok(result) => result,
                     Err(_) => {
-                        let raw_error =
-                            format!("Agent run timed out after {agent_timeout_secs}s");
+                        let raw_error = format!("Agent run timed out after {agent_timeout_secs}s");
                         handle_run_failed_event(
                             &state,
                             &model_store,
@@ -2905,13 +2915,17 @@ impl ChatService for LiveChatService {
         let explicit_model = params.get("model").and_then(|v| v.as_str());
         let stream_only = !self.has_tools_sync();
 
-        let session_key = match params.get("_session_id").and_then(|v| v.as_str()) {
-            Some(id) => id.to_string(),
-            None => match params.get("_session_key").and_then(|v| v.as_str()) {
-                Some(sk) => sk.to_string(),
-                None => "main".to_string(),
-            },
-        };
+        let session_key = params
+            .get("_sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("main")
+            .to_string();
+        let chan_chat_key_from_params = params
+            .get("_chanChatKey")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
 
         // Resolve provider.
         let provider: Arc<dyn moltis_agents::model::LlmProvider> = {
@@ -2949,6 +2963,12 @@ impl ChatService for LiveChatService {
             session_entry.as_ref(),
         )
         .await;
+        let tool_chan_chat_key = chan_chat_key_from_params.or_else(|| {
+            session_entry
+                .as_ref()
+                .and_then(|entry| entry.channel_binding.as_deref())
+                .and_then(crate::session::sandbox_chan_chat_key_for_channel_binding)
+        });
 
         // Load conversation history (excluding the message we just appended).
         let mut history = self
@@ -3079,7 +3099,7 @@ impl ChatService for LiveChatService {
                 "chat",
                 serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": session_key,
+                    "sessionId": session_key,
                     "state": "voice_pending",
                 }),
                 BroadcastOpts::default(),
@@ -3121,7 +3141,7 @@ impl ChatService for LiveChatService {
                 &provider_name,
                 &history,
                 &session_key,
-                &session_key,
+                tool_chan_chat_key.as_deref(),
                 desired_reply_medium,
                 None,
                 Some(&runtime_context),
@@ -3260,9 +3280,9 @@ impl ChatService for LiveChatService {
 
     async fn cancel_queued(&self, params: Value) -> ServiceResult {
         let session_key = params
-            .get("sessionKey")
+            .get("sessionId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing 'sessionKey'".to_string())?;
+            .ok_or_else(|| "missing 'sessionId'".to_string())?;
 
         let removed = self
             .message_queue
@@ -3277,7 +3297,7 @@ impl ChatService for LiveChatService {
             &self.state,
             "chat",
             serde_json::json!({
-                "sessionKey": session_key,
+                "sessionId": session_key,
                 "state": "queue_cleared",
                 "count": count,
             }),
@@ -3290,7 +3310,7 @@ impl ChatService for LiveChatService {
 
     async fn history(&self, params: Value) -> ServiceResult {
         let conn_id = params
-            .get("_conn_id")
+            .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
         let session_key = self.session_key_for(conn_id.as_deref()).await;
@@ -3320,13 +3340,11 @@ impl ChatService for LiveChatService {
     }
 
     async fn clear(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_sessionId").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
-                .get("_conn_id")
+                .get("_connId")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             self.session_key_for(conn_id.as_deref()).await
@@ -3354,7 +3372,7 @@ impl ChatService for LiveChatService {
             &self.state,
             "chat",
             serde_json::json!({
-                "sessionKey": session_key,
+                "sessionId": session_key,
                 "state": "session_cleared",
             }),
             BroadcastOpts::default(),
@@ -3366,13 +3384,11 @@ impl ChatService for LiveChatService {
     }
 
     async fn compact(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_sessionId").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
-                .get("_conn_id")
+                .get("_connId")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             self.session_key_for(conn_id.as_deref()).await
@@ -3411,13 +3427,11 @@ impl ChatService for LiveChatService {
     }
 
     async fn context(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_sessionId").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
-                .get("_conn_id")
+                .get("_connId")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             self.session_key_for(conn_id.as_deref()).await
@@ -3447,7 +3461,7 @@ impl ChatService for LiveChatService {
         let provider_name = Some(provider.name().to_string());
         let supports_tools = provider.supports_tools();
         let llm_context = moltis_agents::model::LlmRequestContext {
-            session_key: Some(session_key.clone()),
+            session_id: Some(session_key.clone()),
         };
         let llm_debug = serde_json::json!({
             "provider": provider.name(),
@@ -3455,7 +3469,7 @@ impl ChatService for LiveChatService {
             "overrides": provider.debug_request_overrides(Some(&llm_context)),
         });
         let session_info = serde_json::json!({
-            "key": session_key,
+            "sessionId": session_key,
             "messageCount": message_count,
             "model": session_entry.as_ref().and_then(|e| e.model.as_deref()),
             "provider": provider_name,
@@ -3465,7 +3479,7 @@ impl ChatService for LiveChatService {
 
         // Project info & context files
         let conn_id = params
-            .get("_conn_id")
+            .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
         let project_id = if let Some(cid) = conn_id.as_deref() {
@@ -3554,15 +3568,22 @@ impl ChatService for LiveChatService {
 
         // Sandbox info
         let sandbox_info = if let Some(ref router) = self.state.sandbox_router {
-            let is_sandboxed = router.is_sandboxed(&session_key).await;
             let config = router.config();
-            let session_image = session_entry.as_ref().and_then(|e| e.sandbox_image.clone());
-            let effective_image = match session_image {
-                Some(img) if !img.is_empty() => img,
-                _ => router.default_image().await,
-            };
+            let router_key = params
+                .get("_chanChatKey")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    session_entry
+                        .as_ref()
+                        .map(crate::session::sandbox_router_key_for_entry)
+                })
+                .unwrap_or_else(|| session_key.clone());
+
+            let is_sandboxed = router.is_sandboxed(&router_key).await;
+            let effective_image = router.resolve_image(&router_key, None).await;
             let container_name = {
-                let id = router.sandbox_id_for(&session_key);
+                let id = router.sandbox_id_for(&router_key);
                 format!(
                     "{}-{}",
                     config
@@ -3728,20 +3749,18 @@ impl ChatService for LiveChatService {
     }
 
     async fn raw_prompt(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_sessionId").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
-                .get("_conn_id")
+                .get("_connId")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             self.session_key_for(conn_id.as_deref()).await
         };
 
         let conn_id = params
-            .get("_conn_id")
+            .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
 
@@ -3767,16 +3786,16 @@ impl ChatService for LiveChatService {
         )
         .await;
         runtime_context.host.accept_language = params
-            .get("_accept_language")
+            .get("_acceptLanguage")
             .and_then(|v| v.as_str())
             .map(String::from);
         runtime_context.host.remote_ip = params
-            .get("_remote_ip")
+            .get("_remoteIp")
             .and_then(|v| v.as_str())
             .map(String::from);
         if runtime_context.host.timezone.is_none() {
             runtime_context.host.timezone = params
-                .get("_timezone")
+                .get("_timeZone")
                 .and_then(|v| v.as_str())
                 .map(String::from);
         }
@@ -3859,20 +3878,18 @@ impl ChatService for LiveChatService {
     /// Return the **full messages array** that would be sent to the LLM on the
     /// next call — system prompt + conversation history — in OpenAI format.
     async fn full_context(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_id").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
+        let session_key = if let Some(sk) = params.get("_sessionId").and_then(|v| v.as_str()) {
             sk.to_string()
         } else {
             let conn_id = params
-                .get("_conn_id")
+                .get("_connId")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             self.session_key_for(conn_id.as_deref()).await
         };
 
         let conn_id = params
-            .get("_conn_id")
+            .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
 
@@ -3898,16 +3915,16 @@ impl ChatService for LiveChatService {
         )
         .await;
         runtime_context.host.accept_language = params
-            .get("_accept_language")
+            .get("_acceptLanguage")
             .and_then(|v| v.as_str())
             .map(String::from);
         runtime_context.host.remote_ip = params
-            .get("_remote_ip")
+            .get("_remoteIp")
             .and_then(|v| v.as_str())
             .map(String::from);
         if runtime_context.host.timezone.is_none() {
             runtime_context.host.timezone = params
-                .get("_timezone")
+                .get("_timeZone")
                 .and_then(|v| v.as_str())
                 .map(String::from);
         }
@@ -4209,7 +4226,10 @@ async fn handle_run_failed_event(
         obj.insert("details".into(), normalized.details.clone());
         obj.insert("raw".into(), serde_json::json!(normalized.raw));
         obj.insert("egress".into(), egress.clone());
-        obj.insert("dedup_key".into(), serde_json::Value::String(dedup_key.clone()));
+        obj.insert(
+            "dedup_key".into(),
+            serde_json::Value::String(dedup_key.clone()),
+        );
     }
 
     mark_unsupported_model(
@@ -4247,7 +4267,10 @@ async fn handle_run_failed_event(
         dedup_key,
         raw_class = normalized.raw.class,
         raw_message = normalized.raw.message_redacted,
-        egress_sent = egress.get("sent").and_then(|v| v.as_bool()).unwrap_or(false),
+        egress_sent = egress
+            .get("sent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         egress_reply_targets_before = reply_targets_before,
         egress_drained_count = drained_count,
         "run failed"
@@ -4278,7 +4301,7 @@ async fn run_with_tools(
     provider_name: &str,
     history_raw: &[serde_json::Value],
     session_key: &str,
-    tool_session_key: &str,
+    chan_chat_key: Option<&str>,
     desired_reply_medium: ReplyMedium,
     project_context: Option<&str>,
     runtime_context: Option<&PromptRuntimeContext>,
@@ -4332,7 +4355,10 @@ async fn run_with_tools(
             ChatMessage::system(runtime_snapshot.clone()),
         ];
         (
-            format!("{}\n\n{}\n\n{}", prompts.system, prompts.persona, runtime_snapshot),
+            format!(
+                "{}\n\n{}\n\n{}",
+                prompts.system, prompts.persona, runtime_snapshot
+            ),
             Some(prefix),
         )
     } else {
@@ -4375,16 +4401,61 @@ async fn run_with_tools(
 
     // Determine if this session is sandboxed (for browser tool execution mode)
     let session_is_sandboxed = if let Some(ref router) = state.sandbox_router {
-        router.is_sandboxed(&tool_session_key).await
+        let router_key = chan_chat_key.unwrap_or(session_key);
+        router.is_sandboxed(router_key).await
     } else {
         false
     };
+
+    // Dispatch BeforeAgentStart hook (may block).
+    if let Some(ref hooks) = hook_registry {
+        let payload = moltis_common::hooks::HookPayload::BeforeAgentStart {
+            session_id: session_key.to_string(),
+            model: provider.id().to_string(),
+        };
+        match hooks.dispatch(&payload).await {
+            Ok(moltis_common::hooks::HookAction::Block(reason)) => {
+                let error_str = format!("blocked by BeforeAgentStart hook: {reason}");
+                handle_run_failed_event(
+                    state,
+                    model_store,
+                    RunFailedEvent {
+                        run_id: run_id.to_string(),
+                        session_key: session_key.to_string(),
+                        provider_name: provider_name.to_string(),
+                        model_id: model_id.to_string(),
+                        stage_hint: FailureStage::Runner,
+                        raw_error: error_str,
+                        details: serde_json::json!({
+                            "hook": "BeforeAgentStart",
+                        }),
+                        seq: client_seq,
+                    },
+                )
+                .await;
+                return None;
+            },
+            Ok(moltis_common::hooks::HookAction::ModifyPayload(_)) => {
+                debug!("BeforeAgentStart ModifyPayload ignored");
+            },
+            Ok(moltis_common::hooks::HookAction::Continue) => {},
+            Err(e) => {
+                warn!(
+                    run_id,
+                    session = session_key,
+                    error = %e,
+                    "BeforeAgentStart hook dispatch failed"
+                );
+            },
+        }
+    }
 
     // Broadcast tool events to the UI in the order emitted by the runner.
     let state_for_events = Arc::clone(state);
     let run_id_for_events = run_id.to_string();
     let session_key_for_events = session_key.to_string();
     let session_store_for_events = session_store.map(Arc::clone);
+    let hook_registry_for_events = hook_registry.clone();
     let (on_event, mut event_rx) = ordered_runner_event_callback();
     let event_forwarder = tokio::spawn(async move {
         // Track tool call arguments from ToolCallStart so they can be persisted in ToolCallEnd.
@@ -4394,17 +4465,18 @@ async fn run_with_tools(
             let run_id = run_id_for_events.clone();
             let sk = session_key_for_events.clone();
             let store = session_store_for_events.clone();
+            let hook_registry = hook_registry_for_events.clone();
             let seq = client_seq;
             let payload = match event {
                 RunnerEvent::Thinking => serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": sk,
+                    "sessionId": sk,
                     "state": "thinking",
                     "seq": seq,
                 }),
                 RunnerEvent::ThinkingDone => serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": sk,
+                    "sessionId": sk,
                     "state": "thinking_done",
                     "seq": seq,
                 }),
@@ -4433,7 +4505,7 @@ async fn run_with_tools(
                     let is_browser = name == "browser";
                     let mut payload = serde_json::json!({
                         "runId": run_id,
-                        "sessionKey": sk,
+                        "sessionId": sk,
                         "state": "tool_call_start",
                         "toolCallId": id,
                         "toolName": name,
@@ -4458,7 +4530,7 @@ async fn run_with_tools(
                 } => {
                     let mut payload = serde_json::json!({
                         "runId": run_id,
-                        "sessionKey": sk,
+                        "sessionId": sk,
                         "state": "tool_call_end",
                         "toolCallId": id,
                         "toolName": name,
@@ -4597,52 +4669,90 @@ async fn run_with_tools(
                             }
                             r
                         });
-                        let tool_result_msg = PersistedMessage::tool_result(
-                            id,
-                            name,
-                            tracked_args,
-                            success,
-                            persisted_result,
-                            error,
-                        );
-                        let store_clone = Arc::clone(store);
-                        let sk_persist = sk.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = store_clone
-                                .append(&sk_persist, &tool_result_msg.to_value())
-                                .await
-                            {
-                                warn!("failed to persist tool result: {e}");
+                        let mut persisted_result_for_store = persisted_result;
+                        let mut persist_blocked = false;
+
+                        // Dispatch ToolResultPersist hook (may modify/block).
+                        if let Some(ref hooks) = hook_registry {
+                            let hook_payload = moltis_common::hooks::HookPayload::ToolResultPersist {
+                                session_id: sk.clone(),
+                                tool_name: name.clone(),
+                                result: persisted_result_for_store
+                                    .clone()
+                                    .unwrap_or(serde_json::Value::Null),
+                            };
+                            match hooks.dispatch(&hook_payload).await {
+                                Ok(moltis_common::hooks::HookAction::Block(reason)) => {
+                                    warn!(
+                                        session = %sk,
+                                        tool_name = %name,
+                                        reason = %reason,
+                                        "tool result persistence blocked by hook"
+                                    );
+                                    persist_blocked = true;
+                                },
+                                Ok(moltis_common::hooks::HookAction::ModifyPayload(v)) => {
+                                    persisted_result_for_store = (!v.is_null()).then_some(v);
+                                },
+                                Ok(moltis_common::hooks::HookAction::Continue) => {},
+                                Err(e) => {
+                                    warn!(
+                                        session = %sk,
+                                        tool_name = %name,
+                                        error = %e,
+                                        "ToolResultPersist hook dispatch failed"
+                                    );
+                                },
                             }
-                        });
+                        }
+                        if !persist_blocked {
+                            let tool_result_msg = PersistedMessage::tool_result(
+                                id,
+                                name,
+                                tracked_args,
+                                success,
+                                persisted_result_for_store,
+                                error,
+                            );
+                            let store_clone = Arc::clone(store);
+                            let sk_persist = sk.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = store_clone
+                                    .append(&sk_persist, &tool_result_msg.to_value())
+                                    .await
+                                {
+                                    warn!("failed to persist tool result: {e}");
+                                }
+                            });
+                        }
                     }
 
                     payload
                 },
                 RunnerEvent::ThinkingText(text) => serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": sk,
+                    "sessionId": sk,
                     "state": "thinking_text",
                     "text": text,
                     "seq": seq,
                 }),
                 RunnerEvent::TextDelta(text) => serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": sk,
+                    "sessionId": sk,
                     "state": "delta",
                     "text": text,
                     "seq": seq,
                 }),
                 RunnerEvent::Iteration(n) => serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": sk,
+                    "sessionId": sk,
                     "state": "iteration",
                     "iteration": n,
                     "seq": seq,
                 }),
                 RunnerEvent::SubAgentStart { task, model, depth } => serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": sk,
+                    "sessionId": sk,
                     "state": "sub_agent_start",
                     "task": task,
                     "model": model,
@@ -4657,7 +4767,7 @@ async fn run_with_tools(
                     tool_calls_made,
                 } => serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": sk,
+                    "sessionId": sk,
                     "state": "sub_agent_end",
                     "task": task,
                     "model": model,
@@ -4668,7 +4778,7 @@ async fn run_with_tools(
                 }),
                 RunnerEvent::RetryingAfterError(_) => serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": sk,
+                    "sessionId": sk,
                     "state": "retrying",
                     "seq": seq,
                 }),
@@ -4693,15 +4803,17 @@ async fn run_with_tools(
     // resolve per-session state and forward the user's locale to web requests.
     // The browser tool uses _sandbox to determine whether to run in a container.
     let mut tool_context = serde_json::json!({
-        "_session_key": tool_session_key,
-        "_session_id": session_key,
+        "_sessionId": session_key,
         "_sandbox": session_is_sandboxed,
     });
+    if let Some(chan_chat_key) = chan_chat_key {
+        tool_context["_chanChatKey"] = serde_json::json!(chan_chat_key);
+    }
     if let Some(lang) = accept_language.as_deref() {
-        tool_context["_accept_language"] = serde_json::json!(lang);
+        tool_context["_acceptLanguage"] = serde_json::json!(lang);
     }
     if let Some(cid) = conn_id.as_deref() {
-        tool_context["_conn_id"] = serde_json::json!(cid);
+        tool_context["_connId"] = serde_json::json!(cid);
     }
 
     let provider_ref = provider.clone();
@@ -4749,7 +4861,7 @@ async fn run_with_tools(
                 "chat",
                 serde_json::json!({
                     "runId": run_id,
-                    "sessionKey": session_key,
+                    "sessionId": session_key,
                     "state": "auto_compact",
                     "phase": "start",
                     "reason": "context_window_exceeded",
@@ -4785,7 +4897,7 @@ async fn run_with_tools(
                         "chat",
                         serde_json::json!({
                             "runId": run_id,
-                            "sessionKey": session_key,
+                            "sessionId": session_key,
                             "state": "auto_compact",
                             "phase": "done",
                             "reason": "context_window_exceeded",
@@ -4812,7 +4924,7 @@ async fn run_with_tools(
                             Some(&on_event),
                             retry_hist,
                             Some(tool_context),
-                            hook_registry,
+                            hook_registry.clone(),
                         )
                         .await
                     } else {
@@ -4824,7 +4936,7 @@ async fn run_with_tools(
                             Some(&on_event),
                             retry_hist,
                             Some(tool_context),
-                            hook_registry,
+                            hook_registry.clone(),
                         )
                         .await
                     }
@@ -4836,7 +4948,7 @@ async fn run_with_tools(
                         "chat",
                         serde_json::json!({
                             "runId": run_id,
-                            "sessionKey": session_key,
+                            "sessionId": session_key,
                             "state": "auto_compact",
                             "phase": "error",
                             "error": e.to_string(),
@@ -4863,8 +4975,64 @@ async fn run_with_tools(
         Ok(result) => {
             clear_unsupported_model(state, model_store, model_id).await;
 
-            let is_silent = result.text.trim().is_empty();
-            let display_text = result.text;
+            let mut display_text = result.text;
+
+            // Dispatch MessageSending hook (may modify/block).
+            if let Some(ref hooks) = hook_registry {
+                let payload = moltis_common::hooks::HookPayload::MessageSending {
+                    session_id: session_key.to_string(),
+                    content: display_text.clone(),
+                };
+                match hooks.dispatch(&payload).await {
+                    Ok(moltis_common::hooks::HookAction::Block(reason)) => {
+                        let error_str = format!("blocked by MessageSending hook: {reason}");
+                        handle_run_failed_event(
+                            state,
+                            model_store,
+                            RunFailedEvent {
+                                run_id: run_id.to_string(),
+                                session_key: session_key.to_string(),
+                                provider_name: provider_name.to_string(),
+                                model_id: model_id.to_string(),
+                                stage_hint: FailureStage::Runner,
+                                raw_error: error_str,
+                                details: serde_json::json!({
+                                    "hook": "MessageSending",
+                                }),
+                                seq: client_seq,
+                            },
+                        )
+                        .await;
+                        return None;
+                    },
+                    Ok(moltis_common::hooks::HookAction::ModifyPayload(v)) => {
+                        if let Some(s) = v.as_str() {
+                            display_text = s.to_string();
+                        } else if let Some(obj) = v.as_object()
+                            && let Some(s) = obj.get("content").and_then(|c| c.as_str())
+                        {
+                            display_text = s.to_string();
+                        } else {
+                            warn!(
+                                run_id,
+                                session = session_key,
+                                "MessageSending ModifyPayload ignored (expected string or object with 'content')"
+                            );
+                        }
+                    },
+                    Ok(moltis_common::hooks::HookAction::Continue) => {},
+                    Err(e) => {
+                        warn!(
+                            run_id,
+                            session = session_key,
+                            error = %e,
+                            "MessageSending hook dispatch failed"
+                        );
+                    },
+                }
+            }
+
+            let is_silent = display_text.trim().is_empty();
 
             info!(
                 run_id,
@@ -4931,6 +5099,27 @@ async fn run_with_tools(
                 // Silent responses must still clear pending channel delivery state
                 // (reply targets + logbook) to avoid later reply "cross-wiring".
                 deliver_channel_replies(state, session_key, "", desired_reply_medium).await;
+            }
+
+            // Dispatch MessageSent + AgentEnd hooks (read-only).
+            if let Some(ref hooks) = hook_registry {
+                let payload = moltis_common::hooks::HookPayload::MessageSent {
+                    session_id: session_key.to_string(),
+                    content: display_text.clone(),
+                };
+                if let Err(e) = hooks.dispatch(&payload).await {
+                    warn!(run_id, session = session_key, error = %e, "MessageSent hook failed");
+                }
+
+                let payload = moltis_common::hooks::HookPayload::AgentEnd {
+                    session_id: session_key.to_string(),
+                    text: display_text.clone(),
+                    iterations: result.iterations,
+                    tool_calls: result.tool_calls_made,
+                };
+                if let Err(e) = hooks.dispatch(&payload).await {
+                    warn!(run_id, session = session_key, error = %e, "AgentEnd hook failed");
+                }
             }
             Some(ChatRunOutput {
                 text: display_text,
@@ -5302,7 +5491,7 @@ async fn compact_session(
 
     if let Some(ref hooks) = hook_registry {
         let payload = moltis_common::hooks::HookPayload::BeforeCompaction {
-            session_key: session_key.to_string(),
+            session_id: session_key.to_string(),
             message_count: pre_message_count,
         };
         if let Err(e) = hooks.dispatch(&payload).await {
@@ -5378,7 +5567,7 @@ If something is unknown, write \"Unknown\" instead of guessing.",
     ));
 
     let llm_context = moltis_agents::model::LlmRequestContext {
-        session_key: Some(session_key.to_string()),
+        session_id: Some(session_key.to_string()),
     };
     let mut stream =
         provider.stream_with_tools_with_context(&llm_context, summary_messages, vec![]);
@@ -5437,7 +5626,7 @@ If something is unknown, write \"Unknown\" instead of guessing.",
 
     if let Some(ref hooks) = hook_registry {
         let payload = moltis_common::hooks::HookPayload::AfterCompaction {
-            session_key: session_key.to_string(),
+            session_id: session_key.to_string(),
             summary_len: summary.len(),
         };
         if let Err(e) = hooks.dispatch(&payload).await {
@@ -5474,6 +5663,50 @@ async fn run_streaming(
 ) -> Option<ChatRunOutput> {
     let persona_id = resolve_session_persona_id(state, runtime_context).await;
     let persona = load_prompt_persona_with_id(persona_id.as_deref());
+    let hook_registry = state.inner.read().await.hook_registry.clone();
+
+    // Dispatch BeforeAgentStart hook (may block).
+    if let Some(ref hooks) = hook_registry {
+        let payload = moltis_common::hooks::HookPayload::BeforeAgentStart {
+            session_id: session_key.to_string(),
+            model: provider.id().to_string(),
+        };
+        match hooks.dispatch(&payload).await {
+            Ok(moltis_common::hooks::HookAction::Block(reason)) => {
+                let error_str = format!("blocked by BeforeAgentStart hook: {reason}");
+                handle_run_failed_event(
+                    state,
+                    model_store,
+                    RunFailedEvent {
+                        run_id: run_id.to_string(),
+                        session_key: session_key.to_string(),
+                        provider_name: provider_name.to_string(),
+                        model_id: model_id.to_string(),
+                        stage_hint: FailureStage::Runner,
+                        raw_error: error_str,
+                        details: serde_json::json!({
+                            "hook": "BeforeAgentStart",
+                        }),
+                        seq: client_seq,
+                    },
+                )
+                .await;
+                return None;
+            },
+            Ok(moltis_common::hooks::HookAction::ModifyPayload(_)) => {
+                debug!("BeforeAgentStart ModifyPayload ignored");
+            },
+            Ok(moltis_common::hooks::HookAction::Continue) => {},
+            Err(e) => {
+                warn!(
+                    run_id,
+                    session = session_key,
+                    error = %e,
+                    "BeforeAgentStart hook dispatch failed"
+                );
+            },
+        }
+    }
 
     let mut messages: Vec<ChatMessage> = Vec::new();
     if is_openai_responses_provider(provider_name) {
@@ -5530,7 +5763,7 @@ async fn run_streaming(
     let stream_start = stream_started_at;
 
     let llm_context = moltis_agents::model::LlmRequestContext {
-        session_key: Some(session_key.to_string()),
+        session_id: Some(session_key.to_string()),
     };
     // Stream-only mode still needs request context (e.g. prompt_cache_key bucketing
     // for OpenAI Responses). Pass empty tools to preserve the no-tools behavior.
@@ -5546,7 +5779,7 @@ async fn run_streaming(
                     "chat",
                     serde_json::json!({
                         "runId": run_id,
-                        "sessionKey": session_key,
+                        "sessionId": session_key,
                         "state": "delta",
                         "text": delta,
                     }),
@@ -5597,6 +5830,61 @@ async fn run_streaming(
                         labels::MODEL => model_id.to_string()
                     )
                     .record(duration);
+                }
+
+                // Dispatch MessageSending hook (may modify/block).
+                if let Some(ref hooks) = hook_registry {
+                    let payload = moltis_common::hooks::HookPayload::MessageSending {
+                        session_id: session_key.to_string(),
+                        content: accumulated.clone(),
+                    };
+                    match hooks.dispatch(&payload).await {
+                        Ok(moltis_common::hooks::HookAction::Block(reason)) => {
+                            let error_str = format!("blocked by MessageSending hook: {reason}");
+                            handle_run_failed_event(
+                                state,
+                                model_store,
+                                RunFailedEvent {
+                                    run_id: run_id.to_string(),
+                                    session_key: session_key.to_string(),
+                                    provider_name: provider_name.to_string(),
+                                    model_id: model_id.to_string(),
+                                    stage_hint: FailureStage::Runner,
+                                    raw_error: error_str,
+                                    details: serde_json::json!({
+                                        "hook": "MessageSending",
+                                    }),
+                                    seq: client_seq,
+                                },
+                            )
+                            .await;
+                            return None;
+                        },
+                        Ok(moltis_common::hooks::HookAction::ModifyPayload(v)) => {
+                            if let Some(s) = v.as_str() {
+                                accumulated = s.to_string();
+                            } else if let Some(obj) = v.as_object()
+                                && let Some(s) = obj.get("content").and_then(|c| c.as_str())
+                            {
+                                accumulated = s.to_string();
+                            } else {
+                                warn!(
+                                    run_id,
+                                    session = session_key,
+                                    "MessageSending ModifyPayload ignored (expected string or object with 'content')"
+                                );
+                            }
+                        },
+                        Ok(moltis_common::hooks::HookAction::Continue) => {},
+                        Err(e) => {
+                            warn!(
+                                run_id,
+                                session = session_key,
+                                error = %e,
+                                "MessageSending hook dispatch failed"
+                            );
+                        },
+                    }
                 }
 
                 let is_silent = accumulated.trim().is_empty();
@@ -5668,6 +5956,27 @@ async fn run_streaming(
                     // (reply targets + logbook) to avoid later reply "cross-wiring".
                     deliver_channel_replies(state, session_key, "", desired_reply_medium).await;
                 }
+
+                // Dispatch MessageSent + AgentEnd hooks (read-only).
+                if let Some(ref hooks) = hook_registry {
+                    let payload = moltis_common::hooks::HookPayload::MessageSent {
+                        session_id: session_key.to_string(),
+                        content: accumulated.clone(),
+                    };
+                    if let Err(e) = hooks.dispatch(&payload).await {
+                        warn!(run_id, session = session_key, error = %e, "MessageSent hook failed");
+                    }
+
+                    let payload = moltis_common::hooks::HookPayload::AgentEnd {
+                        session_id: session_key.to_string(),
+                        text: accumulated.clone(),
+                        iterations: 1,
+                        tool_calls: 0,
+                    };
+                    if let Err(e) = hooks.dispatch(&payload).await {
+                        warn!(run_id, session = session_key, error = %e, "AgentEnd hook failed");
+                    }
+                }
                 return Some(ChatRunOutput {
                     text: accumulated,
                     input_tokens: usage.input_tokens,
@@ -5708,7 +6017,7 @@ async fn run_streaming(
 /// Send a push notification when a chat response completes.
 /// Only sends if push notifications are configured and there are subscribers.
 #[cfg(feature = "push-notifications")]
-async fn send_chat_push_notification(state: &Arc<GatewayState>, session_key: &str, text: &str) {
+async fn send_chat_push_notification(state: &Arc<GatewayState>, session_id: &str, text: &str) {
     let push_service = match state.get_push_service().await {
         Some(svc) => svc,
         None => {
@@ -5725,7 +6034,7 @@ async fn send_chat_push_notification(state: &Arc<GatewayState>, session_key: &st
 
     tracing::info!(
         subscribers = sub_count,
-        session = session_key,
+        session = session_id,
         "sending push notification"
     );
 
@@ -5738,14 +6047,14 @@ async fn send_chat_push_notification(state: &Arc<GatewayState>, session_key: &st
 
     // Build the notification
     let title = "Message received";
-    let url = format!("/chat/{session_key}");
+    let url = format!("/chats/{session_id}");
 
     match crate::push_routes::send_push_notification(
         &push_service,
         title,
         &summary,
         Some(&url),
-        Some(session_key),
+        Some(session_id),
     )
     .await
     {
@@ -5882,11 +6191,11 @@ async fn load_telegram_relay_inbound_context(
         return None;
     }
     let chain_id = channel
-        .get("relay_chain_id")
+        .get("relayChainId")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())?;
     let hop = channel
-        .get("relay_hop")
+        .get("relayHop")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     if hop == 0 || hop > u8::MAX as u64 {
@@ -6040,7 +6349,17 @@ fn trim_trailing_connectors(s: &str) -> &str {
                 c.is_whitespace()
                     || matches!(
                         c,
-                        ',' | '，' | '、' | ';' | '；' | ':' | '：' | '!' | '！' | '?' | '？' | '。'
+                        ',' | '，'
+                            | '、'
+                            | ';'
+                            | '；'
+                            | ':'
+                            | '：'
+                            | '!'
+                            | '！'
+                            | '?'
+                            | '？'
+                            | '。'
                     )
             });
         }
@@ -6086,8 +6405,7 @@ fn extract_relay_groups(
     for a in accounts {
         if let Some(ref u) = a.chan_user_name {
             let handle = Some(format!("@{u}"));
-            username_to_account
-                .insert(u.to_ascii_lowercase(), (a.account_handle.clone(), handle));
+            username_to_account.insert(u.to_ascii_lowercase(), (a.account_handle.clone(), handle));
         }
     }
 
@@ -6098,14 +6416,19 @@ fn extract_relay_groups(
         let mut group_end = mentions[i].end;
         let mut group = vec![mentions[i].clone()];
         let mut j = i + 1;
-        while j < mentions.len() && only_whitespace_or_punct(&sanitized[group_end..mentions[j].start])
+        while j < mentions.len()
+            && only_whitespace_or_punct(&sanitized[group_end..mentions[j].start])
         {
             group.push(mentions[j].clone());
             group_end = mentions[j].end;
             j += 1;
         }
 
-        let seg_end = if j < mentions.len() { mentions[j].start } else { sanitized.len() };
+        let seg_end = if j < mentions.len() {
+            mentions[j].start
+        } else {
+            sanitized.len()
+        };
         let raw_task = &sanitized[group_end..seg_end];
         let raw_task = trim_trailing_connectors(raw_task);
         let task = trim_leading_separators(raw_task).trim();
@@ -6159,7 +6482,8 @@ async fn dispatch_telegram_relay(
     let chan_user_id = target_account_id
         .strip_prefix("telegram:")
         .unwrap_or(target_account_id);
-    let target_session_key = moltis_common::identity::format_session_key("telegram", chan_user_id, chat_id, None);
+    let target_chan_chat_key =
+        moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, None);
 
     let target_session_id = resolve_telegram_session_id(state, target_account_id, chat_id).await;
     let session_exists = if let Some(ref sm) = state.services.session_metadata {
@@ -6174,20 +6498,22 @@ async fn dispatch_telegram_relay(
     ensure_channel_bound_session(state, &target_session_id, target_account_id, chat_id).await;
 
     let reply_target = moltis_channels::ChannelReplyTarget {
-        channel_type: moltis_channels::ChannelType::Telegram,
-        account_handle: target_account_id.to_string(),
-        bot_handle: target_handle,
+        chan_type: moltis_channels::ChannelType::Telegram,
+        chan_account_key: target_account_id.to_string(),
+        chan_user_name: target_handle,
         chat_id: chat_id.to_string(),
         message_id: Some(reply_to_message_id.to_string()),
     };
-    state.push_channel_reply(&target_session_id, reply_target).await;
+    state
+        .push_channel_reply(&target_session_id, reply_target)
+        .await;
 
     let chat = state.chat().await;
     let params = serde_json::json!({
         "text": relay_text,
         "channel": channel_meta,
-        "_session_id": target_session_id,
-        "_session_key": target_session_key,
+        "_sessionId": target_session_id,
+        "_chanChatKey": target_chan_chat_key,
     });
     chat.send(params).await.map_err(|e| e.to_string())?;
     Ok(())
@@ -6401,25 +6727,30 @@ Output format:
             "telegram.relay|{}|hop:{}|src:{}|dst:{}|task:{}",
             chain_id, next_hop, source_account_id, d.target_account_id, task_hash
         );
-        let is_dup = state.inner.write().await.dedupe.check_and_insert(&dedupe_key);
+        let is_dup = state
+            .inner
+            .write()
+            .await
+            .dedupe
+            .check_and_insert(&dedupe_key);
         if is_dup {
             continue;
         }
 
         let relay_text = format!("（来自 {source_handle}）{}", d.task_text.trim());
         let channel_meta = serde_json::json!({
-            "channel_type": "telegram",
-            "message_kind": "text",
+            "chanType": "telegram",
+            "messageKind": "text",
             "username": source_username,
-            "sender_name": source_username,
+            "senderName": source_username,
             "relay": true,
-            "relay_chain_id": chain_id,
-            "relay_hop": next_hop,
-            "relay_from_account_id": source_account_id,
-            "relay_from_bot_handle": source_handle,
-            "relay_source_chat_id": chat_id,
-            "relay_source_outbound_message_id": source_outbound_message_id,
-            "relay_source_inbound_trigger_message_id": inbound_id,
+            "relayChainId": chain_id,
+            "relayHop": next_hop,
+            "relayFromAccountId": source_account_id,
+            "relayFromBotHandle": source_handle,
+            "relaySourceChatId": chat_id,
+            "relaySourceOutboundMessageId": source_outbound_message_id,
+            "relaySourceInboundTriggerMessageId": inbound_id,
         });
 
         let state = Arc::clone(state);
@@ -6443,8 +6774,7 @@ Output format:
             {
                 warn!(
                     target_account_id,
-                    chat_id,
-                    "telegram outbound relay: dispatch failed: {e}"
+                    chat_id, "telegram outbound relay: dispatch failed: {e}"
                 );
             } else {
                 info!(
@@ -6461,8 +6791,8 @@ Output format:
 
 async fn ensure_channel_bound_session(
     state: &Arc<GatewayState>,
-    session_key: &str,
-    account_handle: &str,
+    session_id: &str,
+    chan_account_key: &str,
     chat_id: &str,
 ) {
     let Some(ref session_meta) = state.services.session_metadata else {
@@ -6470,9 +6800,9 @@ async fn ensure_channel_bound_session(
     };
 
     let binding = moltis_channels::ChannelReplyTarget {
-        channel_type: moltis_channels::ChannelType::Telegram,
-        account_handle: account_handle.to_string(),
-        bot_handle: None,
+        chan_type: moltis_channels::ChannelType::Telegram,
+        chan_account_key: chan_account_key.to_string(),
+        chan_user_name: None,
         chat_id: chat_id.to_string(),
         message_id: None,
     };
@@ -6481,35 +6811,44 @@ async fn ensure_channel_bound_session(
         return;
     };
 
-    let entry = session_meta.get(session_key).await;
+    let entry = session_meta.get(session_id).await;
     let has_binding = entry.as_ref().is_some_and(|e| e.channel_binding.is_some());
     if !has_binding {
-        let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
-        let bot_username = crate::session_labels::resolve_telegram_bot_username(&snapshots, account_handle);
-        let label = crate::session_labels::format_telegram_session_label(account_handle, bot_username, chat_id);
-        let _ = session_meta
-            .upsert(session_key, Some(label))
+        let snapshots = state
+            .services
+            .channel
+            .telegram_bus_accounts_snapshot()
             .await;
+        let bot_username =
+            crate::session_labels::resolve_telegram_bot_username(&snapshots, chan_account_key);
+        let label = crate::session_labels::format_telegram_session_label(
+            chan_account_key,
+            bot_username,
+            chat_id,
+        );
+        let _ = session_meta.upsert(session_id, Some(label)).await;
         session_meta
-            .set_channel_binding(session_key, Some(binding_json))
+            .set_channel_binding(session_id, Some(binding_json))
             .await;
     }
 }
 
 async fn resolve_telegram_session_id(
     state: &Arc<GatewayState>,
-    account_handle: &str,
+    chan_account_key: &str,
     chat_id: &str,
 ) -> String {
     if let Some(ref sm) = state.services.session_metadata
-        && let Some(key) = sm.get_active_session_id("telegram", account_handle, chat_id).await
+        && let Some(key) = sm
+            .get_active_session_id("telegram", chan_account_key, chat_id)
+            .await
     {
         return key;
     }
-    let chan_user_id = account_handle
+    let chan_user_id = chan_account_key
         .strip_prefix("telegram:")
-        .unwrap_or(account_handle);
-    moltis_common::identity::format_session_key("telegram", chan_user_id, chat_id, None)
+        .unwrap_or(chan_account_key);
+    moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, None)
 }
 
 async fn maybe_mirror_telegram_group_reply(
@@ -6549,20 +6888,20 @@ async fn maybe_mirror_telegram_group_reply(
     let mirrored_content = format!("[{source_bot_handle} mirror] {text}");
 
     let channel_meta = serde_json::json!({
-        "channel_type": "telegram",
-        "message_kind": "text",
+        "chanType": "telegram",
+        "messageKind": "text",
         "username": source_username,
-        "sender_name": source_username,
+        "senderName": source_username,
         "mirror": true,
-        "mirror_key": mirror_key,
-        "source_account_id": source_account_id,
-        "source_bot_handle": source_bot_handle,
-        "source_chat_id": chat_id,
-        "source_inbound_trigger_message_id": inbound_id,
+        "mirrorKey": mirror_key,
+        "sourceAccountId": source_account_id,
+        "sourceBotHandle": source_bot_handle,
+        "sourceChatId": chat_id,
+        "sourceInboundTriggerMessageId": inbound_id,
     });
 
     let mirror_key_str = channel_meta
-        .get("mirror_key")
+        .get("mirrorKey")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -6591,7 +6930,7 @@ async fn maybe_mirror_telegram_group_reply(
         if let Ok(found) = store
             .tail_contains_channel_field_value(
                 &target_session_key,
-                "mirror_key",
+                "mirrorKey",
                 mirror_key_str,
                 200,
             )
@@ -6654,7 +6993,13 @@ async fn deliver_channel_replies_to_targets(
 ) {
     let session_key = session_key.to_string();
     let text = text.to_string();
-    let bus_accounts = Arc::new(state.services.channel.telegram_bus_accounts_snapshot().await);
+    let bus_accounts = Arc::new(
+        state
+            .services
+            .channel
+            .telegram_bus_accounts_snapshot()
+            .await,
+    );
     let inbound_relay_ctx = load_telegram_relay_inbound_context(&state, &session_key).await;
     let logbook_html = format_logbook_html(&status_log);
     let mut tasks = Vec::with_capacity(targets.len());
@@ -6672,7 +7017,7 @@ async fn deliver_channel_replies_to_targets(
                 ReplyMedium::Text => None,
             };
             let reply_to = target.message_id.as_deref();
-            match target.channel_type {
+            match target.chan_type {
                 moltis_channels::ChannelType::Telegram => match tts_payload {
                     Some(mut payload) => {
                         let transcript = std::mem::take(&mut payload.text);
@@ -6682,7 +7027,7 @@ async fn deliver_channel_replies_to_targets(
                             payload.text = transcript;
                             let send_res = outbound
                                 .send_media_with_ref(
-                                    &target.account_handle,
+                                    &target.chan_account_key,
                                     &target.chat_id,
                                     &payload,
                                     reply_to,
@@ -6690,15 +7035,15 @@ async fn deliver_channel_replies_to_targets(
                                 .await;
                             if let Err(e) = send_res {
                                 warn!(
-                                    account_handle = target.account_handle,
+                                    chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send channel voice reply: {e}"
                                 );
                             } else {
                                 maybe_mirror_telegram_group_reply(
                                     &state,
-                                    &target.account_handle,
-                                    target.bot_handle.as_deref(),
+                                    &target.chan_account_key,
+                                    target.chan_user_name.as_deref(),
                                     &target.chat_id,
                                     reply_to,
                                     &payload.text,
@@ -6709,7 +7054,7 @@ async fn deliver_channel_replies_to_targets(
                             if !logbook_html.is_empty()
                                 && let Err(e) = outbound
                                     .send_text_with_suffix(
-                                        &target.account_handle,
+                                        &target.chan_account_key,
                                         &target.chat_id,
                                         "",
                                         &logbook_html,
@@ -6718,7 +7063,7 @@ async fn deliver_channel_replies_to_targets(
                                     .await
                             {
                                 warn!(
-                                    account_handle = target.account_handle,
+                                    chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send logbook follow-up: {e}"
                                 );
@@ -6728,7 +7073,7 @@ async fn deliver_channel_replies_to_targets(
                             // without caption, then the full text as a follow-up.
                             if let Err(e) = outbound
                                 .send_media_with_ref(
-                                    &target.account_handle,
+                                    &target.chan_account_key,
                                     &target.chat_id,
                                     &payload,
                                     reply_to,
@@ -6736,15 +7081,15 @@ async fn deliver_channel_replies_to_targets(
                                 .await
                             {
                                 warn!(
-                                    account_handle = target.account_handle,
+                                    chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send channel voice reply: {e}"
                                 );
                             } else {
                                 maybe_mirror_telegram_group_reply(
                                     &state,
-                                    &target.account_handle,
-                                    target.bot_handle.as_deref(),
+                                    &target.chan_account_key,
+                                    target.chan_user_name.as_deref(),
                                     &target.chat_id,
                                     reply_to,
                                     &transcript,
@@ -6754,7 +7099,7 @@ async fn deliver_channel_replies_to_targets(
                             let text_result = if logbook_html.is_empty() {
                                 outbound
                                     .send_text(
-                                        &target.account_handle,
+                                        &target.chan_account_key,
                                         &target.chat_id,
                                         &transcript,
                                         None,
@@ -6763,7 +7108,7 @@ async fn deliver_channel_replies_to_targets(
                             } else {
                                 outbound
                                     .send_text_with_suffix(
-                                        &target.account_handle,
+                                        &target.chan_account_key,
                                         &target.chat_id,
                                         &transcript,
                                         &logbook_html,
@@ -6773,7 +7118,7 @@ async fn deliver_channel_replies_to_targets(
                             };
                             if let Err(e) = text_result {
                                 warn!(
-                                    account_handle = target.account_handle,
+                                    chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send transcript follow-up: {e}"
                                 );
@@ -6784,7 +7129,7 @@ async fn deliver_channel_replies_to_targets(
                         let result = if logbook_html.is_empty() {
                             outbound
                                 .send_text_with_ref(
-                                    &target.account_handle,
+                                    &target.chan_account_key,
                                     &target.chat_id,
                                     &text,
                                     reply_to,
@@ -6793,7 +7138,7 @@ async fn deliver_channel_replies_to_targets(
                         } else {
                             outbound
                                 .send_text_with_suffix_with_ref(
-                                    &target.account_handle,
+                                    &target.chan_account_key,
                                     &target.chat_id,
                                     &text,
                                     &logbook_html,
@@ -6805,7 +7150,7 @@ async fn deliver_channel_replies_to_targets(
                             Ok(r) => r,
                             Err(e) => {
                                 warn!(
-                                    account_handle = target.account_handle,
+                                    chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send channel reply: {e}"
                                 );
@@ -6814,8 +7159,8 @@ async fn deliver_channel_replies_to_targets(
                         };
                         maybe_mirror_telegram_group_reply(
                             &state,
-                            &target.account_handle,
-                            target.bot_handle.as_deref(),
+                            &target.chan_account_key,
+                            target.chan_user_name.as_deref(),
                             &target.chat_id,
                             reply_to,
                             &text,
@@ -6827,8 +7172,8 @@ async fn deliver_channel_replies_to_targets(
                                 &state,
                                 bus_accounts.as_ref(),
                                 inbound_relay_ctx,
-                                &target.account_handle,
-                                target.bot_handle.as_deref(),
+                                &target.chan_account_key,
+                                target.chan_user_name.as_deref(),
                                 &target.chat_id,
                                 reply_to,
                                 &sent.message_id,
@@ -6837,7 +7182,7 @@ async fn deliver_channel_replies_to_targets(
                             .await;
                         } else {
                             warn!(
-                                account_handle = target.account_handle,
+                                chan_account_key = target.chan_account_key,
                                 chat_id = target.chat_id,
                                 "telegram outbound reply sent but no message_id ref returned (relay disabled for this reply)"
                             );
@@ -6950,11 +7295,7 @@ async fn build_tts_payload(
     // only for TTS conversion, but keep the original for the caption.
     let sanitized = moltis_voice::tts::sanitize_text_for_tts(text);
 
-    let channel_key = format!(
-        "{}:{}",
-        target.channel_type.as_str(),
-        target.account_handle
-    );
+    let channel_key = format!("{}:{}", target.chan_type.as_str(), target.chan_account_key);
     let (channel_override, session_override) = {
         let inner = state.inner.read().await;
         (
@@ -6991,7 +7332,7 @@ async fn build_tts_payload(
             url: format!("data:{mime_type};base64,{}", response.audio),
             mime_type,
         }),
-        reply_to_id: None,
+        reply_to_message_id: None,
         silent: false,
     })
 }
@@ -7133,7 +7474,7 @@ async fn send_screenshot_to_channels(
             url: screenshot_data.to_string(),
             mime_type: "image/png".to_string(),
         }),
-        reply_to_id: None,
+        reply_to_message_id: None,
         silent: false,
     };
 
@@ -7143,12 +7484,12 @@ async fn send_screenshot_to_channels(
         let state = Arc::clone(state);
         let payload = payload.clone();
         tasks.push(tokio::spawn(async move {
-            match target.channel_type {
+            match target.chan_type {
                 moltis_channels::ChannelType::Telegram => {
                     let reply_to = target.message_id.as_deref();
                     if let Err(e) = outbound
                         .send_media(
-                            &target.account_handle,
+                            &target.chan_account_key,
                             &target.chat_id,
                             &payload,
                             reply_to,
@@ -7156,7 +7497,7 @@ async fn send_screenshot_to_channels(
                         .await
                     {
                         warn!(
-                            account_handle = target.account_handle,
+                            chan_account_key = target.chan_account_key,
                             chat_id = target.chat_id,
                             "failed to send screenshot to channel: {e}"
                         );
@@ -7164,7 +7505,7 @@ async fn send_screenshot_to_channels(
                         let error_msg = format!("⚠️ Failed to send screenshot: {e}");
                         let _ = outbound
                             .send_text(
-                                &target.account_handle,
+                                &target.chan_account_key,
                                 &target.chat_id,
                                 &error_msg,
                                 reply_to,
@@ -7172,7 +7513,7 @@ async fn send_screenshot_to_channels(
                             .await;
                     } else {
                         debug!(
-                            account_handle = target.account_handle,
+                            chan_account_key = target.chan_account_key,
                             chat_id = target.chat_id,
                             "sent screenshot to telegram"
                         );
@@ -7181,8 +7522,8 @@ async fn send_screenshot_to_channels(
                         // (do not mirror media bytes/URLs).
                         maybe_mirror_telegram_group_reply(
                             &state,
-                            &target.account_handle,
-                            target.bot_handle.as_deref(),
+                            &target.chan_account_key,
+                            target.chan_user_name.as_deref(),
                             &target.chat_id,
                             reply_to,
                             "（发送了一张图片）",
@@ -7230,7 +7571,7 @@ async fn send_location_to_channels(
             let reply_to = target.message_id.as_deref();
             if let Err(e) = outbound
                 .send_location(
-                    &target.account_handle,
+                    &target.chan_account_key,
                     &target.chat_id,
                     latitude,
                     longitude,
@@ -7240,13 +7581,13 @@ async fn send_location_to_channels(
                 .await
             {
                 warn!(
-                    account_handle = target.account_handle,
+                    chan_account_key = target.chan_account_key,
                     chat_id = target.chat_id,
                     "failed to send location to channel: {e}"
                 );
             } else {
                 debug!(
-                    account_handle = target.account_handle,
+                    chan_account_key = target.chan_account_key,
                     chat_id = target.chat_id,
                     "sent location pin to telegram"
                 );
@@ -7268,7 +7609,10 @@ mod tests {
         super::*,
         anyhow::Result,
         moltis_agents::{model::LlmProvider, tool_registry::AgentTool},
-        moltis_common::types::ReplyPayload,
+        moltis_common::{
+            hooks::{HookAction, HookEvent, HookHandler, HookPayload, HookRegistry},
+            types::ReplyPayload,
+        },
         moltis_sessions::store::SessionStore,
         std::{
             pin::Pin,
@@ -7308,12 +7652,12 @@ mod tests {
 
     struct ContextStreamingProvider {
         called: Arc<std::sync::atomic::AtomicUsize>,
-        expected_session_key: String,
+        expected_session_id: String,
     }
 
     struct SingleToolCallProvider {
         called: Arc<std::sync::atomic::AtomicUsize>,
-        expected_ctx_session_key: String,
+        expected_ctx_session_id: String,
     }
 
     struct BudgetProvider {
@@ -7380,8 +7724,8 @@ mod tests {
             _tools: Vec<serde_json::Value>,
         ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
             assert_eq!(
-                ctx.session_key.as_deref(),
-                Some(self.expected_session_key.as_str())
+                ctx.session_id.as_deref(),
+                Some(self.expected_session_id.as_str())
             );
             self.called.fetch_add(1, Ordering::SeqCst);
             Box::pin(tokio_stream::iter(vec![
@@ -7432,8 +7776,8 @@ mod tests {
             _tools: Vec<serde_json::Value>,
         ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
             assert_eq!(
-                ctx.session_key.as_deref(),
-                Some(self.expected_ctx_session_key.as_str())
+                ctx.session_id.as_deref(),
+                Some(self.expected_ctx_session_id.as_str())
             );
 
             let n = self.called.fetch_add(1, Ordering::SeqCst);
@@ -7530,7 +7874,7 @@ mod tests {
     }
 
     struct ContextAssertingTool {
-        expected_session_key: String,
+        expected_chan_chat_key: String,
         expected_session_id: String,
         called: Arc<AtomicUsize>,
     }
@@ -7550,18 +7894,59 @@ mod tests {
         }
 
         async fn execute(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-            let sk = params
-                .get("_session_key")
+            let chan_chat_key = params
+                .get("_chanChatKey")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let sid = params
-                .get("_session_id")
+            let session_id = params
+                .get("_sessionId")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            assert_eq!(sk, self.expected_session_key.as_str());
-            assert_eq!(sid, self.expected_session_id.as_str());
+            assert_eq!(chan_chat_key, self.expected_chan_chat_key.as_str());
+            assert_eq!(session_id, self.expected_session_id.as_str());
             self.called.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::json!({ "ok": true }))
+        }
+    }
+
+    struct RecordingHookHandler {
+        subscribed: Vec<HookEvent>,
+        seen: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+        message_override: Option<String>,
+        tool_result_override: Option<serde_json::Value>,
+    }
+
+    #[async_trait]
+    impl HookHandler for RecordingHookHandler {
+        fn name(&self) -> &str {
+            "recording"
+        }
+
+        fn events(&self) -> &[HookEvent] {
+            &self.subscribed
+        }
+
+        async fn handle(&self, event: HookEvent, payload: &HookPayload) -> anyhow::Result<HookAction> {
+            let payload_val = serde_json::to_value(payload)?;
+            self.seen.lock().await.push(payload_val);
+
+            match event {
+                HookEvent::MessageSending => {
+                    if let Some(ref content) = self.message_override {
+                        return Ok(HookAction::ModifyPayload(serde_json::Value::String(
+                            content.clone(),
+                        )));
+                    }
+                },
+                HookEvent::ToolResultPersist => {
+                    if let Some(ref v) = self.tool_result_override {
+                        return Ok(HookAction::ModifyPayload(v.clone()));
+                    }
+                },
+                _ => {}
+            }
+
+            Ok(HookAction::Continue)
         }
     }
 
@@ -7574,7 +7959,7 @@ mod tests {
     impl moltis_channels::plugin::ChannelOutbound for MockChannelOutbound {
         async fn send_text(
             &self,
-            _account_handle: &str,
+            _chan_account_key: &str,
             _to: &str,
             _text: &str,
             _reply_to: Option<&str>,
@@ -7586,7 +7971,7 @@ mod tests {
 
         async fn send_media(
             &self,
-            _account_handle: &str,
+            _chan_account_key: &str,
             _to: &str,
             _payload: &ReplyPayload,
             _reply_to: Option<&str>,
@@ -7604,9 +7989,9 @@ mod tests {
                 delay: Duration::from_millis(50),
             });
         let targets = vec![moltis_channels::ChannelReplyTarget {
-            channel_type: moltis_channels::ChannelType::Telegram,
-            account_handle: "telegram:acct".to_string(),
-            bot_handle: None,
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:acct".to_string(),
+            chan_user_name: None,
             chat_id: "123".to_string(),
             message_id: None,
         }];
@@ -7648,13 +8033,13 @@ mod tests {
     impl moltis_channels::plugin::ChannelOutbound for RecordingOutbound {
         async fn send_text(
             &self,
-            account_handle: &str,
+            chan_account_key: &str,
             to: &str,
             text: &str,
             reply_to: Option<&str>,
         ) -> Result<()> {
             self.texts.lock().await.push((
-                account_handle.to_string(),
+                chan_account_key.to_string(),
                 to.to_string(),
                 text.to_string(),
                 reply_to.map(|s| s.to_string()),
@@ -7664,7 +8049,7 @@ mod tests {
 
         async fn send_media(
             &self,
-            _account_handle: &str,
+            _chan_account_key: &str,
             _to: &str,
             _payload: &ReplyPayload,
             _reply_to: Option<&str>,
@@ -7672,7 +8057,7 @@ mod tests {
             Ok(())
         }
 
-        async fn send_typing(&self, _account_handle: &str, _to: &str) -> Result<()> {
+        async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> Result<()> {
             self.typings.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -7755,9 +8140,9 @@ mod tests {
         seed_session(store.as_ref(), "telegram:fluffy:-100").await;
 
         let targets = vec![moltis_channels::ChannelReplyTarget {
-            channel_type: moltis_channels::ChannelType::Telegram,
-            account_handle: "telegram:lovely".to_string(),
-            bot_handle: Some("@lovely_apple_bot".to_string()),
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:lovely".to_string(),
+            chan_user_name: Some("@lovely_apple_bot".to_string()),
             chat_id: "-100".to_string(),
             message_id: Some("184".to_string()),
         }];
@@ -7793,7 +8178,11 @@ mod tests {
         let alpha_key = "telegram:alpha:-100";
 
         let fluffy = store.read(fluffy_key).await.unwrap();
-        assert_eq!(fluffy.len(), 2, "mirror should be appended once and deduped");
+        assert_eq!(
+            fluffy.len(),
+            2,
+            "mirror should be appended once and deduped"
+        );
         assert_eq!(fluffy[0].get("role").and_then(|v| v.as_str()), Some("user"));
         let content = fluffy[1]
             .get("content")
@@ -7805,10 +8194,10 @@ mod tests {
         );
         let mirror_key = fluffy[1]
             .get("channel")
-            .and_then(|c| c.get("mirror_key"))
+            .and_then(|c| c.get("mirrorKey"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        assert!(mirror_key.starts_with("sha256:"), "missing mirror_key");
+        assert!(mirror_key.starts_with("sha256:"), "missing mirrorKey");
 
         let alpha = store.read(alpha_key).await.unwrap();
         assert!(
@@ -7843,9 +8232,9 @@ mod tests {
         ));
 
         let targets = vec![moltis_channels::ChannelReplyTarget {
-            channel_type: moltis_channels::ChannelType::Telegram,
-            account_handle: "telegram:lovely".to_string(),
-            bot_handle: Some("@lovely_apple_bot".to_string()),
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:lovely".to_string(),
+            chan_user_name: Some("@lovely_apple_bot".to_string()),
             chat_id: "123".to_string(), // non-group
             message_id: Some("1".to_string()),
         }];
@@ -7898,9 +8287,9 @@ mod tests {
             .push_channel_reply(
                 session_key,
                 moltis_channels::ChannelReplyTarget {
-                    channel_type: moltis_channels::ChannelType::Telegram,
-                    account_handle: "telegram:lovely".to_string(),
-                    bot_handle: Some("@lovely_apple_bot".to_string()),
+                    chan_type: moltis_channels::ChannelType::Telegram,
+                    chan_account_key: "telegram:lovely".to_string(),
+                    chan_user_name: Some("@lovely_apple_bot".to_string()),
                     chat_id: "-100".to_string(),
                     message_id: Some("184".to_string()),
                 },
@@ -7958,7 +8347,10 @@ mod tests {
         async fn abort(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
             Ok(serde_json::json!({}))
         }
-        async fn cancel_queued(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+        async fn cancel_queued(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
             Ok(serde_json::json!({ "cleared": 0 }))
         }
         async fn history(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
@@ -7991,7 +8383,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
 
-        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
         let state = Arc::new(crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
@@ -8056,7 +8449,10 @@ mod tests {
             1,
             "expected one internal_complete call"
         );
-        assert_eq!(sent.get("_session_key").and_then(|v| v.as_str()), Some("telegram:bot2:-100"));
+        assert_eq!(
+            sent.get("_chanChatKey").and_then(|v| v.as_str()),
+            Some("telegram:bot2:-100")
+        );
         let relay_text = sent.get("text").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             relay_text.contains("帮我总结一下"),
@@ -8074,7 +8470,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
 
-        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
         let state = Arc::new(crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
@@ -8089,10 +8486,10 @@ mod tests {
         // Older relay-injected message.
         let mut relay_msg = PersistedMessage::user("relay").to_value();
         relay_msg["channel"] = serde_json::json!({
-            "channel_type": "telegram",
+            "chanType": "telegram",
             "relay": true,
-            "relay_chain_id": "sha256:deadbeef",
-            "relay_hop": 1,
+            "relayChainId": "sha256:deadbeef",
+            "relayHop": 1,
         });
         store.append(session_key, &relay_msg).await.unwrap();
 
@@ -8101,7 +8498,10 @@ mod tests {
         store.append(session_key, &normal).await.unwrap();
 
         let ctx = load_telegram_relay_inbound_context(&state, session_key).await;
-        assert!(ctx.is_none(), "expected no relay ctx for non-relay latest user message");
+        assert!(
+            ctx.is_none(),
+            "expected no relay ctx for non-relay latest user message"
+        );
     }
 
     #[test]
@@ -8131,19 +8531,23 @@ mod tests {
             .into_iter()
             .filter(|g| g.line_start)
             .flat_map(|g| {
-                g.mentions.into_iter().map(move |m| {
-                    (m.target_account_id, g.task_text.clone())
-                })
+                g.mentions
+                    .into_iter()
+                    .map(move |m| (m.target_account_id, g.task_text.clone()))
             })
             .collect();
 
         assert_eq!(directives.len(), 2);
-        assert!(directives
-            .iter()
-            .any(|d| d.0 == "telegram:bot1" && d.1 == "完成任务1"));
-        assert!(directives
-            .iter()
-            .any(|d| d.0 == "telegram:bot2" && d.1 == "完成任务2"));
+        assert!(
+            directives
+                .iter()
+                .any(|d| d.0 == "telegram:bot1" && d.1 == "完成任务1")
+        );
+        assert!(
+            directives
+                .iter()
+                .any(|d| d.0 == "telegram:bot2" && d.1 == "完成任务2")
+        );
     }
 
     #[test]
@@ -8292,9 +8696,9 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 moltis_channels::ChannelReplyTarget {
-                    channel_type: moltis_channels::ChannelType::Telegram,
-                    account_handle: "telegram:acct".to_string(),
-                    bot_handle: None,
+                    chan_type: moltis_channels::ChannelType::Telegram,
+                    chan_account_key: "telegram:acct".to_string(),
+                    chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("7".to_string()),
                 },
@@ -8361,9 +8765,9 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 moltis_channels::ChannelReplyTarget {
-                    channel_type: moltis_channels::ChannelType::Telegram,
-                    account_handle: "telegram:acct".to_string(),
-                    bot_handle: None,
+                    chan_type: moltis_channels::ChannelType::Telegram,
+                    chan_account_key: "telegram:acct".to_string(),
+                    chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("9".to_string()),
                 },
@@ -8420,9 +8824,9 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 moltis_channels::ChannelReplyTarget {
-                    channel_type: moltis_channels::ChannelType::Telegram,
-                    account_handle: "telegram:acct".to_string(),
-                    bot_handle: None,
+                    chan_type: moltis_channels::ChannelType::Telegram,
+                    chan_account_key: "telegram:acct".to_string(),
+                    chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("7".to_string()),
                 },
@@ -8450,9 +8854,9 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 moltis_channels::ChannelReplyTarget {
-                    channel_type: moltis_channels::ChannelType::Telegram,
-                    account_handle: "telegram:acct".to_string(),
-                    bot_handle: None,
+                    chan_type: moltis_channels::ChannelType::Telegram,
+                    chan_account_key: "telegram:acct".to_string(),
+                    chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("8".to_string()),
                 },
@@ -8498,7 +8902,7 @@ echo @bot2
         let provider: Arc<dyn moltis_agents::model::LlmProvider> =
             Arc::new(ContextStreamingProvider {
                 called: Arc::clone(&called),
-                expected_session_key: "main".to_string(),
+                expected_session_id: "main".to_string(),
             });
 
         let result = run_streaming(
@@ -8526,6 +8930,86 @@ echo @bot2
     }
 
     #[tokio::test]
+    async fn run_streaming_emits_message_and_agent_hooks() {
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop(),
+        );
+        let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
+
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let mut hooks = HookRegistry::new();
+        hooks.register(Arc::new(RecordingHookHandler {
+            subscribed: vec![
+                HookEvent::BeforeAgentStart,
+                HookEvent::MessageSending,
+                HookEvent::MessageSent,
+                HookEvent::AgentEnd,
+            ],
+            seen: Arc::clone(&seen),
+            message_override: Some("HOOKED".to_string()),
+            tool_result_override: None,
+        }));
+        state.inner.write().await.hook_registry = Some(Arc::new(hooks));
+
+        let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(ContextStreamingProvider {
+                called: Arc::clone(&called),
+                expected_session_id: "main".to_string(),
+            });
+
+        let result = run_streaming(
+            &state,
+            &model_store,
+            "run-1",
+            provider,
+            "ctx-stream-model",
+            &UserContent::text("hi"),
+            "ctx-stream",
+            &[],
+            "main",
+            ReplyMedium::Text,
+            None,
+            0,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("expected chat output");
+
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+        assert_eq!(result.text, "HOOKED");
+
+        let seen_vals = seen.lock().await;
+        let events: Vec<&str> = seen_vals
+            .iter()
+            .filter_map(|v| v.get("event").and_then(|e| e.as_str()))
+            .collect();
+        assert!(events.contains(&"MessageSending"), "missing MessageSending hook");
+        assert!(events.contains(&"MessageSent"), "missing MessageSent hook");
+        assert!(events.contains(&"AgentEnd"), "missing AgentEnd hook");
+        assert!(
+            events.contains(&"BeforeAgentStart"),
+            "missing BeforeAgentStart hook"
+        );
+
+        let agent_end = seen_vals
+            .iter()
+            .find(|v| v.get("event").and_then(|e| e.as_str()) == Some("AgentEnd"))
+            .expect("missing AgentEnd payload");
+        assert_eq!(agent_end["text"], "HOOKED");
+        assert_eq!(agent_end["iterations"], 1);
+        assert_eq!(agent_end["toolCalls"], 0);
+    }
+
+    #[tokio::test]
     async fn run_with_tools_passes_session_key_via_llm_request_context() {
         let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
@@ -8541,7 +9025,7 @@ echo @bot2
         let provider: Arc<dyn moltis_agents::model::LlmProvider> =
             Arc::new(ContextStreamingProvider {
                 called: Arc::clone(&called),
-                expected_session_key: "main".to_string(),
+                expected_session_id: "main".to_string(),
             });
 
         let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
@@ -8560,7 +9044,7 @@ echo @bot2
             "ctx-stream",
             &[],
             "main",
-            "main",
+            None,
             ReplyMedium::Text,
             None,
             None,
@@ -8592,18 +9076,22 @@ echo @bot2
         let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
 
         let provider_called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(SingleToolCallProvider {
-            called: Arc::clone(&provider_called),
-            expected_ctx_session_key: "telegram:bot1:123".to_string(),
-        });
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(SingleToolCallProvider {
+                called: Arc::clone(&provider_called),
+                expected_ctx_session_id: "session:abc".to_string(),
+            });
 
         let tool_called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
-        tool_registry.write().await.register(Box::new(ContextAssertingTool {
-            expected_session_key: "telegram:bot1:123".to_string(),
-            expected_session_id: "session:abc".to_string(),
-            called: Arc::clone(&tool_called),
-        }));
+        tool_registry
+            .write()
+            .await
+            .register(Box::new(ContextAssertingTool {
+                expected_chan_chat_key: "telegram:bot1:123".to_string(),
+                expected_session_id: "session:abc".to_string(),
+                called: Arc::clone(&tool_called),
+            }));
 
         let result = run_with_tools(
             &state,
@@ -8616,7 +9104,7 @@ echo @bot2
             "single-tool-call",
             &[],
             "session:abc",
-            "telegram:bot1:123",
+            Some("telegram:bot1:123"),
             ReplyMedium::Text,
             None,
             None,
@@ -8634,6 +9122,129 @@ echo @bot2
         assert!(result.is_some());
         assert_eq!(provider_called.load(Ordering::SeqCst), 2);
         assert_eq!(tool_called.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_emits_message_and_tool_persist_hooks() {
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop(),
+        );
+        let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
+
+        let provider_called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(SingleToolCallProvider {
+                called: Arc::clone(&provider_called),
+                expected_ctx_session_id: "session:abc".to_string(),
+            });
+
+        let tool_called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        tool_registry
+            .write()
+            .await
+            .register(Box::new(ContextAssertingTool {
+                expected_chan_chat_key: "telegram:bot1:123".to_string(),
+                expected_session_id: "session:abc".to_string(),
+                called: Arc::clone(&tool_called),
+            }));
+
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let mut hooks = HookRegistry::new();
+        hooks.register(Arc::new(RecordingHookHandler {
+            subscribed: vec![
+                HookEvent::BeforeAgentStart,
+                HookEvent::MessageSending,
+                HookEvent::MessageSent,
+                HookEvent::AgentEnd,
+                HookEvent::ToolResultPersist,
+            ],
+            seen: Arc::clone(&seen),
+            message_override: Some("HOOKED".to_string()),
+            tool_result_override: Some(serde_json::json!({"redacted": true})),
+        }));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let result = run_with_tools(
+            &state,
+            &model_store,
+            "run-1",
+            provider,
+            "single-tool-call-model",
+            &tool_registry,
+            &UserContent::text("hi"),
+            "single-tool-call",
+            &[],
+            "session:abc",
+            Some("telegram:bot1:123"),
+            ReplyMedium::Text,
+            None,
+            None,
+            0,
+            &[],
+            Some(Arc::new(hooks)),
+            None,
+            None,
+            Some(&store),
+            false,
+            None,
+        )
+        .await
+        .expect("expected chat output");
+
+        assert_eq!(provider_called.load(Ordering::SeqCst), 2);
+        assert_eq!(tool_called.load(Ordering::SeqCst), 1);
+        assert_eq!(result.text, "HOOKED");
+
+        // Tool results are persisted asynchronously from the runner event forwarder.
+        let start = Instant::now();
+        let persisted = loop {
+            let history = store.read("session:abc").await.unwrap_or_default();
+            if !history.is_empty() {
+                break history;
+            }
+            if start.elapsed() > Duration::from_secs(2) {
+                panic!("timed out waiting for tool_result persistence");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(
+            persisted[0].get("role").and_then(|v| v.as_str()),
+            Some("tool_result")
+        );
+        assert_eq!(persisted[0]["result"], serde_json::json!({"redacted": true}));
+
+        let seen_vals = seen.lock().await;
+        let events: Vec<&str> = seen_vals
+            .iter()
+            .filter_map(|v| v.get("event").and_then(|e| e.as_str()))
+            .collect();
+        assert!(events.contains(&"MessageSending"), "missing MessageSending hook");
+        assert!(events.contains(&"MessageSent"), "missing MessageSent hook");
+        assert!(events.contains(&"AgentEnd"), "missing AgentEnd hook");
+        assert!(
+            events.contains(&"ToolResultPersist"),
+            "missing ToolResultPersist hook"
+        );
+        assert!(
+            events.contains(&"BeforeAgentStart"),
+            "missing BeforeAgentStart hook"
+        );
+
+        let agent_end = seen_vals
+            .iter()
+            .find(|v| v.get("event").and_then(|e| e.as_str()) == Some("AgentEnd"))
+            .expect("missing AgentEnd payload");
+        assert_eq!(agent_end["text"], "HOOKED");
+        assert_eq!(agent_end["iterations"], 2);
+        assert_eq!(agent_end["toolCalls"], 1);
     }
 
     #[tokio::test]
@@ -8956,7 +9567,7 @@ echo @bot2
                 params: serde_json::json!({"text": "second"}),
             },
             QueuedMessage {
-                params: serde_json::json!({"text": "third", "_conn_id": "c1"}),
+                params: serde_json::json!({"text": "third", "_connId": "c1"}),
             },
         ];
 
@@ -10095,7 +10706,10 @@ echo @bot2
         async fn senders_list(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
             Err("not implemented".into())
         }
-        async fn sender_approve(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+        async fn sender_approve(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
             Err("not implemented".into())
         }
         async fn sender_deny(&self, _params: serde_json::Value) -> crate::services::ServiceResult {

@@ -3,15 +3,15 @@
 // code (websocket.js) and Preact pages can coexist during migration.
 //
 // Signals for models, projects, sessions, selectedModelId, and
-// activeSessionKey have moved to stores/*.js. They are re-exported
+// activeSessionId moved to stores/*.js. It is re-exported
 // here for backward compat with pages that still import from signals.js.
 
 import { signal } from "@preact/signals";
 import { models, selectedModelId } from "./stores/model-store.js";
 import { projects } from "./stores/project-store.js";
-import { activeSessionKey, sessions } from "./stores/session-store.js";
+import { activeSessionId, sessions } from "./stores/session-store.js";
 
-export { activeSessionKey, models, projects, selectedModelId, sessions };
+export { activeSessionId, models, projects, selectedModelId, sessions };
 
 // Signals that haven't moved to stores yet
 export var connected = signal(false);

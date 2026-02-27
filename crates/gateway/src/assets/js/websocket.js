@@ -59,8 +59,8 @@ function toolCallEventKey(eventSession, payload) {
 	return `${eventSession}:${toolCallLogicalId(payload)}`;
 }
 
-function clearPendingToolCallEndsForSession(sessionKey) {
-	var prefix = `${sessionKey}:`;
+function clearPendingToolCallEndsForSession(sessionId) {
+	var prefix = `${sessionId}:`;
 	for (var key of pendingToolCallEnds.keys()) {
 		if (key.startsWith(prefix)) {
 			pendingToolCallEnds.delete(key);
@@ -143,7 +143,7 @@ function handleChatThinkingDone(_p, isActive, isChatPage) {
 
 function handleChatVoicePending(_p, isActive, isChatPage, eventSession) {
 	// Update per-session signal
-	var session = sessionStore.getByKey(eventSession);
+	var session = sessionStore.getById(eventSession);
 	if (session) session.voicePending.value = true;
 	if (!(isActive && isChatPage)) return;
 	// Dual-write to global state for backward compat
@@ -153,7 +153,7 @@ function handleChatVoicePending(_p, isActive, isChatPage, eventSession) {
 
 function handleChatToolCallStart(p, isActive, isChatPage, eventSession) {
 	// Update per-session signal
-	var session = sessionStore.getByKey(eventSession);
+	var session = sessionStore.getById(eventSession);
 	if (session) session.streamText.value = "";
 	if (!(isActive && isChatPage)) return;
 	removeThinking();
@@ -184,7 +184,7 @@ function handleChatToolCallStart(p, isActive, isChatPage, eventSession) {
 function appendToolResult(toolCard, result, eventSession) {
 	var out = (result.stdout || "").replace(/\n+$/, "");
 	// Update per-session signal
-	var toolSession = sessionStore.getByKey(eventSession);
+	var toolSession = sessionStore.getById(eventSession);
 	if (toolSession) toolSession.lastToolOutput.value = out;
 	// Dual-write to global state for backward compat
 	S.setLastToolOutput(out);
@@ -289,7 +289,7 @@ function handleChatChannelUser(p, isActive, isChatPage, eventSession) {
 	if (!(isChatPage && isActive)) return;
 	// Compare against the per-session history index, not the global one,
 	// to avoid skipping events when viewing a different session.
-	var chanSession = sessionStore.getByKey(p.sessionId || p.sessionKey || S.activeSessionKey);
+	var chanSession = sessionStore.getById(p.sessionId || S.activeSessionId);
 	var chanLastIdx = chanSession ? chanSession.lastHistoryIndex.value : S.lastHistoryIndex;
 	if (p.messageIndex !== undefined && p.messageIndex <= chanLastIdx) return;
 	var cleanText = stripChannelPrefix(p.text || "");
@@ -308,7 +308,7 @@ function setSafeMarkdownHtml(el, text) {
 function handleChatDelta(p, isActive, isChatPage, eventSession) {
 	if (!p.text) return;
 	// Update per-session signal
-	var session = sessionStore.getByKey(eventSession);
+	var session = sessionStore.getById(eventSession);
 	if (session) session.streamText.value += p.text;
 	if (!(isActive && isChatPage)) return;
 	// When voice is pending, accumulate text silently without rendering.
@@ -384,7 +384,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 	bumpSessionCount(eventSession, 1);
 	// Compare against the per-session history index so cross-session
 	// events aren't wrongly skipped by another session's index.
-	var evtSession = sessionStore.getByKey(eventSession);
+	var evtSession = sessionStore.getById(eventSession);
 	var lastIdx = evtSession ? evtSession.lastHistoryIndex.value : S.lastHistoryIndex;
 	if (p.messageIndex !== undefined && p.messageIndex <= lastIdx) {
 		setSessionReplying(eventSession, false);
@@ -411,7 +411,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 
 		if (p.audio) {
 			var filename = p.audio.split("/").pop();
-			var audioSrc = `/api/sessions/${encodeURIComponent(p.sessionId || p.sessionKey || S.activeSessionKey)}/media/${encodeURIComponent(filename)}`;
+			var audioSrc = `/api/sessions/${encodeURIComponent(p.sessionId || S.activeSessionId)}/media/${encodeURIComponent(filename)}`;
 			console.debug("[audio] rendering persisted audio:", filename);
 			renderAudioPlayer(msgEl, audioSrc, true);
 		}
@@ -435,7 +435,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 			);
 			if (p.audio) {
 				var fn2 = p.audio.split("/").pop();
-				var src2 = `/api/sessions/${encodeURIComponent(p.sessionId || p.sessionKey || S.activeSessionKey)}/media/${encodeURIComponent(fn2)}`;
+				var src2 = `/api/sessions/${encodeURIComponent(p.sessionId || S.activeSessionId)}/media/${encodeURIComponent(fn2)}`;
 				console.debug("[audio] rendering persisted audio (streamed):", fn2);
 				resolvedEl.textContent = "";
 				renderAudioPlayer(resolvedEl, src2, true);
@@ -467,7 +467,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 	}
 	appendLastMessageTimestamp(Date.now());
 	// Reset per-session stream state
-	var finalSession = sessionStore.getByKey(eventSession);
+	var finalSession = sessionStore.getById(eventSession);
 	if (finalSession) finalSession.resetStreamState();
 	// Dual-write to global state for backward compat
 	S.setStreamEl(null);
@@ -500,7 +500,7 @@ function handleChatError(p, isActive, isChatPage, eventSession) {
 	clearPendingToolCallEndsForSession(eventSession);
 	setSessionReplying(eventSession, false);
 	// Reset per-session stream state
-	var errSession = sessionStore.getByKey(eventSession);
+	var errSession = sessionStore.getById(eventSession);
 	if (errSession) errSession.resetStreamState();
 	if (!(isActive && isChatPage)) {
 		S.setVoicePending(false);
@@ -540,7 +540,7 @@ function handleChatQueueCleared(_p, isActive, isChatPage) {
 function handleChatSessionCleared(_p, isActive, isChatPage, eventSession) {
 	clearPendingToolCallEndsForSession(eventSession);
 	// Reset badge, unread state, and history index for every client.
-	var session = sessionStore.getByKey(eventSession);
+	var session = sessionStore.getById(eventSession);
 	if (session) {
 		session.syncCounts(0, 0);
 		session.lastHistoryIndex.value = -1;
@@ -574,13 +574,13 @@ var chatHandlers = {
 };
 
 function handleChatEvent(p) {
-	var eventSession = p.sessionId || p.sessionKey || sessionStore.activeSessionKey.value;
-	var isActive = eventSession === sessionStore.activeSessionKey.value;
+	var eventSession = p.sessionId || sessionStore.activeSessionId.value;
+	var isActive = eventSession === sessionStore.activeSessionId.value;
 	var isChatPage = currentPrefix === "/chats";
 
 	if (isActive && sessionStore.switchInProgress.value) return;
 
-	if (eventSession && !sessionStore.getByKey(eventSession)) {
+	if (eventSession && !sessionStore.getById(eventSession)) {
 		fetchSessions();
 	}
 

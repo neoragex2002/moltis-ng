@@ -5,8 +5,8 @@ use {
         payloads::SendMessageSetters,
         prelude::*,
         types::{
-            CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MessageKind,
-            MessageEntity, MessageEntityKind, MessageEntityRef, ParseMode, UserId,
+            CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MessageEntity,
+            MessageEntityKind, MessageEntityRef, MessageKind, ParseMode, UserId,
         },
     },
     tracing::{debug, info, warn},
@@ -172,8 +172,8 @@ pub async fn handle_message_direct(
     // Emit channel event for real-time UI updates.
     if let Some(ref sink) = event_sink {
         sink.emit(ChannelEvent::InboundMessage {
-            channel_type: ChannelType::Telegram,
-            account_handle: account_handle.to_string(),
+            chan_type: ChannelType::Telegram,
+            chan_account_key: account_handle.to_string(),
             peer_id: peer_id.clone(),
             username: username.clone(),
             sender_name: sender_name.clone(),
@@ -199,7 +199,10 @@ pub async fn handle_message_direct(
                 _ => (0, 0),
             };
             let is_reply = msg.reply_to_message().is_some();
-            let reply_from = msg.reply_to_message().and_then(|m| m.from.as_ref()).map(|u| u.id.0);
+            let reply_from = msg
+                .reply_to_message()
+                .and_then(|m| m.from.as_ref())
+                .map(|u| u.id.0);
             let text_has_at_sign = extract_text(&msg).is_some_and(|t| t.contains('@'));
 
             warn!(
@@ -259,14 +262,14 @@ pub async fn handle_message_direct(
             }
             if !body.trim().is_empty() {
                 let reply_target = ChannelReplyTarget {
-                    channel_type: ChannelType::Telegram,
-                    account_handle: account_handle.to_string(),
-                    bot_handle: bot_handle.clone(),
+                    chan_type: ChannelType::Telegram,
+                    chan_account_key: account_handle.to_string(),
+                    chan_user_name: bot_handle.clone(),
                     chat_id: msg.chat.id.0.to_string(),
                     message_id: Some(msg.id.0.to_string()),
                 };
                 let meta = ChannelMessageMeta {
-                    channel_type: ChannelType::Telegram,
+                    chan_type: ChannelType::Telegram,
                     sender_name: sender_name.clone(),
                     username: username.clone(),
                     message_kind: message_kind(&msg),
@@ -423,9 +426,9 @@ pub async fn handle_message_direct(
         // Handle location sharing: update stored location and resolve any pending tool request.
         let resolved = if let Some(ref sink) = event_sink {
             let reply_target = ChannelReplyTarget {
-                channel_type: ChannelType::Telegram,
-                account_handle: account_handle.to_string(),
-                bot_handle: bot_handle.clone(),
+                chan_type: ChannelType::Telegram,
+                chan_account_key: account_handle.to_string(),
+                chan_user_name: bot_handle.clone(),
                 chat_id: msg.chat.id.0.to_string(),
                 message_id: Some(msg.id.0.to_string()),
             };
@@ -498,9 +501,9 @@ pub async fn handle_message_direct(
         && has_content
     {
         let reply_target = ChannelReplyTarget {
-            channel_type: ChannelType::Telegram,
-            account_handle: account_handle.to_string(),
-            bot_handle: bot_handle.clone(),
+            chan_type: ChannelType::Telegram,
+            chan_account_key: account_handle.to_string(),
+            chan_user_name: bot_handle.clone(),
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
         };
@@ -525,8 +528,9 @@ pub async fn handle_message_direct(
             let body_trim = body.trim_start();
             let cmd_text_full = body_trim.trim_start_matches('/').trim();
             let first = cmd_text_full.split_whitespace().next().unwrap_or("");
-            let (cmd_name_raw, addressed_raw) =
-                first.split_once('@').map_or((first, None), |(a, b)| (a, Some(b)));
+            let (cmd_name_raw, addressed_raw) = first
+                .split_once('@')
+                .map_or((first, None), |(a, b)| (a, Some(b)));
 
             let cmd_name = cmd_name_raw.to_lowercase();
             let bot_username_norm = bot_username.as_deref().map(normalize_username);
@@ -535,7 +539,7 @@ pub async fn handle_message_direct(
             // Group/Channel: only handle addressed commands (`/cmd@this_bot`).
             if chat_type != ChatType::Dm {
                 match (&addressed_norm, &bot_username_norm) {
-                    (Some(target), Some(me)) if target == me => {}
+                    (Some(target), Some(me)) if target == me => {},
                     (Some(_), _) => return Ok(()),
                     (None, _) => return Ok(()),
                 }
@@ -568,8 +572,15 @@ pub async fn handle_message_direct(
                     if let Some(bot) = bot {
                         match context_result {
                             Ok(text) => {
-                                send_context_card(&bot, &reply_target.chat_id, &text, &config, chat_type).await;
-                            }
+                                send_context_card(
+                                    &bot,
+                                    &reply_target.chat_id,
+                                    &text,
+                                    &config,
+                                    chat_type,
+                                )
+                                .await;
+                            },
                             Err(e) => {
                                 let _ = bot
                                     .send_message(
@@ -577,7 +588,7 @@ pub async fn handle_message_direct(
                                         format!("Error: {e}"),
                                     )
                                     .await;
-                            }
+                            },
                         }
                     }
                     return Ok(());
@@ -594,7 +605,7 @@ pub async fn handle_message_direct(
                         match list_result {
                             Ok(text) => {
                                 send_model_keyboard(&bot, &reply_target.chat_id, &text).await;
-                            }
+                            },
                             Err(e) => {
                                 let _ = bot
                                     .send_message(
@@ -602,7 +613,7 @@ pub async fn handle_message_direct(
                                         format!("Error: {e}"),
                                     )
                                     .await;
-                            }
+                            },
                         }
                     }
                     return Ok(());
@@ -619,7 +630,7 @@ pub async fn handle_message_direct(
                         match list_result {
                             Ok(text) => {
                                 send_sandbox_keyboard(&bot, &reply_target.chat_id, &text).await;
-                            }
+                            },
                             Err(e) => {
                                 let _ = bot
                                     .send_message(
@@ -627,7 +638,7 @@ pub async fn handle_message_direct(
                                         format!("Error: {e}"),
                                     )
                                     .await;
-                            }
+                            },
                         }
                     }
                     return Ok(());
@@ -646,7 +657,7 @@ pub async fn handle_message_direct(
                         match list_result {
                             Ok(text) => {
                                 send_sessions_keyboard(&bot, &reply_target.chat_id, &text).await;
-                            }
+                            },
                             Err(e) => {
                                 let _ = bot
                                     .send_message(
@@ -654,7 +665,7 @@ pub async fn handle_message_direct(
                                         format!("Error: {e}"),
                                     )
                                     .await;
-                            }
+                            },
                         }
                     }
                     return Ok(());
@@ -751,7 +762,7 @@ pub async fn handle_message_direct(
         }
 
         let meta = ChannelMessageMeta {
-            channel_type: ChannelType::Telegram,
+            chan_type: ChannelType::Telegram,
             sender_name: sender_name.clone(),
             username: username.clone(),
             message_kind: message_kind(&msg),
@@ -860,8 +871,8 @@ async fn handle_otp_flow(
                 // Emit resolved event.
                 if let Some(sink) = event_sink {
                     sink.emit(ChannelEvent::OtpResolved {
-                        channel_type: ChannelType::Telegram,
-                        account_handle: account_handle.to_string(),
+                        chan_type: ChannelType::Telegram,
+                        chan_account_key: account_handle.to_string(),
                         peer_id: peer_id.to_string(),
                         username: username.map(String::from),
                         resolution: "approved".into(),
@@ -898,8 +909,8 @@ async fn handle_otp_flow(
 
                 if let Some(sink) = event_sink {
                     sink.emit(ChannelEvent::OtpResolved {
-                        channel_type: ChannelType::Telegram,
-                        account_handle: account_handle.to_string(),
+                        chan_type: ChannelType::Telegram,
+                        chan_account_key: account_handle.to_string(),
                         peer_id: peer_id.to_string(),
                         username: username.map(String::from),
                         resolution: "locked_out".into(),
@@ -921,8 +932,8 @@ async fn handle_otp_flow(
 
                 if let Some(sink) = event_sink {
                     sink.emit(ChannelEvent::OtpResolved {
-                        channel_type: ChannelType::Telegram,
-                        account_handle: account_handle.to_string(),
+                        chan_type: ChannelType::Telegram,
+                        chan_account_key: account_handle.to_string(),
                         peer_id: peer_id.to_string(),
                         username: username.map(String::from),
                         resolution: "expired".into(),
@@ -971,8 +982,8 @@ async fn handle_otp_flow(
                         + 300;
 
                     sink.emit(ChannelEvent::OtpChallenge {
-                        channel_type: ChannelType::Telegram,
-                        account_handle: account_handle.to_string(),
+                        chan_type: ChannelType::Telegram,
+                        chan_account_key: account_handle.to_string(),
                         peer_id: peer_id.to_string(),
                         username: username.map(String::from),
                         sender_name: sender_name.map(String::from),
@@ -1038,9 +1049,9 @@ pub async fn handle_edited_location(
 
     if let Some(ref sink) = event_sink {
         let reply_target = ChannelReplyTarget {
-            channel_type: ChannelType::Telegram,
-            account_handle: account_handle.to_string(),
-            bot_handle,
+            chan_type: ChannelType::Telegram,
+            chan_account_key: account_handle.to_string(),
+            chan_user_name: bot_handle,
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
         };
@@ -1203,7 +1214,11 @@ fn render_context_card_markdown_fallback(context_text: &str) -> String {
     };
 
     // Sandbox indicator
-    let sandbox_icon = if sandbox.starts_with("on") { "🟢" } else { "⚫" };
+    let sandbox_icon = if sandbox.starts_with("on") {
+        "🟢"
+    } else {
+        "⚫"
+    };
 
     format!(
         "\
@@ -1252,7 +1267,11 @@ fn truncate_middle(s: &str, max_chars: usize) -> String {
 }
 
 fn format_bool(v: bool) -> &'static str {
-    if v { "yes" } else { "no" }
+    if v {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn format_opt_u64(v: Option<u64>) -> String {
@@ -1326,7 +1345,10 @@ fn render_context_card_v1(
     let overrides_lines: Vec<String> = {
         let mut lines = Vec::new();
         if let Some(k) = prompt_cache_key {
-            lines.push(format!("prompt_cache_key: <code>{}</code>", escape_html_simple(&k)));
+            lines.push(format!(
+                "prompt_cache_key: <code>{}</code>",
+                escape_html_simple(&k)
+            ));
         }
         if max_out_effective.is_some() || max_out_configured.is_some() {
             lines.push(format!(
@@ -1338,10 +1360,16 @@ fn render_context_card_v1(
             ));
         }
         if let Some(e) = reasoning_effort {
-            lines.push(format!("reasoning_effort: <code>{}</code>", escape_html_simple(&e)));
+            lines.push(format!(
+                "reasoning_effort: <code>{}</code>",
+                escape_html_simple(&e)
+            ));
         }
         if let Some(v) = text_verbosity {
-            lines.push(format!("text_verbosity: <code>{}</code>", escape_html_simple(&v)));
+            lines.push(format!(
+                "text_verbosity: <code>{}</code>",
+                escape_html_simple(&v)
+            ));
         }
         if let Some(t) = temperature {
             lines.push(format!("temperature: <code>{:.2}</code>", t));
@@ -1363,11 +1391,19 @@ fn render_context_card_v1(
         .unwrap_or(false);
     let summary_len = compaction.get("summaryLen").and_then(|v| v.as_u64());
     let kept_count = compaction.get("keptMessageCount").and_then(|v| v.as_u64());
-    let keep_rounds = compaction.get("keepLastUserRounds").and_then(|v| v.as_u64());
+    let keep_rounds = compaction
+        .get("keepLastUserRounds")
+        .and_then(|v| v.as_u64());
 
     // Sandbox / mounts.
-    let sandbox_enabled = sandbox.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-    let sandbox_backend = sandbox.get("backend").and_then(|v| v.as_str()).unwrap_or("");
+    let sandbox_enabled = sandbox
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let sandbox_backend = sandbox
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let sandbox_image = sandbox.get("image").and_then(|v| v.as_str()).unwrap_or("");
     let external_mounts_status = sandbox
         .get("externalMountsStatus")
@@ -1392,7 +1428,11 @@ fn render_context_card_v1(
         let lhs = truncate_middle(host, 42);
         let rhs = truncate_middle(guest, 36);
         let line = if mode.is_empty() {
-            format!("▸ <code>{}</code> → <code>{}</code>", escape_html_simple(&lhs), escape_html_simple(&rhs))
+            format!(
+                "▸ <code>{}</code> → <code>{}</code>",
+                escape_html_simple(&lhs),
+                escape_html_simple(&rhs)
+            )
         } else {
             format!(
                 "▸ <code>{}</code> → <code>{}</code> <i>({})</i>",
@@ -1404,7 +1444,10 @@ fn render_context_card_v1(
         mount_lines.push(line);
     }
     if mounts.len() > MAX_LIST_LINES {
-        mount_lines.push(format!("<i>… (+{} more)</i>", mounts.len() - MAX_LIST_LINES));
+        mount_lines.push(format!(
+            "<i>… (+{} more)</i>",
+            mounts.len() - MAX_LIST_LINES
+        ));
     }
     if mount_lines.is_empty() {
         mount_lines.push("<i>none</i>".to_string());
@@ -1446,7 +1489,8 @@ Next (estimate, method={}): prompt={} · threshold={} · progress={}%
         escape_html_simple(method),
         escape_html_simple(&format_opt_u64(prompt_est)),
         escape_html_simple(&format_opt_u64(compact_thred)),
-        pct.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string()),
+        pct.map(|v| v.to_string())
+            .unwrap_or_else(|| "—".to_string()),
     );
 
     let limits_line = format!(
@@ -1464,7 +1508,11 @@ Next (estimate, method={}): prompt={} · threshold={} · progress={}%
         .unwrap_or_default();
     let mut skill_names: Vec<String> = skills
         .iter()
-        .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(|n| n.to_string()))
+        .filter_map(|s| {
+            s.get("name")
+                .and_then(|v| v.as_str())
+                .map(|n| n.to_string())
+        })
         .collect();
     skill_names.sort();
     let skills_line = if skill_names.is_empty() {
@@ -1477,7 +1525,10 @@ Next (estimate, method={}): prompt={} · threshold={} · progress={}%
             .collect();
         let mut out = shown.join(", ");
         if skill_names.len() > MAX_LIST_LINES {
-            out.push_str(&format!(" <i>(+{} more)</i>", skill_names.len() - MAX_LIST_LINES));
+            out.push_str(&format!(
+                " <i>(+{} more)</i>",
+                skill_names.len() - MAX_LIST_LINES
+            ));
         }
         out
     };
@@ -1492,17 +1543,27 @@ Next (estimate, method={}): prompt={} · threshold={} · progress={}%
             .join("\n")
     };
 
-    let sandbox_icon = if sandbox_enabled { "🟢" } else { "⚫" };
+    let sandbox_icon = if sandbox_enabled {
+        "🟢"
+    } else {
+        "⚫"
+    };
     let sandbox_details = if sandbox_enabled {
         let mut parts = Vec::new();
         if !sandbox_backend.is_empty() {
             parts.push(escape_html_simple(sandbox_backend));
         }
         if !sandbox_image.is_empty() {
-            parts.push(format!("<code>{}</code>", escape_html_simple(&truncate_middle(sandbox_image, 48))));
+            parts.push(format!(
+                "<code>{}</code>",
+                escape_html_simple(&truncate_middle(sandbox_image, 48))
+            ));
         }
         if !external_mounts_status.is_empty() {
-            parts.push(format!("externalMounts=<code>{}</code>", escape_html_simple(external_mounts_status)));
+            parts.push(format!(
+                "externalMounts=<code>{}</code>",
+                escape_html_simple(external_mounts_status)
+            ));
         }
         if parts.is_empty() {
             "on".to_string()
@@ -1782,9 +1843,9 @@ pub async fn handle_callback_query(
     };
 
     let reply_target = moltis_channels::ChannelReplyTarget {
-        channel_type: ChannelType::Telegram,
-        account_handle: account_handle.to_string(),
-        bot_handle,
+        chan_type: ChannelType::Telegram,
+        chan_account_key: account_handle.to_string(),
+        chan_user_name: bot_handle,
         chat_id: chat_id.clone(),
         message_id: None, // Callback queries don't have a message to reply-thread to.
     };
@@ -2107,7 +2168,7 @@ fn entities_trigger_wakeup(
                         return true;
                     }
                 }
-            }
+            },
             MessageEntityKind::TextMention { user } => {
                 if bot_user_id.is_some_and(|id| user.id == id) {
                     return true;
@@ -2119,13 +2180,13 @@ fn entities_trigger_wakeup(
                 {
                     return true;
                 }
-            }
+            },
             MessageEntityKind::BotCommand => {
                 if is_addressed_command_to_bot(ent.text(), bot_username_norm) {
                     return true;
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     false
@@ -2158,7 +2219,11 @@ fn fallback_contains_at_username(text: &str, bot_username_norm: &str) -> bool {
 }
 
 /// Check if the bot was @mentioned (or otherwise explicitly activated) in the message.
-fn check_bot_mentioned(msg: &Message, bot_user_id: Option<UserId>, bot_username: Option<&str>) -> bool {
+fn check_bot_mentioned(
+    msg: &Message,
+    bot_user_id: Option<UserId>,
+    bot_username: Option<&str>,
+) -> bool {
     let Some(bot_username) = bot_username else {
         return false;
     };
@@ -2188,7 +2253,7 @@ fn check_bot_mentioned(msg: &Message, bot_user_id: Option<UserId>, bot_username:
                     return fallback_contains_at_username(&t.text, &bot_username_norm);
                 }
                 return false;
-            }
+            },
             MediaKind::Animation(a) => {
                 if let Some(caption) = a.caption.as_deref()
                     && entities_trigger_wakeup(
@@ -2207,7 +2272,7 @@ fn check_bot_mentioned(msg: &Message, bot_user_id: Option<UserId>, bot_username:
                         .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
                 }
                 return false;
-            }
+            },
             MediaKind::Audio(a) => {
                 if let Some(caption) = a.caption.as_deref()
                     && entities_trigger_wakeup(
@@ -2226,7 +2291,7 @@ fn check_bot_mentioned(msg: &Message, bot_user_id: Option<UserId>, bot_username:
                         .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
                 }
                 return false;
-            }
+            },
             MediaKind::Document(d) => {
                 if let Some(caption) = d.caption.as_deref()
                     && entities_trigger_wakeup(
@@ -2245,7 +2310,7 @@ fn check_bot_mentioned(msg: &Message, bot_user_id: Option<UserId>, bot_username:
                         .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
                 }
                 return false;
-            }
+            },
             MediaKind::Photo(p) => {
                 if let Some(caption) = p.caption.as_deref()
                     && entities_trigger_wakeup(
@@ -2264,7 +2329,7 @@ fn check_bot_mentioned(msg: &Message, bot_user_id: Option<UserId>, bot_username:
                         .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
                 }
                 return false;
-            }
+            },
             MediaKind::Video(v) => {
                 if let Some(caption) = v.caption.as_deref()
                     && entities_trigger_wakeup(
@@ -2283,7 +2348,7 @@ fn check_bot_mentioned(msg: &Message, bot_user_id: Option<UserId>, bot_username:
                         .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
                 }
                 return false;
-            }
+            },
             MediaKind::Voice(v) => {
                 if let Some(caption) = v.caption.as_deref()
                     && entities_trigger_wakeup(
@@ -2302,12 +2367,12 @@ fn check_bot_mentioned(msg: &Message, bot_user_id: Option<UserId>, bot_username:
                         .is_some_and(|c| fallback_contains_at_username(c, &bot_username_norm));
                 }
                 return false;
-            }
+            },
             _ => {
                 // Fallback for kinds we don't parse entities for.
                 let text = extract_text(msg).unwrap_or_default();
                 return fallback_contains_at_username(&text, &bot_username_norm);
-            }
+            },
         }
     }
 
@@ -2336,7 +2401,7 @@ fn strip_self_mentions_from_text(
                             ranges.push(ent.range());
                         }
                     }
-                }
+                },
                 MessageEntityKind::TextMention { user } => {
                     if bot_user_id.is_some_and(|id| user.id == id)
                         || user
@@ -2346,7 +2411,7 @@ fn strip_self_mentions_from_text(
                     {
                         ranges.push(ent.range());
                     }
-                }
+                },
                 MessageEntityKind::BotCommand => {
                     let cmd = ent.text();
                     if is_addressed_command_to_bot(cmd, bot_username_norm)
@@ -2358,8 +2423,8 @@ fn strip_self_mentions_from_text(
                             ranges.push(start..r.end);
                         }
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     } else {
@@ -2488,17 +2553,12 @@ fn strip_self_mention_from_message(
     (format!("{stripped_prefix}{rest}"), true)
 }
 
-/// Build a session key.
 #[allow(dead_code)]
-fn build_session_key(
-    account_handle: &str,
-    chat_id: &str,
-    thread_id: Option<&str>,
-) -> String {
-    let chan_user_id = account_handle
+fn build_chan_chat_key(chan_account_key: &str, chat_id: &str, thread_id: Option<&str>) -> String {
+    let chan_user_id = chan_account_key
         .strip_prefix("telegram:")
-        .unwrap_or(account_handle);
-    moltis_common::identity::format_session_key("telegram", chan_user_id, chat_id, thread_id)
+        .unwrap_or(chan_account_key);
+    moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, thread_id)
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2727,19 +2787,19 @@ mod tests {
 
     #[test]
     fn session_key_dm() {
-        let key = build_session_key("telegram:bot1", "1001", None);
+        let key = build_chan_chat_key("telegram:bot1", "1001", None);
         assert_eq!(key, "telegram:bot1:1001");
     }
 
     #[test]
     fn session_key_group() {
-        let key = build_session_key("telegram:bot1", "-100999", None);
+        let key = build_chan_chat_key("telegram:bot1", "-100999", None);
         assert_eq!(key, "telegram:bot1:-100999");
     }
 
     #[test]
     fn session_key_thread() {
-        let key = build_session_key("telegram:bot1", "-100999", Some("12"));
+        let key = build_chan_chat_key("telegram:bot1", "-100999", Some("12"));
         assert_eq!(key, "telegram:bot1:-100999:12");
     }
 
@@ -2820,7 +2880,7 @@ mod tests {
                 // the logic in environments where local binds are permitted.
                 eprintln!("skipping: cannot bind test listener: {e}");
                 return;
-            }
+            },
         };
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -2846,21 +2906,24 @@ mod tests {
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            map.insert(account_handle.to_string(), AccountState {
-                bot: bot.clone(),
-                bot_user_id: None,
-                bot_username: Some("test_bot".into()),
-                account_handle: account_handle.to_string(),
-                config: TelegramAccountConfig {
-                    token: Secret::new("test-token".to_string()),
-                    ..Default::default()
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
-                outbound: Arc::clone(&outbound),
-                cancel: CancellationToken::new(),
-                message_log: None,
-                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                otp: std::sync::Mutex::new(OtpState::new(300)),
-            });
+            );
         }
 
         let msg: Message = serde_json::from_value(json!({
@@ -3019,7 +3082,7 @@ mod tests {
             Err(e) => {
                 eprintln!("skipping: cannot bind test listener: {e}");
                 return;
-            }
+            },
         };
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -3045,21 +3108,24 @@ mod tests {
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            map.insert(account_handle.to_string(), AccountState {
-                bot: bot.clone(),
-                bot_user_id: None,
-                bot_username: Some("test_bot".into()),
-                account_handle: account_handle.to_string(),
-                config: TelegramAccountConfig {
-                    token: Secret::new("test-token".to_string()),
-                    ..Default::default()
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
-                outbound: Arc::clone(&outbound),
-                cancel: CancellationToken::new(),
-                message_log: None,
-                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                otp: std::sync::Mutex::new(OtpState::new(300)),
-            });
+            );
         }
 
         let msg: Message = serde_json::from_value(json!({
@@ -3165,8 +3231,7 @@ mod tests {
             "listen-only ingest must not dispatch to chat/LLM"
         );
         assert_eq!(
-            sink.ingest_calls
-                .load(std::sync::atomic::Ordering::Relaxed),
+            sink.ingest_calls.load(std::sync::atomic::Ordering::Relaxed),
             1
         );
         let last = sink.last_ingest_text.lock().unwrap().clone();
@@ -3233,8 +3298,7 @@ mod tests {
             1
         );
         assert_eq!(
-            sink.ingest_calls
-                .load(std::sync::atomic::Ordering::Relaxed),
+            sink.ingest_calls.load(std::sync::atomic::Ordering::Relaxed),
             0
         );
         let last = sink.last_dispatch_text.lock().unwrap().clone();
@@ -3257,7 +3321,7 @@ mod tests {
             Err(e) => {
                 eprintln!("skipping: cannot bind test listener: {e}");
                 return;
-            }
+            },
         };
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -3283,21 +3347,24 @@ mod tests {
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            map.insert(account_handle.to_string(), AccountState {
-                bot: bot.clone(),
-                bot_user_id: None,
-                bot_username: Some("test_bot".into()),
-                account_handle: account_handle.to_string(),
-                config: TelegramAccountConfig {
-                    token: Secret::new("test-token".to_string()),
-                    ..Default::default()
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
-                outbound: Arc::clone(&outbound),
-                cancel: CancellationToken::new(),
-                message_log: None,
-                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                otp: std::sync::Mutex::new(OtpState::new(300)),
-            });
+            );
         }
 
         let msg: Message = serde_json::from_value(json!({
@@ -3357,7 +3424,7 @@ mod tests {
             Err(e) => {
                 eprintln!("skipping: cannot bind test listener: {e}");
                 return;
-            }
+            },
         };
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -3383,21 +3450,24 @@ mod tests {
 
         {
             let mut map = accounts.write().expect("accounts write lock");
-            map.insert(account_handle.to_string(), AccountState {
-                bot: bot.clone(),
-                bot_user_id: None,
-                bot_username: Some("test_bot".into()),
-                account_handle: account_handle.to_string(),
-                config: TelegramAccountConfig {
-                    token: Secret::new("test-token".to_string()),
-                    ..Default::default()
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
-                outbound: Arc::clone(&outbound),
-                cancel: CancellationToken::new(),
-                message_log: None,
-                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                otp: std::sync::Mutex::new(OtpState::new(300)),
-            });
+            );
         }
 
         let msg: Message = serde_json::from_value(json!({
@@ -3531,7 +3601,12 @@ mod tests {
         let wrapped = json!({ "format": "context.v1", "payload": payload });
         let text = wrapped.to_string();
         let out = parse_context_v1_payload(&text).expect("should parse context.v1");
-        assert_eq!(out.get("session").and_then(|v| v.get("key")).and_then(|v| v.as_str()), Some("session:1"));
+        assert_eq!(
+            out.get("session")
+                .and_then(|v| v.get("key"))
+                .and_then(|v| v.as_str()),
+            Some("session:1")
+        );
     }
 
     #[test]
@@ -3640,10 +3715,16 @@ mod tests {
             assert!(html.contains("max_output_tokens"));
             assert!(html.contains("Compaction"));
             assert!(html.contains("Sandbox"));
-            assert!(html.contains("(+"), "should indicate truncated lists when large");
+            assert!(
+                html.contains("(+"),
+                "should indicate truncated lists when large"
+            );
             assert!(html.contains("Telegram has no draftText"));
         }
-        assert!(html.chars().count() <= 3700, "should stay within a safe size for Telegram");
+        assert!(
+            html.chars().count() <= 3700,
+            "should stay within a safe size for Telegram"
+        );
     }
 
     #[test]
@@ -3681,7 +3762,11 @@ mod tests {
         assert!(entities_trigger_wakeup(addressed, &entities, None, bot));
 
         let plain = "/context";
-        let entities = vec![MessageEntity::new(MessageEntityKind::BotCommand, 0, plain.len())];
+        let entities = vec![MessageEntity::new(
+            MessageEntityKind::BotCommand,
+            0,
+            plain.len(),
+        )];
         assert!(!entities_trigger_wakeup(plain, &entities, None, bot));
     }
 
@@ -3690,7 +3775,11 @@ mod tests {
         let bot = "mybot";
         let cmd = "/context@MyBot";
         let text = format!("{cmd} hi");
-        let entities = vec![MessageEntity::new(MessageEntityKind::BotCommand, 0, cmd.len())];
+        let entities = vec![MessageEntity::new(
+            MessageEntityKind::BotCommand,
+            0,
+            cmd.len(),
+        )];
         let (out, stripped) = strip_self_mentions_from_text(&text, &entities, None, bot);
         assert!(stripped);
         assert_eq!(out, "/context hi");
@@ -3764,6 +3853,10 @@ mod tests {
         }))
         .expect("deserialize reply message");
 
-        assert!(check_bot_mentioned(&msg, Some(UserId(bot_id)), Some("MyBot")));
+        assert!(check_bot_mentioned(
+            &msg,
+            Some(UserId(bot_id)),
+            Some("MyBot")
+        ));
     }
 }
