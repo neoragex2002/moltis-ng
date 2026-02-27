@@ -50,7 +50,7 @@ cases. Only use `"never"` in fully automated, sandboxed environments.
 
 ## Sandbox Isolation
 
-Commands execute inside isolated containers (Docker or Apple Container) by
+Commands execute inside isolated containers (Docker) by
 default. This protects your host system from:
 
 - Accidental file deletion or modification
@@ -377,8 +377,8 @@ Always run with sandbox enabled in production:
 
 ```toml
 [tools.exec.sandbox]
-enabled = true
-backend = "auto"  # uses strongest available
+mode = "all"
+backend = "auto"  # uses docker when available
 ```
 
 ### 3. Limit Rate Limits

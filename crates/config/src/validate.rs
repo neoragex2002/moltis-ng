@@ -168,7 +168,9 @@ fn build_schema_map() -> KnownKeys {
             ("mode", Leaf),
             ("scope", Leaf),
             ("idle_ttl_secs", Leaf),
-            ("workspace_mount", Leaf),
+            ("data_mount", Leaf),
+            ("data_mount_type", Leaf),
+            ("data_mount_source", Leaf),
             (
                 "mounts",
                 Array(Box::new(Struct(HashMap::from([
@@ -703,7 +705,7 @@ pub fn validate_toml_str(toml_str: &str) -> ValidationResult {
 
     // 5. Semantic warnings on parsed config (only if it parses)
     if let Ok(config) = toml::from_str::<MoltisConfig>(toml_str) {
-        check_semantic_warnings(&config, &mut diagnostics);
+        check_semantic_warnings(&config, &toml_value, &mut diagnostics);
     }
 
     ValidationResult {
@@ -819,10 +821,20 @@ fn check_provider_names(
 }
 
 /// Run semantic checks on a successfully parsed config.
-fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnostic>) {
+fn check_semantic_warnings(
+    config: &MoltisConfig,
+    toml_value: &toml::Value,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let is_localhost = config.server.bind == "127.0.0.1"
         || config.server.bind == "localhost"
         || config.server.bind == "::1";
+
+    let sandbox_table_present = toml_value
+        .get("tools")
+        .and_then(|v| v.get("exec"))
+        .and_then(|v| v.get("sandbox"))
+        .is_some();
 
     // auth.disabled + non-localhost
     if config.auth.disabled && !is_localhost {
@@ -892,19 +904,127 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
         });
     }
 
-    // Unknown sandbox backend
-    let valid_sandbox_backends = ["auto", "docker", "apple-container"];
-    if !valid_sandbox_backends.contains(&config.tools.exec.sandbox.backend.as_str()) {
-        diagnostics.push(Diagnostic {
-            severity: Severity::Warning,
-            category: "unknown-field",
-            path: "tools.exec.sandbox.backend".into(),
-            message: format!(
-                "unknown sandbox backend \"{}\"; expected one of: {}",
-                config.tools.exec.sandbox.backend,
-                valid_sandbox_backends.join(", ")
-            ),
-        });
+    if sandbox_table_present {
+        // Sandbox backend
+        //
+        // NOTE: "apple-container" is intentionally not supported to keep the mental
+        // model simple and consistent across environments (Docker-first).
+        if config.tools.exec.sandbox.backend == "apple-container" {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                category: "security",
+                path: "tools.exec.sandbox.backend".into(),
+                message: "sandbox backend \"apple-container\" is not supported; set tools.exec.sandbox.backend=\"docker\"".into(),
+            });
+        } else {
+            let valid_sandbox_backends = ["auto", "docker"];
+            if !valid_sandbox_backends.contains(&config.tools.exec.sandbox.backend.as_str()) {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    category: "unknown-field",
+                    path: "tools.exec.sandbox.backend".into(),
+                    message: format!(
+                        "unknown sandbox backend \"{}\"; expected one of: {}",
+                        config.tools.exec.sandbox.backend,
+                        valid_sandbox_backends.join(", ")
+                    ),
+                });
+            }
+        }
+    }
+
+    if sandbox_table_present && config.tools.exec.sandbox.mode != "off" {
+        // Docker data mount rules (fail-fast mental model).
+        //
+        // - backend="docker": strict errors (Docker will be used).
+        // - backend="auto": warnings (Docker may be used when available).
+        let backend = config.tools.exec.sandbox.backend.as_str();
+        let severity = match backend {
+            "docker" => Some(Severity::Error),
+            "auto" => Some(Severity::Warning),
+            _ => None,
+        };
+        if let Some(severity) = severity {
+            if config.tools.exec.sandbox.data_mount == "none" {
+                diagnostics.push(Diagnostic {
+                    severity,
+                    category: "security",
+                    path: "tools.exec.sandbox.data_mount".into(),
+                    message: "docker sandbox requires data_dir mount; set tools.exec.sandbox.data_mount=\"ro\"|\"rw\"".into(),
+                });
+            } else {
+                let mount_type = config
+                    .tools
+                    .exec
+                    .sandbox
+                    .data_mount_type
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty());
+                let mount_source = config
+                    .tools
+                    .exec
+                    .sandbox
+                    .data_mount_source
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty());
+
+                if mount_type.is_none() {
+                    diagnostics.push(Diagnostic {
+                        severity,
+                        category: "security",
+                        path: "tools.exec.sandbox.data_mount_type".into(),
+                        message: "docker sandbox requires tools.exec.sandbox.data_mount_type when tools.exec.sandbox.data_mount != \"none\"".into(),
+                    });
+                }
+                if mount_source.is_none() {
+                    diagnostics.push(Diagnostic {
+                        severity,
+                        category: "security",
+                        path: "tools.exec.sandbox.data_mount_source".into(),
+                        message: "docker sandbox requires tools.exec.sandbox.data_mount_source when tools.exec.sandbox.data_mount != \"none\"".into(),
+                    });
+                }
+
+                if let (Some(mount_type), Some(mount_source)) = (mount_type, mount_source) {
+                    match mount_type {
+                        "bind" => {
+                            if !mount_source.starts_with('/') {
+                                diagnostics.push(Diagnostic {
+                                    severity,
+                                    category: "security",
+                                    path: "tools.exec.sandbox.data_mount_source".into(),
+                                    message: "tools.exec.sandbox.data_mount_source must be an absolute path when tools.exec.sandbox.data_mount_type=\"bind\"".into(),
+                                });
+                            }
+                        },
+                        "volume" => {
+                            if mount_source.contains('/')
+                                || mount_source.contains('\\')
+                                || mount_source.contains(':')
+                                || mount_source.chars().any(char::is_whitespace)
+                            {
+                                diagnostics.push(Diagnostic {
+                                    severity,
+                                    category: "security",
+                                    path: "tools.exec.sandbox.data_mount_source".into(),
+                                    message: "tools.exec.sandbox.data_mount_source must be a Docker volume name when tools.exec.sandbox.data_mount_type=\"volume\"".into(),
+                                });
+                            }
+                        },
+                        _ => {
+                            diagnostics.push(Diagnostic {
+                                severity,
+                                category: "security",
+                                path: "tools.exec.sandbox.data_mount_type".into(),
+                                message: "tools.exec.sandbox.data_mount_type must be \"bind\" or \"volume\"".into(),
+                            });
+                        },
+                    }
+                }
+            }
+        }
     }
 
     // Unknown sandbox scope
@@ -1700,6 +1820,24 @@ backend = "podman"
             warning.is_some(),
             "expected warning for unknown sandbox backend"
         );
+    }
+
+    #[test]
+    fn apple_container_sandbox_backend_is_error() {
+        let toml = r#"
+[tools.exec.sandbox]
+backend = "apple-container"
+"#;
+        let result = validate_toml_str(toml);
+        let diag = result
+            .diagnostics
+            .iter()
+            .find(|d| d.path == "tools.exec.sandbox.backend");
+        assert!(diag.is_some(), "expected diagnostic for apple-container");
+        let diag = diag.unwrap();
+        assert_eq!(diag.severity, Severity::Error);
+        assert!(diag.message.contains("not supported"));
+        assert!(diag.message.contains("tools.exec.sandbox.backend"));
     }
 
     #[test]

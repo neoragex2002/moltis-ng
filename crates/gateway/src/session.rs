@@ -120,9 +120,7 @@ struct ChannelReplyTargetCompat {
 ///
 /// This key is intentionally *not* the opaque persistent `session:<uuid>`.
 pub(crate) fn sandbox_chan_chat_key_for_channel_binding(binding_json: &str) -> Option<String> {
-    if let Ok(target) =
-        serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
-    {
+    if let Ok(target) = serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json) {
         let chan_user_id = moltis_common::identity::chan_user_id_from_chan_account_key(
             &target.chan_account_key,
             Some(target.chan_type.as_str()),

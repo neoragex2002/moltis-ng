@@ -14,8 +14,8 @@ HTTP mode. The key settings are:
 | `--no-tls` or `MOLTIS_NO_TLS=true` | Disable TLS | Provider handles HTTPS |
 | `--bind 0.0.0.0` | Bind all interfaces | Required for container networking |
 | `--port <PORT>` | Listen port | Must match provider's expected internal port |
-| `MOLTIS_CONFIG_DIR=/data/config` | Config directory | Persist moltis.toml, credentials |
-| `MOLTIS_DATA_DIR=/data` | Data directory | Persist databases, sessions, memory |
+| `MOLTIS_CONFIG_DIR=/moltis/config` | Config directory | Persist moltis.toml, credentials |
+| `MOLTIS_DATA_DIR=/moltis/data` | Data directory | Persist databases, sessions, memory |
 | `MOLTIS_DEPLOY_PLATFORM` | Deploy platform | Hides local-only providers (see below) |
 | `MOLTIS_PASSWORD` | Initial password | Set auth password via environment variable |
 
@@ -59,7 +59,7 @@ fly volumes create moltis_data --region iad --size 1
 
 - **Image**: pulled from `ghcr.io/moltis-org/moltis:latest`
 - **Port**: internal 8080, Fly terminates TLS and routes HTTPS traffic
-- **Storage**: a Fly Volume mounted at `/data` persists the database, sessions,
+- **Storage**: a Fly Volume mounted at `/moltis` persists config + data
   and memory files
 - **Auto-scaling**: machines stop when idle and start on incoming requests
 
@@ -82,7 +82,7 @@ Click the button above or create an app manually:
 3. Set image to `ghcr.io/moltis-org/moltis:latest`
 4. Set the run command: `moltis --bind 0.0.0.0 --port 8080 --no-tls`
 5. Set environment variables:
-   - `MOLTIS_DATA_DIR` = `/data`
+   - `MOLTIS_DATA_DIR` = `/moltis/data`
    - `MOLTIS_PASSWORD` = your password
 6. Set the HTTP port to `8080`
 
@@ -105,7 +105,7 @@ The repository includes a `render.yaml` blueprint. Click the button above or:
 ### Configuration details
 
 - **Port**: Render uses port 10000 by default
-- **Persistent disk**: 1 GB mounted at `/data` (included in the blueprint)
+- **Persistent disk**: 1 GB mounted at `/moltis` (included in the blueprint)
 - **Environment**: set `MOLTIS_PASSWORD` in the Render dashboard under
   **Environment** > **Secret Files** or **Environment Variables**
 
@@ -126,7 +126,7 @@ environment variables (`MOLTIS_CONFIG_DIR`, `MOLTIS_DATA_DIR`,
 ### Persistent storage
 
 Railway supports persistent volumes. Add one in the service settings and mount
-it at `/data`.
+it at `/moltis`.
 -->
 
 ## Authentication

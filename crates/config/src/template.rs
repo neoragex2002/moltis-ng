@@ -254,14 +254,17 @@ scope = "chat"                    # Container lifecycle:
 idle_ttl_secs = 0                 # Idle container TTL (seconds):
                                   #   0   - Disable TTL (default)
                                   #   >0  - Auto-cleanup when idle for TTL
-workspace_mount = "ro"            # How to mount workspace in sandbox:
-                                  #   "ro"   - Read-only (safe)
-                                  #   "rw"   - Read-write (can modify files)
-                                  #   "none" - No mount
+data_mount = "ro"                 # How to mount Moltis data_dir into sandbox (guest: /moltis/data):
+                                  #   "ro"   - Read-only (safe; recommended)
+                                  #   "rw"   - Read-write (can modify data_dir; use with care)
+                                  #   "none" - No mount (Docker backend will fail-fast when sandboxing is required)
+#
+# Docker backend requires both of these when `data_mount != "none"`:
+# data_mount_type = "bind"        # "bind" (host path) or "volume" (named volume)
+# data_mount_source = "/srv/moltis-data"  # bind: absolute host path | volume: volume name
 backend = "auto"                  # Container backend:
-                                  #   "auto"            - Auto-detect (prefers Apple Container on macOS)
+                                  #   "auto"            - Auto-detect (uses Docker when available)
                                   #   "docker"          - Use Docker
-                                  #   "apple-container" - Use Apple Container (macOS only)
 no_network = true                 # Disable network access in sandbox (recommended)
 # image = "custom-image:tag"      # Custom Docker image (default: auto-built)
 # container_prefix = "moltis"     # Prefix for container names

@@ -140,7 +140,6 @@ function buildImage() {
 }
 
 var BACKEND_LABELS = {
-	"apple-container": "Apple Container (VM-isolated)",
 	docker: "Docker",
 	cgroup: "cgroup (systemd-run)",
 	none: "None (host execution)",
@@ -152,13 +151,6 @@ function backendRecommendation(info) {
 	var backend = info.backend;
 
 	if (backend === "none") {
-		if (os === "macos") {
-			return {
-				level: "warn",
-				text: "No container runtime detected. Install Apple Container (macOS 26+) for VM-isolated sandboxing, or install Docker as an alternative.",
-				link: "https://developer.apple.com/documentation/virtualization",
-			};
-		}
 		if (os === "linux") {
 			return {
 				level: "warn",
@@ -168,13 +160,6 @@ function backendRecommendation(info) {
 		return {
 			level: "warn",
 			text: "No container runtime detected. Install Docker for sandboxed execution.",
-		};
-	}
-
-	if (os === "macos" && backend === "docker") {
-		return {
-			level: "info",
-			text: "Apple Container provides stronger VM-level isolation on macOS 26+. Install it for automatic use (moltis prefers it over Docker). Run: brew install container",
 		};
 	}
 
@@ -195,8 +180,7 @@ function SandboxBanner() {
 	var label = BACKEND_LABELS[info.backend] || info.backend;
 	var rec = backendRecommendation(info);
 
-	var badgeColor =
-		info.backend === "none" ? "var(--error)" : info.backend === "apple-container" ? "var(--accent)" : "var(--muted)";
+	var badgeColor = info.backend === "none" ? "var(--error)" : "var(--muted)";
 
 	return html`<div>
     <div class="info-bar" style="margin-bottom:8px;">
@@ -305,7 +289,6 @@ function ImagesPage() {
       </div>
       <p class="text-sm text-[var(--muted)] leading-relaxed" class="max-w-form" style="margin:0;">
         Container images cached by moltis for sandbox execution. You can delete individual images or prune all. Build custom images from a base with apt packages.
-        ${sandboxInfo.value?.backend === "apple-container" && html`<br /><br />Apple Container provides VM-isolated execution but does not support building images. Docker (or OrbStack) is required alongside Apple Container to build and cache custom images. Sandboxed commands run via Apple Container; image builds use Docker.`}
       </p>
 
       <${SandboxBanner} />

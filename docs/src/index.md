@@ -22,14 +22,14 @@ curl -fsSL https://www.moltis.org/install.sh | sh
 | **Deployment** | Single binary | Node.js + dependencies |
 | **Memory Safety** | Rust ownership | Garbage collection |
 | **Secret Handling** | Zeroed on drop | "Eventually collected" |
-| **Sandbox** | Docker + Apple Container | Docker only |
+| **Sandbox** | Docker | Docker only |
 | **Startup** | Milliseconds | Seconds |
 
 ## Key Features
 
 - **Multiple LLM Providers** — OpenAI Codex, GitHub Copilot, Local LLM*
 - **Streaming-First** — Responses appear as tokens arrive, not after completion
-- **Sandboxed Execution** — Commands run in isolated containers (Docker or Apple Container)
+- **Sandboxed Execution** — Commands run in isolated containers (Docker)
 - **MCP Support** — Connect to Model Context Protocol servers for extended capabilities
 - **Multi-Channel** — Web UI, Telegram, API access with synchronized responses
 - **Built-in Throttling** — Per-IP endpoint limits with strict login protection

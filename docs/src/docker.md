@@ -12,7 +12,8 @@ docker run -d \
   -p 13131:13131 \
   -p 13132:13132 \
   -v moltis-config:/home/moltis/.config/moltis \
-  -v moltis-data:/home/moltis/.moltis \
+  -e MOLTIS_DATA_DIR=/moltis/data \
+  -v moltis-data:/moltis/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/moltis-org/moltis:latest
 ```
@@ -56,7 +57,7 @@ Moltis uses two directories that should be persisted:
 | Path | Contents |
 |------|----------|
 | `/home/moltis/.config/moltis` | Configuration files: `moltis.toml`, `credentials.json`, `mcp-servers.json` |
-| `/home/moltis/.moltis` | Runtime data: databases, sessions, memory files, logs |
+| `/moltis/data` | Runtime data: databases, sessions, memory files, logs |
 
 You can use named volumes (as shown above) or bind mounts to local directories
 for easier access to configuration files:
@@ -67,7 +68,8 @@ docker run -d \
   -p 13131:13131 \
   -p 13132:13132 \
   -v ./config:/home/moltis/.config/moltis \
-  -v ./data:/home/moltis/.moltis \
+  -e MOLTIS_DATA_DIR=/moltis/data \
+  -v ./data:/moltis/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/moltis-org/moltis:latest
 ```
@@ -114,9 +116,11 @@ services:
     ports:
       - "13131:13131"
       - "13132:13132"
+    environment:
+      - MOLTIS_DATA_DIR=/moltis/data
     volumes:
       - ./config:/home/moltis/.config/moltis
-      - ./data:/home/moltis/.moltis
+      - ./data:/moltis/data
       - /var/run/docker.sock:/var/run/docker.sock
 ```
 
@@ -139,7 +143,8 @@ podman run -d \
   -p 13131:13131 \
   -p 13132:13132 \
   -v moltis-config:/home/moltis/.config/moltis \
-  -v moltis-data:/home/moltis/.moltis \
+  -e MOLTIS_DATA_DIR=/moltis/data \
+  -v moltis-data:/moltis/data \
   -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock \
   ghcr.io/moltis-org/moltis:latest
 
@@ -149,7 +154,8 @@ podman run -d \
   -p 13131:13131 \
   -p 13132:13132 \
   -v moltis-config:/home/moltis/.config/moltis \
-  -v moltis-data:/home/moltis/.moltis \
+  -e MOLTIS_DATA_DIR=/moltis/data \
+  -v moltis-data:/moltis/data \
   -v /run/podman/podman.sock:/var/run/docker.sock \
   ghcr.io/moltis-org/moltis:latest
 ```
@@ -179,9 +185,9 @@ docker run -d \
   -p 13131:13131 \
   -p 13132:13132 \
   -e MOLTIS_CONFIG_DIR=/config \
-  -e MOLTIS_DATA_DIR=/data \
+  -e MOLTIS_DATA_DIR=/moltis/data \
   -v ./config:/config \
-  -v ./data:/data \
+  -v ./data:/moltis/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/moltis-org/moltis:latest
 ```

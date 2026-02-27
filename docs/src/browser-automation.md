@@ -283,7 +283,7 @@ sandbox_image = "browserless/chrome"  # Container image for sandboxed sessions
 ```
 
 Requirements:
-- Docker or Apple Container must be installed and running
+- Docker must be installed and running
 - The container image is pulled automatically on first use
 - Session sandbox mode must be enabled (`[tools.exec.sandbox] mode = "all"`)
 

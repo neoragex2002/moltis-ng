@@ -54,9 +54,19 @@ Commands run inside isolated containers for security:
 
 ```toml
 [tools.exec.sandbox]
-enabled = true
-backend = "docker"              # "docker" or "apple" (macOS 15+)
-base_image = "ubuntu:25.10"
+mode = "all"                    # "off" | "non-main" | "all"
+scope = "chat"                  # "session" | "chat" | "bot" | "global"
+backend = "auto"                # "auto" | "docker" (apple-container is not supported)
+no_network = true
+
+# Fixed container path for instance data is `/moltis/data`.
+# Docker backend requires these when sandboxing is enabled:
+data_mount = "ro"               # "none" | "ro" | "rw"
+data_mount_type = "bind"        # "bind" | "volume"
+data_mount_source = "/srv/moltis-data" # bind: absolute host path | volume: volume name
+
+# Optional: override base image for sandbox containers (default: ubuntu:25.10)
+# image = "ubuntu:25.10"
 
 # Packages installed in the sandbox image
 packages = [
@@ -220,9 +230,13 @@ max_iterations = 25
 default = "openai-codex"
 
 [tools.exec.sandbox]
-enabled = true
+mode = "all"
+scope = "chat"
 backend = "docker"
-base_image = "ubuntu:25.10"
+no_network = true
+data_mount = "ro"
+data_mount_type = "bind"
+data_mount_source = "/srv/moltis-data"
 packages = ["curl", "git", "jq", "python3", "nodejs"]
 
 [memory]

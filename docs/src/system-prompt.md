@@ -117,7 +117,7 @@ Injected as compact key=value lines under a `## Runtime` heading:
 
 ```
 Host: host=moltis-devbox | os=macos | arch=aarch64 | shell=zsh | provider=openai | model=gpt-5 | sessionId=main | sudo_non_interactive=true | timezone=Europe/Paris
-Sandbox(exec): enabled=true | mode=all | backend=docker | scope=session | image=moltis-sandbox:abc123 | workspace_mount=ro | network=disabled
+ Sandbox(exec): enabled=true | mode=all | backend=docker | scope=session | image=moltis-sandbox:abc123 | data_mount=ro | network=disabled
 ```
 
 When tools are included, an **Execution routing** block explains how `exec`

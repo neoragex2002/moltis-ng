@@ -319,6 +319,9 @@ pub async fn provision_host_packages(packages: &[String]) -> Result<Option<HostP
 /// Default container image used when none is configured.
 pub const DEFAULT_SANDBOX_IMAGE: &str = "ubuntu:25.10";
 
+/// Fixed guest mountpoint for Moltis instance data inside sandbox containers.
+pub const SANDBOX_GUEST_DATA_DIR: &str = "/moltis/data";
+
 /// Sandbox mode controlling when sandboxing is applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -370,7 +373,7 @@ impl std::fmt::Display for SandboxScope {
     }
 }
 
-/// Workspace mount mode.
+/// Mount mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -387,6 +390,23 @@ impl std::fmt::Display for WorkspaceMount {
             Self::None => f.write_str("none"),
             Self::Ro => f.write_str("ro"),
             Self::Rw => f.write_str("rw"),
+        }
+    }
+}
+
+/// Backing type for the sandbox data mount (`/moltis/data`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DataMountType {
+    Bind,
+    Volume,
+}
+
+impl std::fmt::Display for DataMountType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bind => f.write_str("bind"),
+            Self::Volume => f.write_str("volume"),
         }
     }
 }
@@ -414,7 +434,13 @@ pub struct SandboxConfig {
     /// - `>0`: idle containers may be reclaimed after TTL.
     /// - `=0`: disable TTL; containers persist unless cleaned by other policy.
     pub idle_ttl_secs: u64,
-    pub workspace_mount: WorkspaceMount,
+    /// Whether to mount the Moltis data directory into sandbox containers.
+    ///
+    /// When enabled, Docker mounts `data_mount_source` to the fixed guest path
+    /// `/moltis/data` (ro/rw based on this value).
+    pub data_mount: WorkspaceMount,
+    pub data_mount_type: Option<DataMountType>,
+    pub data_mount_source: Option<String>,
     /// Additional host directory mounts exposed inside the sandbox container.
     ///
     /// Deny-by-default: mounts require `mount_allowlist` entries and are validated
@@ -427,8 +453,10 @@ pub struct SandboxConfig {
     pub image: Option<String>,
     pub container_prefix: Option<String>,
     pub no_network: bool,
-    /// Backend: `"auto"` (default), `"docker"`, or `"apple-container"`.
-    /// `"auto"` prefers Apple Container on macOS when available.
+    /// Backend: `"auto"` (default) or `"docker"`.
+    /// `"auto"` uses Docker when available, falls back to direct execution.
+    ///
+    /// Note: `"apple-container"` is intentionally not supported (will fail-fast).
     pub backend: String,
     pub resource_limits: ResourceLimits,
     /// Packages to install via `apt-get` after container creation.
@@ -463,7 +491,9 @@ impl Default for SandboxConfig {
             mode: SandboxMode::default(),
             scope: SandboxScope::default(),
             idle_ttl_secs: 0,
-            workspace_mount: WorkspaceMount::default(),
+            data_mount: WorkspaceMount::default(),
+            data_mount_type: None,
+            data_mount_source: None,
             mounts: Vec::new(),
             mount_allowlist: Vec::new(),
             image: None,
@@ -500,11 +530,17 @@ impl From<&moltis_config::schema::SandboxConfig> for SandboxConfig {
                 },
             },
             idle_ttl_secs: cfg.idle_ttl_secs,
-            workspace_mount: match cfg.workspace_mount.as_str() {
+            data_mount: match cfg.data_mount.as_str() {
                 "rw" => WorkspaceMount::Rw,
                 "none" => WorkspaceMount::None,
                 _ => WorkspaceMount::Ro,
             },
+            data_mount_type: cfg.data_mount_type.as_deref().and_then(|raw| match raw {
+                "bind" => Some(DataMountType::Bind),
+                "volume" => Some(DataMountType::Volume),
+                _ => None,
+            }),
+            data_mount_source: cfg.data_mount_source.clone(),
             mounts: cfg
                 .mounts
                 .iter()
@@ -793,6 +829,34 @@ impl DockerSandbox {
         Self { config }
     }
 
+    fn normalize_bind_mount_source_for_compare(source: &str) -> String {
+        // Lexically normalize absolute UNIX-style paths for comparison against
+        // `docker inspect` output, without touching the filesystem.
+        //
+        // This reduces false contract mismatches when users provide paths with
+        // redundant separators or dot segments.
+        if !source.starts_with('/') {
+            return source.trim().to_string();
+        }
+
+        let mut stack: Vec<&str> = Vec::new();
+        for segment in source.split('/') {
+            match segment {
+                "" | "." => {},
+                ".." => {
+                    let _ = stack.pop();
+                },
+                other => stack.push(other),
+            }
+        }
+
+        if stack.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", stack.join("/"))
+        }
+    }
+
     fn image(&self) -> &str {
         self.config
             .image
@@ -830,20 +894,183 @@ impl DockerSandbox {
         args
     }
 
-    fn workspace_args(&self) -> Vec<String> {
-        let workspace_dir = moltis_config::data_dir();
-        let workspace_dir_str = workspace_dir.display().to_string();
-        match self.config.workspace_mount {
-            WorkspaceMount::Ro => vec![
-                "-v".to_string(),
-                format!("{workspace_dir_str}:{workspace_dir_str}:ro"),
-            ],
-            WorkspaceMount::Rw => vec![
-                "-v".to_string(),
-                format!("{workspace_dir_str}:{workspace_dir_str}:rw"),
-            ],
-            WorkspaceMount::None => Vec::new(),
+    fn data_mount_args(&self) -> Result<Vec<String>> {
+        let mode = match self.config.data_mount {
+            WorkspaceMount::Ro => "ro",
+            WorkspaceMount::Rw => "rw",
+            WorkspaceMount::None => {
+                anyhow::bail!(
+                    "SANDBOX_DATA_MOUNT_REQUIRED: docker sandbox requires data_dir mount; \
+                     set tools.exec.sandbox.data_mount=ro|rw and set \
+                     tools.exec.sandbox.data_mount_type/tools.exec.sandbox.data_mount_source"
+                )
+            },
+        };
+
+        let mount_type = self.config.data_mount_type.ok_or_else(|| {
+            anyhow::anyhow!(
+                "SANDBOX_DATA_MOUNT_REQUIRED: docker sandbox requires data_dir mount; \
+                 set tools.exec.sandbox.data_mount=ro|rw and set \
+                 tools.exec.sandbox.data_mount_type/tools.exec.sandbox.data_mount_source"
+            )
+        })?;
+
+        let mount_source = self
+            .config
+            .data_mount_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "SANDBOX_DATA_MOUNT_REQUIRED: docker sandbox requires data_dir mount; \
+                     set tools.exec.sandbox.data_mount=ro|rw and set \
+                     tools.exec.sandbox.data_mount_type/tools.exec.sandbox.data_mount_source"
+                )
+            })?;
+
+        match mount_type {
+            DataMountType::Bind => {
+                if !std::path::Path::new(mount_source).is_absolute() {
+                    anyhow::bail!(
+                        "SANDBOX_DATA_MOUNT_INVALID: tools.exec.sandbox.data_mount_source must be an \
+                         absolute path when tools.exec.sandbox.data_mount_type=bind"
+                    );
+                }
+                if mount_source.contains(':') {
+                    anyhow::bail!(
+                        "SANDBOX_DATA_MOUNT_INVALID: tools.exec.sandbox.data_mount_source must not contain ':' \
+                         when tools.exec.sandbox.data_mount_type=bind"
+                    );
+                }
+            },
+            DataMountType::Volume => {
+                if mount_source.contains('/')
+                    || mount_source.contains('\\')
+                    || mount_source.contains(':')
+                    || mount_source.chars().any(char::is_whitespace)
+                {
+                    anyhow::bail!(
+                        "SANDBOX_DATA_MOUNT_INVALID: tools.exec.sandbox.data_mount_source must be a \
+                         Docker volume name when tools.exec.sandbox.data_mount_type=volume"
+                    );
+                }
+            },
         }
+
+        Ok(vec![
+            "-v".to_string(),
+            format!("{mount_source}:{SANDBOX_GUEST_DATA_DIR}:{mode}"),
+        ])
+    }
+
+    async fn container_contract_matches(&self, name: &str) -> Result<bool> {
+        let expected_env = format!("MOLTIS_DATA_DIR={SANDBOX_GUEST_DATA_DIR}");
+
+        let env_output = tokio::process::Command::new("docker")
+            .args([
+                "inspect",
+                "--format",
+                "{{range .Config.Env}}{{println .}}{{end}}",
+                name,
+            ])
+            .output()
+            .await?;
+        if !env_output.status.success() {
+            return Ok(false);
+        }
+        let env_stdout = String::from_utf8_lossy(&env_output.stdout);
+        let env_ok = env_stdout.lines().any(|l| l.trim() == expected_env);
+
+        let mounts_output = tokio::process::Command::new("docker")
+            .args([
+                "inspect",
+                "--format",
+                "{{range .Mounts}}{{println .Type \"|\" .Name \"|\" .Source \"|\" .Destination \"|\" .RW}}{{end}}",
+                name,
+            ])
+            .output()
+            .await?;
+        if !mounts_output.status.success() {
+            return Ok(false);
+        }
+        let mounts_stdout = String::from_utf8_lossy(&mounts_output.stdout);
+
+        let expected_mount_type = self.config.data_mount_type.ok_or_else(|| {
+            anyhow::anyhow!(
+                "SANDBOX_DATA_MOUNT_REQUIRED: docker sandbox requires data_dir mount; \
+                 set tools.exec.sandbox.data_mount=ro|rw and set \
+                 tools.exec.sandbox.data_mount_type/tools.exec.sandbox.data_mount_source"
+            )
+        })?;
+        let expected_mount_source = self
+            .config
+            .data_mount_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "SANDBOX_DATA_MOUNT_REQUIRED: docker sandbox requires data_dir mount; \
+                     set tools.exec.sandbox.data_mount=ro|rw and set \
+                     tools.exec.sandbox.data_mount_type/tools.exec.sandbox.data_mount_source"
+                )
+            })?;
+        let expected_mount_source_normalized = match expected_mount_type {
+            DataMountType::Bind => {
+                Self::normalize_bind_mount_source_for_compare(expected_mount_source)
+            },
+            DataMountType::Volume => expected_mount_source.to_string(),
+        };
+        let expected_rw = match self.config.data_mount {
+            WorkspaceMount::Rw => "true",
+            WorkspaceMount::Ro => "false",
+            WorkspaceMount::None => "false",
+        };
+
+        let mut mount_ok = false;
+        for line in mounts_stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        {
+            let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+            if parts.len() != 5 {
+                continue;
+            }
+            let mount_type = parts[0];
+            let mount_name = parts[1];
+            let mount_source = parts[2];
+            let mount_dest = parts[3];
+            let mount_rw = parts[4];
+
+            if mount_dest != SANDBOX_GUEST_DATA_DIR {
+                continue;
+            }
+
+            match expected_mount_type {
+                DataMountType::Bind => {
+                    let mount_source_normalized =
+                        Self::normalize_bind_mount_source_for_compare(mount_source);
+                    if mount_type == "bind"
+                        && mount_source_normalized == expected_mount_source_normalized
+                        && mount_rw == expected_rw
+                    {
+                        mount_ok = true;
+                    }
+                },
+                DataMountType::Volume => {
+                    if mount_type == "volume"
+                        && mount_name == expected_mount_source_normalized
+                        && mount_rw == expected_rw
+                    {
+                        mount_ok = true;
+                    }
+                },
+            }
+        }
+
+        Ok(env_ok && mount_ok)
     }
 
     fn external_mount_args(&self) -> Result<Vec<String>> {
@@ -965,6 +1192,36 @@ impl DockerSandbox {
         }
         Ok(args)
     }
+
+    fn docker_run_args(&self, name: &str, image: &str) -> Result<Vec<String>> {
+        let mut args = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--name".to_string(),
+            name.to_string(),
+        ];
+
+        if self.config.no_network {
+            args.push("--network=none".to_string());
+        }
+
+        if let Some(ref tz) = self.config.timezone {
+            args.extend(["-e".to_string(), format!("TZ={tz}")]);
+        }
+
+        args.extend([
+            "-e".to_string(),
+            format!("MOLTIS_DATA_DIR={SANDBOX_GUEST_DATA_DIR}"),
+        ]);
+
+        args.extend(self.resource_args());
+        args.extend(self.data_mount_args()?);
+        args.extend(self.external_mount_args()?);
+
+        args.push(image.to_string());
+        args.extend(["sleep".to_string(), "infinity".to_string()]);
+        Ok(args)
+    }
 }
 
 #[async_trait]
@@ -982,36 +1239,32 @@ impl Sandbox for DockerSandbox {
             .output()
             .await;
 
-        if let Ok(output) = check {
+        if let Ok(output) = check
+            && output.status.success()
+        {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if stdout.trim() == "true" {
-                return Ok(());
+                if self.container_contract_matches(&name).await? {
+                    return Ok(());
+                }
+
+                // Stale container (older mount/env contract). Recreate it.
+                let _ = tokio::process::Command::new("docker")
+                    .args(["rm", "-f", &name])
+                    .output()
+                    .await;
+            } else {
+                // Container exists but is not running — recreate for a clean contract.
+                let _ = tokio::process::Command::new("docker")
+                    .args(["rm", "-f", &name])
+                    .output()
+                    .await;
             }
         }
 
         // Start a new container.
-        let mut args = vec![
-            "run".to_string(),
-            "-d".to_string(),
-            "--name".to_string(),
-            name.clone(),
-        ];
-
-        if self.config.no_network {
-            args.push("--network=none".to_string());
-        }
-
-        if let Some(ref tz) = self.config.timezone {
-            args.extend(["-e".to_string(), format!("TZ={tz}")]);
-        }
-
-        args.extend(self.resource_args());
-        args.extend(self.workspace_args());
-        args.extend(self.external_mount_args()?);
-
         let image = image_override.unwrap_or_else(|| self.image());
-        args.push(image.to_string());
-        args.extend(["sleep".to_string(), "infinity".to_string()]);
+        let args = self.docker_run_args(&name, image)?;
 
         let output = tokio::process::Command::new("docker")
             .args(&args)
@@ -1171,6 +1424,32 @@ impl Sandbox for NoSandbox {
 
     async fn exec(&self, _id: &SandboxId, command: &str, opts: &ExecOpts) -> Result<ExecResult> {
         crate::exec::exec_command(command, opts).await
+    }
+
+    async fn cleanup(&self, _id: &SandboxId) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Explicitly unsupported sandbox backend (used for `backend=apple-container`).
+pub struct UnsupportedAppleContainerSandbox;
+
+#[async_trait]
+impl Sandbox for UnsupportedAppleContainerSandbox {
+    fn backend_name(&self) -> &'static str {
+        "apple-container"
+    }
+
+    async fn ensure_ready(&self, _id: &SandboxId, _image_override: Option<&str>) -> Result<()> {
+        anyhow::bail!(
+            "SANDBOX_BACKEND_UNSUPPORTED: backend=apple-container is not supported; set tools.exec.sandbox.backend=docker"
+        );
+    }
+
+    async fn exec(&self, _id: &SandboxId, _command: &str, _opts: &ExecOpts) -> Result<ExecResult> {
+        anyhow::bail!(
+            "SANDBOX_BACKEND_UNSUPPORTED: backend=apple-container is not supported; set tools.exec.sandbox.backend=docker"
+        );
     }
 
     async fn cleanup(&self, _id: &SandboxId) -> Result<()> {
@@ -1495,178 +1774,14 @@ fn ensure_apple_container_service() -> bool {
     try_start_apple_container_service()
 }
 
+#[cfg(target_os = "macos")]
 fn is_apple_container_service_error(stderr: &str) -> bool {
     stderr.contains("XPC connection error") || stderr.contains("Connection invalid")
 }
 
+#[cfg(target_os = "macos")]
 fn is_apple_container_exists_error(stderr: &str) -> bool {
     stderr.contains("already exists") || stderr.contains("exists: \"container with id")
-}
-
-fn is_apple_container_corruption_error(stderr: &str) -> bool {
-    is_apple_container_service_error(stderr)
-        || is_apple_container_exists_error(stderr)
-        || stderr.contains("cannot exec: container is not running")
-        || stderr.contains("failed to bootstrap container")
-        || stderr.contains("config.json")
-}
-
-/// Wrapper sandbox that can fail over from a primary backend to a fallback backend.
-///
-/// This is used on macOS to fail over from Apple Container to Docker when the
-/// Apple runtime enters a corrupted state (stale metadata, missing config.json,
-/// service errors, etc.).
-pub struct FailoverSandbox {
-    primary: Arc<dyn Sandbox>,
-    fallback: Arc<dyn Sandbox>,
-    primary_name: &'static str,
-    fallback_name: &'static str,
-    use_fallback: RwLock<bool>,
-}
-
-impl FailoverSandbox {
-    pub fn new(primary: Arc<dyn Sandbox>, fallback: Arc<dyn Sandbox>) -> Self {
-        let primary_name = primary.backend_name();
-        let fallback_name = fallback.backend_name();
-        Self {
-            primary,
-            fallback,
-            primary_name,
-            fallback_name,
-            use_fallback: RwLock::new(false),
-        }
-    }
-
-    async fn fallback_enabled(&self) -> bool {
-        *self.use_fallback.read().await
-    }
-
-    async fn switch_to_fallback(&self, error: &anyhow::Error) {
-        let mut use_fallback = self.use_fallback.write().await;
-        if !*use_fallback {
-            warn!(
-                primary = self.primary_name,
-                fallback = self.fallback_name,
-                %error,
-                "sandbox primary backend failed, switching to fallback backend"
-            );
-            *use_fallback = true;
-        }
-    }
-
-    fn should_failover(&self, error: &anyhow::Error) -> bool {
-        if self.primary_name != "apple-container" {
-            return false;
-        }
-        let message = format!("{error:#}");
-        is_apple_container_corruption_error(&message)
-    }
-}
-
-#[async_trait]
-impl Sandbox for FailoverSandbox {
-    fn backend_name(&self) -> &'static str {
-        self.primary_name
-    }
-
-    async fn ensure_ready(&self, id: &SandboxId, image_override: Option<&str>) -> Result<()> {
-        if self.fallback_enabled().await {
-            return self.fallback.ensure_ready(id, image_override).await;
-        }
-
-        match self.primary.ensure_ready(id, image_override).await {
-            Ok(()) => Ok(()),
-            Err(primary_error) => {
-                if !self.should_failover(&primary_error) {
-                    return Err(primary_error);
-                }
-
-                self.switch_to_fallback(&primary_error).await;
-                let primary_message = format!("{primary_error:#}");
-                self.fallback
-                    .ensure_ready(id, image_override)
-                    .await
-                    .map_err(|fallback_error| {
-                        anyhow::anyhow!(
-                            "primary sandbox backend ({}) failed: {}; fallback backend ({}) also failed: {}",
-                            self.primary_name,
-                            primary_message,
-                            self.fallback_name,
-                            fallback_error
-                        )
-                    })
-            },
-        }
-    }
-
-    async fn exec(&self, id: &SandboxId, command: &str, opts: &ExecOpts) -> Result<ExecResult> {
-        if self.fallback_enabled().await {
-            return self.fallback.exec(id, command, opts).await;
-        }
-
-        match self.primary.exec(id, command, opts).await {
-            Ok(result) => Ok(result),
-            Err(primary_error) => {
-                if !self.should_failover(&primary_error) {
-                    return Err(primary_error);
-                }
-
-                self.switch_to_fallback(&primary_error).await;
-                let primary_message = format!("{primary_error:#}");
-                self.fallback
-                    .ensure_ready(id, None)
-                    .await
-                    .map_err(|fallback_error| {
-                        anyhow::anyhow!(
-                            "primary sandbox backend ({}) failed during exec: {}; fallback backend ({}) failed to initialize: {}",
-                            self.primary_name,
-                            primary_message,
-                            self.fallback_name,
-                            fallback_error
-                        )
-                    })?;
-                self.fallback.exec(id, command, opts).await
-            },
-        }
-    }
-
-    async fn cleanup(&self, id: &SandboxId) -> Result<()> {
-        if self.fallback_enabled().await {
-            let result = self.fallback.cleanup(id).await;
-            if let Err(error) = self.primary.cleanup(id).await {
-                debug!(
-                    backend = self.primary_name,
-                    %error,
-                    "primary sandbox cleanup failed after failover"
-                );
-            }
-            return result;
-        }
-
-        self.primary.cleanup(id).await
-    }
-
-    async fn build_image(
-        &self,
-        base: &str,
-        packages: &[String],
-    ) -> Result<Option<BuildImageResult>> {
-        if self.fallback_enabled().await {
-            return self.fallback.build_image(base, packages).await;
-        }
-
-        match self.primary.build_image(base, packages).await {
-            Ok(result) => Ok(result),
-            Err(primary_error) => {
-                if !self.should_failover(&primary_error) {
-                    return Err(primary_error);
-                }
-
-                self.switch_to_fallback(&primary_error).await;
-                self.fallback.build_image(base, packages).await
-            },
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2024,67 +2139,17 @@ fn create_sandbox_backend(config: SandboxConfig) -> Arc<dyn Sandbox> {
 /// Select the sandbox backend based on config and platform availability.
 ///
 /// When `backend` is `"auto"` (the default):
-/// - On macOS, prefer Apple Container if the `container` CLI is installed
-///   (each sandbox runs in a lightweight VM — stronger isolation than Docker).
-/// - Fall back to Docker otherwise.
+/// - Use Docker when available.
+/// - Fall back to direct execution otherwise.
 fn select_backend(config: SandboxConfig) -> Arc<dyn Sandbox> {
     match config.backend.as_str() {
         "docker" => Arc::new(DockerSandbox::new(config)),
-        #[cfg(target_os = "macos")]
-        "apple-container" => {
-            if !ensure_apple_container_service() {
-                tracing::warn!(
-                    "apple container service could not be started; \
-                     run `container system start` manually, then restart moltis"
-                );
-            }
-            let apple_backend: Arc<dyn Sandbox> =
-                Arc::new(AppleContainerSandbox::new(config.clone()));
-            maybe_wrap_with_docker_failover(apple_backend, &config)
-        },
+        "apple-container" => Arc::new(UnsupportedAppleContainerSandbox),
         _ => auto_detect_backend(config),
     }
 }
 
-#[cfg(target_os = "macos")]
-fn maybe_wrap_with_docker_failover(
-    primary: Arc<dyn Sandbox>,
-    config: &SandboxConfig,
-) -> Arc<dyn Sandbox> {
-    let docker_usable =
-        should_use_docker_backend(is_cli_available("docker"), is_docker_daemon_available());
-    if !docker_usable {
-        return primary;
-    }
-
-    tracing::info!(
-        primary = primary.backend_name(),
-        fallback = "docker",
-        "sandbox backend failover enabled"
-    );
-    Arc::new(FailoverSandbox::new(
-        primary,
-        Arc::new(DockerSandbox::new(config.clone())),
-    ))
-}
-
 fn auto_detect_backend(config: SandboxConfig) -> Arc<dyn Sandbox> {
-    #[cfg(target_os = "macos")]
-    {
-        if is_cli_available("container") {
-            if ensure_apple_container_service() {
-                tracing::info!("sandbox backend: apple-container (VM-isolated, preferred)");
-                let apple_backend: Arc<dyn Sandbox> =
-                    Arc::new(AppleContainerSandbox::new(config.clone()));
-                return maybe_wrap_with_docker_failover(apple_backend, &config);
-            }
-            tracing::warn!(
-                "apple container CLI found but service could not be started; \
-                 falling back to docker"
-            );
-        }
-    }
-
     if should_use_docker_backend(is_cli_available("docker"), is_docker_daemon_available()) {
         tracing::info!("sandbox backend: docker");
         return Arc::new(DockerSandbox::new(config));
@@ -2556,14 +2621,6 @@ mod tests {
                 cleanup_calls: AtomicUsize::new(0),
             }
         }
-
-        fn ensure_ready_calls(&self) -> usize {
-            self.ensure_ready_calls.load(Ordering::SeqCst)
-        }
-
-        fn exec_calls(&self) -> usize {
-            self.exec_calls.load(Ordering::SeqCst)
-        }
     }
 
     #[async_trait::async_trait]
@@ -2647,13 +2704,20 @@ mod tests {
         let json = r#"{
             "mode": "all",
             "scope": "session",
-            "workspace_mount": "rw",
+            "data_mount": "rw",
+            "data_mount_type": "bind",
+            "data_mount_source": "/srv/moltis-data",
             "no_network": true,
             "resource_limits": {"memory_limit": "1G"}
         }"#;
         let config: SandboxConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.mode, SandboxMode::All);
-        assert_eq!(config.workspace_mount, WorkspaceMount::Rw);
+        assert_eq!(config.data_mount, WorkspaceMount::Rw);
+        assert_eq!(config.data_mount_type, Some(DataMountType::Bind));
+        assert_eq!(
+            config.data_mount_source.as_deref(),
+            Some("/srv/moltis-data")
+        );
         assert!(config.no_network);
         assert_eq!(config.resource_limits.memory_limit.as_deref(), Some("1G"));
     }
@@ -2677,26 +2741,121 @@ mod tests {
     }
 
     #[test]
-    fn test_docker_workspace_args_ro() {
+    fn test_docker_data_mount_args_bind_ro() {
         let config = SandboxConfig {
-            workspace_mount: WorkspaceMount::Ro,
+            data_mount: WorkspaceMount::Ro,
+            data_mount_type: Some(DataMountType::Bind),
+            data_mount_source: Some("/srv/moltis-data".into()),
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
-        let args = docker.workspace_args();
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0], "-v");
-        assert!(args[1].ends_with(":ro"));
+        let args = docker.data_mount_args().unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "-v".to_string(),
+                "/srv/moltis-data:/moltis/data:ro".to_string()
+            ]
+        );
     }
 
     #[test]
-    fn test_docker_workspace_args_none() {
+    fn test_docker_data_mount_args_volume_rw() {
         let config = SandboxConfig {
-            workspace_mount: WorkspaceMount::None,
+            data_mount: WorkspaceMount::Rw,
+            data_mount_type: Some(DataMountType::Volume),
+            data_mount_source: Some("moltis-data".into()),
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
-        assert!(docker.workspace_args().is_empty());
+        let args = docker.data_mount_args().unwrap();
+        assert_eq!(
+            args,
+            vec!["-v".to_string(), "moltis-data:/moltis/data:rw".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_docker_data_mount_args_missing_fails_fast() {
+        let config = SandboxConfig {
+            data_mount: WorkspaceMount::None,
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let err = docker.data_mount_args().unwrap_err().to_string();
+        assert!(err.contains("SANDBOX_DATA_MOUNT_REQUIRED"));
+    }
+
+    #[test]
+    fn test_docker_data_mount_args_invalid_bind_source_fails_fast() {
+        let config = SandboxConfig {
+            data_mount: WorkspaceMount::Ro,
+            data_mount_type: Some(DataMountType::Bind),
+            data_mount_source: Some("relative/path".into()),
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let err = docker.data_mount_args().unwrap_err().to_string();
+        assert!(err.contains("SANDBOX_DATA_MOUNT_INVALID"));
+    }
+
+    #[test]
+    fn test_docker_data_mount_args_invalid_bind_source_with_colon_fails_fast() {
+        let config = SandboxConfig {
+            data_mount: WorkspaceMount::Ro,
+            data_mount_type: Some(DataMountType::Bind),
+            data_mount_source: Some("/srv/moltis:data".into()),
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let err = docker.data_mount_args().unwrap_err().to_string();
+        assert!(err.contains("SANDBOX_DATA_MOUNT_INVALID"));
+    }
+
+    #[test]
+    fn test_docker_data_mount_args_invalid_volume_source_fails_fast() {
+        let config = SandboxConfig {
+            data_mount: WorkspaceMount::Ro,
+            data_mount_type: Some(DataMountType::Volume),
+            data_mount_source: Some("bad/name".into()),
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let err = docker.data_mount_args().unwrap_err().to_string();
+        assert!(err.contains("SANDBOX_DATA_MOUNT_INVALID"));
+    }
+
+    #[test]
+    fn test_docker_data_mount_args_invalid_volume_source_with_colon_fails_fast() {
+        let config = SandboxConfig {
+            data_mount: WorkspaceMount::Ro,
+            data_mount_type: Some(DataMountType::Volume),
+            data_mount_source: Some("bad:name".into()),
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let err = docker.data_mount_args().unwrap_err().to_string();
+        assert!(err.contains("SANDBOX_DATA_MOUNT_INVALID"));
+    }
+
+    #[test]
+    fn test_docker_run_args_includes_data_dir_env() {
+        let config = SandboxConfig {
+            data_mount: WorkspaceMount::Ro,
+            data_mount_type: Some(DataMountType::Bind),
+            data_mount_source: Some("/srv/moltis-data".into()),
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let args = docker
+            .docker_run_args("moltis-sandbox-test", DEFAULT_SANDBOX_IMAGE)
+            .unwrap();
+        assert!(args.contains(&"-e".to_string()));
+        assert!(args.contains(&format!("MOLTIS_DATA_DIR={SANDBOX_GUEST_DATA_DIR}")));
+        assert!(
+            args.iter()
+                .any(|a| a.contains(&format!(":{SANDBOX_GUEST_DATA_DIR}:ro")))
+        );
     }
 
     #[test]
@@ -3267,45 +3426,7 @@ mod tests {
         assert_eq!(img, DEFAULT_SANDBOX_IMAGE);
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn test_backend_name_apple_container() {
-        let sandbox = AppleContainerSandbox::new(SandboxConfig::default());
-        assert_eq!(sandbox.backend_name(), "apple-container");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn test_sandbox_router_explicit_apple_container_backend() {
-        let config = SandboxConfig {
-            backend: "apple-container".into(),
-            ..Default::default()
-        };
-        let router = SandboxRouter::new(config);
-        assert_eq!(router.backend_name(), "apple-container");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn test_apple_container_name_generation_rotation() {
-        let sandbox = AppleContainerSandbox::new(SandboxConfig::default());
-        let id = SandboxId {
-            scope: SandboxScope::Session,
-            key: "session-abc".into(),
-        };
-
-        let first_name = sandbox.container_name(&id).await;
-        assert_eq!(first_name, "moltis-sandbox-session-abc");
-
-        let rotated_name = sandbox.bump_container_generation(&id).await;
-        assert_eq!(rotated_name, "moltis-sandbox-session-abc-g1");
-
-        let current_name = sandbox.container_name(&id).await;
-        assert_eq!(current_name, "moltis-sandbox-session-abc-g1");
-    }
-
-    /// When both Docker and Apple Container are available, test that we can
-    /// explicitly select each one.
+    /// When Docker is available, test that we can explicitly select it.
     #[test]
     fn test_select_backend_explicit_choices() {
         // Docker backend
@@ -3317,117 +3438,21 @@ mod tests {
             let backend = select_backend(config);
             assert_eq!(backend.backend_name(), "docker");
         }
-
-        // Apple Container backend (macOS only)
-        #[cfg(target_os = "macos")]
-        if is_cli_available("container") {
-            let config = SandboxConfig {
-                backend: "apple-container".into(),
-                ..Default::default()
-            };
-            let backend = select_backend(config);
-            assert_eq!(backend.backend_name(), "apple-container");
-        }
-    }
-
-    #[test]
-    fn test_is_apple_container_service_error() {
-        assert!(is_apple_container_service_error(
-            "Error: internalError: \"XPC connection error\""
-        ));
-        assert!(is_apple_container_service_error(
-            "Error: Connection invalid while contacting service"
-        ));
-        assert!(!is_apple_container_service_error(
-            "Error: something else happened"
-        ));
-    }
-
-    #[test]
-    fn test_is_apple_container_exists_error() {
-        assert!(is_apple_container_exists_error(
-            "Error: exists: \"container with id moltis-sandbox-main already exists\""
-        ));
-        assert!(is_apple_container_exists_error(
-            "Error: container already exists"
-        ));
-        assert!(!is_apple_container_exists_error("Error: no such container"));
-    }
-
-    #[test]
-    fn test_is_apple_container_corruption_error() {
-        assert!(is_apple_container_corruption_error(
-            "failed to bootstrap container because config.json is missing"
-        ));
-        assert!(is_apple_container_corruption_error(
-            "cannot exec: container is not running"
-        ));
-        assert!(!is_apple_container_corruption_error("permission denied"));
     }
 
     #[tokio::test]
-    async fn test_failover_sandbox_switches_from_apple_to_docker() {
-        let primary = Arc::new(TestSandbox::new(
-            "apple-container",
-            Some("failed to bootstrap container: config.json missing"),
-            None,
-        ));
-        let fallback = Arc::new(TestSandbox::new("docker", None, None));
-        let sandbox = FailoverSandbox::new(primary.clone(), fallback.clone());
+    async fn test_explicit_apple_container_backend_is_unsupported() {
+        let config = SandboxConfig {
+            backend: "apple-container".into(),
+            ..Default::default()
+        };
+        let backend = select_backend(config);
         let id = SandboxId {
             scope: SandboxScope::Session,
             key: "session-abc".into(),
         };
-
-        sandbox.ensure_ready(&id, None).await.unwrap();
-        sandbox.ensure_ready(&id, None).await.unwrap();
-
-        assert_eq!(primary.ensure_ready_calls(), 1);
-        assert_eq!(fallback.ensure_ready_calls(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_failover_sandbox_does_not_switch_on_unrelated_error() {
-        let primary = Arc::new(TestSandbox::new(
-            "apple-container",
-            Some("permission denied"),
-            None,
-        ));
-        let fallback = Arc::new(TestSandbox::new("docker", None, None));
-        let sandbox = FailoverSandbox::new(primary.clone(), fallback.clone());
-        let id = SandboxId {
-            scope: SandboxScope::Session,
-            key: "session-abc".into(),
-        };
-
-        let error = sandbox.ensure_ready(&id, None).await.unwrap_err();
-        assert!(format!("{error:#}").contains("permission denied"));
-        assert_eq!(primary.ensure_ready_calls(), 1);
-        assert_eq!(fallback.ensure_ready_calls(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_failover_sandbox_switches_exec_path() {
-        let primary = Arc::new(TestSandbox::new(
-            "apple-container",
-            None,
-            Some("cannot exec: container is not running"),
-        ));
-        let fallback = Arc::new(TestSandbox::new("docker", None, None));
-        let sandbox = FailoverSandbox::new(primary.clone(), fallback.clone());
-        let id = SandboxId {
-            scope: SandboxScope::Session,
-            key: "session-abc".into(),
-        };
-
-        let result = sandbox
-            .exec(&id, "uname -a", &ExecOpts::default())
-            .await
-            .unwrap();
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(primary.exec_calls(), 1);
-        assert_eq!(fallback.ensure_ready_calls(), 1);
-        assert_eq!(fallback.exec_calls(), 1);
+        let error = backend.ensure_ready(&id, None).await.unwrap_err();
+        assert!(format!("{error:#}").contains("SANDBOX_BACKEND_UNSUPPORTED"));
     }
 
     #[test]

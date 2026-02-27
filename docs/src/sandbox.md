@@ -11,58 +11,37 @@ Configure in `moltis.toml`:
 [tools.exec.sandbox]
 backend = "auto"          # default — picks the best available
 # backend = "docker"      # force Docker
-# backend = "apple-container"  # force Apple Container (macOS only)
+# backend = "apple-container"  # not supported (will fail-fast)
 ```
 
-With `"auto"` (the default), Moltis picks the strongest available backend:
+With `"auto"` (the default), Moltis uses Docker when available:
 
 | Priority | Backend           | Platform | Isolation          |
 |----------|-------------------|----------|--------------------|
-| 1        | Apple Container   | macOS    | VM (Virtualization.framework) |
-| 2        | Docker            | any      | Linux namespaces / cgroups    |
-| 3        | none (host)       | any      | no isolation                  |
+| 1        | Docker            | any      | Linux namespaces / cgroups    |
+| 2        | none (host)       | any      | no isolation                  |
 
-## Apple Container (recommended on macOS)
+## Data directory mount (`/moltis/data`)
 
-[Apple Container](https://github.com/apple/container) runs each sandbox in a
-lightweight virtual machine using Apple's Virtualization.framework. Every
-container gets its own kernel, so a kernel exploit inside the sandbox cannot
-reach the host — unlike Docker, which shares the host kernel.
+Sandbox containers use a fixed, stable path for the Moltis instance data
+directory: `/moltis/data`.
 
-### Install
+On Docker, this requires configuring the mount backing explicitly:
 
-Download the signed installer from GitHub:
-
-```bash
-# Download the installer package
-gh release download --repo apple/container --pattern "container-installer-signed.pkg" --dir /tmp
-
-# Install (requires admin)
-sudo installer -pkg /tmp/container-installer-signed.pkg -target /
-
-# First-time setup — downloads a default Linux kernel
-container system start
+```toml
+[tools.exec.sandbox]
+data_mount = "ro"                 # "ro" | "rw" (must not be "none" when sandboxing)
+data_mount_type = "bind"          # "bind" | "volume"
+data_mount_source = "/srv/moltis-data" # bind: absolute host path | volume: volume name
 ```
 
-Alternatively, build from source with `brew install container` (requires
-Xcode 26+).
-
-### Verify
-
-```bash
-container --version
-# Run a quick test
-container run --rm ubuntu echo "hello from VM"
-```
-
-Once installed, restart `moltis gateway` — the startup banner will show
-`sandbox: apple-container backend`.
+Moltis injects `MOLTIS_DATA_DIR=/moltis/data` into sandbox containers so any code
+running inside the sandbox resolves the data directory consistently.
 
 ## Docker
 
 Docker is supported on macOS, Linux, and Windows. On macOS it runs inside a
-Linux VM managed by Docker Desktop, so it is reasonably isolated but adds more
-overhead than Apple Container.
+Linux VM managed by Docker Desktop.
 
 Install from https://docs.docker.com/get-docker/
 

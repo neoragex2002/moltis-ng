@@ -31,6 +31,8 @@ const SYSTEM_GUIDELINES_AND_SILENT_REPLIES: &str = concat!(
     "The user's UI already shows tool results, so there is no need to repeat or acknowledge them. Stay silent when the output answers the user's question.\n",
 );
 
+const SANDBOX_DATA_DIR: &str = "/moltis/data";
+
 /// Build the three-layer OpenAI Responses developer preamble.
 ///
 /// The provider is responsible for mapping these layers to `role=developer` messages
@@ -120,7 +122,7 @@ pub fn build_openai_responses_developer_prompts(
 
     persona.push_str("## People (reference)\n\n");
     persona.push_str("For other agents/bots managed by this Moltis instance, see:\n");
-    persona.push_str("- data_dir/PEOPLE.md\n");
+    persona.push_str(&format!("- {SANDBOX_DATA_DIR}/PEOPLE.md\n"));
     persona.push_str("Note: do not inline the roster here; keep this message cache-friendly.\n\n");
 
     persona.push_str("## Tools\n\n");
@@ -266,7 +268,7 @@ pub struct PromptSandboxRuntimeContext {
     pub backend: Option<String>,
     pub scope: Option<String>,
     pub image: Option<String>,
-    pub workspace_mount: Option<String>,
+    pub data_mount: Option<String>,
     pub no_network: Option<bool>,
     /// Per-session override for sandbox enablement.
     pub session_override: Option<bool>,
@@ -663,10 +665,10 @@ fn format_sandbox_runtime_line(sandbox: &PromptSandboxRuntimeContext) -> String 
     {
         parts.push(format!("image={v}"));
     }
-    if let Some(v) = sandbox.workspace_mount.as_deref()
+    if let Some(v) = sandbox.data_mount.as_deref()
         && !v.is_empty()
     {
-        parts.push(format!("workspace_mount={v}"));
+        parts.push(format!("data_mount={v}"));
     }
     if let Some(v) = sandbox.no_network {
         parts.push(format!(
@@ -925,7 +927,7 @@ mod tests {
                 backend: Some("docker".into()),
                 scope: Some("session".into()),
                 image: Some("moltis-sandbox:abc123".into()),
-                workspace_mount: Some("ro".into()),
+                data_mount: Some("ro".into()),
                 no_network: Some(true),
                 session_override: Some(true),
             }),
@@ -1141,7 +1143,7 @@ mod tests {
                 backend: Some("none".into()),
                 scope: Some("chat".into()),
                 image: Some("ubuntu:25.10".into()),
-                workspace_mount: Some("ro".into()),
+                data_mount: Some("ro".into()),
                 no_network: Some(false),
                 session_override: Some(true),
             }),
@@ -1177,7 +1179,7 @@ mod tests {
         assert!(prompts.persona.contains("## Owner (USER.md)"));
         assert!(prompts.persona.contains("Owner / primary operator: Neo"));
         assert!(prompts.persona.contains("## People (reference)"));
-        assert!(prompts.persona.contains("data_dir/PEOPLE.md"));
+        assert!(prompts.persona.contains("/moltis/data/PEOPLE.md"));
         assert!(prompts.persona.contains("## Tools"));
         assert!(prompts.persona.contains("# TOOLS.md"));
         assert!(prompts.persona.contains("## Agents"));

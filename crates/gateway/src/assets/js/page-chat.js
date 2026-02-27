@@ -401,7 +401,7 @@ function renderContextSandboxSection(card, data) {
 		sandboxSection.appendChild(ctxRow("Backend", sb.backend));
 		if (sb.mode) sandboxSection.appendChild(ctxRow("Mode", sb.mode));
 		if (sb.scope) sandboxSection.appendChild(ctxRow("Scope", sb.scope));
-		if (sb.workspaceMount) sandboxSection.appendChild(ctxRow("Workspace Mount", sb.workspaceMount));
+		if (sb.dataMount) sandboxSection.appendChild(ctxRow("Data Mount", sb.dataMount));
 		if (sb.image) sandboxSection.appendChild(ctxRow("Image", sb.image, true));
 		if (sb.containerName) sandboxSection.appendChild(ctxRow("Container", sb.containerName));
 	}

@@ -26,7 +26,7 @@
 - PEOPLE.md 生成不泄露 token：`crates/gateway/src/people.rs:61`
 - Telegram session label：`crates/gateway/src/channel_events.rs:1864`、`crates/gateway/src/chat.rs:9884`
 - Onboarding 写入落点更新（`personas/default/*`）：`crates/onboarding/src/service.rs:347`
-- Prompt 引用 `data_dir/PEOPLE.md`：`crates/agents/src/prompt.rs:1176`
+- Prompt 引用 `/moltis/data/PEOPLE.md`：`crates/agents/src/prompt.rs:34`
 - Personas frontmatter 解析/写回回归测试（Node）：`crates/gateway/src/assets/js/identity-frontmatter.test.mjs:10`
 - Channels persona 缺失提示逻辑回归测试（Node）：`crates/gateway/src/assets/js/persona-utils.test.mjs:6`
 

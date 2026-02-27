@@ -857,11 +857,20 @@ mod tests {
                 "marker"
             }
 
-            async fn ensure_ready(&self, _id: &SandboxId, _image_override: Option<&str>) -> Result<()> {
+            async fn ensure_ready(
+                &self,
+                _id: &SandboxId,
+                _image_override: Option<&str>,
+            ) -> Result<()> {
                 Ok(())
             }
 
-            async fn exec(&self, id: &SandboxId, _command: &str, _opts: &ExecOpts) -> Result<ExecResult> {
+            async fn exec(
+                &self,
+                id: &SandboxId,
+                _command: &str,
+                _opts: &ExecOpts,
+            ) -> Result<ExecResult> {
                 Ok(ExecResult {
                     stdout: format!("sandboxed:{}", id.key),
                     stderr: String::new(),

@@ -2163,7 +2163,9 @@ mod tests {
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = HookRegistry::new();
-        registry.register(Arc::new(CaptureHook { seen: Arc::clone(&seen) }));
+        registry.register(Arc::new(CaptureHook {
+            seen: Arc::clone(&seen),
+        }));
 
         let uc = UserContent::text("Hi");
         run_agent_loop_with_context(
@@ -2183,7 +2185,9 @@ mod tests {
         .unwrap();
 
         let captured = seen.lock().unwrap_or_else(|e| e.into_inner());
-        let json = captured.first().expect("expected BeforeLLMCall hook payload");
+        let json = captured
+            .first()
+            .expect("expected BeforeLLMCall hook payload");
         assert!(json.contains("\"chanChatKey\""));
         assert!(json.contains("\"chanAccountKey\""));
         assert!(json.contains("\"chanChatKey\":\"telegram:123:-100\""));

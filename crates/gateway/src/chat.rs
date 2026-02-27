@@ -828,7 +828,7 @@ async fn build_prompt_runtime_context(
                 backend: Some(router.backend_name().to_string()),
                 scope: Some(config.scope.to_string()),
                 image: Some(router.resolve_image(&router_key, None).await),
-                workspace_mount: Some(config.workspace_mount.to_string()),
+                data_mount: Some(config.data_mount.to_string()),
                 no_network: Some(config.no_network),
                 session_override: session_entry.and_then(|entry| entry.sandbox_enabled),
             })
@@ -839,7 +839,7 @@ async fn build_prompt_runtime_context(
                 backend: Some("none".to_string()),
                 scope: None,
                 image: None,
-                workspace_mount: None,
+                data_mount: None,
                 no_network: None,
                 session_override: None,
             })
@@ -3603,7 +3603,7 @@ impl ChatService for LiveChatService {
                 "backend": router.backend_name(),
                 "mode": config.mode,
                 "scope": config.scope,
-                "workspaceMount": config.workspace_mount,
+                "dataMount": config.data_mount,
                 "mountAllowlist": mount_allowlist,
                 "mounts": mounts,
                 "externalMountsStatus": external_mounts_status,
@@ -3616,7 +3616,7 @@ impl ChatService for LiveChatService {
             serde_json::json!({
                 "enabled": false,
                 "backend": null,
-                "workspaceMount": app_config.tools.exec.sandbox.workspace_mount.as_str(),
+                "dataMount": app_config.tools.exec.sandbox.data_mount.as_str(),
                 "mountAllowlist": mount_allowlist,
                 "mounts": mounts,
                 "externalMountsStatus": external_mounts_status,
@@ -4674,13 +4674,14 @@ async fn run_with_tools(
 
                         // Dispatch ToolResultPersist hook (may modify/block).
                         if let Some(ref hooks) = hook_registry {
-                            let hook_payload = moltis_common::hooks::HookPayload::ToolResultPersist {
-                                session_id: sk.clone(),
-                                tool_name: name.clone(),
-                                result: persisted_result_for_store
-                                    .clone()
-                                    .unwrap_or(serde_json::Value::Null),
-                            };
+                            let hook_payload =
+                                moltis_common::hooks::HookPayload::ToolResultPersist {
+                                    session_id: sk.clone(),
+                                    tool_name: name.clone(),
+                                    result: persisted_result_for_store
+                                        .clone()
+                                        .unwrap_or(serde_json::Value::Null),
+                                };
                             match hooks.dispatch(&hook_payload).await {
                                 Ok(moltis_common::hooks::HookAction::Block(reason)) => {
                                     warn!(
@@ -7926,7 +7927,11 @@ mod tests {
             &self.subscribed
         }
 
-        async fn handle(&self, event: HookEvent, payload: &HookPayload) -> anyhow::Result<HookAction> {
+        async fn handle(
+            &self,
+            event: HookEvent,
+            payload: &HookPayload,
+        ) -> anyhow::Result<HookAction> {
             let payload_val = serde_json::to_value(payload)?;
             self.seen.lock().await.push(payload_val);
 
@@ -7943,7 +7948,7 @@ mod tests {
                         return Ok(HookAction::ModifyPayload(v.clone()));
                     }
                 },
-                _ => {}
+                _ => {},
             }
 
             Ok(HookAction::Continue)
@@ -8992,7 +8997,10 @@ echo @bot2
             .iter()
             .filter_map(|v| v.get("event").and_then(|e| e.as_str()))
             .collect();
-        assert!(events.contains(&"MessageSending"), "missing MessageSending hook");
+        assert!(
+            events.contains(&"MessageSending"),
+            "missing MessageSending hook"
+        );
         assert!(events.contains(&"MessageSent"), "missing MessageSent hook");
         assert!(events.contains(&"AgentEnd"), "missing AgentEnd hook");
         assert!(
@@ -9219,14 +9227,20 @@ echo @bot2
             persisted[0].get("role").and_then(|v| v.as_str()),
             Some("tool_result")
         );
-        assert_eq!(persisted[0]["result"], serde_json::json!({"redacted": true}));
+        assert_eq!(
+            persisted[0]["result"],
+            serde_json::json!({"redacted": true})
+        );
 
         let seen_vals = seen.lock().await;
         let events: Vec<&str> = seen_vals
             .iter()
             .filter_map(|v| v.get("event").and_then(|e| e.as_str()))
             .collect();
-        assert!(events.contains(&"MessageSending"), "missing MessageSending hook");
+        assert!(
+            events.contains(&"MessageSending"),
+            "missing MessageSending hook"
+        );
         assert!(events.contains(&"MessageSent"), "missing MessageSent hook");
         assert!(events.contains(&"AgentEnd"), "missing AgentEnd hook");
         assert!(
@@ -9320,8 +9334,7 @@ echo @bot2
         let (_mounts, _allow, status) = super::sandbox_mount_debug_info(&cfg, None, false);
         assert_eq!(status, "router_unavailable");
 
-        let (_mounts, _allow, status) =
-            super::sandbox_mount_debug_info(&cfg, Some("apple-container"), true);
+        let (_mounts, _allow, status) = super::sandbox_mount_debug_info(&cfg, Some("none"), true);
         assert_eq!(status, "unsupported_backend");
 
         let (_mounts, allow, status) = super::sandbox_mount_debug_info(&cfg, Some("docker"), true);

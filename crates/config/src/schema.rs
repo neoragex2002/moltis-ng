@@ -1272,7 +1272,21 @@ pub struct SandboxConfig {
     /// - `=0`: disable TTL (containers persist until explicit cleanup policy).
     #[serde(default)]
     pub idle_ttl_secs: u64,
-    pub workspace_mount: String,
+    /// How to mount the Moltis data directory into sandbox containers.
+    /// - "none": no mount (Docker backend will fail-fast when sandboxing is required)
+    /// - "ro": read-only
+    /// - "rw": read-write
+    pub data_mount: String,
+    /// Backing type for the sandbox data mount:
+    /// - "bind": bind mount from a Docker-host-visible absolute path
+    /// - "volume": named Docker volume
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_mount_type: Option<String>,
+    /// Backing source for the sandbox data mount:
+    /// - bind: Docker-host-visible absolute path (e.g. "/srv/moltis-data")
+    /// - volume: Docker volume name (e.g. "moltis-data")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_mount_source: Option<String>,
     /// Additional host directory mounts exposed inside the sandbox container.
     ///
     /// Deny-by-default: enabling mounts requires `mount_allowlist` entries.
@@ -1286,8 +1300,10 @@ pub struct SandboxConfig {
     pub image: Option<String>,
     pub container_prefix: Option<String>,
     pub no_network: bool,
-    /// Backend: "auto" (default), "docker", or "apple-container".
-    /// "auto" prefers Apple Container on macOS when available, falls back to Docker.
+    /// Backend: "auto" (default) or "docker".
+    /// "auto" uses Docker when available, falls back to direct execution.
+    ///
+    /// Note: "apple-container" is intentionally not supported (will fail-fast).
     pub backend: String,
     pub resource_limits: ResourceLimitsConfig,
     /// Packages to install via `apt-get` in the sandbox image.
@@ -1480,7 +1496,9 @@ impl Default for SandboxConfig {
             mode: "all".into(),
             scope: "chat".into(),
             idle_ttl_secs: 0,
-            workspace_mount: "ro".into(),
+            data_mount: "ro".into(),
+            data_mount_type: None,
+            data_mount_source: None,
             mounts: Vec::new(),
             mount_allowlist: Vec::new(),
             image: None,

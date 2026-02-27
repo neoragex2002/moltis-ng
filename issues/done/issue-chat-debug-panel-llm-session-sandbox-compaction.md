@@ -54,7 +54,7 @@
 
 - 很难确认某些 **模型参数**（例如 OpenAI Responses 的 `reasoning.effort`、`text.verbosity`、`temperature`、`max_output_tokens`）是否在实际请求中生效。
 - 很难在 UI 侧核对 **prompt cache 分桶**是否真的按不同 `session_key` 写入 `prompt_cache_key`（只能看服务器日志或抓包）。
-- Sandbox 的 **mount** 只展示 `workspace_mount`，但不展示外部 mounts（`mounts[]` / `mount_allowlist[]`）及其是否生效（例如 backend 不支持导致失效）。
+- Sandbox 的 **mount** 只展示 `data_mount`，但不展示外部 mounts（`mounts[]` / `mount_allowlist[]`）及其是否生效（例如 backend 不支持导致失效）。
 - **compact** 相关只展示 token/budget 水位线，不展示“当前会话是否已 compact / summary 长度 / keep window 实际保留量”等状态；只有执行 `/compact` 后会出现一次性的 compact 卡片，缺少常驻 debug 信息。
 
 ## 目标（Desired Behavior）
@@ -68,7 +68,7 @@
    - UI 里已展示，继续保留，并与 `prompt_cache_key` 的来源关系清晰可见（例如 `prompt_cache_key = hash(session_key)` 或 `raw(session_key)`，以及 fallback 的说明）。
 
 3) **Mount 情况（Sandbox）**
-   - 展示 `workspace_mount`（已有）+ `mount_allowlist[]` + `mounts[]`（每条 host->guest + ro/rw）。
+   - 展示 `data_mount`（已有）+ `mount_allowlist[]` + `mounts[]`（每条 host->guest + ro/rw）。
    - 展示外部 mounts 是否“已生效/被拒绝/不支持”（例如 apple-container 后端不支持外部 mounts）。
 
 4) **Compact 情况**

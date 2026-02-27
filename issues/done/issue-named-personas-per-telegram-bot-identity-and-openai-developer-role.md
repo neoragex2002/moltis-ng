@@ -473,7 +473,7 @@ Developer message #3（runtime snapshot / may change）：
 ## Runtime
 
 Host: host=DESKTOP | os=linux | arch=x86_64 | shell=bash | provider=openai-responses | model=openai-responses::gpt-5.2 | session=telegram:lovely:8454363355 | channel=telegram | channel_account_id=lovely | channel_account_handle=@lovely_apple_bot | channel_chat_id=8454363355 | sudo_non_interactive=false | sudo_status=requires_password | timezone=Asia/Shanghai
-Sandbox(exec): enabled=true | mode=all | backend=none | scope=chat | image=ubuntu:25.10 | workspace_mount=ro | network=enabled
+Sandbox(exec): enabled=true | mode=all | backend=none | scope=chat | image=ubuntu:25.10 | data_mount=ro | network=enabled
 
 Execution routing:
 - `exec` runs inside sandbox when `Sandbox(exec): enabled=true`.
