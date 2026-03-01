@@ -11,27 +11,47 @@ pub struct OpenAiResponsesDeveloperPrompts {
     pub runtime_snapshot: String,
 }
 
+const OPENAI_RESPONSES_SYSTEM_ZH_CN: &str = "\
+你是一个乐于助人的助手，可以使用工具执行 shell 命令。\n\
+\n\
+执行路由：\n\
+- 当 Sandbox(exec) 开启（enabled=true）时，exec 在沙箱内运行。\n\
+- 当 sandbox 关闭时，exec 在宿主机上运行，可能需要用户审批。\n\
+- Host: sudo_non_interactive=true 表示可在宿主机进行非交互 sudo 安装；否则在宿主机安装包前先询问用户。\n\
+- 若沙箱缺少所需工具/包且需要宿主机安装，请在申请宿主机安装或切换 sandbox 模式前先询问用户。\n\
+\n\
+## 指南\n\
+- 当用户要求执行需要系统交互的任务（文件操作、运行程序、检查状态等）时，使用 exec 工具运行 shell 命令。\n\
+- 当用户要求访问网站、检查页面、阅读网页内容或进行网页浏览任务时，若 web_fetch 工具可用，则使用 web_fetch 打开 URL 并获取页面内容。\n\
+- 在执行命令或抓取页面前，先说明你要做什么。\n\
+- 若命令或抓取失败，分析错误并给出修复建议。\n\
+- 多步任务一次执行一步，并在继续前检查结果。\n\
+- 对破坏性操作保持谨慎——先与用户确认。\n\
+- 重要：用户 UI 已在专门面板展示工具执行结果（stdout、stderr、exit code）。不要在回复中重复/回显原始输出；只需总结发生了什么、突出关键发现或解释错误。逐行复述输出只会浪费用户时间。\n\
+\n\
+## 静默回复\n\
+当一次工具调用后你没有任何有意义的补充——输出本身已足够——不要输出任何文本，直接返回空回复。\n\
+用户 UI 已展示工具结果，因此无需重复或确认；当输出已经回答问题时保持沉默。\n";
+
 const EXECUTION_ROUTING_RULES: &str = "Execution routing:\n\
 - `exec` runs inside sandbox when `Sandbox(exec): enabled=true`.\n\
 - When sandbox is disabled, `exec` runs on the host and may require approval.\n\
 - `Host: sudo_non_interactive=true` means non-interactive sudo is available for host installs; otherwise ask the user before host package installation.\n\
 - If sandbox is missing required tools/packages and host installation is needed, ask the user before requesting host install or changing sandbox mode.\n";
 
-const SYSTEM_GUIDELINES_AND_SILENT_REPLIES: &str = concat!(
-    "## Guidelines\n\n",
-    "- Use the `exec` tool to run shell commands when the user asks you to perform tasks that require system interaction (file operations, running programs, checking status, etc.).\n",
-    "- Use the `web_fetch` tool to open URLs and fetch web page content when the user asks to visit a website, check a page, read web content, or perform web browsing tasks.\n",
-    "- Always explain what you're doing before executing commands or fetching pages.\n",
-    "- If a command or fetch fails, analyze the error and suggest fixes.\n",
-    "- For multi-step tasks, execute one step at a time and check results before proceeding.\n",
-    "- Be careful with destructive operations — confirm with the user first.\n",
-    "- IMPORTANT: The user's UI already displays tool execution results (stdout, stderr, exit code) in a dedicated panel. Do NOT repeat or echo raw tool output in your response. Instead, summarize what happened, highlight key findings, or explain errors. Simply parroting the output wastes the user's time.\n\n",
-    "## Silent Replies\n\n",
-    "When you have nothing meaningful to add after a tool call — the output speaks for itself — do NOT produce any text. Simply return an empty response.\n",
-    "The user's UI already shows tool results, so there is no need to repeat or acknowledge them. Stay silent when the output answers the user's question.\n",
-);
-
 const SANDBOX_DATA_DIR: &str = "/moltis/data";
+
+fn strip_yaml_frontmatter(input: &str) -> &str {
+    let trimmed = input.trim();
+    let Some(rest) = trimmed.strip_prefix("---\n") else {
+        return trimmed;
+    };
+    let Some(end_idx) = rest.find("\n---") else {
+        return trimmed;
+    };
+    let after = &rest[(end_idx + "\n---".len())..];
+    after.trim_start_matches('\n').trim()
+}
 
 /// Build the three-layer OpenAI Responses developer preamble.
 ///
@@ -43,164 +63,171 @@ pub fn build_openai_responses_developer_prompts(
     project_context: Option<&str>,
     skills: &[SkillMetadata],
     persona_id: &str,
-    include_tools: bool,
-    identity: Option<&AgentIdentity>,
-    user: Option<&UserProfile>,
     identity_md_raw: Option<&str>,
     soul_text: Option<&str>,
     agents_text: Option<&str>,
     tools_text: Option<&str>,
     runtime_context: Option<&PromptRuntimeContext>,
 ) -> OpenAiResponsesDeveloperPrompts {
-    let base_intro = if include_tools {
-        "You are a helpful assistant with access to tools for executing shell commands.\n\n"
-    } else {
-        "You are a helpful assistant. Answer questions clearly and concisely.\n\n"
-    };
-
-    let mut system = String::from(base_intro);
-    if include_tools {
-        system.push_str(EXECUTION_ROUTING_RULES);
-        system.push('\n');
-        system.push_str(SYSTEM_GUIDELINES_AND_SILENT_REPLIES);
-    } else {
-        system.push_str(concat!(
-            "## Guidelines\n\n",
-            "- Be helpful, accurate, and concise.\n",
-            "- If you don't know something, say so rather than making things up.\n",
-            "- For coding questions, provide clear explanations with examples.\n",
-        ));
-    }
+    let system = format!("# 系统（System）\n\n{OPENAI_RESPONSES_SYSTEM_ZH_CN}");
 
     let mut persona = String::new();
-    persona.push_str(&format!("# Persona: {persona_id}\n\n"));
+    persona.push_str(&format!("# 人格（Persona: {persona_id}）\n\n"));
 
-    persona.push_str("## Identity\n\n");
-    if let Some(id) = identity {
-        let mut parts = Vec::new();
-        if let (Some(name), Some(emoji)) = (&id.name, &id.emoji) {
-            parts.push(format!("Your name is {name} {emoji}."));
-        } else if let Some(name) = &id.name {
-            parts.push(format!("Your name is {name}."));
-        }
-        if let Some(creature) = &id.creature {
-            parts.push(format!("You are a {creature}."));
-        }
-        if let Some(vibe) = &id.vibe {
-            parts.push(format!("Your vibe: {vibe}."));
-        }
-        if !parts.is_empty() {
-            persona.push_str(&parts.join(" "));
-            persona.push_str("\n\n");
-        }
-    }
-    if let Some(raw) = identity_md_raw.map(str::trim)
-        && !raw.is_empty()
+    persona.push_str("## 1. 身份 (Identity, Who are you?)\n");
+    if let Some(raw) = identity_md_raw
+        && !raw.trim().is_empty()
     {
-        persona.push_str(raw);
-        persona.push_str("\n\n");
+        persona.push_str(strip_yaml_frontmatter(raw));
     } else {
-        persona.push_str("<IDENTITY.md missing>\n\n");
+        persona.push_str("（未配置 IDENTITY.md）");
     }
+    persona.push_str("\n\n");
 
-    persona.push_str("## Soul\n\n");
+    persona.push_str("## 2. 灵魂 (Soul, What is your soul?)\n");
     persona.push_str(soul_text.unwrap_or(DEFAULT_SOUL).trim());
     persona.push_str("\n\n");
 
-    persona.push_str("## Owner (USER.md)\n\n");
-    if let Some(u) = user {
-        if let Some(name) = &u.name {
-            persona.push_str(&format!("Owner / primary operator: {name}\n"));
-        }
-        if let Some(tz) = &u.timezone {
-            persona.push_str(&format!("Timezone: {tz}\n"));
-        }
-        persona.push('\n');
-    } else {
-        persona.push_str("<USER.md missing>\n\n");
-    }
+    persona.push_str("## 3. 主操作者 (Owner, Who is your owner?)\n");
+    persona.push_str(&format!("关于 Owner 的信息，详见 {SANDBOX_DATA_DIR}/USER.md。\n\n"));
+    persona.push_str("规则：\n");
+    persona.push_str("- 当你被问到“我是谁 / 主操作者是谁 / 主操作者资料 / 与主操作者相关身份信息”等问题时：\n");
+    persona.push_str(&format!(
+        "    1. 必须先读取 {SANDBOX_DATA_DIR}/USER.md\n    2. 再基于该文件内容回答\n    3. 不得凭空猜测\n    4. 禁止修改其中信息\n\n"
+    ));
 
-    persona.push_str("## People (reference)\n\n");
-    persona.push_str("For other agents/bots managed by this Moltis instance, see:\n");
-    persona.push_str(&format!("- {SANDBOX_DATA_DIR}/PEOPLE.md\n"));
-    persona.push_str("Note: do not inline the roster here; keep this message cache-friendly.\n\n");
+    persona.push_str("## 4. 人物清单 (People, Who are the people you know?)\n\n");
+    persona.push_str(&format!("关于你认识的熟人信息，详见 {SANDBOX_DATA_DIR}/PEOPLE.md。\n\n"));
+    persona.push_str("规则：\n");
+    persona.push_str("- 当你被问到“你认识哪些人 / 有哪些账号或 bots / 有哪些代理或角色”等问题时：\n");
+    persona.push_str(&format!(
+        "    1. 必须先读取 {SANDBOX_DATA_DIR}/PEOPLE.md\n    2. 再基于该文件内容回答\n    3. 不得靠记忆或猜测其中名单\n    4. {SANDBOX_DATA_DIR}/PEOPLE.md 由系统自动生成/更新，禁止修改其中内容\n\n"
+    ));
 
-    persona.push_str("## Tools\n\n");
-    if let Some(raw) = tools_text.map(str::trim)
-        && !raw.is_empty()
+    persona.push_str("## 5. 对工作区规则的个人偏好\n\n");
+    if let Some(raw) = agents_text
+        && !raw.trim().is_empty()
     {
-        persona.push_str(raw);
-        persona.push_str("\n\n");
+        persona.push_str(raw.trim());
     } else {
-        persona.push_str("<TOOLS.md missing>\n\n");
+        persona.push_str("（未配置）");
     }
+    persona.push_str("\n\n说明：\n");
+    persona.push_str("- 以上是你个人的工作区长期规则/偏好。\n");
+    persona.push_str("- “当前项目/工作区”的规则与上下文会出现在“运行环境 / 项目级上下文”里；一旦出现，以运行环境为准。\n\n");
 
-    persona.push_str("## Agents\n\n");
-    if let Some(raw) = agents_text.map(str::trim)
-        && !raw.is_empty()
+    persona.push_str("## 6. 对工具说明的个人偏好\n\n");
+    if let Some(raw) = tools_text
+        && !raw.trim().is_empty()
     {
-        persona.push_str(raw);
-        persona.push_str("\n\n");
+        persona.push_str(raw.trim());
     } else {
-        persona.push_str("<AGENTS.md missing>\n\n");
+        persona.push_str("（未配置）");
     }
+    persona.push_str("\n\n说明：\n");
+    persona.push_str("- 以上是你个人的工具使用约定/偏好。\n");
+    persona.push_str("- 本次运行“到底有哪些工具可用、每个工具的能力/参数是什么”属于事实信息，会出现在“运行环境 / 项目级可用工具”里；以运行环境为准。\n\n");
 
-    persona.push_str("## Workspace/Project Context (reference)\n\n");
-    persona.push_str("Project/workspace rules may be injected separately per run. If present, treat them as authoritative for that scope.\n\n");
+    persona.push_str("## 7. 对项目上下文的个人偏好\n\n");
+    persona.push_str("说明：项目/工作区上下文会在“运行环境”中以本次注入内容的形式出现；一旦出现，视为本次运行范围内的权威规则。\n");
 
     let mut runtime_snapshot = String::new();
-    runtime_snapshot.push_str("## Runtime (snapshot, may change)\n\n");
+    runtime_snapshot.push_str("# 运行环境（Runtime）\n\n");
+
+    runtime_snapshot.push_str("## 1. 运行环境\n");
     if let Some(runtime) = runtime_context {
-        let mut host = runtime.host.clone();
-        // Default: do not include precise remote IP or exact location in the prompt.
-        host.remote_ip = None;
-        host.location = None;
-
-        if let Some(line) = format_host_runtime_line(&host) {
-            runtime_snapshot.push_str(&line);
-            runtime_snapshot.push('\n');
+        let host = &runtime.host;
+        if let Some(provider) = host.provider.as_deref() {
+            runtime_snapshot.push_str(&format!("- provider: {provider}\n"));
         }
+        if let Some(model) = host.model.as_deref() {
+            runtime_snapshot.push_str(&format!("- model: {model}\n"));
+        }
+        if let Some(session_id) = host.session_id.as_deref() {
+            runtime_snapshot.push_str(&format!("- session_id: {session_id}\n"));
+        }
+        if let Some(channel) = host.channel.as_deref() {
+            runtime_snapshot.push_str(&format!("- channel: {channel}\n"));
+        }
+        if let Some(channel_account_id) = host.channel_account_id.as_deref() {
+            runtime_snapshot.push_str(&format!("- channel_account_id: {channel_account_id}\n"));
+        }
+        if let Some(channel_account_handle) = host.channel_account_handle.as_deref() {
+            runtime_snapshot.push_str(&format!("- channel_account_handle: {channel_account_handle}\n"));
+        }
+        if let Some(channel_chat_id) = host.channel_chat_id.as_deref() {
+            runtime_snapshot.push_str(&format!("- channel_chat_id: {channel_chat_id}\n"));
+        }
+        if let Some(timezone) = host.timezone.as_deref() {
+            runtime_snapshot.push_str(&format!("- timezone: {timezone}\n"));
+        }
+        if let Some(accept_language) = host.accept_language.as_deref() {
+            runtime_snapshot.push_str(&format!("- accept_language: {accept_language}\n"));
+        }
+    } else {
+        runtime_snapshot.push_str("（未知）\n");
+    }
+    runtime_snapshot.push_str("\n");
+
+    runtime_snapshot.push_str("## 2. 执行路由\n");
+    if let Some(runtime) = runtime_context {
         if let Some(ref sandbox) = runtime.sandbox {
-            runtime_snapshot.push_str(&format_sandbox_runtime_line(sandbox));
-            runtime_snapshot.push('\n');
+            runtime_snapshot.push_str(&format!("- exec_sandboxed: {}\n", sandbox.exec_sandboxed));
+            if let Some(mode) = sandbox.mode.as_deref() {
+                runtime_snapshot.push_str(&format!("- sandbox_mode: {mode}\n"));
+            }
+            if let Some(backend) = sandbox.backend.as_deref() {
+                runtime_snapshot.push_str(&format!("- sandbox_backend: {backend}\n"));
+            }
+            if let Some(scope) = sandbox.scope.as_deref() {
+                runtime_snapshot.push_str(&format!("- sandbox_scope: {scope}\n"));
+            }
+            if let Some(image) = sandbox.image.as_deref() {
+                runtime_snapshot.push_str(&format!("- sandbox_image: {image}\n"));
+            }
+            if let Some(data_mount) = sandbox.data_mount.as_deref() {
+                runtime_snapshot.push_str(&format!("- sandbox_data_mount: {data_mount}\n"));
+            }
+            if let Some(no_network) = sandbox.no_network {
+                runtime_snapshot.push_str(&format!("- sandbox_no_network: {no_network}\n"));
+            }
+        } else {
+            runtime_snapshot.push_str("- exec_sandboxed: false\n");
         }
-        runtime_snapshot.push('\n');
+        if let Some(sudo_non_interactive) = runtime.host.sudo_non_interactive {
+            runtime_snapshot.push_str(&format!("- host_sudo_non_interactive: {sudo_non_interactive}\n"));
+        }
+        if let Some(sudo_status) = runtime.host.sudo_status.as_deref() {
+            runtime_snapshot.push_str(&format!("- host_sudo_status: {sudo_status}\n"));
+        }
+    } else {
+        runtime_snapshot.push_str("（未知）\n");
     }
-    if include_tools {
-        runtime_snapshot.push_str(EXECUTION_ROUTING_RULES);
-        runtime_snapshot.push('\n');
-    }
+    runtime_snapshot.push_str("\n");
 
-    runtime_snapshot.push_str("## Project Context (snapshot, may change)\n\n");
+    runtime_snapshot.push_str("## 3. 项目级上下文\n");
     if let Some(ctx) = project_context.map(str::trim)
         && !ctx.is_empty()
     {
         runtime_snapshot.push_str(ctx);
     } else {
-        runtime_snapshot.push_str("<no project context injected>");
+        runtime_snapshot.push_str("（无）");
     }
     runtime_snapshot.push_str("\n\n");
 
+    runtime_snapshot.push_str("## 4. 项目级可用技能 (Available Skills)\n");
     if !skills.is_empty() {
+        runtime_snapshot.push('\n');
         runtime_snapshot.push_str(&moltis_skills::prompt_gen::generate_skills_prompt(skills));
+        runtime_snapshot.push('\n');
+    } else {
+        runtime_snapshot.push_str("（无）\n\n");
     }
 
-    // If memory tools are registered, add a hint about them.
+    // Tool registry summary.
     let tool_schemas = tools.list_schemas();
-    let has_memory = tool_schemas
-        .iter()
-        .any(|s| s["name"].as_str() == Some("memory_search"));
-    if has_memory {
-        runtime_snapshot.push_str(concat!(
-            "## Long-Term Memory\n\n",
-            "You have access to a long-term memory system. Use `memory_search` to recall ",
-            "past conversations, decisions, and context. Search proactively when the user ",
-            "references previous work or when context would help.\n\n",
-        ));
-    }
-
+    runtime_snapshot.push_str("## 5. 项目级可用工具 (Available Tools)\n\n");
     if !tool_schemas.is_empty() {
-        runtime_snapshot.push_str("## Available Tools\n\n");
         if native_tools {
             for schema in &tool_schemas {
                 let name = schema["name"].as_str().unwrap_or("unknown");
@@ -219,11 +246,26 @@ pub fn build_openai_responses_developer_prompts(
                 let desc = schema["description"].as_str().unwrap_or("");
                 let params = &schema["parameters"];
                 runtime_snapshot.push_str(&format!(
-                    "### {name}\n{desc}\n\nParameters:\n```json\n{}\n```\n\n",
+                    "### {name}\n{desc}\n\n参数：\n```json\n{}\n```\n\n",
                     serde_json::to_string_pretty(params).unwrap_or_default()
                 ));
             }
         }
+    } else {
+        runtime_snapshot.push_str("（无）\n\n");
+    }
+
+    // If memory tools are registered, add a hint about them.
+    let has_memory = tool_schemas
+        .iter()
+        .any(|s| s["name"].as_str() == Some("memory_search"));
+    if has_memory {
+        runtime_snapshot.push_str("## 6. 长期记忆 (Long-Term Memory)\n\n");
+        runtime_snapshot.push_str(
+            "你可以使用长期记忆系统。\n\
+- 使用 `memory_search` 回忆过去的对话、决策与上下文。\n\
+- 当用户提到“之前做过什么 / 上次说到哪 / 之前的结论 / 旧的文件或约定”等需要历史上下文的内容时，应主动搜索再回答。\n\n",
+        );
     }
 
     OpenAiResponsesDeveloperPrompts {
@@ -288,16 +330,14 @@ pub struct PromptRuntimeContext {
 /// response pipeline; Layer 2 (`sanitize_text_for_tts`) catches anything the model
 /// misses.
 pub const VOICE_REPLY_SUFFIX: &str = "\n\n\
-## Voice Reply Mode\n\n\
-The user will hear your response as spoken audio. Write for speech, not for reading:\n\
-- Use natural, conversational sentences. No bullet lists, numbered lists, or headings.\n\
-- NEVER include raw URLs. Instead describe the resource by name \
-(e.g. \"the Rust documentation website\" instead of \"https://doc.rust-lang.org\").\n\
-- No markdown formatting: no bold, italic, headers, code fences, or inline backticks.\n\
-- Spell out abbreviations that a text-to-speech engine might mispronounce \
-(e.g. \"API\" → \"A-P-I\", \"CLI\" → \"C-L-I\").\n\
-- Keep responses concise — two to three short paragraphs at most.\n\
-- Use complete sentences and natural transitions between ideas.\n";
+## 语音回复模式\n\n\
+用户将以语音形式听到你的回复。请为“听”而写，而不是为“读”而写：\n\
+- 使用自然、口语化的完整句子；不要使用项目符号列表、编号列表或标题。\n\
+- 禁止输出原始 URL。请用资源名称描述（例如用“Rust 官方文档网站”，而不是具体链接）。\n\
+- 不要使用任何 Markdown 格式：不要加粗/斜体/标题/代码块/行内反引号。\n\
+- 对可能被 TTS 误读的缩写进行拼读（例如把“API”写成“A-P-I”，“CLI”写成“C-L-I”）。\n\
+- 保持简洁：最多两到三段短段落。\n\
+- 使用自然的衔接与过渡，避免生硬的堆砌。\n";
 
 /// Build the system prompt for an agent run, including available tools.
 ///
@@ -457,13 +497,8 @@ fn build_system_prompt_full(
                 prompt.push('\n');
             }
             if include_tools {
-                prompt.push_str(
-                    "Execution routing:\n\
-- `exec` runs inside sandbox when `Sandbox(exec): enabled=true`.\n\
-- When sandbox is disabled, `exec` runs on the host and may require approval.\n\
-- `Host: sudo_non_interactive=true` means non-interactive sudo is available for host installs; otherwise ask the user before host package installation.\n\
-- If sandbox is missing required tools/packages and host installation is needed, ask the user before requesting host install or changing sandbox mode.\n\n",
-                );
+                prompt.push_str(EXECUTION_ROUTING_RULES);
+                prompt.push('\n');
             } else {
                 prompt.push('\n');
             }
@@ -1105,18 +1140,6 @@ mod tests {
             source: None,
         }];
 
-        let identity = AgentIdentity {
-            name: Some("Jarvis".into()),
-            emoji: Some("🤖".into()),
-            creature: Some("robot".into()),
-            vibe: Some("chill".into()),
-        };
-        let user = UserProfile {
-            name: Some("Neo".into()),
-            timezone: None,
-            location: None,
-        };
-
         let runtime = PromptRuntimeContext {
             host: PromptHostRuntimeContext {
                 host: Some("DESKTOP".into()),
@@ -1155,9 +1178,6 @@ mod tests {
             None,
             &skills,
             "default",
-            true, // include_tools
-            Some(&identity),
-            Some(&user),
             Some("# IDENTITY.md\n\nYou are a robot.\n"),
             Some("# SOUL.md\n\nBe helpful.\n"),
             Some("# AGENTS.md\n\nSome agents.\n"),
@@ -1165,53 +1185,69 @@ mod tests {
             Some(&runtime),
         );
 
-        assert!(prompts.system.contains("Execution routing:"));
-        assert!(prompts.system.contains("## Guidelines"));
-        assert!(prompts.system.contains("## Silent Replies"));
+        assert!(prompts.system.contains("# 系统（System）"));
+        assert!(prompts.system.contains("执行路由："));
+        assert!(prompts.system.contains("## 指南"));
+        assert!(prompts.system.contains("## 静默回复"));
 
-        assert!(prompts.persona.contains("# Persona: default"));
-        assert!(prompts.persona.contains("## Identity"));
-        assert!(prompts.persona.contains("Your name is Jarvis 🤖."));
-        assert!(prompts.persona.contains("You are a robot."));
-        assert!(prompts.persona.contains("Your vibe: chill."));
-        assert!(prompts.persona.contains("## Soul"));
+        assert!(prompts.persona.contains("# 人格（Persona: default）"));
+        assert!(prompts.persona.contains("## 1. 身份"));
+        assert!(prompts.persona.contains("# IDENTITY.md"));
         assert!(prompts.persona.contains("# SOUL.md"));
-        assert!(prompts.persona.contains("## Owner (USER.md)"));
-        assert!(prompts.persona.contains("Owner / primary operator: Neo"));
-        assert!(prompts.persona.contains("## People (reference)"));
+        assert!(prompts.persona.contains("## 2. 灵魂"));
+        assert!(prompts.persona.contains("## 3. 主操作者"));
+        assert!(prompts.persona.contains("/moltis/data/USER.md"));
+        assert!(prompts.persona.contains("## 4. 人物清单"));
         assert!(prompts.persona.contains("/moltis/data/PEOPLE.md"));
-        assert!(prompts.persona.contains("## Tools"));
-        assert!(prompts.persona.contains("# TOOLS.md"));
-        assert!(prompts.persona.contains("## Agents"));
+        assert!(prompts.persona.contains("## 5. 对工作区规则的个人偏好"));
         assert!(prompts.persona.contains("# AGENTS.md"));
+        assert!(prompts.persona.contains("## 6. 对工具说明的个人偏好"));
+        assert!(prompts.persona.contains("# TOOLS.md"));
 
+        assert!(prompts.runtime_snapshot.contains("# 运行环境（Runtime）"));
+        assert!(prompts.runtime_snapshot.contains("## 1. 运行环境"));
         assert!(
             prompts
                 .runtime_snapshot
-                .contains("## Runtime (snapshot, may change)")
-        );
-        assert!(prompts.runtime_snapshot.contains("Host: host=DESKTOP"));
-        assert!(
-            prompts
-                .runtime_snapshot
-                .contains("provider=openai-responses")
+                .contains("provider: openai-responses")
         );
         assert!(
             prompts
                 .runtime_snapshot
-                .contains("model=openai-responses::gpt-5.2")
+                .contains("model: openai-responses::gpt-5.2")
         );
         assert!(
             prompts
                 .runtime_snapshot
-                .contains("channel_account_handle=@lovely_apple_bot")
+                .contains("channel_account_handle: @lovely_apple_bot")
         );
-        assert!(!prompts.runtime_snapshot.contains("remote_ip="));
-        assert!(!prompts.runtime_snapshot.contains("location="));
-        assert!(prompts.runtime_snapshot.contains("## Long-Term Memory"));
-        assert!(prompts.runtime_snapshot.contains("## Available Tools"));
+        assert!(!prompts.runtime_snapshot.contains("remote_ip"));
+        assert!(!prompts.runtime_snapshot.contains("location"));
+        assert!(prompts.runtime_snapshot.contains("## 5. 项目级可用工具"));
+        assert!(prompts.runtime_snapshot.contains("## 6. 长期记忆"));
         assert!(prompts.runtime_snapshot.contains("- `exec`"));
         assert!(prompts.runtime_snapshot.contains("- `memory_search`"));
         assert!(prompts.runtime_snapshot.contains("tmux"));
+    }
+
+    #[test]
+    fn openai_responses_identity_md_injection_strips_yaml_frontmatter() {
+        let tools = ToolRegistry::new();
+        let identity_md = "---\nname: Rex\n---\n\n# IDENTITY.md\n\nHello.\n";
+        let prompts = build_openai_responses_developer_prompts(
+            &tools,
+            true,
+            None,
+            &[],
+            "default",
+            Some(identity_md),
+            Some("# SOUL.md\n\nBe helpful.\n"),
+            None,
+            None,
+            None,
+        );
+        assert!(prompts.persona.contains("# IDENTITY.md"));
+        assert!(prompts.persona.contains("Hello."));
+        assert!(!prompts.persona.contains("name: Rex"));
     }
 }

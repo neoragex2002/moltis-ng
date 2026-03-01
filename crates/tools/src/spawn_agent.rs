@@ -245,7 +245,6 @@ impl AgentTool for SpawnAgentTool {
             .trim()
             .eq_ignore_ascii_case("openai-responses");
         let result = if is_openai_responses {
-            let include_tools = !sub_tools.list_schemas().is_empty();
             let persona_label = persona_id.unwrap_or("default");
             let prompts = build_openai_responses_developer_prompts(
                 &sub_tools,
@@ -253,9 +252,6 @@ impl AgentTool for SpawnAgentTool {
                 None,
                 &[],
                 persona_label,
-                include_tools,
-                Some(&persona.identity),
-                Some(&persona.user),
                 persona.identity_md_raw.as_deref(),
                 persona.soul_text.as_deref(),
                 persona.agents_text.as_deref(),

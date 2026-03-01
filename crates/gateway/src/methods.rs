@@ -5678,7 +5678,7 @@ async fn reload_hooks(state: &Arc<GatewayState>) {
     .await;
 }
 
-/// Persist the disabled hooks set to `data_dir/disabled_hooks.json`.
+/// Persist the disabled hooks set to `<data_dir>/disabled_hooks.json`.
 async fn persist_disabled_hooks(state: &Arc<GatewayState>) {
     let disabled = state.inner.read().await.disabled_hooks.clone();
     let path = moltis_config::data_dir().join("disabled_hooks.json");
@@ -5688,7 +5688,7 @@ async fn persist_disabled_hooks(state: &Arc<GatewayState>) {
     }
 }
 
-/// Load the disabled hooks set from `data_dir/disabled_hooks.json`.
+/// Load the disabled hooks set from `<data_dir>/disabled_hooks.json`.
 pub(crate) fn load_disabled_hooks() -> std::collections::HashSet<String> {
     let path = moltis_config::data_dir().join("disabled_hooks.json");
     std::fs::read_to_string(&path)

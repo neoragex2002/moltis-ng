@@ -348,7 +348,7 @@ pub fn load_persona_identity(persona_id: &str) -> Option<AgentIdentity> {
 }
 
 /// Load IDENTITY.md raw markdown for the default persona
-/// (`data_dir/personas/default/IDENTITY.md`) if present and non-empty.
+/// (`<data_dir>/personas/default/IDENTITY.md`) if present and non-empty.
 pub fn load_identity_md_raw() -> Option<String> {
     load_markdown_raw(identity_path())
 }
@@ -423,7 +423,7 @@ If you change this file, tell the user — it's your soul, and they should know.
 \n\
 _This file is yours to evolve. As you learn who you are, update it._";
 
-/// Load SOUL.md for the default persona (`data_dir/personas/default/SOUL.md`)
+/// Load SOUL.md for the default persona (`<data_dir>/personas/default/SOUL.md`)
 /// if present and non-empty.
 ///
 /// When the file does not exist, it is seeded with [`DEFAULT_SOUL`] (mirroring
@@ -471,7 +471,7 @@ fn write_default_soul() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Load AGENTS.md for the default persona (`data_dir/personas/default/AGENTS.md`)
+/// Load AGENTS.md for the default persona (`<data_dir>/personas/default/AGENTS.md`)
 /// if present and non-empty.
 pub fn load_agents_md() -> Option<String> {
     load_workspace_markdown(agents_path())
@@ -483,7 +483,7 @@ pub fn load_persona_agents_md(persona_id: &str) -> Option<String> {
     load_workspace_markdown(dir.join("AGENTS.md"))
 }
 
-/// Load TOOLS.md for the default persona (`data_dir/personas/default/TOOLS.md`)
+/// Load TOOLS.md for the default persona (`<data_dir>/personas/default/TOOLS.md`)
 /// if present and non-empty.
 pub fn load_tools_md() -> Option<String> {
     load_workspace_markdown(tools_path())
@@ -495,12 +495,12 @@ pub fn load_persona_tools_md(persona_id: &str) -> Option<String> {
     load_workspace_markdown(dir.join("TOOLS.md"))
 }
 
-/// Load HEARTBEAT.md from the workspace root (`data_dir`) if present and non-empty.
+/// Load HEARTBEAT.md from the workspace root (`<data_dir>`) if present and non-empty.
 pub fn load_heartbeat_md() -> Option<String> {
     load_workspace_markdown(heartbeat_path())
 }
 
-/// Persist SOUL.md for the default persona (`data_dir/personas/default/SOUL.md`).
+/// Persist SOUL.md for the default persona (`<data_dir>/personas/default/SOUL.md`).
 ///
 /// - `Some(non-empty)` writes `SOUL.md` with the given content
 /// - `None` or empty writes an empty `SOUL.md` so that `load_soul()`
@@ -526,84 +526,172 @@ pub fn save_soul(soul: Option<&str>) -> anyhow::Result<PathBuf> {
 /// Persist identity values to `IDENTITY.md` using YAML frontmatter.
 pub fn save_identity(identity: &AgentIdentity) -> anyhow::Result<PathBuf> {
     let path = identity_path();
-    let has_values = identity.name.is_some()
-        || identity.emoji.is_some()
-        || identity.creature.is_some()
-        || identity.vibe.is_some();
-
-    if !has_values {
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
-        return Ok(path);
-    }
-
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut yaml_lines = Vec::new();
+    let managed_keys = ["name", "emoji", "creature", "vibe"];
+    let mut managed_lines = Vec::new();
     if let Some(name) = identity.name.as_deref() {
-        yaml_lines.push(format!("name: {}", yaml_scalar(name)));
+        managed_lines.push(format!("name: {}", yaml_scalar(name)));
     }
     if let Some(emoji) = identity.emoji.as_deref() {
-        yaml_lines.push(format!("emoji: {}", yaml_scalar(emoji)));
+        managed_lines.push(format!("emoji: {}", yaml_scalar(emoji)));
     }
     if let Some(creature) = identity.creature.as_deref() {
-        yaml_lines.push(format!("creature: {}", yaml_scalar(creature)));
+        managed_lines.push(format!("creature: {}", yaml_scalar(creature)));
     }
     if let Some(vibe) = identity.vibe.as_deref() {
-        yaml_lines.push(format!("vibe: {}", yaml_scalar(vibe)));
+        managed_lines.push(format!("vibe: {}", yaml_scalar(vibe)));
     }
-    let yaml = yaml_lines.join("\n");
-    let content = format!(
-        "---\n{}\n---\n\n# IDENTITY.md\n\nThis file is managed by Moltis settings.\n",
-        yaml
-    );
-    std::fs::write(&path, content)?;
+
+    let file_exists = path.exists();
+    if managed_lines.is_empty() && !file_exists {
+        return Ok(path);
+    }
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = update_markdown_yaml_frontmatter(&existing, &managed_keys, &managed_lines);
+    std::fs::write(&path, updated)?;
     Ok(path)
 }
 
 /// Persist user values to `USER.md` using YAML frontmatter.
 pub fn save_user(user: &UserProfile) -> anyhow::Result<PathBuf> {
     let path = user_path();
-    let has_values = user.name.is_some() || user.timezone.is_some() || user.location.is_some();
-
-    if !has_values {
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
-        return Ok(path);
-    }
-
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut yaml_lines = Vec::new();
+    let managed_keys = [
+        "name",
+        "timezone",
+        "latitude",
+        "longitude",
+        "location_place",
+        "location_updated_at",
+    ];
+
+    let mut managed_lines = Vec::new();
     if let Some(name) = user.name.as_deref() {
-        yaml_lines.push(format!("name: {}", yaml_scalar(name)));
+        managed_lines.push(format!("name: {}", yaml_scalar(name)));
     }
     if let Some(ref tz) = user.timezone {
-        yaml_lines.push(format!("timezone: {}", yaml_scalar(tz.name())));
+        managed_lines.push(format!("timezone: {}", yaml_scalar(tz.name())));
     }
     if let Some(ref loc) = user.location {
-        yaml_lines.push(format!("latitude: {}", loc.latitude));
-        yaml_lines.push(format!("longitude: {}", loc.longitude));
+        managed_lines.push(format!("latitude: {}", loc.latitude));
+        managed_lines.push(format!("longitude: {}", loc.longitude));
         if let Some(ref place) = loc.place {
-            yaml_lines.push(format!("location_place: {}", yaml_scalar(place)));
+            managed_lines.push(format!("location_place: {}", yaml_scalar(place)));
         }
         if let Some(ts) = loc.updated_at {
-            yaml_lines.push(format!("location_updated_at: {ts}"));
+            managed_lines.push(format!("location_updated_at: {ts}"));
         }
     }
-    let yaml = yaml_lines.join("\n");
-    let content = format!(
-        "---\n{}\n---\n\n# USER.md\n\nThis file is managed by Moltis settings.\n",
-        yaml
-    );
-    std::fs::write(&path, content)?;
+
+    let file_exists = path.exists();
+    if managed_lines.is_empty() && !file_exists {
+        return Ok(path);
+    }
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = update_markdown_yaml_frontmatter(&existing, &managed_keys, &managed_lines);
+    std::fs::write(&path, updated)?;
     Ok(path)
+}
+
+fn update_markdown_yaml_frontmatter(
+    content: &str,
+    managed_keys: &[&str],
+    managed_lines: &[String],
+) -> String {
+    match split_yaml_frontmatter(content) {
+        Some(frontmatter) => {
+            let preserved = frontmatter
+                .inner
+                .lines()
+                .filter(|raw| {
+                    let line = raw.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        return true;
+                    }
+                    let Some((key, _)) = line.split_once(':') else {
+                        return true;
+                    };
+                    let key = key.trim();
+                    !managed_keys.iter().any(|k| *k == key)
+                })
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+
+            let mut new_inner_lines: Vec<String> = Vec::new();
+            new_inner_lines.extend(managed_lines.iter().cloned());
+            if !preserved.is_empty() {
+                if !new_inner_lines.is_empty() {
+                    new_inner_lines.push(String::new());
+                }
+                new_inner_lines.extend(preserved);
+            }
+
+            let new_inner = new_inner_lines
+                .join("\n")
+                .trim_matches('\n')
+                .to_string();
+
+            if new_inner.trim().is_empty() {
+                // No frontmatter remains; remove only the frontmatter block.
+                format!("{}{}", frontmatter.prefix, frontmatter.body)
+            } else {
+                format!(
+                    "{}---\n{new_inner}\n---\n{}",
+                    frontmatter.prefix, frontmatter.body
+                )
+            }
+        },
+        None => {
+            if managed_lines.is_empty() {
+                return content.to_string();
+            }
+            let inner = managed_lines.join("\n");
+            if content.trim().is_empty() {
+                format!("---\n{inner}\n---\n")
+            } else {
+                format!("---\n{inner}\n---\n\n{content}")
+            }
+        },
+    }
+}
+
+struct YamlFrontmatterSplit<'a> {
+    prefix: &'a str,
+    inner: &'a str,
+    body: &'a str,
+}
+
+fn split_yaml_frontmatter(content: &str) -> Option<YamlFrontmatterSplit<'_>> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---\n") {
+        return None;
+    }
+    let prefix_len = content.len() - trimmed.len();
+    let inner_start = prefix_len + "---\n".len();
+    let rest = &content[inner_start..];
+    let end_marker_newline = rest.find("\n---")?;
+    let end_marker_line_start = inner_start + end_marker_newline + 1;
+    if !content[end_marker_line_start..].starts_with("---") {
+        return None;
+    }
+    let after_end_marker = match content[end_marker_line_start..].find('\n') {
+        Some(nl) => end_marker_line_start + nl + 1,
+        None => content.len(),
+    };
+
+    Some(YamlFrontmatterSplit {
+        prefix: &content[..prefix_len],
+        inner: &content[inner_start..(end_marker_line_start - 1)],
+        body: &content[after_end_marker..],
+    })
 }
 
 fn extract_yaml_frontmatter(content: &str) -> Option<&str> {
@@ -1328,7 +1416,7 @@ name = "Rex"
     }
 
     #[test]
-    fn save_identity_removes_empty_file() {
+    fn save_identity_does_not_delete_file_when_empty_and_preserves_body() {
         let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
@@ -1342,8 +1430,20 @@ name = "Rex"
         let path = save_identity(&seeded).expect("seed identity");
         assert!(path.exists());
 
+        // Simulate user-authored body content and ensure it survives updates.
+        std::fs::write(
+            &path,
+            "---\nname: \"Rex\"\ncustom: keep\n---\n\n# IDENTITY.md\n\nUser notes stay.\n",
+        )
+        .unwrap();
+
         save_identity(&AgentIdentity::default()).expect("save empty identity");
-        assert!(!path.exists());
+        assert!(path.exists());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("User notes stay."));
+        assert!(raw.contains("# IDENTITY.md"));
+        assert!(!raw.contains("name:"));
+        assert!(raw.contains("custom: keep"));
 
         clear_data_dir();
     }
@@ -1407,7 +1507,7 @@ name = "Rex"
     }
 
     #[test]
-    fn save_user_removes_empty_file() {
+    fn save_user_does_not_delete_file_when_empty_and_preserves_body() {
         let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
@@ -1420,8 +1520,20 @@ name = "Rex"
         let path = save_user(&seeded).expect("seed user");
         assert!(path.exists());
 
+        // Simulate user-authored body content and ensure it survives updates.
+        std::fs::write(
+            &path,
+            "---\nname: Alice\ncustom: keep\n---\n\n# USER.md\n\nMy prompt.\n",
+        )
+        .unwrap();
+
         save_user(&UserProfile::default()).expect("save empty user");
-        assert!(!path.exists());
+        assert!(path.exists());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("My prompt."));
+        assert!(raw.contains("# USER.md"));
+        assert!(!raw.contains("name:"));
+        assert!(raw.contains("custom: keep"));
 
         clear_data_dir();
     }

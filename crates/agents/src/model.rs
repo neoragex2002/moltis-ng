@@ -185,6 +185,13 @@ impl ChatMessage {
 pub fn values_to_chat_messages(values: &[serde_json::Value]) -> Vec<ChatMessage> {
     let mut messages = Vec::with_capacity(values.len());
     for (i, val) in values.iter().enumerate() {
+        if val
+            .get("moltis_internal_kind")
+            .and_then(|v| v.as_str())
+            == Some("ui_error_notice")
+        {
+            continue;
+        }
         let Some(role) = val["role"].as_str() else {
             tracing::warn!(index = i, "skipping message with missing/invalid role");
             continue;
@@ -701,5 +708,20 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert!(matches!(&msgs[0], ChatMessage::User { .. }));
         assert!(matches!(&msgs[1], ChatMessage::Assistant { .. }));
+    }
+
+    #[test]
+    fn convert_skips_ui_error_notice_internal_kind() {
+        let values = vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "[error] something failed",
+                "moltis_internal_kind": "ui_error_notice"
+            }),
+            serde_json::json!({"role": "user", "content": "hi"}),
+        ];
+        let msgs = values_to_chat_messages(&values);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(&msgs[0], ChatMessage::User { .. }));
     }
 }

@@ -28,7 +28,8 @@ use {
         model::{StreamEvent, values_to_chat_messages},
         multimodal::parse_data_uri,
         prompt::{
-            PromptHostRuntimeContext, PromptRuntimeContext, PromptSandboxRuntimeContext,
+            OpenAiResponsesDeveloperPrompts, PromptHostRuntimeContext, PromptRuntimeContext,
+            PromptSandboxRuntimeContext,
             VOICE_REPLY_SUFFIX, build_openai_responses_developer_prompts,
             build_system_prompt_minimal_runtime, build_system_prompt_with_session_runtime,
         },
@@ -206,6 +207,17 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+const MOLTIS_INTERNAL_KIND_UI_ERROR_NOTICE: &str = "ui_error_notice";
+
+fn ui_error_notice_message(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "role": "assistant",
+        "content": text,
+        "created_at": now_ms(),
+        "moltis_internal_kind": MOLTIS_INTERNAL_KIND_UI_ERROR_NOTICE,
+    })
+}
+
 pub(crate) fn normalize_model_key(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
     let mut last_was_separator = true;
@@ -232,6 +244,46 @@ fn normalize_provider_key(value: &str) -> String {
 
 fn is_openai_responses_provider(provider_name: &str) -> bool {
     normalize_provider_key(provider_name) == "openai-responses"
+}
+
+struct OpenAiResponsesAsSentPrompt {
+    system_text: String,
+    persona_text: String,
+    runtime_text: String,
+    joined_for_token_estimate: String,
+    prefix_messages: Vec<ChatMessage>,
+}
+
+fn openai_responses_as_sent_from_prompts(
+    prompts: OpenAiResponsesDeveloperPrompts,
+    desired_reply_medium: ReplyMedium,
+) -> OpenAiResponsesAsSentPrompt {
+    let OpenAiResponsesDeveloperPrompts {
+        system,
+        persona,
+        mut runtime_snapshot,
+    } = prompts;
+
+    if desired_reply_medium == ReplyMedium::Voice {
+        runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
+    }
+
+    let joined_for_token_estimate =
+        format!("{system}\n\n{persona}\n\n{runtime_snapshot}");
+
+    let prefix_messages = vec![
+        ChatMessage::system(system.clone()),
+        ChatMessage::system(persona.clone()),
+        ChatMessage::system(runtime_snapshot.clone()),
+    ];
+
+    OpenAiResponsesAsSentPrompt {
+        system_text: system,
+        persona_text: persona,
+        runtime_text: runtime_snapshot,
+        joined_for_token_estimate,
+        prefix_messages,
+    }
 }
 
 async fn resolve_session_persona_id(
@@ -756,10 +808,6 @@ struct PromptPersona {
 ///
 /// Both `run_with_tools` and `run_streaming` need the same persona data;
 /// this function avoids duplicating the merge logic.
-fn load_prompt_persona() -> PromptPersona {
-    load_prompt_persona_with_id(None)
-}
-
 fn load_prompt_persona_with_id(persona_id: Option<&str>) -> PromptPersona {
     let config = moltis_config::discover_and_load();
     let mut identity = config.identity.clone();
@@ -2375,23 +2423,14 @@ impl ChatService for LiveChatService {
                     project_context.as_deref(),
                     &[],
                     persona_id.as_deref().unwrap_or("default"),
-                    false, // include_tools
-                    Some(&persona.identity),
-                    Some(&persona.user),
                     persona.identity_md_raw.as_deref(),
                     persona.soul_text.as_deref(),
                     persona.agents_text.as_deref(),
                     persona.tools_text.as_deref(),
                     Some(&runtime_context),
                 );
-                let mut runtime_snapshot = prompts.runtime_snapshot;
-                if desired_reply_medium == ReplyMedium::Voice {
-                    runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
-                }
-                format!(
-                    "{}\n\n{}\n\n{}",
-                    prompts.system, prompts.persona, runtime_snapshot
-                )
+                let as_sent = openai_responses_as_sent_from_prompts(prompts, desired_reply_medium);
+                as_sent.joined_for_token_estimate
             } else {
                 let native_tools = provider.supports_tools();
                 let filtered_registry = {
@@ -2413,23 +2452,14 @@ impl ChatService for LiveChatService {
                     project_context.as_deref(),
                     &discovered_skills,
                     persona_id.as_deref().unwrap_or("default"),
-                    true, // include_tools
-                    Some(&persona.identity),
-                    Some(&persona.user),
                     persona.identity_md_raw.as_deref(),
                     persona.soul_text.as_deref(),
                     persona.agents_text.as_deref(),
                     persona.tools_text.as_deref(),
                     Some(&runtime_context),
                 );
-                let mut runtime_snapshot = prompts.runtime_snapshot;
-                if desired_reply_medium == ReplyMedium::Voice {
-                    runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
-                }
-                format!(
-                    "{}\n\n{}\n\n{}",
-                    prompts.system, prompts.persona, runtime_snapshot
-                )
+                let as_sent = openai_responses_as_sent_from_prompts(prompts, desired_reply_medium);
+                as_sent.joined_for_token_estimate
             }
         } else {
             let system_prompt = if stream_only {
@@ -2956,13 +2986,17 @@ impl ChatService for LiveChatService {
         let _ = self.session_metadata.upsert(&session_key, None).await;
         self.session_metadata.touch(&session_key, 1).await;
         let session_entry = self.session_metadata.get(&session_key).await;
-        let runtime_context = build_prompt_runtime_context(
+        let mut runtime_context = build_prompt_runtime_context(
             &self.state,
             &provider,
             &session_key,
             session_entry.as_ref(),
         )
         .await;
+        runtime_context.host.accept_language = params
+            .get("_acceptLanguage")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let tool_chan_chat_key = chan_chat_key_from_params.or_else(|| {
             session_entry
                 .as_ref()
@@ -2982,8 +3016,57 @@ impl ChatService for LiveChatService {
 
         // Proactive compaction for send_sync (channels / API callers).
         let budget = CompactionBudget::for_provider(provider.as_ref());
-        let persona = load_prompt_persona();
-        let system_prompt = if stream_only {
+        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
+        let persona_id_effective = persona_id.as_deref().unwrap_or("default");
+        let persona = load_prompt_persona_with_id(persona_id.as_deref());
+
+        let system_prompt = if is_openai_responses_provider(provider.name()) {
+            if stream_only {
+                let prompts = build_openai_responses_developer_prompts(
+                    &ToolRegistry::new(),
+                    provider.supports_tools(),
+                    None,
+                    &[],
+                    persona_id_effective,
+                    persona.identity_md_raw.as_deref(),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                );
+                let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
+                as_sent.joined_for_token_estimate
+            } else {
+                let native_tools = provider.supports_tools();
+                let filtered_registry = {
+                    let registry_guard = self.tool_registry.read().await;
+                    if native_tools {
+                        apply_runtime_tool_filters(
+                            &registry_guard,
+                            &persona.config,
+                            &[],
+                            false, // send_sync: MCP tools always enabled for API calls
+                        )
+                    } else {
+                        registry_guard.clone_without(&[])
+                    }
+                };
+                let prompts = build_openai_responses_developer_prompts(
+                    &filtered_registry,
+                    native_tools,
+                    None,
+                    &[],
+                    persona_id_effective,
+                    persona.identity_md_raw.as_deref(),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                );
+                let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
+                as_sent.joined_for_token_estimate
+            }
+        } else if stream_only {
             build_system_prompt_minimal_runtime(
                 None,
                 Some(&persona.identity),
@@ -3043,10 +3126,10 @@ impl ChatService for LiveChatService {
 
         if estimated_keep_window_input_tokens >= budget.input_hard_cap {
             let msg = "keep_window_overflow: last 4 user rounds plus current message exceed input limit; shorten/split your message or start a new session";
-            let error_entry = PersistedMessage::system(format!("[error] {msg}"));
+            let error_entry = ui_error_notice_message(&format!("[error] {msg}"));
             let _ = self
                 .session_store
-                .append(&session_key, &error_entry.to_value())
+                .append(&session_key, &error_entry)
                 .await;
             return Err(msg.to_string());
         }
@@ -3199,10 +3282,10 @@ impl ChatService for LiveChatService {
                     .unwrap_or_else(|| "agent run failed (check server logs)".to_string());
 
                 // Persist the error in the session so it's visible in session history.
-                let error_entry = PersistedMessage::system(format!("[error] {error_msg}"));
+                let error_entry = ui_error_notice_message(&format!("[error] {error_msg}"));
                 let _ = self
                     .session_store
-                    .append(&session_key, &error_entry.to_value())
+                    .append(&session_key, &error_entry)
                     .await;
                 // Update metadata so the session shows in the UI.
                 if let Ok(count) = self.session_store.count(&session_key).await {
@@ -3662,7 +3745,6 @@ impl ChatService for LiveChatService {
 
         // Build the system prompt used for token estimates and debug displays.
         let stream_only = !self.has_tools_sync();
-        let persona = load_prompt_persona();
         let project_context = self
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
@@ -3673,7 +3755,80 @@ impl ChatService for LiveChatService {
             session_entry.as_ref(),
         )
         .await;
-        let system_prompt = if stream_only {
+        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
+        let persona_id_effective = persona_id
+            .as_deref()
+            .unwrap_or("default")
+            .to_string();
+        let persona = load_prompt_persona_with_id(persona_id.as_deref());
+
+        let mut as_sent_preamble: Option<Vec<serde_json::Value>> = None;
+
+        let system_prompt = if is_openai_responses_provider(provider.name()) {
+            let prompts = if stream_only {
+                build_openai_responses_developer_prompts(
+                    &ToolRegistry::new(),
+                    provider.supports_tools(),
+                    project_context.as_deref(),
+                    &[],
+                    &persona_id_effective,
+                    persona.identity_md_raw.as_deref(),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            } else {
+                let native_tools = provider.supports_tools();
+                let filtered_registry = {
+                    let registry_guard = self.tool_registry.read().await;
+                    if native_tools {
+                        apply_runtime_tool_filters(
+                            &registry_guard,
+                            &persona.config,
+                            &discovered_skills,
+                            mcp_disabled,
+                        )
+                    } else {
+                        registry_guard.clone_without(&[])
+                    }
+                };
+                build_openai_responses_developer_prompts(
+                    &filtered_registry,
+                    native_tools,
+                    project_context.as_deref(),
+                    &discovered_skills,
+                    &persona_id_effective,
+                    persona.identity_md_raw.as_deref(),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            };
+            let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
+            as_sent_preamble = Some(vec![
+                serde_json::json!({
+                    "index": 1,
+                    "layer": "system",
+                    "role": "developer",
+                    "text": as_sent.system_text,
+                }),
+                serde_json::json!({
+                    "index": 2,
+                    "layer": "persona",
+                    "role": "developer",
+                    "text": as_sent.persona_text,
+                }),
+                serde_json::json!({
+                    "index": 3,
+                    "layer": "runtime_snapshot",
+                    "role": "developer",
+                    "text": as_sent.runtime_text,
+                }),
+            ]);
+            as_sent.joined_for_token_estimate
+        } else if stream_only {
             build_system_prompt_minimal_runtime(
                 project_context.as_deref(),
                 Some(&persona.identity),
@@ -3744,7 +3899,9 @@ impl ChatService for LiveChatService {
             "sandbox": sandbox_info,
             "supportsTools": supports_tools,
             "compaction": compaction_info,
-            "tokenDebug": token_debug
+            "tokenDebug": token_debug,
+            "personaIdEffective": persona_id_effective,
+            "asSentPreamble": as_sent_preamble
         }))
     }
 
@@ -3772,9 +3929,6 @@ impl ChatService for LiveChatService {
             .unwrap_or_default();
         let provider = self.resolve_provider(&session_key, &history).await?;
         let native_tools = provider.supports_tools();
-
-        // Load persona data.
-        let persona = load_prompt_persona();
 
         // Build runtime context.
         let session_entry = self.session_metadata.get(&session_key).await;
@@ -3805,6 +3959,13 @@ impl ChatService for LiveChatService {
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
 
+        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
+        let persona_id_effective = persona_id
+            .as_deref()
+            .unwrap_or("default")
+            .to_string();
+        let persona = load_prompt_persona_with_id(persona_id.as_deref());
+
         // Discover skills.
         let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
         let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
@@ -3822,6 +3983,8 @@ impl ChatService for LiveChatService {
             .and_then(|entry| entry.mcp_disabled)
             .unwrap_or(false);
 
+        let stream_only = !self.has_tools_sync();
+
         // Build filtered tool registry.
         let filtered_registry = {
             let registry_guard = self.tool_registry.read().await;
@@ -3837,41 +4000,87 @@ impl ChatService for LiveChatService {
             }
         };
 
-        let tool_count = filtered_registry.list_schemas().len();
+        let mut as_sent_preamble: Option<Vec<serde_json::Value>> = None;
 
-        // Build the system prompt.
-        let system_prompt = if native_tools {
-            build_system_prompt_with_session_runtime(
-                &filtered_registry,
+        let (system_prompt, tool_count) = if is_openai_responses_provider(provider.name()) {
+            let empty_tools;
+            let (tools_for_prompt, skills_for_prompt) = if stream_only {
+                empty_tools = ToolRegistry::new();
+                (&empty_tools, &[] as &[moltis_skills::types::SkillMetadata])
+            } else {
+                (&filtered_registry, discovered_skills.as_slice())
+            };
+
+            let prompts = build_openai_responses_developer_prompts(
+                tools_for_prompt,
                 native_tools,
                 project_context.as_deref(),
-                &discovered_skills,
-                Some(&persona.identity),
-                Some(&persona.user),
+                skills_for_prompt,
+                &persona_id_effective,
+                persona.identity_md_raw.as_deref(),
                 persona.soul_text.as_deref(),
                 persona.agents_text.as_deref(),
                 persona.tools_text.as_deref(),
                 Some(&runtime_context),
-            )
-        } else {
-            build_system_prompt_minimal_runtime(
-                project_context.as_deref(),
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-            )
-        };
+            );
+            let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
+            as_sent_preamble = Some(vec![
+                serde_json::json!({
+                    "index": 1,
+                    "layer": "system",
+                    "role": "developer",
+                    "text": as_sent.system_text,
+                }),
+                serde_json::json!({
+                    "index": 2,
+                    "layer": "persona",
+                    "role": "developer",
+                    "text": as_sent.persona_text,
+                }),
+                serde_json::json!({
+                    "index": 3,
+                    "layer": "runtime_snapshot",
+                    "role": "developer",
+                    "text": as_sent.runtime_text,
+                }),
+            ]);
 
-        let char_count = system_prompt.len();
+            (as_sent.joined_for_token_estimate, tools_for_prompt.list_schemas().len())
+        } else {
+            let system_prompt = if native_tools {
+                build_system_prompt_with_session_runtime(
+                    &filtered_registry,
+                    native_tools,
+                    project_context.as_deref(),
+                    &discovered_skills,
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            } else {
+                build_system_prompt_minimal_runtime(
+                    project_context.as_deref(),
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            };
+            (system_prompt, filtered_registry.list_schemas().len())
+        };
 
         Ok(serde_json::json!({
             "prompt": system_prompt,
-            "charCount": char_count,
+            "charCount": system_prompt.len(),
             "native_tools": native_tools,
             "toolCount": tool_count,
+            "personaIdEffective": persona_id_effective,
+            "asSentPreamble": as_sent_preamble,
         }))
     }
 
@@ -3902,9 +4111,6 @@ impl ChatService for LiveChatService {
         let provider = self.resolve_provider(&session_key, &history).await?;
         let native_tools = provider.supports_tools();
 
-        // Load persona data.
-        let persona = load_prompt_persona();
-
         // Build runtime context.
         let session_entry = self.session_metadata.get(&session_key).await;
         let mut runtime_context = build_prompt_runtime_context(
@@ -3928,6 +4134,13 @@ impl ChatService for LiveChatService {
                 .and_then(|v| v.as_str())
                 .map(String::from);
         }
+
+        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
+        let persona_id_effective = persona_id
+            .as_deref()
+            .unwrap_or("default")
+            .to_string();
+        let persona = load_prompt_persona_with_id(persona_id.as_deref());
 
         // Resolve project context.
         let project_context = self
@@ -3966,34 +4179,6 @@ impl ChatService for LiveChatService {
             }
         };
 
-        // Build the system prompt.
-        let system_prompt = if native_tools {
-            build_system_prompt_with_session_runtime(
-                &filtered_registry,
-                native_tools,
-                project_context.as_deref(),
-                &discovered_skills,
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-            )
-        } else {
-            build_system_prompt_minimal_runtime(
-                project_context.as_deref(),
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-            )
-        };
-
-        let system_prompt_chars = system_prompt.len();
-
         // Reconstruct `role: "tool"` messages from persisted `tool_result`
         // entries so the context view shows what the LLM actually saw.
         let history_with_tools: Vec<Value> = history
@@ -4022,12 +4207,107 @@ impl ChatService for LiveChatService {
             })
             .collect();
 
-        // Build the full messages array: system prompt + conversation history.
-        let mut messages = Vec::with_capacity(1 + history_with_tools.len());
-        messages.push(ChatMessage::system(system_prompt));
-        messages.extend(values_to_chat_messages(&history_with_tools));
+        let stream_only = !self.has_tools_sync();
 
-        let openai_messages: Vec<Value> = messages.iter().map(|m| m.to_openai_value()).collect();
+        let mut as_sent_preamble: Option<Vec<serde_json::Value>> = None;
+
+        let (openai_messages, system_prompt_chars) = if is_openai_responses_provider(provider.name())
+        {
+            let empty_tools;
+            let (tools_for_prompt, skills_for_prompt) = if stream_only {
+                empty_tools = ToolRegistry::new();
+                (&empty_tools, &[] as &[moltis_skills::types::SkillMetadata])
+            } else {
+                (&filtered_registry, discovered_skills.as_slice())
+            };
+
+            let prompts = build_openai_responses_developer_prompts(
+                tools_for_prompt,
+                native_tools,
+                project_context.as_deref(),
+                skills_for_prompt,
+                &persona_id_effective,
+                persona.identity_md_raw.as_deref(),
+                persona.soul_text.as_deref(),
+                persona.agents_text.as_deref(),
+                persona.tools_text.as_deref(),
+                Some(&runtime_context),
+            );
+            let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
+
+            as_sent_preamble = Some(vec![
+                serde_json::json!({
+                    "index": 1,
+                    "layer": "system",
+                    "role": "developer",
+                    "text": as_sent.system_text.clone(),
+                }),
+                serde_json::json!({
+                    "index": 2,
+                    "layer": "persona",
+                    "role": "developer",
+                    "text": as_sent.persona_text.clone(),
+                }),
+                serde_json::json!({
+                    "index": 3,
+                    "layer": "runtime_snapshot",
+                    "role": "developer",
+                    "text": as_sent.runtime_text.clone(),
+                }),
+            ]);
+
+            let mut msgs: Vec<Value> = Vec::new();
+            msgs.push(serde_json::json!({"role": "developer", "content": as_sent.system_text}));
+            msgs.push(serde_json::json!({"role": "developer", "content": as_sent.persona_text}));
+            msgs.push(serde_json::json!({"role": "developer", "content": as_sent.runtime_text}));
+
+            for msg in values_to_chat_messages(&history_with_tools) {
+                let mut val = msg.to_openai_value();
+                if val.get("role").and_then(|r| r.as_str()) == Some("system") {
+                    val["role"] = serde_json::Value::String("developer".to_string());
+                }
+                msgs.push(val);
+            }
+
+            (msgs, as_sent.joined_for_token_estimate.len())
+        } else {
+            // Build the system prompt.
+            let system_prompt = if native_tools {
+                build_system_prompt_with_session_runtime(
+                    &filtered_registry,
+                    native_tools,
+                    project_context.as_deref(),
+                    &discovered_skills,
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            } else {
+                build_system_prompt_minimal_runtime(
+                    project_context.as_deref(),
+                    Some(&persona.identity),
+                    Some(&persona.user),
+                    persona.soul_text.as_deref(),
+                    persona.agents_text.as_deref(),
+                    persona.tools_text.as_deref(),
+                    Some(&runtime_context),
+                )
+            };
+
+            // Build the full messages array: system prompt + conversation history.
+            let mut messages = Vec::with_capacity(1 + history_with_tools.len());
+            messages.push(ChatMessage::system(system_prompt.clone()));
+            messages.extend(values_to_chat_messages(&history_with_tools));
+
+            (
+                messages.iter().map(|m| m.to_openai_value()).collect(),
+                system_prompt.len(),
+            )
+        };
+
         let message_count = openai_messages.len();
         let total_chars: usize = openai_messages
             .iter()
@@ -4039,6 +4319,8 @@ impl ChatService for LiveChatService {
             "messageCount": message_count,
             "systemPromptChars": system_prompt_chars,
             "totalChars": total_chars,
+            "personaIdEffective": persona_id_effective,
+            "asSentPreamble": as_sent_preamble,
         }))
     }
 }
@@ -4336,30 +4618,16 @@ async fn run_with_tools(
             project_context,
             skills,
             persona_id.as_deref().unwrap_or("default"),
-            true, // include_tools
-            Some(&persona.identity),
-            Some(&persona.user),
             persona.identity_md_raw.as_deref(),
             persona.soul_text.as_deref(),
             persona.agents_text.as_deref(),
             persona.tools_text.as_deref(),
             runtime_context,
         );
-        let mut runtime_snapshot = prompts.runtime_snapshot;
-        if desired_reply_medium == ReplyMedium::Voice {
-            runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
-        }
-        let prefix = vec![
-            ChatMessage::system(prompts.system.clone()),
-            ChatMessage::system(prompts.persona.clone()),
-            ChatMessage::system(runtime_snapshot.clone()),
-        ];
+        let as_sent = openai_responses_as_sent_from_prompts(prompts, desired_reply_medium);
         (
-            format!(
-                "{}\n\n{}\n\n{}",
-                prompts.system, prompts.persona, runtime_snapshot
-            ),
-            Some(prefix),
+            as_sent.joined_for_token_estimate,
+            Some(as_sent.prefix_messages),
         )
     } else {
         // Use a minimal prompt without tool schemas for providers that don't support tools.
@@ -5717,22 +5985,14 @@ async fn run_streaming(
             project_context,
             &[],
             persona_id.as_deref().unwrap_or("default"),
-            false, // include_tools
-            Some(&persona.identity),
-            Some(&persona.user),
             persona.identity_md_raw.as_deref(),
             persona.soul_text.as_deref(),
             persona.agents_text.as_deref(),
             persona.tools_text.as_deref(),
             runtime_context,
         );
-        let mut runtime_snapshot = prompts.runtime_snapshot;
-        if desired_reply_medium == ReplyMedium::Voice {
-            runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
-        }
-        messages.push(ChatMessage::system(prompts.system));
-        messages.push(ChatMessage::system(prompts.persona));
-        messages.push(ChatMessage::system(runtime_snapshot));
+        let as_sent = openai_responses_as_sent_from_prompts(prompts, desired_reply_medium);
+        messages.extend(as_sent.prefix_messages);
     } else {
         let system_prompt = build_system_prompt_minimal_runtime(
             project_context,
@@ -7855,6 +8115,77 @@ mod tests {
         }
     }
 
+    struct BlockingBeforeAgentStartHook;
+
+    #[async_trait]
+    impl HookHandler for BlockingBeforeAgentStartHook {
+        fn name(&self) -> &str {
+            "block_before_agent_start"
+        }
+
+        fn events(&self) -> &[HookEvent] {
+            static EVENTS: [HookEvent; 1] = [HookEvent::BeforeAgentStart];
+            &EVENTS
+        }
+
+        async fn handle(
+            &self,
+            event: HookEvent,
+            _payload: &HookPayload,
+        ) -> anyhow::Result<HookAction> {
+            match event {
+                HookEvent::BeforeAgentStart => Ok(HookAction::Block("blocked".to_string())),
+                _ => Ok(HookAction::Continue),
+            }
+        }
+    }
+
+    struct ToolsBudgetProvider {
+        budget: BudgetProvider,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ToolsBudgetProvider {
+        fn name(&self) -> &str {
+            self.budget.name()
+        }
+
+        fn id(&self) -> &str {
+            self.budget.id()
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        fn context_window(&self) -> u32 {
+            self.budget.context_window()
+        }
+
+        fn input_limit(&self) -> Option<u32> {
+            self.budget.input_limit()
+        }
+
+        fn output_limit(&self) -> Option<u32> {
+            self.budget.output_limit()
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            tools: &[serde_json::Value],
+        ) -> anyhow::Result<moltis_agents::model::CompletionResponse> {
+            self.budget.complete(messages, tools).await
+        }
+
+        fn stream(
+            &self,
+            messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            self.budget.stream(messages)
+        }
+    }
+
     #[async_trait]
     impl AgentTool for DummyTool {
         fn name(&self) -> &str {
@@ -8321,6 +8652,229 @@ mod tests {
             content.starts_with("[@lovely_apple_bot mirror] "),
             "unexpected prefix: {content}"
         );
+    }
+
+    #[test]
+    fn openai_responses_as_sent_appends_voice_suffix_to_runtime_snapshot() {
+        let prompts = OpenAiResponsesDeveloperPrompts {
+            system: "sys".to_string(),
+            persona: "persona".to_string(),
+            runtime_snapshot: "runtime".to_string(),
+        };
+        let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Voice);
+        assert!(as_sent.runtime_text.contains("## 语音回复模式"));
+        assert!(as_sent.joined_for_token_estimate.contains("## 语音回复模式"));
+    }
+
+    #[tokio::test]
+    async fn debug_endpoints_expose_as_sent_preamble_for_openai_responses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
+
+        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(
+            &store,
+        ));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(StaticProvider {
+            name: "openai-responses".to_string(),
+            id: "openai-responses::test".to_string(),
+        });
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_agents::providers::ModelInfo {
+                id: "openai-responses::test".to_string(),
+                provider: "openai-responses".to_string(),
+                display_name: "openai-responses test".to_string(),
+                created_at: None,
+            },
+            Arc::clone(&provider),
+        );
+
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        tool_registry.write().await.register(Box::new(DummyTool {
+            name: "memory_search".into(),
+        }));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::clone(&state),
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_tools(tool_registry);
+
+        // chat.context
+        let ctx = chat
+            .context(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(ctx["personaIdEffective"], "default");
+        let preamble = ctx["asSentPreamble"].as_array().expect("asSentPreamble array");
+        assert_eq!(preamble.len(), 3);
+        assert_eq!(preamble[0]["role"], "developer");
+        assert_eq!(preamble[0]["layer"], "system");
+        assert!(preamble[0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("# 系统（System）"));
+
+        // chat.raw_prompt
+        let raw = chat
+            .raw_prompt(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(raw["personaIdEffective"], "default");
+        let preamble = raw["asSentPreamble"].as_array().expect("asSentPreamble array");
+        assert_eq!(preamble.len(), 3);
+
+        // chat.full_context
+        let full = chat
+            .full_context(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(full["personaIdEffective"], "default");
+        let preamble = full["asSentPreamble"].as_array().expect("asSentPreamble array");
+        assert_eq!(preamble.len(), 3);
+        let messages = full["messages"].as_array().expect("messages array");
+        assert!(
+            messages.len() >= 3,
+            "expected at least 3 messages (developer preamble)"
+        );
+        assert_eq!(messages[0]["role"], "developer");
+        assert_eq!(messages[1]["role"], "developer");
+        assert_eq!(messages[2]["role"], "developer");
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("# 系统（System）"));
+    }
+
+    struct PersonaChannelService {
+        persona_id: String,
+    }
+
+    #[async_trait]
+    impl crate::services::ChannelService for PersonaChannelService {
+        async fn status(&self) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn logout(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn send(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn add(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn remove(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn update(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn senders_list(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn sender_approve(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+        async fn sender_deny(&self, _params: Value) -> ServiceResult {
+            Err("not implemented".into())
+        }
+
+        async fn telegram_account_persona_id(&self, account_id: &str) -> Option<String> {
+            (account_id == "telegram:lovely").then(|| self.persona_id.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn debug_endpoints_use_effective_persona_id_from_telegram_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
+
+        let mut services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(
+            &store,
+        ));
+        services.channel = Arc::new(PersonaChannelService {
+            persona_id: "my_persona".to_string(),
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(StaticProvider {
+            name: "openai-responses".to_string(),
+            id: "openai-responses::test".to_string(),
+        });
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_agents::providers::ModelInfo {
+                id: "openai-responses::test".to_string(),
+                provider: "openai-responses".to_string(),
+                display_name: "openai-responses test".to_string(),
+                created_at: None,
+            },
+            Arc::clone(&provider),
+        );
+
+        // Seed a telegram channel binding into session metadata so runtime_context.host.channel
+        // becomes "telegram" and persona routing becomes active.
+        metadata.upsert("main", None).await.unwrap();
+        let binding = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:lovely".to_string(),
+            chan_user_name: Some("@lovely_apple_bot".to_string()),
+            chat_id: "123".to_string(),
+            message_id: None,
+        })
+        .unwrap();
+        metadata.set_channel_binding("main", Some(binding)).await;
+
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        tool_registry.write().await.register(Box::new(DummyTool {
+            name: "memory_search".into(),
+        }));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::clone(&state),
+            Arc::clone(&store),
+            Arc::clone(&metadata),
+        )
+        .with_tools(tool_registry);
+
+        let ctx = chat
+            .context(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(ctx["personaIdEffective"], "my_persona");
     }
 
     struct RelayLabelingChatService {
@@ -10773,5 +11327,147 @@ echo @bot2
             Some("TG @lovely_apple_bot · dm:123")
         );
         assert!(entry.channel_binding.is_some());
+    }
+
+    #[tokio::test]
+    async fn send_sync_keep_window_overflow_persists_ui_error_notice_as_assistant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
+
+        let services = crate::services::GatewayServices::noop()
+            .with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(BudgetProvider {
+            context_window: 32,
+            input_limit: Some(1),
+            output_limit: Some(1),
+        });
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_agents::providers::ModelInfo {
+                id: "budget-model".to_string(),
+                provider: "budget".to_string(),
+                display_name: "budget".to_string(),
+                created_at: None,
+            },
+            Arc::clone(&provider),
+        );
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::clone(&state),
+            Arc::clone(&store),
+            metadata,
+        );
+
+        let res = chat
+            .send_sync(serde_json::json!({
+                "_sessionId": "main",
+                "text": "hello"
+            }))
+            .await;
+        assert!(res.is_err(), "expected overflow error");
+
+        let history = store.read("main").await.unwrap_or_default();
+        assert!(
+            history.len() >= 2,
+            "expected at least [user, ui_error_notice], got {}",
+            history.len()
+        );
+        let last = history.last().unwrap();
+        assert_eq!(last.get("role").and_then(|v| v.as_str()), Some("assistant"));
+        assert_eq!(
+            last.get("moltis_internal_kind").and_then(|v| v.as_str()),
+            Some(MOLTIS_INTERNAL_KIND_UI_ERROR_NOTICE)
+        );
+        let content = last.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(content.starts_with("[error] "));
+    }
+
+    #[tokio::test]
+    async fn send_sync_run_failed_persists_ui_error_notice_as_assistant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
+
+        let services = crate::services::GatewayServices::noop()
+            .with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let mut hooks = HookRegistry::new();
+        hooks.register(Arc::new(BlockingBeforeAgentStartHook));
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(ToolsBudgetProvider {
+            budget: BudgetProvider {
+                context_window: 8_192,
+                input_limit: Some(8_192),
+                output_limit: Some(1_024),
+            },
+        });
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_agents::providers::ModelInfo {
+                id: "budget-model".to_string(),
+                provider: "budget".to_string(),
+                display_name: "budget".to_string(),
+                created_at: None,
+            },
+            Arc::clone(&provider),
+        );
+
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        tool_registry.write().await.register(Box::new(DummyTool {
+            name: "noop".into(),
+        }));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::clone(&state),
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_tools(tool_registry)
+        .with_hooks(hooks);
+
+        let res = chat
+            .send_sync(serde_json::json!({
+                "_sessionId": "main",
+                "text": "hello"
+            }))
+            .await;
+        assert!(res.is_err(), "expected run failed error");
+
+        let history = store.read("main").await.unwrap_or_default();
+        assert!(
+            history.len() >= 2,
+            "expected at least [user, ui_error_notice], got {}",
+            history.len()
+        );
+        let last = history.last().unwrap();
+        assert_eq!(last.get("role").and_then(|v| v.as_str()), Some("assistant"));
+        assert_eq!(
+            last.get("moltis_internal_kind").and_then(|v| v.as_str()),
+            Some(MOLTIS_INTERNAL_KIND_UI_ERROR_NOTICE)
+        );
+        let content = last.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(content.starts_with("[error] "));
     }
 }

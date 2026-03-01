@@ -666,11 +666,11 @@ function PersonasSection() {
 	}
 
 	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-		<h2 class="text-lg font-medium text-[var(--text-strong)]">Personas</h2>
-		<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:800px;margin:0;">
-			Manages persona profiles stored under <code>data_dir/personas/&lt;persona_id&gt;/</code>.
-			Each persona has <code>IDENTITY.md</code>, <code>SOUL.md</code>, <code>TOOLS.md</code>, and <code>AGENTS.md</code>.
-		</p>
+			<h2 class="text-lg font-medium text-[var(--text-strong)]">Personas</h2>
+			<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:800px;margin:0;">
+				Manages persona profiles stored under <code>&lt;data_dir&gt;/personas/&lt;persona_id&gt;/</code>.
+				Each persona has <code>IDENTITY.md</code>, <code>SOUL.md</code>, <code>TOOLS.md</code>, and <code>AGENTS.md</code>.
+			</p>
 
 		<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:900px;">
 			<label class="text-xs text-[var(--muted)]">persona_id</label>
@@ -838,10 +838,10 @@ function OwnerSection() {
 	}
 
 	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-		<h2 class="text-lg font-medium text-[var(--text-strong)]">Owner</h2>
-		<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:800px;margin:0;">
-			Edits the global <code>data_dir/USER.md</code> (shared across all personas and channels).
-		</p>
+			<h2 class="text-lg font-medium text-[var(--text-strong)]">Owner</h2>
+			<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:800px;margin:0;">
+				Edits the global <code>&lt;data_dir&gt;/USER.md</code> (shared across all personas and channels).
+			</p>
 		<form onSubmit=${onSave} style="max-width:900px;display:flex;flex-direction:column;gap:12px;">
 			<textarea
 				class="provider-key-input"

@@ -85,7 +85,7 @@
 ### 功能目标（Functional）
 - [x] Docker sandbox：将 **data_mount_source** 挂载到容器内固定路径 `/moltis/data`（ro/rw 由 `data_mount` 决定；source 可为宿主机绝对路径或 Docker volume）。
 - [x] Docker sandbox：创建容器时注入 `MOLTIS_DATA_DIR=/moltis/data`，确保容器内运行的代码调用 `moltis_config::data_dir()` 时解析到固定挂载点。
-- [x] Agents persona/system prompt：将 `PEOPLE.md` 等引用从占位符 `data_dir/...` 改为真实可达路径 `/moltis/data/...`（至少覆盖 `PEOPLE.md`）。本单采取 fail-fast，不存在“mount 不可用但继续执行”的降级态。
+- [x] Agents persona/system prompt：将 `PEOPLE.md` 等引用从占位符 `<data_dir>/...` 改为真实可达路径 `/moltis/data/...`（至少覆盖 `PEOPLE.md`）。本单采取 fail-fast，不存在“mount 不可用但继续执行”的降级态。
 - [x] Apple Container backend：明确为不支持（fail-fast），并给出“改用 Docker”的 remediation（避免引入自动切换/降级策略）。
 - [x] 定义并实现 sandbox data mount backing 配置（用于容器化/volume 场景，且只保留一套命名）：
   - `tools.exec.sandbox.data_mount_type`：`bind` | `volume`
@@ -110,7 +110,7 @@
 
 ## 问题陈述（Problem Statement）
 ### 现象（Symptoms）
-1) system prompt 中引用 `data_dir/PEOPLE.md`，agent 无法理解/定位 `data_dir` 是什么目录，导致读取 roster 的指引不可执行。
+1) system prompt 中引用 `<data_dir>/PEOPLE.md`，agent 无法理解/定位 `<data_dir>` 是什么目录，导致读取 roster 的指引不可执行。
 2) Docker sandbox 当前挂载策略为 `host_abs_path:host_abs_path`，prompt 若要给出真实路径，会泄露并绑定宿主机用户名/路径结构，且在换用户/换机器时不稳定。
 3) 当 gateway 运行在容器内并通过 docker.sock 创建 sandbox 容器时，gateway 的 `MOLTIS_DATA_DIR` 往往是容器内路径（如 `/moltis/data`）。若 sandbox mount 仍基于该路径拼接 `-v /moltis/data:...`，Docker daemon 将在宿主机侧解析该路径并导致挂载失败（或挂载到错误位置）。
 
@@ -121,7 +121,7 @@
 
 ### 复现步骤（Reproduction）
 1. 运行任意会注入 persona/system prompt 的流程。
-2. 观察 persona 中的 People 参考路径为 `data_dir/PEOPLE.md`。
+2. 观察 persona 中的 People 参考路径为 `<data_dir>/PEOPLE.md`。
 3. 期望 vs 实际：
    - 期望：给出容器内可直接访问的路径（如 `/moltis/data/PEOPLE.md`）。
    - 实际：给出概念占位符，agent 无法解析。
@@ -156,10 +156,10 @@
   - 当 sandbox data_mount 启用时，容器内必须存在固定可达路径 `/moltis/data` 指向宿主机 data_dir 内容。
   - 容器创建时必须设置 `MOLTIS_DATA_DIR=/moltis/data`，使容器内运行的 Moltis 代码与脚本统一解析到该路径。
   - sandbox data_mount 的 source 必须显式可配置为 `bind`（宿主机绝对路径）或 `volume`（Docker volume 名），不得隐式依赖 gateway 的 `MOLTIS_DATA_DIR` 恰好等于 Docker host 可见路径。
-  - system prompt 中引用的 data_dir 文件路径必须使用 `/moltis/data/<file>` 形式；不得出现占位符（如 `data_dir/...`）。
+  - system prompt 中引用的 `<data_dir>` 文件路径必须使用 `/moltis/data/<file>` 形式；不得出现占位符（如 `<data_dir>/...`）。
   - 本单采取 fail-fast：若 backend 不支持或配置不满足条件，则不得创建 sandbox 容器，必须直接报错并给出 remediation（避免“降级态”与误导性输出）。
 - 不得：
-  - 不得在 system prompt 中使用未定义的占位符目录（如 `data_dir/...`）。
+  - 不得在 system prompt 中使用未定义的占位符目录（如 `<data_dir>/...`）。
   - 不得在 system prompt 中写死宿主机用户名相关的绝对路径。
 - 应当：
   - 对不支持挂载的 backend（如 Apple Container），应当明确报错并提示改用 Docker。
@@ -187,7 +187,7 @@
 #### 行为规范（Normative Rules）
 - 规则 1：容器内固定 data_dir 为 `/moltis/data`（source=constant）。
 - 规则 2：容器创建时必须注入 `MOLTIS_DATA_DIR=/moltis/data`（source=as-sent 到 container runtime）。
-- 规则 3：system prompt 中任何“可执行的 data_dir 路径指引”必须使用 `/moltis/data/...`，不得出现 `data_dir/...` 占位符。
+- 规则 3：system prompt 中任何“可执行的 <data_dir> 路径指引”必须使用 `/moltis/data/...`，不得出现 `<data_dir>/...` 占位符。
 - 规则 4（Docker 前置条件，已决策）：backend 为 Docker 时，必须同时满足：
   - `data_mount != none`（语义：data_dir mount；ro/rw 任选其一）
   - `tools.exec.sandbox.data_mount_type`/`tools.exec.sandbox.data_mount_source` 配置完整且通过语法校验
@@ -323,7 +323,7 @@ data_mount_source = "moltis-data" # Docker volume 名（与 gateway 容器内路
 ## 验收标准（Acceptance Criteria）【不可省略】
 - [x] Docker sandbox 启用 data_mount 且 data mount 配置完整时，容器内 `/moltis/data` 存在且可访问宿主机 data_dir 内容。
 - [x] 容器内运行的任意 Moltis 代码调用 `moltis_config::data_dir()` 时解析到 `/moltis/data`（通过单测或集成验证证明）。
-- [x] system prompt 不再出现 `data_dir/PEOPLE.md`；sandbox 场景下输出 `/moltis/data/PEOPLE.md`。
+- [x] system prompt 不再出现 `<data_dir>/PEOPLE.md`；sandbox 场景下输出 `/moltis/data/PEOPLE.md`。
 - [x] `backend=apple-container` 时 sandbox 明确报错（含 remediation），不得创建 sandbox 容器。
 - [x] Docker 下当 `data_mount=none` 或 data mount 配置缺失/无效时 sandbox 明确报错（含 remediation），不得创建 sandbox 容器。
 - [x] 容器化部署兼容（至少覆盖两类常见形态）：
@@ -351,7 +351,7 @@ data_mount_source = "moltis-data" # Docker volume 名（与 gateway 容器内路
 ## 发布与回滚（Rollout & Rollback）
 - 发布策略：默认启用 fail-fast（仅在配置完整时允许 sandbox），并提供迁移说明。
 - 回滚策略：
-  - 回滚代码变更后，旧行为恢复为 `host:host` 挂载与 `data_dir/...` 占位符（不建议长期保留）。
+  - 回滚代码变更后，旧行为恢复为 `host:host` 挂载与 `<data_dir>/...` 占位符（不建议长期保留）。
   - 回滚风险：已更新 prompt 的路径会与旧挂载策略不一致。
 - 上线观测：
   - 关注 “sandbox mount missing / file not found: /moltis/data/...” 相关日志。
@@ -366,7 +366,7 @@ data_mount_source = "moltis-data" # Docker volume 名（与 gateway 容器内路
 - Step 6: 旧 sandbox 容器迁移策略落地（推荐自动检测不匹配则删除重建，避免升级后行为不一致）。
 - Step 7: Apple Container backend：当 `backend=apple-container` 时 fail-fast（错误码+明确 remediation），不做自动切换（避免策略复杂化）。
 - Step 8: 更新 `crates/agents/src/prompt.rs`：
-  - `data_dir/PEOPLE.md` → `/moltis/data/PEOPLE.md`
+  - `<data_dir>/PEOPLE.md` → `/moltis/data/PEOPLE.md`
   - 更新/新增单测断言
 - Step 9: 更新相关文档：解释 “gateway data_dir（进程视角）” 与 “data_mount_source（Docker host 视角）” 的区别，给出 3 个可用部署示例（Case 1/2/3）+ 1 个 fail-fast 对照（Case 4）。
 - Step 10: 补齐 unit tests +（可选）integration smoke。

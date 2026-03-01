@@ -7,7 +7,7 @@
 - Affected providers/models: all（主要是 UI/配置/会话元数据；与 provider 无强耦合）
 
 **已实现（2026-02-24）**
-- 默认 persona canonical 路径收敛到 `data_dir/personas/default/*`（无 root fallback）：`crates/config/src/loader.rs:266`
+- 默认 persona canonical 路径收敛到 `<data_dir>/personas/default/*`（无 root fallback）：`crates/config/src/loader.rs:266`
 - Settings → General：新增 `Personas` 与 `Owner`（替换原 Identity 导航入口）：`crates/gateway/src/assets/js/page-settings.js:69`
 - Personas CRUD（list/get/save/delete/clone）+ `default` 不可删除 + persona_id 校验：`crates/gateway/src/personas.rs:47`、`crates/gateway/src/methods.rs:1253`
 - Owner（`USER.md`）全局编辑 RPC + UI：`crates/gateway/src/owner.rs:3`、`crates/gateway/src/assets/js/page-settings.js:847`
@@ -33,7 +33,7 @@
 **已知差异/后续优化（非阻塞）**
 - Personas 编辑器当前是“纯文本为主”（textarea），无 YAML/Markdown 校验与预览。
 - `default` persona 的 seeded 文本是最小模板（后续可按需收敛为更稳定、更一致的默认内容）。
-- `crates/gateway/src/server.rs` 仍会 seed `data_dir/AGENTS.md` 与 `data_dir/TOOLS.md`（历史遗留；当前默认 persona 不再读取该路径）。
+- `crates/gateway/src/server.rs` 仍会 seed `<data_dir>/AGENTS.md` 与 `<data_dir>/TOOLS.md`（历史遗留；当前默认 persona 不再读取该路径）。
 
 **已冻结口径**
 - Q1（default persona canonical 来源）：选择 A）彻底废弃 root `~/.moltis/*.md`，以 `{data_dir}/personas/default/*` 为唯一真值（不做 fallback）。
@@ -221,7 +221,7 @@ Out of scope（本单不做）：
 ### Unit
 - [x] persona_id 合法性校验与路径约束：`crates/gateway/src/personas.rs:169`
 - [x] personas CRUD（create/clone/delete；禁止删除 `default`）：`crates/gateway/src/personas.rs:180`
-- [x] 默认 persona canonical 路径（`data_dir/personas/default/*`）：`crates/config/src/loader.rs:1316`
+- [x] 默认 persona canonical 路径（`<data_dir>/personas/default/*`）：`crates/config/src/loader.rs:1316`
 - [x] Telegram session label 生成：`crates/gateway/src/chat.rs:9884`
 - [x] PEOPLE.md 生成且不泄露 token：`crates/gateway/src/people.rs:61`
 
@@ -234,7 +234,7 @@ Out of scope（本单不做）：
 
 ### 自动化缺口（如有，必须写手工验收）
 - 缺口原因：当前未引入 Web UI 的 Playwright E2E；本单以 unit 覆盖为主。
-- 手工验收步骤（建议在清空存量数据后执行；你允许直接删除旧 data_dir/DB）：
+- 手工验收步骤（建议在清空存量数据后执行；你允许直接删除旧 <data_dir>/DB）：
   1. 可选：清空 `data_dir`（默认 `~/.moltis`；也可能由 `MOLTIS_DATA_DIR` 指向）。
      - UI 配置项：如需自定义 data_dir，可在启动前设置环境变量 `MOLTIS_DATA_DIR=/path/to/data_dir`（或使用 CLI 参数/配置中的 data_dir 覆盖方式，按你的部署习惯）。
   2. 启动：`moltis gateway`，在日志中找到 “listening on …” 的 URL 并打开 Web UI。
@@ -244,10 +244,10 @@ Out of scope（本单不做）：
      - Create：输入 `ops`（示例），确认 clone 自 `default` 成功，dropdown 出现 `ops`。
      - Clone：将 `ops` clone 为 `ops2`，验证内容一致。
      - Delete：删除 `ops2` 成功；尝试删除 `default` 应被拒绝。
-     - 文件落点：确认对应文件写入 `data_dir/personas/<persona_id>/{IDENTITY,SOUL,TOOLS,AGENTS}.md`。
+     - 文件落点：确认对应文件写入 `<data_dir>/personas/<persona_id>/{IDENTITY,SOUL,TOOLS,AGENTS}.md`。
   4. Settings → General → Owner：
      - 编辑 USER.md 保存并 Reload，确认内容持久化。
-     - 文件落点：确认写入 `data_dir/USER.md`。
+     - 文件落点：确认写入 `<data_dir>/USER.md`。
   5. Channels：
      - 新增 Telegram bot（token + allowlist 等），确认卡片出现 Details 并可复制：
        `account_id/chan_user_id/chan_user_name/chan_nickname/persona_id`。

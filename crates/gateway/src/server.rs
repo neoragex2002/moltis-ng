@@ -5339,10 +5339,10 @@ Recommended usage:
 const DEFAULT_WORKSPACE_AGENTS_MD: &str = r#"<!--
 Workspace AGENTS.md contains global instructions for this workspace.
 
-How Moltis uses this file:
-- Loaded from data_dir/AGENTS.md when present.
-- Injected as workspace context in the system prompt.
-- Separate from project AGENTS.md/CLAUDE.md discovery.
+	How Moltis uses this file:
+	- Loaded from <data_dir>/AGENTS.md when present.
+	- Injected as workspace context in the system prompt.
+	- Separate from project AGENTS.md/CLAUDE.md discovery.
 
 Use this for cross-project rules that should apply everywhere in this workspace.
 -->"#;
@@ -5351,9 +5351,9 @@ Use this for cross-project rules that should apply everywhere in this workspace.
 const DEFAULT_TOOLS_MD: &str = r#"<!--
 TOOLS.md contains workspace-specific tool notes and constraints.
 
-How Moltis uses this file:
-- Loaded from data_dir/TOOLS.md when present.
-- Injected as workspace context in the system prompt.
+	How Moltis uses this file:
+	- Loaded from <data_dir>/TOOLS.md when present.
+	- Injected as workspace context in the system prompt.
 
 Use this for local setup details (hosts, aliases, device names) and
 tool behavior constraints (safe defaults, forbidden actions, etc.).
