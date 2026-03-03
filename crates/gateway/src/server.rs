@@ -342,15 +342,8 @@ fn should_prebuild_sandbox_image(
     !matches!(mode, moltis_tools::sandbox::SandboxMode::Off) && !packages.is_empty()
 }
 
-fn instance_slug(config: &moltis_config::MoltisConfig) -> String {
-    let mut raw_name = config.identity.name.clone();
-    if let Some(file_identity) = moltis_config::load_identity()
-        && file_identity.name.is_some()
-    {
-        raw_name = file_identity.name;
-    }
-
-    let base = raw_name
+fn instance_slug(_config: &moltis_config::MoltisConfig) -> String {
+    let base = load_default_display_name()
         .unwrap_or_else(|| "moltis".to_string())
         .to_lowercase();
     let mut out = String::new();
@@ -377,6 +370,39 @@ fn instance_slug(config: &moltis_config::MoltisConfig) -> String {
     } else {
         out
     }
+}
+
+fn load_default_display_name() -> Option<String> {
+    let raw = std::fs::read_to_string(moltis_config::people_path()).ok()?;
+    let frontmatter = extract_yaml_frontmatter(&raw)?;
+    let yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
+    let people = yaml.get("people")?.as_sequence()?;
+    for item in people {
+        let entry = item.as_mapping()?;
+        let name = entry
+            .get(&serde_yaml::Value::String("name".to_string()))?
+            .as_str()?
+            .trim();
+        if name == "default" {
+            return entry
+                .get(&serde_yaml::Value::String("display_name".to_string()))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
+
+fn extract_yaml_frontmatter(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("---")?;
+    let rest = rest.strip_prefix('\n')?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
 }
 
 fn sandbox_container_prefix(instance_slug: &str) -> String {
@@ -881,6 +907,16 @@ pub async fn start_gateway(
 
     // Load config file (moltis.toml / .yaml / .json) if present.
     let mut config = moltis_config::discover_and_load();
+
+    // Seed default workspace files and keep PEOPLE.md aligned to IDENTITY.md
+    // without touching PEOPLE.md body content.
+    if let Err(e) = moltis_config::ensure_default_person_seeded() {
+        warn!(error = %e, "failed to seed people/default workspace files");
+    }
+    if let Err(e) = moltis_config::sync_people_md_from_identities() {
+        warn!(error = %e, "failed to sync PEOPLE.md from people/<name>/IDENTITY.md");
+    }
+
     let instance_slug_value = instance_slug(&config);
     let browser_container_prefix = browser_container_prefix(&instance_slug_value);
     let sandbox_container_prefix = sandbox_container_prefix(&instance_slug_value);
@@ -1481,10 +1517,8 @@ pub async fn start_gateway(
     // Build sandbox router from config (shared across sessions).
     let mut sandbox_config = moltis_tools::sandbox::SandboxConfig::from(&config.tools.exec.sandbox);
     sandbox_config.container_prefix = Some(sandbox_container_prefix);
-    sandbox_config.timezone = config
-        .user
-        .timezone
-        .as_ref()
+    sandbox_config.timezone = moltis_config::load_user()
+        .and_then(|u| u.timezone)
         .map(|tz| tz.name().to_string());
     let sandbox_router = Arc::new(moltis_tools::sandbox::SandboxRouter::new(sandbox_config));
 

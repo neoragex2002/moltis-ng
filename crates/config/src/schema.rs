@@ -154,15 +154,12 @@ pub struct ResolvedIdentity {
 }
 
 impl ResolvedIdentity {
-    pub fn from_config(cfg: &MoltisConfig) -> Self {
-        Self {
-            name: cfg.identity.name.clone().unwrap_or_else(|| "moltis".into()),
-            emoji: cfg.identity.emoji.clone(),
-            creature: cfg.identity.creature.clone(),
-            vibe: cfg.identity.vibe.clone(),
-            soul: None,
-            user_name: cfg.user.name.clone(),
-        }
+    /// Create a resolved identity from workspace-backed sources (USER.md / PEOPLE.md / IDENTITY.md).
+    ///
+    /// This struct intentionally does not depend on `moltis.toml` identity/user fields:
+    /// workspace files are the single source of truth.
+    pub fn from_workspace() -> Self {
+        Self::default()
     }
 }
 
@@ -193,8 +190,6 @@ pub struct MoltisConfig {
     pub tls: TlsConfig,
     pub auth: AuthConfig,
     pub metrics: MetricsConfig,
-    pub identity: AgentIdentity,
-    pub user: UserProfile,
     pub hooks: Option<HooksConfig>,
     pub memory: MemoryEmbeddingConfig,
     pub tailscale: TailscaleConfig,
@@ -887,14 +882,6 @@ impl Default for MetricsConfig {
             prometheus_endpoint: true,
             labels: HashMap::new(),
         }
-    }
-}
-
-impl MoltisConfig {
-    /// Returns `true` when both the agent name and user name have been set
-    /// (i.e. the onboarding wizard has been completed).
-    pub fn is_onboarded(&self) -> bool {
-        self.identity.name.is_some() && self.user.name.is_some()
     }
 }
 

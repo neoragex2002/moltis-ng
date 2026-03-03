@@ -264,17 +264,17 @@ pub fn data_dir() -> PathBuf {
 
 /// Path to the default persona's soul file.
 pub fn soul_path() -> PathBuf {
-    data_dir().join("personas/default/SOUL.md")
+    data_dir().join("people/default/SOUL.md")
 }
 
 /// Path to the default persona's AGENTS markdown.
 pub fn agents_path() -> PathBuf {
-    data_dir().join("personas/default/AGENTS.md")
+    data_dir().join("people/default/AGENTS.md")
 }
 
 /// Path to the default persona's identity file.
 pub fn identity_path() -> PathBuf {
-    data_dir().join("personas/default/IDENTITY.md")
+    data_dir().join("people/default/IDENTITY.md")
 }
 
 /// Path to the workspace user profile file.
@@ -284,7 +284,7 @@ pub fn user_path() -> PathBuf {
 
 /// Path to the default persona's tool-guidance markdown.
 pub fn tools_path() -> PathBuf {
-    data_dir().join("personas/default/TOOLS.md")
+    data_dir().join("people/default/TOOLS.md")
 }
 
 /// Path to the workspace PEOPLE roster markdown.
@@ -292,22 +292,256 @@ pub fn people_path() -> PathBuf {
     data_dir().join("PEOPLE.md")
 }
 
-/// Directory containing named personas.
-pub fn personas_dir() -> PathBuf {
-    data_dir().join("personas")
+/// Ensure the default agent workspace exists under `people/default/`.
+///
+/// This seeds empty files when missing:
+/// - `IDENTITY.md` (frontmatter + starter body)
+/// - `SOUL.md` (default soul text, via `load_soul()` seed behavior)
+/// - `TOOLS.md` (empty)
+/// - `AGENTS.md` (empty)
+pub fn ensure_default_person_seeded() -> anyhow::Result<()> {
+    let identity = identity_path();
+    if let Some(parent) = identity.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if !identity.exists() {
+        std::fs::write(
+            &identity,
+            "---\nname: default\nemoji: 🤖\ncreature: 助手\nvibe: 直接、清晰、效率优先\n---\n\n# IDENTITY.md\n\n（在这里写更长的自我定义。正文仅手工编辑；UI/程序只会修改上面的字段。）\n",
+        )?;
+    }
+
+    // Seed SOUL.md (and ensure directory exists) via existing default behavior.
+    let _ = load_soul();
+
+    for path in [tools_path(), agents_path()] {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if !path.exists() {
+            std::fs::write(&path, "")?;
+        }
+    }
+
+    Ok(())
 }
 
-fn is_valid_persona_id(persona_id: &str) -> bool {
-    let id = persona_id;
-    if id.is_empty() || id.len() > 64 {
+/// Ensure `PEOPLE.md` exists with a minimal v1 frontmatter template.
+pub fn ensure_people_md_seeded() -> anyhow::Result<()> {
+    let path = people_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(
+        &path,
+        "---\nschema_version: 1\npeople:\n  - name: default\n    display_name: 默认\n---\n\n# PEOPLE.md\n\n（公共通信录：只在这里维护对外展示名与对外联系信息。emoji/creature 由系统从 people/<name>/IDENTITY.md 自动对齐。）\n",
+    )?;
+    Ok(())
+}
+
+/// Sync `PEOPLE.md` frontmatter fields (`emoji`/`creature`) from `people/<name>/IDENTITY.md`.
+///
+/// - Only updates YAML frontmatter; body is preserved byte-for-byte.
+/// - Preserves `people[]` ordering and all other per-entry keys.
+/// - Never deletes entries; missing dirs/identity parse errors are logged and skipped.
+/// - Seeds `PEOPLE.md` if missing.
+pub fn sync_people_md_from_identities() -> anyhow::Result<()> {
+    ensure_people_md_seeded()?;
+
+    let path = people_path();
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let (prefix, existing_frontmatter, body) = match split_yaml_frontmatter(&existing) {
+        Some(split) => (split.prefix, split.inner, split.body),
+        None => ("", "", existing.as_str()),
+    };
+
+    let mut root: serde_yaml::Value = if existing_frontmatter.trim().is_empty() {
+        serde_yaml::Value::Mapping(Default::default())
+    } else {
+        match serde_yaml::from_str(existing_frontmatter) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "invalid PEOPLE.md frontmatter; skipping sync");
+                return Ok(());
+            },
+        }
+    };
+
+    let serde_yaml::Value::Mapping(root_map) = &mut root else {
+        warn!(path = %path.display(), "PEOPLE.md frontmatter is not a YAML mapping; skipping sync");
+        return Ok(());
+    };
+
+    // Ensure schema_version exists (v1).
+    root_map
+        .entry(serde_yaml::Value::String("schema_version".to_string()))
+        .or_insert_with(|| serde_yaml::Value::Number(1.into()));
+
+    // Extract people list.
+    let people_key = serde_yaml::Value::String("people".to_string());
+    if !root_map.contains_key(&people_key) {
+        root_map.insert(people_key.clone(), serde_yaml::Value::Sequence(Vec::new()));
+    }
+    let Some(serde_yaml::Value::Sequence(people_seq)) = root_map.get_mut(&people_key) else {
+        warn!(path = %path.display(), "PEOPLE.md frontmatter 'people' is not a YAML list; skipping sync");
+        return Ok(());
+    };
+
+    // Build set of existing directories under people/.
+    let mut people_dirs = std::collections::HashSet::<String>::new();
+    let root_dir = people_dir();
+    if let Ok(rd) = std::fs::read_dir(&root_dir) {
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if !ft.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_valid_person_name(&name) {
+                people_dirs.insert(name);
+            }
+        }
+    }
+
+    // Sync emoji/creature per PEOPLE entry (preserve order and extra keys).
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut listed_names = std::collections::HashSet::<String>::new();
+
+    for item in people_seq.iter_mut() {
+        let serde_yaml::Value::Mapping(entry) = item else {
+            continue;
+        };
+        let name_key = serde_yaml::Value::String("name".to_string());
+        let Some(serde_yaml::Value::String(name)) = entry.get(&name_key) else {
+            continue;
+        };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        listed_names.insert(name.clone());
+
+        if !is_valid_person_name(&name) {
+            warn!(name = %name, "PEOPLE.md entry has invalid name; skipping sync");
+            continue;
+        }
+        if !seen.insert(name.clone()) {
+            warn!(name = %name, "PEOPLE.md has duplicate name entries; skipping sync for this duplicate");
+            continue;
+        }
+
+        if !people_dirs.contains(&name) {
+            warn!(name = %name, "PEOPLE.md entry has no corresponding people/<name>/ directory; skipping sync");
+            continue;
+        }
+
+        let Some(identity) = load_persona_identity(&name) else {
+            warn!(name = %name, "people/<name>/IDENTITY.md missing or invalid; skipping sync");
+            continue;
+        };
+
+        let emoji_key = serde_yaml::Value::String("emoji".to_string());
+        let creature_key = serde_yaml::Value::String("creature".to_string());
+
+        match identity.emoji.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(emoji) => {
+                entry.insert(emoji_key, serde_yaml::Value::String(emoji.to_string()));
+            },
+            None => {
+                entry.remove(&emoji_key);
+            },
+        }
+        match identity
+            .creature
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(creature) => {
+                entry.insert(creature_key, serde_yaml::Value::String(creature.to_string()));
+            },
+            None => {
+                entry.remove(&creature_key);
+            },
+        }
+    }
+
+    // Warn if a directory exists but isn't discoverable in PEOPLE.md.
+    for dir_name in people_dirs {
+        if !listed_names.contains(&dir_name) {
+            warn!(name = %dir_name, "people/<name>/ exists but is missing from PEOPLE.md");
+        }
+    }
+
+    let mut new_inner = serde_yaml::to_string(&root)?;
+    // Be tolerant if serde_yaml emits document markers.
+    if let Some(rest) = new_inner.strip_prefix("---\n") {
+        new_inner = rest.to_string();
+    }
+    if let Some(rest) = new_inner.strip_suffix("\n...\n") {
+        new_inner = rest.to_string();
+    }
+    new_inner = new_inner.trim_matches('\n').to_string();
+
+    let new_content = if split_yaml_frontmatter(&existing).is_some() {
+        format!("{prefix}---\n{new_inner}\n---\n{body}")
+    } else {
+        format!("---\n{new_inner}\n---\n{body}")
+    };
+
+    atomic_write_if_changed(&path, &new_content)?;
+    Ok(())
+}
+
+fn atomic_write_if_changed(path: &Path, content: &str) -> anyhow::Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    if existing == content {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_extension(format!("tmp.{nanos}"));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Directory containing per-agent private workspace docs (`people/<name>/...`).
+pub fn people_dir() -> PathBuf {
+    data_dir().join("people")
+}
+
+/// Validate the stable agent directory name (the `<name>` in `people/<name>/...`).
+///
+/// The name must be ASCII and match: `^[a-z0-9][a-z0-9_-]{0,63}$`.
+pub fn is_valid_person_name(name: &str) -> bool {
+    let name = name;
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
         return false;
     }
-    id.chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    let first = bytes[0];
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return false;
+    }
+    bytes.iter().all(|b| {
+        b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-'
+    })
 }
 
-fn persona_dir(persona_id: &str) -> Option<PathBuf> {
-    is_valid_persona_id(persona_id).then(|| personas_dir().join(persona_id))
+fn person_dir(person_name: &str) -> Option<PathBuf> {
+    is_valid_person_name(person_name).then(|| people_dir().join(person_name))
 }
 
 fn load_markdown_raw(path: PathBuf) -> Option<String> {
@@ -343,19 +577,19 @@ fn load_identity_from_path(path: PathBuf) -> Option<AgentIdentity> {
 
 /// Load identity values from a named persona's `IDENTITY.md` frontmatter if present.
 pub fn load_persona_identity(persona_id: &str) -> Option<AgentIdentity> {
-    let dir = persona_dir(persona_id)?;
+    let dir = person_dir(persona_id)?;
     load_identity_from_path(dir.join("IDENTITY.md"))
 }
 
-/// Load IDENTITY.md raw markdown for the default persona
-/// (`<data_dir>/personas/default/IDENTITY.md`) if present and non-empty.
+/// Load IDENTITY.md raw markdown for the default agent
+/// (`<data_dir>/people/default/IDENTITY.md`) if present and non-empty.
 pub fn load_identity_md_raw() -> Option<String> {
     load_markdown_raw(identity_path())
 }
 
 /// Load IDENTITY.md raw markdown from a named persona directory if present and non-empty.
 pub fn load_persona_identity_md_raw(persona_id: &str) -> Option<String> {
-    let dir = persona_dir(persona_id)?;
+    let dir = person_dir(persona_id)?;
     load_markdown_raw(dir.join("IDENTITY.md"))
 }
 
@@ -423,7 +657,7 @@ If you change this file, tell the user — it's your soul, and they should know.
 \n\
 _This file is yours to evolve. As you learn who you are, update it._";
 
-/// Load SOUL.md for the default persona (`<data_dir>/personas/default/SOUL.md`)
+/// Load SOUL.md for the default agent (`<data_dir>/people/default/SOUL.md`)
 /// if present and non-empty.
 ///
 /// When the file does not exist, it is seeded with [`DEFAULT_SOUL`] (mirroring
@@ -452,7 +686,7 @@ pub fn load_soul() -> Option<String> {
 
 /// Load SOUL.md from a named persona directory if present and non-empty.
 pub fn load_persona_soul(persona_id: &str) -> Option<String> {
-    let dir = persona_dir(persona_id)?;
+    let dir = person_dir(persona_id)?;
     load_markdown_raw(dir.join("SOUL.md"))
 }
 
@@ -471,7 +705,7 @@ fn write_default_soul() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Load AGENTS.md for the default persona (`<data_dir>/personas/default/AGENTS.md`)
+/// Load AGENTS.md for the default agent (`<data_dir>/people/default/AGENTS.md`)
 /// if present and non-empty.
 pub fn load_agents_md() -> Option<String> {
     load_workspace_markdown(agents_path())
@@ -479,11 +713,11 @@ pub fn load_agents_md() -> Option<String> {
 
 /// Load AGENTS.md from a named persona directory if present and non-empty.
 pub fn load_persona_agents_md(persona_id: &str) -> Option<String> {
-    let dir = persona_dir(persona_id)?;
+    let dir = person_dir(persona_id)?;
     load_workspace_markdown(dir.join("AGENTS.md"))
 }
 
-/// Load TOOLS.md for the default persona (`<data_dir>/personas/default/TOOLS.md`)
+/// Load TOOLS.md for the default agent (`<data_dir>/people/default/TOOLS.md`)
 /// if present and non-empty.
 pub fn load_tools_md() -> Option<String> {
     load_workspace_markdown(tools_path())
@@ -491,7 +725,7 @@ pub fn load_tools_md() -> Option<String> {
 
 /// Load TOOLS.md from a named persona directory if present and non-empty.
 pub fn load_persona_tools_md(persona_id: &str) -> Option<String> {
-    let dir = persona_dir(persona_id)?;
+    let dir = person_dir(persona_id)?;
     load_workspace_markdown(dir.join("TOOLS.md"))
 }
 
@@ -500,7 +734,7 @@ pub fn load_heartbeat_md() -> Option<String> {
     load_workspace_markdown(heartbeat_path())
 }
 
-/// Persist SOUL.md for the default persona (`<data_dir>/personas/default/SOUL.md`).
+/// Persist SOUL.md for the default agent (`<data_dir>/people/default/SOUL.md`).
 ///
 /// - `Some(non-empty)` writes `SOUL.md` with the given content
 /// - `None` or empty writes an empty `SOUL.md` so that `load_soul()`
@@ -1340,20 +1574,20 @@ mod tests {
 bind = "127.0.0.1"
 port = 18789
 
-[identity]
-name = "Rex"
+[hooks]
+hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 "#,
         )
         .expect("write seed config");
 
         let mut config = load_config(&path).expect("load seed config");
-        config.identity.name = None;
+        config.hooks = None;
         save_config_to_path(&path, &config).expect("save config");
 
         let reloaded = load_config(&path).expect("reload config");
         assert!(
-            reloaded.identity.name.is_none(),
-            "identity.name should be removed when cleared"
+            reloaded.hooks.is_none(),
+            "hooks table should be removed when cleared"
         );
     }
 
@@ -1401,16 +1635,16 @@ name = "Rex"
     }
 
     #[test]
-    fn default_persona_paths_live_under_personas_default() {
+    fn default_person_paths_live_under_people_default() {
         let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
         let data = data_dir();
-        assert_eq!(identity_path(), data.join("personas/default/IDENTITY.md"));
-        assert_eq!(soul_path(), data.join("personas/default/SOUL.md"));
-        assert_eq!(tools_path(), data.join("personas/default/TOOLS.md"));
-        assert_eq!(agents_path(), data.join("personas/default/AGENTS.md"));
+        assert_eq!(identity_path(), data.join("people/default/IDENTITY.md"));
+        assert_eq!(soul_path(), data.join("people/default/SOUL.md"));
+        assert_eq!(tools_path(), data.join("people/default/TOOLS.md"));
+        assert_eq!(agents_path(), data.join("people/default/AGENTS.md"));
 
         clear_data_dir();
     }
@@ -1672,6 +1906,117 @@ name = "Rex"
         let content = load_soul();
         assert_eq!(content.as_deref(), Some(DEFAULT_SOUL));
         assert!(soul_file.exists());
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn sync_people_md_preserves_body_and_other_fields() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        // Seed identity (SOT for emoji/creature).
+        let identity_path = data_dir().join("people/default/IDENTITY.md");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &identity_path,
+            "---\nname: default\nemoji: 🤖\ncreature: 助手\nvibe: test\n---\n\nPRIVATE BODY\n",
+        )
+        .unwrap();
+
+        // Seed PEOPLE.md with a body and extra per-entry keys.
+        let people_path = people_path();
+        let seed = "---\nschema_version: 1\npeople:\n  - name: default\n    display_name: 默认\n    telegram_user_name: my_bot\n    custom_field: keep\n    emoji: old\n    creature: oldc\n---\n\nPUBLIC BODY\n";
+        std::fs::write(&people_path, seed).unwrap();
+
+        let before = std::fs::read_to_string(&people_path).unwrap();
+        let before_body = split_yaml_frontmatter(&before).unwrap().body.to_string();
+
+        sync_people_md_from_identities().unwrap();
+
+        let after = std::fs::read_to_string(&people_path).unwrap();
+        let after_split = split_yaml_frontmatter(&after).unwrap();
+        assert_eq!(after_split.body, before_body, "PEOPLE.md body must be preserved");
+
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(after_split.inner).unwrap();
+        let people = yaml
+            .get("people")
+            .and_then(|v| v.as_sequence())
+            .unwrap();
+        let entry = people[0].as_mapping().unwrap();
+        assert_eq!(
+            entry
+                .get(&serde_yaml::Value::String("telegram_user_name".to_string()))
+                .and_then(|v| v.as_str()),
+            Some("my_bot")
+        );
+        assert_eq!(
+            entry
+                .get(&serde_yaml::Value::String("custom_field".to_string()))
+                .and_then(|v| v.as_str()),
+            Some("keep")
+        );
+        assert_eq!(
+            entry
+                .get(&serde_yaml::Value::String("emoji".to_string()))
+                .and_then(|v| v.as_str()),
+            Some("🤖")
+        );
+        assert_eq!(
+            entry
+                .get(&serde_yaml::Value::String("creature".to_string()))
+                .and_then(|v| v.as_str()),
+            Some("助手")
+        );
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn sync_people_md_removes_emoji_when_identity_clears_it() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        let identity_path = data_dir().join("people/default/IDENTITY.md");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &identity_path,
+            "---\nname: default\ncreature: 助手\n---\n\nPRIVATE BODY\n",
+        )
+        .unwrap();
+
+        let people_path = people_path();
+        std::fs::write(
+            &people_path,
+            "---\nschema_version: 1\npeople:\n  - name: default\n    emoji: old\n    creature: oldc\n---\n\nPUBLIC BODY\n",
+        )
+        .unwrap();
+
+        sync_people_md_from_identities().unwrap();
+
+        let after = std::fs::read_to_string(&people_path).unwrap();
+        let split = split_yaml_frontmatter(&after).unwrap();
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(split.inner).unwrap();
+        let entry = yaml
+            .get("people")
+            .and_then(|v| v.as_sequence())
+            .unwrap()[0]
+            .as_mapping()
+            .unwrap();
+
+        assert!(
+            entry.get(&serde_yaml::Value::String("emoji".to_string()))
+                .is_none(),
+            "emoji should be removed when not present in IDENTITY.md"
+        );
+        assert_eq!(
+            entry
+                .get(&serde_yaml::Value::String("creature".to_string()))
+                .and_then(|v| v.as_str()),
+            Some("助手")
+        );
 
         clear_data_dir();
     }

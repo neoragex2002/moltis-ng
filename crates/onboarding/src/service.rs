@@ -1,12 +1,17 @@
 //! Live onboarding service that backs the `wizard.*` RPC methods.
 
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use serde_json::{Value, json};
 
-use moltis_config::{AgentIdentity, MoltisConfig, UserProfile};
+use moltis_config::MoltisConfig;
 
 use crate::state::{WizardState, WizardStep};
+
+const DEFAULT_PERSON_NAME: &str = "default";
 
 /// Live onboarding service backed by a `WizardState` and config persistence.
 pub struct LiveOnboardingService {
@@ -63,21 +68,20 @@ impl LiveOnboardingService {
             });
         }
 
+        // Ensure workspace files exist before pre-populating.
+        let _ = moltis_config::ensure_default_person_seeded();
+        let _ = moltis_config::ensure_people_md_seeded();
+
         let mut ws = WizardState::new();
 
-        // Pre-populate from existing config so the user can keep values.
-        if self.config_path.exists()
-            && let Ok(cfg) = moltis_config::loader::load_config(&self.config_path)
-        {
-            ws.identity = cfg.identity;
-            ws.user = cfg.user;
-        }
+        // Pre-populate from existing workspace files so the user can keep values.
         if let Some(file_identity) = moltis_config::load_identity() {
-            merge_identity(&mut ws.identity, &file_identity);
+            ws.identity = file_identity;
         }
         if let Some(file_user) = moltis_config::load_user() {
-            merge_user(&mut ws.user, &file_user);
+            ws.user = file_user;
         }
+        ws.agent_display_name = load_people_display_name(DEFAULT_PERSON_NAME);
 
         let resp = step_response(&ws);
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = Some(ws);
@@ -91,37 +95,51 @@ impl LiveOnboardingService {
         ws.advance(input);
 
         if ws.is_done() {
-            // Merge into existing config or create new one.
-            let mut config = if self.config_path.exists() {
+            // Ensure the config file exists (onboarding writes it on completion).
+            let config = if self.config_path.exists() {
                 moltis_config::loader::load_config(&self.config_path).unwrap_or_default()
             } else {
                 MoltisConfig::default()
             };
-            config.identity = ws.identity.clone();
-            config.user = ws.user.clone();
             self.save(&config)
                 .map_err(|e| format!("failed to save config: {e}"))?;
-            if let Err(e) = moltis_config::save_identity(&ws.identity) {
+
+            // Persist workspace identity/user.
+            let mut identity = ws.identity.clone();
+            identity.name = Some(DEFAULT_PERSON_NAME.to_string());
+            if let Err(e) = moltis_config::save_identity(&identity) {
                 return Err(format!("failed to save IDENTITY.md: {e}"));
             }
             if let Err(e) = moltis_config::save_user(&ws.user) {
                 return Err(format!("failed to save USER.md: {e}"));
             }
+            if let Err(e) =
+                save_people_display_name(DEFAULT_PERSON_NAME, ws.agent_display_name.as_deref())
+            {
+                return Err(format!("failed to save PEOPLE.md display_name: {e}"));
+            }
+            if let Err(e) = moltis_config::sync_people_md_from_identities() {
+                return Err(format!("failed to sync PEOPLE.md: {e}"));
+            }
             self.mark_onboarded();
 
+            let effective_display_name = ws
+                .agent_display_name
+                .clone()
+                .unwrap_or_else(|| "moltis".to_string());
             let resp = json!({
                 "step": "done",
                 "prompt": ws.prompt(),
                 "done": true,
                 "identity": {
-                    "name": config.identity.name,
-                    "emoji": config.identity.emoji,
-                    "creature": config.identity.creature,
-                    "vibe": config.identity.vibe,
+                    "name": effective_display_name,
+                    "emoji": identity.emoji,
+                    "creature": identity.creature,
+                    "vibe": identity.vibe,
                 },
                 "user": {
-                    "name": config.user.name,
-                    "timezone": config.user.timezone,
+                    "name": ws.user.name,
+                    "timezone": ws.user.timezone,
                 },
             });
             *guard = None;
@@ -157,19 +175,13 @@ impl LiveOnboardingService {
     ///
     /// Accepts: `{name?, emoji?, creature?, vibe?, soul?, user_name?}`
     pub fn identity_update(&self, params: Value) -> anyhow::Result<Value> {
-        let mut config = if self.config_path.exists() {
-            moltis_config::loader::load_config(&self.config_path).unwrap_or_default()
-        } else {
-            MoltisConfig::default()
-        };
-        let mut identity = config.identity.clone();
-        if let Some(file_identity) = moltis_config::load_identity() {
-            merge_identity(&mut identity, &file_identity);
-        }
-        let mut user = config.user.clone();
-        if let Some(file_user) = moltis_config::load_user() {
-            merge_user(&mut user, &file_user);
-        }
+        // Ensure workspace files exist.
+        let _ = moltis_config::ensure_default_person_seeded();
+        let _ = moltis_config::ensure_people_md_seeded();
+
+        let mut identity = moltis_config::load_identity().unwrap_or_default();
+        identity.name = Some(DEFAULT_PERSON_NAME.to_string());
+        let mut user = moltis_config::load_user().unwrap_or_default();
 
         /// Extract an optional non-empty string from JSON, mapping `""` to `None`.
         fn str_field(params: &Value, key: &str) -> Option<Option<String>> {
@@ -180,7 +192,7 @@ impl LiveOnboardingService {
         }
 
         if let Some(v) = str_field(&params, "name") {
-            identity.name = v;
+            save_people_display_name(DEFAULT_PERSON_NAME, v.as_deref())?;
         }
         if let Some(v) = str_field(&params, "emoji") {
             identity.emoji = v;
@@ -202,21 +214,18 @@ impl LiveOnboardingService {
         if let Some(v) = str_field(&params, "user_name") {
             user.name = v;
         }
-
-        config.identity = identity.clone();
-        config.user = user.clone();
-
-        self.save(&config)?;
         moltis_config::save_identity(&identity)?;
         moltis_config::save_user(&user)?;
+        moltis_config::sync_people_md_from_identities()?;
 
         // Mark onboarding complete once both names are present.
-        if identity.name.is_some() && user.name.is_some() {
+        let display_name = load_people_display_name(DEFAULT_PERSON_NAME);
+        if display_name.is_some() && user.name.is_some() {
             self.mark_onboarded();
         }
 
         Ok(json!({
-            "name": identity.name,
+            "name": display_name,
             "emoji": identity.emoji,
             "creature": identity.creature,
             "vibe": identity.vibe,
@@ -231,39 +240,11 @@ impl LiveOnboardingService {
         Ok(json!({}))
     }
 
-    /// Read identity from the config file (for `agent.identity.get`).
+    /// Read identity from workspace-backed sources (for `agent.identity.get`).
     pub fn identity_get(&self) -> moltis_config::ResolvedIdentity {
-        if self.config_path.exists()
-            && let Ok(cfg) = moltis_config::loader::load_config(&self.config_path)
-        {
-            let mut id = moltis_config::ResolvedIdentity::from_config(&cfg);
-            if let Some(file_identity) = moltis_config::load_identity() {
-                if let Some(name) = file_identity.name {
-                    id.name = name;
-                }
-                if let Some(emoji) = file_identity.emoji {
-                    id.emoji = Some(emoji);
-                }
-                if let Some(creature) = file_identity.creature {
-                    id.creature = Some(creature);
-                }
-                if let Some(vibe) = file_identity.vibe {
-                    id.vibe = Some(vibe);
-                }
-            }
-            if let Some(file_user) = moltis_config::load_user()
-                && let Some(name) = file_user.name
-            {
-                id.user_name = Some(name);
-            }
-            id.soul = moltis_config::load_soul();
-            return id;
-        }
         let mut id = moltis_config::ResolvedIdentity::default();
+        id.name = load_people_display_name(DEFAULT_PERSON_NAME).unwrap_or_else(|| id.name.clone());
         if let Some(file_identity) = moltis_config::load_identity() {
-            if let Some(name) = file_identity.name {
-                id.name = name;
-            }
             id.emoji = file_identity.emoji;
             id.creature = file_identity.creature;
             id.vibe = file_identity.vibe;
@@ -281,33 +262,6 @@ fn onboarded_sentinel() -> std::path::PathBuf {
     moltis_config::data_dir().join(".onboarded")
 }
 
-fn merge_identity(dst: &mut AgentIdentity, src: &AgentIdentity) {
-    if src.name.is_some() {
-        dst.name = src.name.clone();
-    }
-    if src.emoji.is_some() {
-        dst.emoji = src.emoji.clone();
-    }
-    if src.creature.is_some() {
-        dst.creature = src.creature.clone();
-    }
-    if src.vibe.is_some() {
-        dst.vibe = src.vibe.clone();
-    }
-}
-
-fn merge_user(dst: &mut UserProfile, src: &UserProfile) {
-    if src.name.is_some() {
-        dst.name = src.name.clone();
-    }
-    if src.timezone.is_some() {
-        dst.timezone = src.timezone.clone();
-    }
-    if src.location.is_some() {
-        dst.location = src.location.clone();
-    }
-}
-
 fn step_response(ws: &WizardState) -> Value {
     json!({
         "step": ws.step,
@@ -323,12 +277,175 @@ fn current_value(ws: &WizardState) -> Option<&str> {
     use WizardStep::*;
     match ws.step {
         UserName => ws.user.name.as_deref(),
-        AgentName => ws.identity.name.as_deref(),
+        AgentName => ws.agent_display_name.as_deref(),
         AgentEmoji => ws.identity.emoji.as_deref(),
         AgentCreature => ws.identity.creature.as_deref(),
         AgentVibe => ws.identity.vibe.as_deref(),
         _ => None,
     }
+}
+
+fn extract_yaml_frontmatter(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("---")?;
+    let rest = rest.strip_prefix('\n')?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+fn split_yaml_frontmatter(content: &str) -> Option<(&str, &str, &str)> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---\n") {
+        return None;
+    }
+    let prefix_len = content.len() - trimmed.len();
+    let inner_start = prefix_len + "---\n".len();
+    let rest = &content[inner_start..];
+    let end_marker_newline = rest.find("\n---")?;
+    let end_marker_line_start = inner_start + end_marker_newline + 1;
+    if !content[end_marker_line_start..].starts_with("---") {
+        return None;
+    }
+    let after_end_marker = match content[end_marker_line_start..].find('\n') {
+        Some(nl) => end_marker_line_start + nl + 1,
+        None => content.len(),
+    };
+
+    Some((
+        &content[..prefix_len],
+        &content[inner_start..(end_marker_line_start - 1)],
+        &content[after_end_marker..],
+    ))
+}
+
+fn atomic_write_if_changed(path: &Path, content: &str) -> anyhow::Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    if existing == content {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_extension(format!("tmp.{nanos}"));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn load_people_display_name(person_name: &str) -> Option<String> {
+    moltis_config::ensure_people_md_seeded().ok()?;
+    let raw = std::fs::read_to_string(moltis_config::people_path()).ok()?;
+    let frontmatter = extract_yaml_frontmatter(&raw)?;
+    let yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
+    let people = yaml.get("people")?.as_sequence()?;
+    for item in people {
+        let entry = item.as_mapping()?;
+        let name = entry
+            .get(&serde_yaml::Value::String("name".to_string()))?
+            .as_str()?
+            .trim();
+        if name == person_name {
+            return entry
+                .get(&serde_yaml::Value::String("display_name".to_string()))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
+
+fn save_people_display_name(person_name: &str, display_name: Option<&str>) -> anyhow::Result<()> {
+    moltis_config::ensure_people_md_seeded()?;
+    let path = moltis_config::people_path();
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let (prefix, inner, body, has_frontmatter) = match split_yaml_frontmatter(&existing) {
+        Some((p, i, b)) => (p, i, b, true),
+        None => ("", "", existing.as_str(), false),
+    };
+
+    let mut yaml: serde_yaml::Value = if inner.trim().is_empty() {
+        serde_yaml::Value::Mapping(Default::default())
+    } else {
+        serde_yaml::from_str(inner)?
+    };
+    let serde_yaml::Value::Mapping(root) = &mut yaml else {
+        anyhow::bail!("PEOPLE.md frontmatter is not a mapping");
+    };
+    root.entry(serde_yaml::Value::String("schema_version".to_string()))
+        .or_insert_with(|| serde_yaml::Value::Number(1.into()));
+    root.entry(serde_yaml::Value::String("people".to_string()))
+        .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
+    let Some(seq) = root
+        .get_mut(&serde_yaml::Value::String("people".to_string()))
+        .and_then(|v| v.as_sequence_mut())
+    else {
+        anyhow::bail!("PEOPLE.md frontmatter 'people' is not a list");
+    };
+
+    // Find or append the entry.
+    let mut found = None;
+    for item in seq.iter_mut() {
+        let Some(entry) = item.as_mapping_mut() else {
+            continue;
+        };
+        let Some(name) = entry
+            .get(&serde_yaml::Value::String("name".to_string()))
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        if name.trim() == person_name {
+            found = Some(entry);
+            break;
+        }
+    }
+    if found.is_none() {
+        let mut entry = serde_yaml::Mapping::new();
+        entry.insert(
+            serde_yaml::Value::String("name".to_string()),
+            serde_yaml::Value::String(person_name.to_string()),
+        );
+        seq.push(serde_yaml::Value::Mapping(entry));
+        let Some(serde_yaml::Value::Mapping(last)) = seq.last_mut() else {
+            unreachable!();
+        };
+        found = Some(last);
+    }
+
+    let entry = found.unwrap();
+    let key = serde_yaml::Value::String("display_name".to_string());
+    let next = display_name.unwrap_or("").trim();
+    if next.is_empty() {
+        entry.remove(&key);
+    } else {
+        entry.insert(key, serde_yaml::Value::String(next.to_string()));
+    }
+
+    let mut new_inner = serde_yaml::to_string(&yaml)?;
+    if let Some(rest) = new_inner.strip_prefix("---\n") {
+        new_inner = rest.to_string();
+    }
+    if let Some(rest) = new_inner.strip_suffix("\n...\n") {
+        new_inner = rest.to_string();
+    }
+    let new_inner = new_inner.trim_matches('\n');
+    let new_content = if has_frontmatter {
+        format!("{prefix}---\n{new_inner}\n---\n{body}")
+    } else {
+        format!("---\n{new_inner}\n---\n{body}")
+    };
+
+    atomic_write_if_changed(&path, &new_content)?;
+    Ok(())
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -376,7 +493,7 @@ mod tests {
         let status = svc.wizard_status();
         assert_eq!(status["onboarded"], true);
 
-        assert!(dir.path().join("personas/default/IDENTITY.md").exists());
+        assert!(dir.path().join("people/default/IDENTITY.md").exists());
         assert!(dir.path().join("USER.md").exists());
         moltis_config::clear_data_dir();
     }
@@ -387,9 +504,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         moltis_config::set_data_dir(dir.path().to_path_buf());
         let config_path = dir.path().join("moltis.toml");
-        // Write a config with identity and user — but no sentinel file.
+        // Write a config — but no sentinel file.
         let mut f = std::fs::File::create(&config_path).unwrap();
-        writeln!(f, "[identity]\nname = \"Rex\"\n\n[user]\nname = \"Alice\"").unwrap();
+        writeln!(f, "[server]\nbind = \"127.0.0.1\"\nport = 18789").unwrap();
 
         let svc = LiveOnboardingService::new(config_path);
         // Should NOT be onboarded — data alone isn't enough.
@@ -470,7 +587,7 @@ mod tests {
         let res = svc.identity_update(json!({ "soul": null })).unwrap();
         assert!(res["soul"].is_null());
 
-        let soul_path = dir.path().join("personas/default/SOUL.md");
+        let soul_path = dir.path().join("people/default/SOUL.md");
         // save_soul(None) writes an empty file (not deleted) to prevent re-seeding
         assert!(soul_path.exists());
         assert!(std::fs::read_to_string(&soul_path).unwrap().is_empty());

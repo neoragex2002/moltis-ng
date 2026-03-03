@@ -22,6 +22,8 @@ pub struct WizardState {
     pub step: WizardStep,
     pub user: UserProfile,
     pub identity: AgentIdentity,
+    /// Public display name for the default agent (stored in PEOPLE.md).
+    pub agent_display_name: Option<String>,
 }
 
 impl Default for WizardState {
@@ -36,6 +38,7 @@ impl WizardState {
             step: WizardStep::Welcome,
             user: UserProfile::default(),
             identity: AgentIdentity::default(),
+            agent_display_name: None,
         }
     }
 
@@ -46,7 +49,7 @@ impl WizardState {
                 "Welcome to moltis! Let's set things up. Press Enter to continue."
             },
             WizardStep::UserName => "What's your name?",
-            WizardStep::AgentName => "Pick a name for your agent:",
+            WizardStep::AgentName => "Pick a display name for your agent:",
             WizardStep::AgentEmoji => "Choose an emoji for your agent (e.g. \u{1f916}):",
             WizardStep::AgentCreature => {
                 "What kind of creature is your agent? (e.g. owl, fox, dragon)"
@@ -72,9 +75,9 @@ impl WizardState {
             },
             WizardStep::AgentName => {
                 if !input.is_empty() {
-                    self.identity.name = Some(input.to_string());
-                } else if self.identity.name.is_none() {
-                    self.identity.name = Some("moltis".to_string());
+                    self.agent_display_name = Some(input.to_string());
+                } else if self.agent_display_name.is_none() {
+                    self.agent_display_name = Some("moltis".to_string());
                 }
                 self.step = WizardStep::AgentEmoji;
             },
@@ -129,7 +132,7 @@ mod tests {
         assert_eq!(s.step, WizardStep::AgentName);
 
         s.advance("Momo"); // → emoji
-        assert_eq!(s.identity.name.as_deref(), Some("Momo"));
+        assert_eq!(s.agent_display_name.as_deref(), Some("Momo"));
 
         s.advance("\u{1f99c}"); // → creature
         assert_eq!(s.identity.emoji.as_deref(), Some("\u{1f99c}"));
@@ -167,6 +170,6 @@ mod tests {
         s.advance(""); // welcome
         s.advance("User");
         s.advance(""); // empty agent name → defaults to "moltis"
-        assert_eq!(s.identity.name.as_deref(), Some("moltis"));
+        assert_eq!(s.agent_display_name.as_deref(), Some("moltis"));
     }
 }

@@ -322,6 +322,33 @@ pub const DEFAULT_SANDBOX_IMAGE: &str = "ubuntu:25.10";
 /// Fixed guest mountpoint for Moltis instance data inside sandbox containers.
 pub const SANDBOX_GUEST_DATA_DIR: &str = "/moltis/data";
 
+fn public_data_view_dir(base_data_dir: &str, sandbox_key: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(base_data_dir)
+        .join(".sandbox_views")
+        .join(sandbox_key)
+}
+
+fn copy_file_or_empty(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    match std::fs::read_to_string(src) {
+        Ok(content) => std::fs::write(dst, content)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::write(dst, "")?,
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+fn prepare_public_data_view(base_data_dir: &str, sandbox_key: &str) -> anyhow::Result<std::path::PathBuf> {
+    let view_dir = public_data_view_dir(base_data_dir, sandbox_key);
+    std::fs::create_dir_all(&view_dir)?;
+
+    // Only expose public workspace files to sandboxed exec.
+    let base = std::path::PathBuf::from(base_data_dir);
+    copy_file_or_empty(&base.join("USER.md"), &view_dir.join("USER.md"))?;
+    copy_file_or_empty(&base.join("PEOPLE.md"), &view_dir.join("PEOPLE.md"))?;
+
+    Ok(view_dir)
+}
+
 /// Sandbox mode controlling when sandboxing is applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -894,7 +921,7 @@ impl DockerSandbox {
         args
     }
 
-    fn data_mount_args(&self) -> Result<Vec<String>> {
+    fn data_mount_args(&self, id: &SandboxId) -> Result<Vec<String>> {
         let mode = match self.config.data_mount {
             WorkspaceMount::Ro => "ro",
             WorkspaceMount::Rw => "rw",
@@ -929,7 +956,7 @@ impl DockerSandbox {
                 )
             })?;
 
-        match mount_type {
+        let mount_source_to_use = match mount_type {
             DataMountType::Bind => {
                 if !std::path::Path::new(mount_source).is_absolute() {
                     anyhow::bail!(
@@ -943,6 +970,8 @@ impl DockerSandbox {
                          when tools.exec.sandbox.data_mount_type=bind"
                     );
                 }
+                let view_dir = prepare_public_data_view(mount_source, &id.key)?;
+                view_dir.display().to_string()
             },
             DataMountType::Volume => {
                 if mount_source.contains('/')
@@ -955,16 +984,17 @@ impl DockerSandbox {
                          Docker volume name when tools.exec.sandbox.data_mount_type=volume"
                     );
                 }
+                mount_source.to_string()
             },
-        }
+        };
 
         Ok(vec![
             "-v".to_string(),
-            format!("{mount_source}:{SANDBOX_GUEST_DATA_DIR}:{mode}"),
+            format!("{mount_source_to_use}:{SANDBOX_GUEST_DATA_DIR}:{mode}"),
         ])
     }
 
-    async fn container_contract_matches(&self, name: &str) -> Result<bool> {
+    async fn container_contract_matches(&self, name: &str, id: &SandboxId) -> Result<bool> {
         let expected_env = format!("MOLTIS_DATA_DIR={SANDBOX_GUEST_DATA_DIR}");
 
         let env_output = tokio::process::Command::new("docker")
@@ -1018,7 +1048,9 @@ impl DockerSandbox {
             })?;
         let expected_mount_source_normalized = match expected_mount_type {
             DataMountType::Bind => {
-                Self::normalize_bind_mount_source_for_compare(expected_mount_source)
+                let view_dir =
+                    public_data_view_dir(expected_mount_source, &id.key).display().to_string();
+                Self::normalize_bind_mount_source_for_compare(&view_dir)
             },
             DataMountType::Volume => expected_mount_source.to_string(),
         };
@@ -1193,7 +1225,7 @@ impl DockerSandbox {
         Ok(args)
     }
 
-    fn docker_run_args(&self, name: &str, image: &str) -> Result<Vec<String>> {
+    fn docker_run_args(&self, name: &str, image: &str, id: &SandboxId) -> Result<Vec<String>> {
         let mut args = vec![
             "run".to_string(),
             "-d".to_string(),
@@ -1215,7 +1247,7 @@ impl DockerSandbox {
         ]);
 
         args.extend(self.resource_args());
-        args.extend(self.data_mount_args()?);
+        args.extend(self.data_mount_args(id)?);
         args.extend(self.external_mount_args()?);
 
         args.push(image.to_string());
@@ -1244,7 +1276,7 @@ impl Sandbox for DockerSandbox {
         {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if stdout.trim() == "true" {
-                if self.container_contract_matches(&name).await? {
+                if self.container_contract_matches(&name, id).await? {
                     return Ok(());
                 }
 
@@ -1264,7 +1296,7 @@ impl Sandbox for DockerSandbox {
 
         // Start a new container.
         let image = image_override.unwrap_or_else(|| self.image());
-        let args = self.docker_run_args(&name, image)?;
+        let args = self.docker_run_args(&name, image, id)?;
 
         let output = tokio::process::Command::new("docker")
             .args(&args)
@@ -1351,6 +1383,13 @@ WORKDIR /home/sandbox\n"
 
     async fn exec(&self, id: &SandboxId, command: &str, opts: &ExecOpts) -> Result<ExecResult> {
         let name = self.container_name(id);
+
+        // Refresh the public data view so USER.md / PEOPLE.md reads inside sandbox are current.
+        if self.config.data_mount_type == Some(DataMountType::Bind)
+            && let Some(ref source) = self.config.data_mount_source
+        {
+            let _ = prepare_public_data_view(source, &id.key);
+        }
 
         let mut args = vec!["exec".to_string()];
 
@@ -2742,19 +2781,27 @@ mod tests {
 
     #[test]
     fn test_docker_data_mount_args_bind_ro() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("USER.md"), "user\n").unwrap();
+        std::fs::write(dir.path().join("PEOPLE.md"), "people\n").unwrap();
         let config = SandboxConfig {
             data_mount: WorkspaceMount::Ro,
             data_mount_type: Some(DataMountType::Bind),
-            data_mount_source: Some("/srv/moltis-data".into()),
+            data_mount_source: Some(dir.path().display().to_string()),
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
-        let args = docker.data_mount_args().unwrap();
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "main".into(),
+        };
+        let view = public_data_view_dir(&dir.path().display().to_string(), &id.key);
+        let args = docker.data_mount_args(&id).unwrap();
         assert_eq!(
             args,
             vec![
                 "-v".to_string(),
-                "/srv/moltis-data:/moltis/data:ro".to_string()
+                format!("{}:/moltis/data:ro", view.display())
             ]
         );
     }
@@ -2768,7 +2815,11 @@ mod tests {
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
-        let args = docker.data_mount_args().unwrap();
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "main".into(),
+        };
+        let args = docker.data_mount_args(&id).unwrap();
         assert_eq!(
             args,
             vec!["-v".to_string(), "moltis-data:/moltis/data:rw".to_string()]
@@ -2782,7 +2833,11 @@ mod tests {
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
-        let err = docker.data_mount_args().unwrap_err().to_string();
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "main".into(),
+        };
+        let err = docker.data_mount_args(&id).unwrap_err().to_string();
         assert!(err.contains("SANDBOX_DATA_MOUNT_REQUIRED"));
     }
 
@@ -2795,7 +2850,11 @@ mod tests {
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
-        let err = docker.data_mount_args().unwrap_err().to_string();
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "main".into(),
+        };
+        let err = docker.data_mount_args(&id).unwrap_err().to_string();
         assert!(err.contains("SANDBOX_DATA_MOUNT_INVALID"));
     }
 
@@ -2808,7 +2867,11 @@ mod tests {
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
-        let err = docker.data_mount_args().unwrap_err().to_string();
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "main".into(),
+        };
+        let err = docker.data_mount_args(&id).unwrap_err().to_string();
         assert!(err.contains("SANDBOX_DATA_MOUNT_INVALID"));
     }
 
@@ -2821,7 +2884,11 @@ mod tests {
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
-        let err = docker.data_mount_args().unwrap_err().to_string();
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "main".into(),
+        };
+        let err = docker.data_mount_args(&id).unwrap_err().to_string();
         assert!(err.contains("SANDBOX_DATA_MOUNT_INVALID"));
     }
 
@@ -2834,28 +2901,67 @@ mod tests {
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
-        let err = docker.data_mount_args().unwrap_err().to_string();
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "main".into(),
+        };
+        let err = docker.data_mount_args(&id).unwrap_err().to_string();
         assert!(err.contains("SANDBOX_DATA_MOUNT_INVALID"));
     }
 
     #[test]
     fn test_docker_run_args_includes_data_dir_env() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("USER.md"), "user\n").unwrap();
+        std::fs::write(dir.path().join("PEOPLE.md"), "people\n").unwrap();
         let config = SandboxConfig {
             data_mount: WorkspaceMount::Ro,
             data_mount_type: Some(DataMountType::Bind),
-            data_mount_source: Some("/srv/moltis-data".into()),
+            data_mount_source: Some(dir.path().display().to_string()),
             ..Default::default()
         };
         let docker = DockerSandbox::new(config);
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "test".into(),
+        };
         let args = docker
-            .docker_run_args("moltis-sandbox-test", DEFAULT_SANDBOX_IMAGE)
+            .docker_run_args("moltis-sandbox-test", DEFAULT_SANDBOX_IMAGE, &id)
             .unwrap();
         assert!(args.contains(&"-e".to_string()));
         assert!(args.contains(&format!("MOLTIS_DATA_DIR={SANDBOX_GUEST_DATA_DIR}")));
         assert!(
             args.iter()
-                .any(|a| a.contains(&format!(":{SANDBOX_GUEST_DATA_DIR}:ro")))
+                .any(|a| a.contains(&format!(".sandbox_views/{}:{SANDBOX_GUEST_DATA_DIR}:ro", id.key)))
         );
+    }
+
+    #[test]
+    fn test_prepare_public_data_view_only_copies_public_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("USER.md"), "user-public\n").unwrap();
+        std::fs::write(dir.path().join("PEOPLE.md"), "people-public\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("people/default")).unwrap();
+        std::fs::write(
+            dir.path().join("people/default/IDENTITY.md"),
+            "---\nname: default\n---\nsecret\n",
+        )
+        .unwrap();
+
+        let view_dir = prepare_public_data_view(&dir.path().display().to_string(), "main").unwrap();
+
+        let mut names: Vec<String> = std::fs::read_dir(&view_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["PEOPLE.md".to_string(), "USER.md".to_string()]);
+
+        let user = std::fs::read_to_string(view_dir.join("USER.md")).unwrap();
+        let people = std::fs::read_to_string(view_dir.join("PEOPLE.md")).unwrap();
+        assert_eq!(user, "user-public\n");
+        assert_eq!(people, "people-public\n");
+        assert!(!view_dir.join("people").exists());
     }
 
     #[test]
@@ -2911,7 +3017,10 @@ mod tests {
 
     #[test]
     fn test_create_sandbox_off() {
-        let config = SandboxConfig::default();
+        let config = SandboxConfig {
+            mode: SandboxMode::Off,
+            ..Default::default()
+        };
         let sandbox = create_sandbox(config);
         let id = SandboxId {
             scope: SandboxScope::Session,

@@ -93,7 +93,7 @@ pub fn build_openai_responses_developer_prompts(
     persona.push_str("规则：\n");
     persona.push_str("- 当你被问到“我是谁 / 主操作者是谁 / 主操作者资料 / 与主操作者相关身份信息”等问题时：\n");
     persona.push_str(&format!(
-        "    1. 必须先读取 {SANDBOX_DATA_DIR}/USER.md\n    2. 再基于该文件内容回答\n    3. 不得凭空猜测\n    4. 禁止修改其中信息\n\n"
+        "    1. 必须先读取 {SANDBOX_DATA_DIR}/USER.md\n    2. 再基于该文件内容回答\n    3. 不得凭空猜测\n    4. 不得擅自修改其中信息；如需更新字段，先征得用户同意并通过 UI/RPC 更新字段（正文只读）\n\n"
     ));
 
     persona.push_str("## 4. 人物清单 (People, Who are the people you know?)\n\n");
@@ -101,7 +101,7 @@ pub fn build_openai_responses_developer_prompts(
     persona.push_str("规则：\n");
     persona.push_str("- 当你被问到“你认识哪些人 / 有哪些账号或 bots / 有哪些代理或角色”等问题时：\n");
     persona.push_str(&format!(
-        "    1. 必须先读取 {SANDBOX_DATA_DIR}/PEOPLE.md\n    2. 再基于该文件内容回答\n    3. 不得靠记忆或猜测其中名单\n    4. {SANDBOX_DATA_DIR}/PEOPLE.md 由系统自动生成/更新，禁止修改其中内容\n\n"
+        "    1. 必须先读取 {SANDBOX_DATA_DIR}/PEOPLE.md\n    2. 再基于该文件内容回答\n    3. 不得靠记忆或猜测其中名单\n    4. PEOPLE.md 是公共通信录：字段可由用户在 UI 中维护；其中 emoji/creature 由系统从 people/<name>/IDENTITY.md 自动对齐；正文为手工说明（UI 只读）\n\n"
     ));
 
     persona.push_str("## 5. 对工作区规则的个人偏好\n\n");

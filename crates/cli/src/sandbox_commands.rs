@@ -30,15 +30,43 @@ fn sanitize_instance_slug(name: &str) -> String {
     }
 }
 
-fn instance_sandbox_prefix(config: &moltis_config::MoltisConfig) -> String {
-    let mut identity_name = config.identity.name.clone();
-    if let Some(file_identity) = moltis_config::load_identity()
-        && file_identity.name.is_some()
-    {
-        identity_name = file_identity.name;
-    }
-    let slug = sanitize_instance_slug(identity_name.as_deref().unwrap_or("moltis"));
+fn instance_sandbox_prefix(_config: &moltis_config::MoltisConfig) -> String {
+    let display_name = load_default_display_name().unwrap_or_else(|| "moltis".to_string());
+    let slug = sanitize_instance_slug(&display_name);
     format!("moltis-{slug}-sandbox")
+}
+
+fn load_default_display_name() -> Option<String> {
+    let raw = std::fs::read_to_string(moltis_config::people_path()).ok()?;
+    let frontmatter = extract_yaml_frontmatter(&raw)?;
+    let yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
+    let people = yaml.get("people")?.as_sequence()?;
+    for item in people {
+        let entry = item.as_mapping()?;
+        let name = entry
+            .get(&serde_yaml::Value::String("name".to_string()))?
+            .as_str()?
+            .trim();
+        if name == "default" {
+            return entry
+                .get(&serde_yaml::Value::String("display_name".to_string()))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
+
+fn extract_yaml_frontmatter(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("---")?;
+    let rest = rest.strip_prefix('\n')?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
 }
 
 #[derive(Subcommand)]

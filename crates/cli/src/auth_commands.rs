@@ -162,11 +162,20 @@ fn logout(provider: &str) -> Result<()> {
 }
 
 fn reset_identity() -> Result<()> {
-    moltis_config::loader::update_config(|cfg| {
-        cfg.identity = Default::default();
-        cfg.user = Default::default();
-    })?;
-    println!("Identity and user profile cleared. Onboarding will be required on next load.");
+    moltis_config::ensure_default_person_seeded()?;
+
+    let identity = moltis_config::AgentIdentity {
+        name: Some("default".to_string()),
+        ..Default::default()
+    };
+    let user = moltis_config::UserProfile::default();
+
+    moltis_config::save_identity(&identity)?;
+    moltis_config::save_user(&user)?;
+    moltis_config::save_soul(None)?;
+
+    let _ = std::fs::remove_file(moltis_config::data_dir().join(".onboarded"));
+    println!("Workspace identity and user profile cleared. Onboarding will be required on next load.");
     Ok(())
 }
 

@@ -36,10 +36,8 @@ pub mod metrics_middleware;
 pub mod metrics_routes;
 pub mod nodes;
 pub mod onboarding;
-pub mod owner;
 pub mod pairing;
 pub mod people;
-pub mod personas;
 pub mod project;
 pub mod provider_setup;
 #[cfg(feature = "push-notifications")]
@@ -63,6 +61,7 @@ pub mod tools_routes;
 pub mod tts_phrases;
 pub mod update_check;
 pub mod upload_routes;
+pub mod user;
 pub mod voice;
 pub mod voice_agent_tools;
 pub mod ws;

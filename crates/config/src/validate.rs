@@ -382,20 +382,6 @@ fn build_schema_map() -> KnownKeys {
             ])),
         ),
         (
-            "identity",
-            Struct(HashMap::from([
-                ("name", Leaf),
-                ("emoji", Leaf),
-                ("creature", Leaf),
-                ("vibe", Leaf),
-                ("soul", Leaf),
-            ])),
-        ),
-        (
-            "user",
-            Struct(HashMap::from([("name", Leaf), ("timezone", Leaf)])),
-        ),
-        (
             "hooks",
             Struct(HashMap::from([(
                 "hooks",
@@ -2289,7 +2275,7 @@ bucket_hash = "auto"
     }
 
     #[test]
-    fn identity_soul_field_allowed() {
+    fn identity_soul_field_is_unknown() {
         let toml = r#"
 [identity]
 soul = "hello"
@@ -2299,8 +2285,9 @@ soul = "hello"
             result
                 .diagnostics
                 .iter()
-                .all(|d| !(d.category == "unknown-field" && d.path == "identity.soul")),
-            "unexpected unknown-field for identity.soul: {:?}",
+                .any(|d| d.category == "unknown-field"
+                    && (d.path == "identity" || d.path == "identity.soul")),
+            "expected unknown-field for identity after identity config retirement: {:?}",
             result.diagnostics
         );
     }

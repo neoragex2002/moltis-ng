@@ -810,25 +810,12 @@ struct PromptPersona {
 /// this function avoids duplicating the merge logic.
 fn load_prompt_persona_with_id(persona_id: Option<&str>) -> PromptPersona {
     let config = moltis_config::discover_and_load();
-    let mut identity = config.identity.clone();
     let file_identity = persona_id
         .and_then(moltis_config::load_persona_identity)
         .or_else(moltis_config::load_identity);
-    if let Some(file_identity) = file_identity {
-        if file_identity.name.is_some() {
-            identity.name = file_identity.name;
-        }
-        if file_identity.emoji.is_some() {
-            identity.emoji = file_identity.emoji;
-        }
-        if file_identity.creature.is_some() {
-            identity.creature = file_identity.creature;
-        }
-        if file_identity.vibe.is_some() {
-            identity.vibe = file_identity.vibe;
-        }
-    }
-    let mut user = config.user.clone();
+    let identity = file_identity.unwrap_or_default();
+
+    let mut user = moltis_config::UserProfile::default();
     if let Some(file_user) = moltis_config::load_user() {
         if file_user.name.is_some() {
             user.name = file_user.name;

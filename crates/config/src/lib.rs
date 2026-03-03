@@ -19,10 +19,12 @@ pub use {
         find_user_global_config_file, heartbeat_path, identity_path, load_agents_md,
         load_heartbeat_md, load_identity, load_identity_md_raw, load_persona_agents_md,
         load_persona_identity, load_persona_identity_md_raw, load_persona_soul,
-        load_persona_tools_md, load_soul, load_tools_md, load_user, people_path, personas_dir,
+        load_persona_tools_md, load_soul, load_tools_md, load_user, people_path, people_dir,
+        ensure_default_person_seeded, ensure_people_md_seeded, is_valid_person_name,
         save_config, save_identity, save_raw_config, save_soul, save_user, set_config_dir,
         set_data_dir, soul_path, tools_path, update_config, user_global_config_dir,
         user_global_config_dir_if_different, user_path,
+        sync_people_md_from_identities,
     },
     schema::{
         AgentIdentity, AuthConfig, ChatConfig, GeoLocation, MessageQueueMode, MoltisConfig,

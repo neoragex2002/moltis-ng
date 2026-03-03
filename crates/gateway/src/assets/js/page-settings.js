@@ -28,14 +28,10 @@ import { connected } from "./signals.js";
 import * as S from "./state.js";
 import { fetchPhrase } from "./tts-phrases.js";
 import { Modal } from "./ui.js";
-import {
-	parseIdentityFrontmatter,
-	upsertIdentityFrontmatter,
-} from "./identity-frontmatter.js";
 
 var identity = signal(null);
 var loading = signal(true);
-var activeSection = signal("personas");
+var activeSection = signal("identity");
 var mounted = false;
 var containerRef = null;
 
@@ -73,13 +69,18 @@ function fetchIdentity() {
 var sections = [
 	{ group: "General" },
 	{
-		id: "personas",
-		label: "Personas",
+		id: "identity",
+		label: "Identity",
 		icon: html`<span class="icon icon-person"></span>`,
 	},
 	{
-		id: "owner",
-		label: "Owner",
+		id: "user",
+		label: "User",
+		icon: html`<span class="icon icon-person"></span>`,
+	},
+	{
+		id: "people",
+		label: "People",
 		icon: html`<span class="icon icon-person"></span>`,
 	},
 	{
@@ -282,11 +283,11 @@ function IdentitySection() {
 	function onSave(e) {
 		e.preventDefault();
 		if (!(name.trim() || userName.trim())) {
-			setError("Agent name and your name are required.");
+			setError("Agent display name and your name are required.");
 			return;
 		}
 		if (!name.trim()) {
-			setError("Agent name is required.");
+			setError("Agent display name is required.");
 			return;
 		}
 		if (!userName.trim()) {
@@ -349,7 +350,7 @@ function IdentitySection() {
 		if (trimmed === currentValue) return;
 
 		if (!trimmed) {
-			setError(field === "name" ? "Agent name is required." : "Your name is required.");
+			setError(field === "name" ? "Agent display name is required." : "Your name is required.");
 			return;
 		}
 
@@ -414,14 +415,16 @@ function IdentitySection() {
 			<!-- Agent section -->
 			<div>
 				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Agent</h3>
-				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">Saved to <code>IDENTITY.md</code> in your workspace root.</p>
+				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
+					Display name is saved to <code>PEOPLE.md</code> (public). Emoji/Creature/Vibe are saved to <code>people/default/IDENTITY.md</code> (private).
+				</p>
 				<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;">
 						<div>
-							<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Name *</div>
+							<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Display name *</div>
 							<input type="text" class="provider-key-input" style="width:100%;"
 								value=${name} onInput=${(e) => setName(e.target.value)} onBlur=${onNameBlur}
 								placeholder="e.g. Rex" />
-						</div>
+					</div>
 						<div>
 							<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Emoji</div>
 							<${EmojiPicker} value=${emoji} onChange=${setEmoji} onSelect=${onEmojiSelect} />
@@ -463,7 +466,7 @@ function IdentitySection() {
 			<!-- Soul section -->
 			<div>
 				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">Soul</h3>
-				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">Personality and tone injected into every conversation. Saved to <code>SOUL.md</code> in your workspace root. Leave empty for the default.</p>
+				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">Personality and tone injected into every conversation. Saved to <code>people/default/SOUL.md</code>. Leave empty for the default.</p>
 				<textarea
 					class="provider-key-input"
 					rows="8"
@@ -491,25 +494,14 @@ function IdentitySection() {
 	</div>`;
 }
 
-// ── Personas section ─────────────────────────────────────────
+// ── User section ────────────────────────────────────────────
 
-function PersonasSection() {
-	var [personaIds, setPersonaIds] = useState([]);
-	var [selectedId, setSelectedId] = useState("default");
-	var [loadingPersona, setLoadingPersona] = useState(false);
-	var [saving, setSaving] = useState(false);
-	var [saved, setSaved] = useState(false);
+function UserSection() {
+	var [loadingUser, setLoadingUser] = useState(true);
+	var [userDoc, setUserDoc] = useState({ name: "", timezone: "", location: null, body: "" });
 	var [error, setError] = useState(null);
-
-	var [identityRaw, setIdentityRaw] = useState("");
-	var [soul, setSoul] = useState("");
-	var [tools, setTools] = useState("");
-	var [agents, setAgents] = useState("");
-
-	var [name, setName] = useState("");
-	var [emoji, setEmoji] = useState("");
-	var [creature, setCreature] = useState("");
-	var [vibe, setVibe] = useState("");
+	var [saved, setSaved] = useState(false);
+	var [saving, setSaving] = useState(false);
 
 	function flashSaved() {
 		setSaved(true);
@@ -519,298 +511,13 @@ function PersonasSection() {
 		}, 1200);
 	}
 
-	function loadList() {
-		sendRpc("personas.list", {}).then((res) => {
-			if (!res?.ok) return;
-			var ids = res.payload?.personas || [];
-			setPersonaIds(ids);
-			if (!ids.includes(selectedId) && ids.length > 0) {
-				setSelectedId(ids[0]);
-			}
-			rerender();
-		});
-	}
-
-	function loadPersona(pid) {
-		if (!pid) return;
-		setLoadingPersona(true);
+	function loadUser() {
+		setLoadingUser(true);
 		setError(null);
-		sendRpc("personas.get", { persona_id: pid }).then((res) => {
-			setLoadingPersona(false);
-			if (!res?.ok) {
-				setError(res?.error?.message || "Failed to load persona");
-				rerender();
-				return;
-			}
-			var p = res.payload || {};
-			var raw = p.identity || "";
-			setIdentityRaw(raw);
-			setSoul(p.soul || "");
-			setTools(p.tools || "");
-			setAgents(p.agents || "");
-
-			var fm = parseIdentityFrontmatter(raw);
-			setName(fm.name || "");
-			setEmoji(fm.emoji || "");
-			setCreature(fm.creature || "");
-			setVibe(fm.vibe || "");
-			rerender();
-		});
-	}
-
-	useEffect(() => {
-		loadList();
-	}, []);
-
-	useEffect(() => {
-		loadPersona(selectedId);
-	}, [selectedId]);
-
-	function syncIdentityFrontmatter(nextFields) {
-		var raw = upsertIdentityFrontmatter(identityRaw || "", nextFields);
-		setIdentityRaw(raw);
-		rerender();
-	}
-
-	function onIdentityRawInput(val) {
-		setIdentityRaw(val);
-		var fm = parseIdentityFrontmatter(val || "");
-		if (fm.name != null) setName(fm.name || "");
-		if (fm.emoji != null) setEmoji(fm.emoji || "");
-		if (fm.creature != null) setCreature(fm.creature || "");
-		if (fm.vibe != null) setVibe(fm.vibe || "");
-	}
-
-	function onCreate() {
-		var id = window.prompt("New persona_id (letters, numbers, _ and -):", "");
-		if (!id) return;
-		var next = id.trim();
-		if (!next) return;
-		setError(null);
-		sendRpc("personas.clone", { from_id: "default", to_id: next }).then((res) => {
+		sendRpc("workspace.user.get", {}).then((res) => {
+			setLoadingUser(false);
 			if (res?.ok) {
-				loadList();
-				setSelectedId(next);
-			} else {
-				setError(res?.error?.message || "Failed to create persona");
-				rerender();
-			}
-		});
-	}
-
-	function onClone() {
-		var id = window.prompt(`Clone '${selectedId}' to new persona_id:`, "");
-		if (!id) return;
-		var next = id.trim();
-		if (!next) return;
-		setError(null);
-		sendRpc("personas.clone", { from_id: selectedId, to_id: next }).then((res) => {
-			if (res?.ok) {
-				loadList();
-				setSelectedId(next);
-			} else {
-				setError(res?.error?.message || "Failed to clone persona");
-				rerender();
-			}
-		});
-	}
-
-	function onDelete() {
-		if (selectedId === "default") {
-			setError("The 'default' persona cannot be deleted.");
-			rerender();
-			return;
-		}
-		var yes = window.confirm(`Delete persona '${selectedId}'?`);
-		if (!yes) return;
-		setError(null);
-		sendRpc("personas.delete", { persona_id: selectedId }).then((res) => {
-			if (res?.ok) {
-				loadList();
-				setSelectedId("default");
-			} else {
-				setError(res?.error?.message || "Failed to delete persona");
-				rerender();
-			}
-		});
-	}
-
-	function onSave(e) {
-		e.preventDefault();
-		setSaving(true);
-		setError(null);
-		// Ensure structured fields are reflected in the YAML frontmatter.
-		var raw = upsertIdentityFrontmatter(identityRaw || "", {
-			name,
-			emoji,
-			creature,
-			vibe,
-		});
-		sendRpc("personas.save", {
-			persona_id: selectedId,
-			identity: raw,
-			soul: soul || "",
-			tools: tools || "",
-			agents: agents || "",
-		}).then((res) => {
-			setSaving(false);
-			if (res?.ok) {
-				setIdentityRaw(raw);
-				flashSaved();
-				loadList();
-			} else {
-				setError(res?.error?.message || "Failed to save persona");
-			}
-			rerender();
-		});
-	}
-
-	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-			<h2 class="text-lg font-medium text-[var(--text-strong)]">Personas</h2>
-			<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:800px;margin:0;">
-				Manages persona profiles stored under <code>&lt;data_dir&gt;/personas/&lt;persona_id&gt;/</code>.
-				Each persona has <code>IDENTITY.md</code>, <code>SOUL.md</code>, <code>TOOLS.md</code>, and <code>AGENTS.md</code>.
-			</p>
-
-		<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:900px;">
-			<label class="text-xs text-[var(--muted)]">persona_id</label>
-			<select
-				class="provider-key-input"
-				style="max-width:240px;"
-				value=${selectedId}
-				onChange=${(e) => setSelectedId(e.target.value)}
-			>
-				${personaIds.map((id) => html`<option key=${id} value=${id}>${id}</option>`)}
-			</select>
-			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onCreate}>Create</button>
-			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onClone}>Clone</button>
-			<button type="button" class="provider-btn provider-btn-sm provider-btn-danger" onClick=${onDelete}>Delete</button>
-			${loadingPersona ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
-			${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
-			${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
-		</div>
-
-		<form onSubmit=${onSave} style="max-width:900px;display:flex;flex-direction:column;gap:16px;">
-			<div>
-				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Identity (frontmatter)</h3>
-				<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;">
-					<div>
-						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Name</div>
-						<input type="text" class="provider-key-input" style="width:100%;"
-							value=${name} onInput=${(e) => {
-								setName(e.target.value);
-								syncIdentityFrontmatter({ name: e.target.value, emoji, creature, vibe });
-							}}
-							placeholder="e.g. Rex" />
-					</div>
-					<div>
-						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Emoji</div>
-						<${EmojiPicker} value=${emoji} onChange=${(v) => {
-							setEmoji(v);
-							syncIdentityFrontmatter({ name, emoji: v, creature, vibe });
-						}} onSelect=${(v) => {
-							setEmoji(v);
-							syncIdentityFrontmatter({ name, emoji: v, creature, vibe });
-						}} />
-					</div>
-					<div>
-						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Creature</div>
-						<input type="text" class="provider-key-input" style="width:100%;"
-							value=${creature} onInput=${(e) => {
-								setCreature(e.target.value);
-								syncIdentityFrontmatter({ name, emoji, creature: e.target.value, vibe });
-							}}
-							placeholder="e.g. robot" />
-					</div>
-					<div>
-						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Vibe</div>
-						<input type="text" class="provider-key-input" style="width:100%;"
-							value=${vibe} onInput=${(e) => {
-								setVibe(e.target.value);
-								syncIdentityFrontmatter({ name, emoji, creature, vibe: e.target.value });
-							}}
-							placeholder="e.g. chill" />
-					</div>
-				</div>
-			</div>
-
-			<div>
-				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">IDENTITY.md (raw)</h3>
-				<textarea
-					class="provider-key-input"
-					rows="10"
-					style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
-					value=${identityRaw}
-					onInput=${(e) => onIdentityRawInput(e.target.value)}
-				/>
-			</div>
-
-			<div>
-				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">SOUL.md</h3>
-				<textarea
-					class="provider-key-input"
-					rows="10"
-					style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
-					value=${soul}
-					onInput=${(e) => setSoul(e.target.value)}
-				/>
-			</div>
-
-			<div>
-				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">TOOLS.md</h3>
-				<textarea
-					class="provider-key-input"
-					rows="10"
-					style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
-					value=${tools}
-					onInput=${(e) => setTools(e.target.value)}
-				/>
-			</div>
-
-			<div>
-				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">AGENTS.md</h3>
-				<textarea
-					class="provider-key-input"
-					rows="10"
-					style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
-					value=${agents}
-					onInput=${(e) => setAgents(e.target.value)}
-				/>
-			</div>
-
-			<div style="display:flex;align-items:center;gap:8px;">
-				<button type="submit" class="provider-btn" disabled=${saving}>
-					${saving ? "Saving\u2026" : "Save"}
-				</button>
-			</div>
-		</form>
-	</div>`;
-}
-
-// ── Owner section ───────────────────────────────────────────
-
-function OwnerSection() {
-	var [userMd, setUserMd] = useState("");
-	var [loadingOwner, setLoadingOwner] = useState(true);
-	var [saving, setSaving] = useState(false);
-	var [saved, setSaved] = useState(false);
-	var [error, setError] = useState(null);
-
-	function flashSaved() {
-		setSaved(true);
-		setTimeout(() => {
-			setSaved(false);
-			rerender();
-		}, 1200);
-	}
-
-	function loadOwner() {
-		setLoadingOwner(true);
-		setError(null);
-		sendRpc("owner.get", {}).then((res) => {
-			setLoadingOwner(false);
-			if (res?.ok) {
-				setUserMd(res.payload?.user_md || "");
+				setUserDoc(res.payload || { name: "", timezone: "", location: null, body: "" });
 			} else {
 				setError(res?.error?.message || "Failed to load USER.md");
 			}
@@ -819,16 +526,16 @@ function OwnerSection() {
 	}
 
 	useEffect(() => {
-		loadOwner();
+		loadUser();
 	}, []);
 
-	function onSave(e) {
-		e.preventDefault();
+	function patchUser(patch) {
 		setSaving(true);
 		setError(null);
-		sendRpc("owner.save", { user_md: userMd || "" }).then((res) => {
+		sendRpc("workspace.user.update", { patch }).then((res) => {
 			setSaving(false);
 			if (res?.ok) {
+				setUserDoc(res.payload || userDoc);
 				flashSaved();
 			} else {
 				setError(res?.error?.message || "Failed to save USER.md");
@@ -837,32 +544,217 @@ function OwnerSection() {
 		});
 	}
 
+	function onFieldBlur(field, value) {
+		var patch = {};
+		patch[field] = (value || "").trim();
+		patchUser(patch);
+	}
+
 	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-			<h2 class="text-lg font-medium text-[var(--text-strong)]">Owner</h2>
-			<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:800px;margin:0;">
-				Edits the global <code>&lt;data_dir&gt;/USER.md</code> (shared across all personas and channels).
-			</p>
-		<form onSubmit=${onSave} style="max-width:900px;display:flex;flex-direction:column;gap:12px;">
+		<h2 class="text-lg font-medium text-[var(--text-strong)]">User</h2>
+		<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:0;">
+			Public owner profile stored in <code>USER.md</code>. Only YAML fields are editable here; the body is read-only.
+		</p>
+
+		<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadUser} disabled=${saving}>
+				Reload
+			</button>
+			${loadingUser ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
+			${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+			${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+		</div>
+
+		<div style="max-width:900px;display:flex;flex-direction:column;gap:10px;">
+			<div>
+				<label class="text-xs text-[var(--muted)]">Owner name</label>
+				<input class="provider-key-input" style="width:320px;"
+					value=${userDoc.name || ""}
+					onInput=${(e) => setUserDoc({ ...userDoc, name: e.target.value })}
+					onBlur=${() => onFieldBlur("name", userDoc.name)} />
+			</div>
+			<div>
+				<label class="text-xs text-[var(--muted)]">Timezone (IANA)</label>
+				<input class="provider-key-input" style="width:320px;"
+					placeholder="Asia/Shanghai"
+					value=${userDoc.timezone || ""}
+					onInput=${(e) => setUserDoc({ ...userDoc, timezone: e.target.value })}
+					onBlur=${() => onFieldBlur("timezone", userDoc.timezone)} />
+			</div>
+			${userDoc.location
+				? html`<div class="text-xs text-[var(--muted)]">
+					Location: ${userDoc.location.place || (userDoc.location.latitude + "," + userDoc.location.longitude)}
+					${userDoc.location.updatedAt ? html`<span> (updated ${userDoc.location.updatedAt})</span>` : null}
+				</div>`
+				: null}
+		</div>
+
+		<div style="max-width:900px;">
+			<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin:8px 0 4px;">USER.md body (read-only)</h3>
 			<textarea
 				class="provider-key-input"
-				rows="16"
-				style="width:100%;min-height:16rem;resize:vertical;font-size:.8rem;line-height:1.5;"
-				value=${userMd}
-				onInput=${(e) => setUserMd(e.target.value)}
-				placeholder="---\nname: Neo\ntimezone: Asia/Shanghai\n---\n"
+				rows="10"
+				style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
+				value=${userDoc.body || ""}
+				disabled=${true}
 			/>
-			<div style="display:flex;align-items:center;gap:8px;">
-				<button type="submit" class="provider-btn" disabled=${saving || loadingOwner}>
-					${saving ? "Saving\u2026" : "Save"}
-				</button>
-				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadOwner} disabled=${saving}>
-					Reload
-				</button>
-				${loadingOwner ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
-				${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
-				${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
-			</div>
-		</form>
+		</div>
+	</div>`;
+}
+
+// ── People section ───────────────────────────────────────────
+
+function PeopleSection() {
+	var [loadingPeople, setLoadingPeople] = useState(true);
+	var [peopleDoc, setPeopleDoc] = useState({ schemaVersion: 1, people: [], body: "" });
+	var [error, setError] = useState(null);
+	var [saved, setSaved] = useState(false);
+	var [saving, setSaving] = useState(false);
+
+	function flashSaved() {
+		setSaved(true);
+		setTimeout(() => {
+			setSaved(false);
+			rerender();
+		}, 1200);
+	}
+
+	function loadPeople() {
+		setLoadingPeople(true);
+		setError(null);
+		sendRpc("workspace.people.get", {}).then((res) => {
+			setLoadingPeople(false);
+			if (res?.ok) {
+				setPeopleDoc(res.payload || { schemaVersion: 1, people: [], body: "" });
+			} else {
+				setError(res?.error?.message || "Failed to load PEOPLE.md");
+			}
+			rerender();
+		});
+	}
+
+	useEffect(() => {
+		loadPeople();
+	}, []);
+
+	function setEntryField(idx, field, value) {
+		var next = (peopleDoc.people || []).slice();
+		var entry = { ...(next[idx] || {}) };
+		entry[field] = value;
+		next[idx] = entry;
+		setPeopleDoc({ ...peopleDoc, people: next });
+		rerender();
+	}
+
+	function saveEntryPatch(name, patch) {
+		setSaving(true);
+		setError(null);
+		sendRpc("workspace.people.updateEntry", { name, patch }).then((res) => {
+			setSaving(false);
+			if (res?.ok) {
+				setPeopleDoc(res.payload || peopleDoc);
+				flashSaved();
+			} else {
+				setError(res?.error?.message || "Failed to save PEOPLE.md");
+			}
+			rerender();
+		});
+	}
+
+	function onFieldBlur(entry, field, value) {
+		var patch = {};
+		patch[field] = (value || "").trim();
+		saveEntryPatch(entry.name, patch);
+	}
+
+	function onSync() {
+		setSaving(true);
+		setError(null);
+		sendRpc("workspace.people.sync", {}).then((res) => {
+			setSaving(false);
+			if (res?.ok) {
+				loadPeople();
+				flashSaved();
+			} else {
+				setError(res?.error?.message || "Failed to sync PEOPLE.md");
+			}
+			rerender();
+		});
+	}
+
+	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
+		<h2 class="text-lg font-medium text-[var(--text-strong)]">People</h2>
+		<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:0;">
+			Public directory stored in <code>PEOPLE.md</code>. Emoji/Creature are synced from <code>people/&lt;name&gt;/IDENTITY.md</code> and are read-only here.
+		</p>
+
+		<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadPeople} disabled=${saving}>
+				Reload
+			</button>
+			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onSync} disabled=${saving}>
+				Sync emoji/creature
+			</button>
+			${loadingPeople ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
+			${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+			${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+		</div>
+
+		<div style="max-width:1100px;overflow:auto;border:1px solid var(--border);border-radius:10px;">
+			<table class="w-full text-sm" style="border-collapse:collapse;min-width:900px;">
+				<thead>
+					<tr style="background:var(--surface2);">
+						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">name</th>
+						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">emoji</th>
+						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">creature</th>
+						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">display name</th>
+						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">telegram user id</th>
+						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">telegram username</th>
+						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">telegram display</th>
+					</tr>
+				</thead>
+				<tbody>
+					${(peopleDoc.people || []).map((p, idx) => html`
+						<tr key=${p.name}>
+							<td class="p-2" style="border-bottom:1px solid var(--border);font-family:ui-monospace, SFMono-Regular, Menlo, monospace;">${p.name}</td>
+							<td class="p-2" style="border-bottom:1px solid var(--border);color:var(--muted);">${p.emoji || ""}</td>
+							<td class="p-2" style="border-bottom:1px solid var(--border);color:var(--muted);">${p.creature || ""}</td>
+							<td class="p-2" style="border-bottom:1px solid var(--border);">
+								<input class="provider-key-input" style="width:180px;" value=${p.displayName || ""}
+									onInput=${(e) => setEntryField(idx, "displayName", e.target.value)}
+									onBlur=${() => onFieldBlur(p, "displayName", p.displayName)} />
+							</td>
+							<td class="p-2" style="border-bottom:1px solid var(--border);">
+								<input class="provider-key-input" style="width:160px;" value=${p.telegramUserId || ""}
+									onInput=${(e) => setEntryField(idx, "telegramUserId", e.target.value)}
+									onBlur=${() => onFieldBlur(p, "telegramUserId", p.telegramUserId)} />
+							</td>
+							<td class="p-2" style="border-bottom:1px solid var(--border);">
+								<input class="provider-key-input" style="width:180px;" value=${p.telegramUserName || ""}
+									onInput=${(e) => setEntryField(idx, "telegramUserName", e.target.value)}
+									onBlur=${() => onFieldBlur(p, "telegramUserName", p.telegramUserName)} />
+							</td>
+							<td class="p-2" style="border-bottom:1px solid var(--border);">
+								<input class="provider-key-input" style="width:180px;" value=${p.telegramDisplayName || ""}
+									onInput=${(e) => setEntryField(idx, "telegramDisplayName", e.target.value)}
+									onBlur=${() => onFieldBlur(p, "telegramDisplayName", p.telegramDisplayName)} />
+							</td>
+						</tr>
+					`)}
+				</tbody>
+			</table>
+		</div>
+
+		<div style="max-width:900px;">
+			<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin:8px 0 4px;">PEOPLE.md body (read-only)</h3>
+			<textarea
+				class="provider-key-input"
+				rows="10"
+				style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
+				value=${peopleDoc.body || ""}
+				disabled=${true}
+			/>
+		</div>
 	</div>`;
 }
 
@@ -3657,8 +3549,9 @@ function SettingsPage() {
 	return html`<div class="settings-layout">
 		<${SettingsSidebar} />
 		${ps ? html`<${PageSection} key=${section} initFn=${ps.init} teardownFn=${ps.teardown} />` : null}
-		${section === "personas" ? html`<${PersonasSection} />` : null}
-		${section === "owner" ? html`<${OwnerSection} />` : null}
+		${section === "identity" ? html`<${IdentitySection} />` : null}
+		${section === "user" ? html`<${UserSection} />` : null}
+		${section === "people" ? html`<${PeopleSection} />` : null}
 		${section === "memory" ? html`<${MemorySection} />` : null}
 		${section === "environment" ? html`<${EnvironmentSection} />` : null}
 		${section === "security" ? html`<${SecuritySection} />` : null}
@@ -3669,7 +3562,7 @@ function SettingsPage() {
 	</div>`;
 }
 
-var DEFAULT_SECTION = "personas";
+var DEFAULT_SECTION = "identity";
 
 registerPrefix(
 	routes.settings,

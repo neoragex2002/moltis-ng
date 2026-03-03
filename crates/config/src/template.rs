@@ -48,28 +48,6 @@ auto_generate = true              # Auto-generate local CA and server certificat
 # ca_cert_path = "/path/to/ca.pem"    # CA certificate for trust instructions
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AGENT IDENTITY
-# ══════════════════════════════════════════════════════════════════════════════
-# Customize your agent's personality. These are typically set during onboarding.
-
-[identity]
-# name = "moltis"                 # Agent's display name
-# emoji = "🦊"                    # Agent's emoji/avatar
-# creature = "fox"                # Creature type for personality
-# vibe = "helpful"                # Personality vibe/style
-# soul = ""                       # Freeform personality text injected into system prompt
-                                  # Use this for custom instructions, tone, or behavior
-
-# ══════════════════════════════════════════════════════════════════════════════
-# USER PROFILE
-# ══════════════════════════════════════════════════════════════════════════════
-# Information about you. Set during onboarding.
-
-[user]
-# name = "Your Name"              # Your name (used in conversations)
-# timezone = "America/New_York"   # Your timezone (IANA format)
-
-# ══════════════════════════════════════════════════════════════════════════════
 # LLM PROVIDERS
 # ══════════════════════════════════════════════════════════════════════════════
 # Configure API keys and settings for each LLM provider.

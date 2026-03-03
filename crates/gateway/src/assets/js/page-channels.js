@@ -25,9 +25,9 @@ export function prefetchChannels() {
 			S.setCachedChannels(ch);
 		}
 	});
-	sendRpc("personas.list", {}).then((res) => {
+	sendRpc("workspace.people.get", {}).then((res) => {
 		if (res?.ok) {
-			var ids = res.payload?.personas || [];
+			var ids = (res.payload?.people || []).map((p) => p.name).filter(Boolean);
 			personaIds.value = ids;
 			// Avoid false "(missing → default)" warnings before we have a reliable list.
 			personaIdsLoaded.value = isPersonaListLoaded(ids);
@@ -51,9 +51,9 @@ function loadChannels() {
 			updateNavCount("channels", ch.length);
 		}
 	});
-	sendRpc("personas.list", {}).then((res) => {
+	sendRpc("workspace.people.get", {}).then((res) => {
 		if (res?.ok) {
-			var ids = res.payload?.personas || [];
+			var ids = (res.payload?.people || []).map((p) => p.name).filter(Boolean);
 			personaIds.value = ids;
 			personaIdsLoaded.value = isPersonaListLoaded(ids);
 		} else {
