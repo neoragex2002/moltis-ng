@@ -2212,19 +2212,24 @@ pub async fn start_gateway(
     // Initialize metrics store for persistence.
     #[cfg(feature = "metrics")]
     let metrics_store: Option<Arc<dyn crate::state::MetricsStore>> = {
-        let metrics_db_path = data_dir.join("metrics.db");
-        match moltis_metrics::SqliteMetricsStore::new(&metrics_db_path).await {
-            Ok(store) => {
-                info!(
-                    "Metrics history store initialized at {}",
-                    metrics_db_path.display()
-                );
-                Some(Arc::new(store))
-            },
-            Err(e) => {
-                warn!("Failed to initialize metrics store: {e}");
-                None
-            },
+        if !config.metrics.enabled {
+            info!("Metrics history store disabled (metrics.enabled=false)");
+            None
+        } else {
+            let metrics_db_path = data_dir.join("metrics.db");
+            match moltis_metrics::SqliteMetricsStore::new(&metrics_db_path).await {
+                Ok(store) => {
+                    info!(
+                        "Metrics history store initialized at {}",
+                        metrics_db_path.display()
+                    );
+                    Some(Arc::new(store))
+                },
+                Err(e) => {
+                    warn!("Failed to initialize metrics store: {e}");
+                    None
+                },
+            }
         }
     };
 
@@ -2955,142 +2960,147 @@ pub async fn start_gateway(
     // Spawn metrics history collection and broadcast task (every 10 seconds).
     #[cfg(feature = "metrics")]
     {
-        let metrics_state = Arc::clone(&state);
-        let server_start = std::time::Instant::now();
-        tokio::spawn(async move {
-            // Load history from persistent store on startup.
-            if let Some(ref store) = metrics_state.metrics_store {
-                // Load last 7 days of history (max points for charts).
-                let seven_days_ago = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64
-                    - (7 * 24 * 60 * 60 * 1000);
-                match store.load_history(seven_days_ago, 60480).await {
-                    Ok(points) => {
-                        let mut inner = metrics_state.inner.write().await;
-                        for point in points {
-                            inner.metrics_history.push(point);
-                        }
-                        let loaded = inner.metrics_history.iter().count();
-                        drop(inner);
-                        info!("Loaded {loaded} historical metrics points from store");
-                    },
-                    Err(e) => {
-                        warn!("Failed to load metrics history: {e}");
-                    },
+        if !config.metrics.enabled {
+            info!("Metrics history collection disabled (metrics.enabled=false)");
+        } else {
+            let metrics_state = Arc::clone(&state);
+            let server_start = std::time::Instant::now();
+            tokio::spawn(async move {
+                // Load history from persistent store on startup.
+                if let Some(ref store) = metrics_state.metrics_store {
+                    // Load last 7 days of history (max points for charts).
+                    let seven_days_ago = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64
+                        - (7 * 24 * 60 * 60 * 1000);
+                    match store.load_history(seven_days_ago, 60480).await {
+                        Ok(points) => {
+                            let mut inner = metrics_state.inner.write().await;
+                            for point in points {
+                                inner.metrics_history.push(point);
+                            }
+                            let loaded = inner.metrics_history.iter().count();
+                            drop(inner);
+                            info!("Loaded {loaded} historical metrics points from store");
+                        },
+                        Err(e) => {
+                            warn!("Failed to load metrics history: {e}");
+                        },
+                    }
                 }
-            }
 
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            let mut cleanup_counter = 0u32;
-            loop {
-                interval.tick().await;
-                if let Some(ref handle) = metrics_state.metrics_handle {
-                    // Update gauges that are derived from server state, not events.
-                    moltis_metrics::gauge!(moltis_metrics::system::UPTIME_SECONDS)
-                        .set(server_start.elapsed().as_secs_f64());
-                    let session_count =
-                        metrics_state.inner.read().await.active_sessions.len() as f64;
-                    moltis_metrics::gauge!(moltis_metrics::session::ACTIVE).set(session_count);
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                let mut cleanup_counter = 0u32;
+                loop {
+                    interval.tick().await;
+                    if let Some(ref handle) = metrics_state.metrics_handle {
+                        // Update gauges that are derived from server state, not events.
+                        moltis_metrics::gauge!(moltis_metrics::system::UPTIME_SECONDS)
+                            .set(server_start.elapsed().as_secs_f64());
+                        let session_count =
+                            metrics_state.inner.read().await.active_sessions.len() as f64;
+                        moltis_metrics::gauge!(moltis_metrics::session::ACTIVE).set(session_count);
 
-                    let prometheus_text = handle.render();
-                    let snapshot =
-                        moltis_metrics::MetricsSnapshot::from_prometheus_text(&prometheus_text);
-                    // Convert per-provider metrics to history format.
-                    let by_provider = snapshot
-                        .categories
-                        .llm
-                        .by_provider
-                        .iter()
-                        .map(|(name, metrics)| {
-                            (
-                                name.clone(),
-                                moltis_metrics::ProviderTokens {
-                                    input_tokens: metrics.input_tokens,
-                                    output_tokens: metrics.output_tokens,
-                                    completions: metrics.completions,
-                                    errors: metrics.errors,
-                                },
-                            )
-                        })
-                        .collect();
+                        let prometheus_text = handle.render();
+                        let snapshot = moltis_metrics::MetricsSnapshot::from_prometheus_text(
+                            &prometheus_text,
+                        );
+                        // Convert per-provider metrics to history format.
+                        let by_provider = snapshot
+                            .categories
+                            .llm
+                            .by_provider
+                            .iter()
+                            .map(|(name, metrics)| {
+                                (
+                                    name.clone(),
+                                    moltis_metrics::ProviderTokens {
+                                        input_tokens: metrics.input_tokens,
+                                        output_tokens: metrics.output_tokens,
+                                        completions: metrics.completions,
+                                        errors: metrics.errors,
+                                    },
+                                )
+                            })
+                            .collect();
 
-                    let point = crate::state::MetricsHistoryPoint {
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
-                        llm_completions: snapshot.categories.llm.completions_total,
-                        llm_input_tokens: snapshot.categories.llm.input_tokens,
-                        llm_output_tokens: snapshot.categories.llm.output_tokens,
-                        llm_errors: snapshot.categories.llm.errors,
-                        by_provider,
-                        http_requests: snapshot.categories.http.total,
-                        http_active: snapshot.categories.http.active,
-                        ws_connections: snapshot.categories.websocket.total,
-                        ws_active: snapshot.categories.websocket.active,
-                        tool_executions: snapshot.categories.tools.total,
-                        tool_errors: snapshot.categories.tools.errors,
-                        mcp_calls: snapshot.categories.mcp.total,
-                        active_sessions: snapshot.categories.system.active_sessions,
-                    };
-
-                    // Push to in-memory history.
-                    metrics_state
-                        .inner
-                        .write()
-                        .await
-                        .metrics_history
-                        .push(point.clone());
-
-                    // Persist to store if available.
-                    if let Some(ref store) = metrics_state.metrics_store
-                        && let Err(e) = store.save_point(&point).await
-                    {
-                        warn!("Failed to persist metrics point: {e}");
-                    }
-
-                    // Broadcast metrics update to all connected clients.
-                    let payload = crate::state::MetricsUpdatePayload { snapshot, point };
-                    if let Ok(payload_json) = serde_json::to_value(&payload) {
-                        crate::broadcast::broadcast(
-                            &metrics_state,
-                            "metrics.update",
-                            payload_json,
-                            crate::broadcast::BroadcastOpts {
-                                drop_if_slow: true,
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                    }
-
-                    // Cleanup old data once per hour (360 ticks at 10s interval).
-                    cleanup_counter += 1;
-                    if cleanup_counter >= 360 {
-                        cleanup_counter = 0;
-                        if let Some(ref store) = metrics_state.metrics_store {
-                            // Keep 7 days of history.
-                            let cutoff = std::time::SystemTime::now()
+                        let point = crate::state::MetricsHistoryPoint {
+                            timestamp: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
-                                .as_millis() as u64
-                                - (7 * 24 * 60 * 60 * 1000);
-                            match store.cleanup_before(cutoff).await {
-                                Ok(deleted) if deleted > 0 => {
-                                    info!("Cleaned up {} old metrics points", deleted);
+                                .as_millis() as u64,
+                            llm_completions: snapshot.categories.llm.completions_total,
+                            llm_input_tokens: snapshot.categories.llm.input_tokens,
+                            llm_output_tokens: snapshot.categories.llm.output_tokens,
+                            llm_errors: snapshot.categories.llm.errors,
+                            by_provider,
+                            http_requests: snapshot.categories.http.total,
+                            http_active: snapshot.categories.http.active,
+                            ws_connections: snapshot.categories.websocket.total,
+                            ws_active: snapshot.categories.websocket.active,
+                            tool_executions: snapshot.categories.tools.total,
+                            tool_errors: snapshot.categories.tools.errors,
+                            mcp_calls: snapshot.categories.mcp.total,
+                            active_sessions: snapshot.categories.system.active_sessions,
+                        };
+
+                        // Push to in-memory history.
+                        metrics_state
+                            .inner
+                            .write()
+                            .await
+                            .metrics_history
+                            .push(point.clone());
+
+                        // Persist to store if available.
+                        if let Some(ref store) = metrics_state.metrics_store
+                            && let Err(e) = store.save_point(&point).await
+                        {
+                            warn!("Failed to persist metrics point: {e}");
+                        }
+
+                        // Broadcast metrics update to all connected clients.
+                        let payload = crate::state::MetricsUpdatePayload { snapshot, point };
+                        if let Ok(payload_json) = serde_json::to_value(&payload) {
+                            crate::broadcast::broadcast(
+                                &metrics_state,
+                                "metrics.update",
+                                payload_json,
+                                crate::broadcast::BroadcastOpts {
+                                    drop_if_slow: true,
+                                    ..Default::default()
                                 },
-                                Err(e) => {
-                                    warn!("Failed to cleanup old metrics: {e}");
-                                },
-                                _ => {},
+                            )
+                            .await;
+                        }
+
+                        // Cleanup old data once per hour (360 ticks at 10s interval).
+                        cleanup_counter += 1;
+                        if cleanup_counter >= 360 {
+                            cleanup_counter = 0;
+                            if let Some(ref store) = metrics_state.metrics_store {
+                                // Keep 7 days of history.
+                                let cutoff = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64
+                                    - (7 * 24 * 60 * 60 * 1000);
+                                match store.cleanup_before(cutoff).await {
+                                    Ok(deleted) if deleted > 0 => {
+                                        info!("Cleaned up {} old metrics points", deleted);
+                                    },
+                                    Err(e) => {
+                                        warn!("Failed to cleanup old metrics: {e}");
+                                    },
+                                    _ => {},
+                                }
                             }
                         }
                     }
                 }
-            }
-        });
+            });
+        }
     }
 
     // Spawn sandbox event broadcast task: forwards provision events to WS clients.
