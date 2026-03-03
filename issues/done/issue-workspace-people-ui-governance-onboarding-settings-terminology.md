@@ -9,6 +9,7 @@
 
 **已实现（如有，写日期）**
 - 2026-03-03：Settings Sidebar 移除 `Identity`，新增 `Contacts`，Type4 入口收敛到 `User / People / Contacts`：`crates/gateway/src/assets/js/page-settings.js:42`
+- 2026-03-03：Settings（User/People/Contacts）header 布局对齐：dropdown/操作按钮贴近标题，不再做页面右对齐：`crates/gateway/src/assets/js/page-settings.js:275`
 - 2026-03-03：People（私有）管理落地（`people/<name>/*` 的 CRUD；default 不可删；统一保存 RPC）：`crates/gateway/src/assets/js/page-settings.js:331`、`crates/gateway/src/person.rs:166`、`crates/gateway/src/methods.rs:1341`
 - 2026-03-03：Contacts（公共）编辑入口落地（`PEOPLE.md` frontmatter + body 可编辑；emoji/creature 只读对齐）：`crates/gateway/src/assets/js/page-settings.js:675`、`crates/gateway/src/people.rs:213`
 - 2026-03-03：Channels 绑定口径收敛：UI 文案改为 “Agent (optional)” + 指向 `people/<name>/`，并改为 selector（值仍落到存量 `persona_id` 字段）：`crates/gateway/src/assets/js/page-channels.js:31`、`crates/gateway/src/assets/js/page-channels.js:393`

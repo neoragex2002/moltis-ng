@@ -271,40 +271,40 @@ function UserSection() {
 	}
 
 	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-		<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-			<div>
+		<div style="display:flex;flex-direction:column;gap:6px;">
+			<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
 				<h2 class="text-lg font-medium text-[var(--text-strong)]" style="margin:0;">User</h2>
-				<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:4px 0 0;">
-					Public owner profile stored in <code>USER.md</code>.
-				</p>
+				<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+					<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadUser} disabled=${saving}>
+						Reload
+					</button>
+					<button type="button" class="provider-btn provider-btn-sm" onClick=${onSave} disabled=${saving || !isDirty()}>
+						${saving ? "Saving\u2026" : "Save"}
+					</button>
+					${loadingUser ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
+					${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+					${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+				</div>
 			</div>
-			<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadUser} disabled=${saving}>
-					Reload
-				</button>
-				<button type="button" class="provider-btn provider-btn-sm" onClick=${onSave} disabled=${saving || !isDirty()}>
-					${saving ? "Saving\u2026" : "Save"}
-				</button>
-				${loadingUser ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
-				${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
-				${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
-			</div>
+			<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:0;">
+				Public owner profile stored in <code>USER.md</code>.
+			</p>
 		</div>
 
-		<div style="max-width:900px;display:flex;flex-direction:column;gap:10px;">
-			<div>
-				<label class="text-xs text-[var(--muted)]">Owner </label>
-				<input class="provider-key-input" style="width:100px;"
-					value=${draft.name || ""}
-					onInput=${(e) => setDraft({ ...draft, name: e.target.value })} />
-			</div>
-			<div>
-				<label class="text-xs text-[var(--muted)]">Timezone </label>
-				<input class="provider-key-input" style="width:220px;"
-					placeholder="Asia/Shanghai"
-					value=${draft.timezone || ""}
-					onInput=${(e) => setDraft({ ...draft, timezone: e.target.value })} />
-			</div>
+			<div style="max-width:900px;display:flex;flex-direction:column;gap:10px;">
+				<div>
+					<label class="text-xs text-[var(--muted)]">Owner</label>
+					<input class="provider-key-input" style="width:320px;"
+						value=${draft.name || ""}
+						onInput=${(e) => setDraft({ ...draft, name: e.target.value })} />
+				</div>
+				<div>
+					<label class="text-xs text-[var(--muted)]">Timezone</label>
+					<input class="provider-key-input" style="width:320px;"
+						placeholder="Asia/Shanghai"
+						value=${draft.timezone || ""}
+						onInput=${(e) => setDraft({ ...draft, timezone: e.target.value })} />
+				</div>
 			${draft.location
 				? html`<div class="text-xs text-[var(--muted)]">
 					Location: ${draft.location.place || (draft.location.latitude + "," + draft.location.longitude)}
@@ -535,7 +535,7 @@ function PeoplePrivateSection() {
 	}
 
 	var selectStyle =
-		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:.85rem;cursor:pointer;";
+		"height:32px;font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0 10px;font-size:.85rem;cursor:pointer;";
 
 	function renderSection(title, filePath, dirty, key, content, setContent, onSave) {
 		return html`<div style="max-width:900px;border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--surface);">
@@ -562,39 +562,36 @@ function PeoplePrivateSection() {
 	}
 
 	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-		<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-			<div>
-				<h2 class="text-lg font-medium text-[var(--text-strong)]" style="margin:0;">People</h2>
-				<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:4px 0 0;">
-					Private agent configuration under <code>people/${"<name>"}/</code>.
-				</p>
-			</div>
-			<div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;">
-				<div style="display:flex;flex-direction:column;gap:4px;">
-					<label class="text-xs text-[var(--muted)]">Agent</label>
-					<select style=${selectStyle} value=${selectedName} onChange=${(e) => setSelectedName(e.target.value)}>
-						${peopleList.map(
-							(p) => html`<option key=${p.name} value=${p.name}>${p.name}${p.isDefault ? " (default)" : ""}</option>`,
-						)}
-					</select>
+			<div style="display:flex;flex-direction:column;gap:6px;">
+				<div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;">
+					<h2 class="text-lg font-medium text-[var(--text-strong)]" style="margin:0;">People</h2>
+					<div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;">
+						<select style=${selectStyle} value=${selectedName} onChange=${(e) => setSelectedName(e.target.value)}>
+							${peopleList.map(
+								(p) => html`<option key=${p.name} value=${p.name}>${p.name}${p.isDefault ? " (default)" : ""}</option>`,
+							)}
+						</select>
+						<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${() => setShowNewModal(true)} disabled=${savingKey}>
+							New
+						</button>
+					<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${() => setShowCloneModal(true)} disabled=${savingKey || !baseDoc}>
+						Clone
+					</button>
+					<button
+						type="button"
+						class="provider-btn provider-btn-sm provider-btn-danger"
+						onClick=${() => setShowDeleteModal(true)}
+						disabled=${savingKey || isDefault()}
+						title=${isDefault() ? "Default agent cannot be deleted" : "Delete this agent"}
+					>
+						Delete
+					</button>
+					${loadingList || loadingDoc ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
 				</div>
-				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${() => setShowNewModal(true)} disabled=${savingKey}>
-					New
-				</button>
-				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${() => setShowCloneModal(true)} disabled=${savingKey || !baseDoc}>
-					Clone
-				</button>
-				<button
-					type="button"
-					class="provider-btn provider-btn-sm provider-btn-danger"
-					onClick=${() => setShowDeleteModal(true)}
-					disabled=${savingKey || isDefault()}
-					title=${isDefault() ? "Default agent cannot be deleted" : "Delete this agent"}
-				>
-					Delete
-				</button>
-				${loadingList || loadingDoc ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
 			</div>
+			<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:0;">
+				Private agent configuration under <code>people/${"<name>"}/</code>.
+			</p>
 		</div>
 
 		${error ? html`<div class="text-xs" style="color:var(--error);max-width:900px;">${error}</div>` : null}
@@ -808,40 +805,34 @@ function ContactsSection() {
 	}
 
 	var selectStyle =
-		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:.85rem;cursor:pointer;";
+		"height:32px;font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0 10px;font-size:.85rem;cursor:pointer;";
 
 	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-		<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-			<div>
+		<div style="display:flex;flex-direction:column;gap:6px;">
+			<div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;">
 				<h2 class="text-lg font-medium text-[var(--text-strong)]" style="margin:0;">Contacts</h2>
-				<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:4px 0 0;">
-					Public directory stored in <code>PEOPLE.md</code>. <span style="color:var(--muted);">Name/Emoji/Creature are synced from <code>people/${"<name>"}/IDENTITY.md</code>.</span>
-				</p>
+				<div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;">
+					<select style=${selectStyle} value=${selectedName} onChange=${(e) => setSelectedName(e.target.value)}>
+						${(doc.people || []).map((p) => html`<option key=${p.name} value=${p.name}>${p.name}</option>`)}
+					</select>
+					${isMissingDir() ? html`<span class="text-xs" style="color:var(--error);">Missing: people/${selectedName}/</span>` : null}
+					<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadContacts} disabled=${saving}>
+						Reload
+					</button>
+					<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onSync} disabled=${saving}>
+						Sync emoji/creature
+					</button>
+					<button type="button" class="provider-btn provider-btn-sm" onClick=${onSave} disabled=${saving || !isDirty()}>
+						${saving ? "Saving\u2026" : "Save"}
+					</button>
+					${loading ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
+					${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+					${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+				</div>
 			</div>
-			<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadContacts} disabled=${saving}>
-					Reload
-				</button>
-				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onSync} disabled=${saving}>
-					Sync emoji/creature
-				</button>
-				<button type="button" class="provider-btn provider-btn-sm" onClick=${onSave} disabled=${saving || !isDirty()}>
-					${saving ? "Saving\u2026" : "Save"}
-				</button>
-				${loading ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
-				${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
-				${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
-			</div>
-		</div>
-
-		<div style="max-width:900px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
-			<div style="display:flex;flex-direction:column;gap:4px;min-width:260px;">
-				<label class="text-xs text-[var(--muted)]">Agent</label>
-				<select style=${selectStyle} value=${selectedName} onChange=${(e) => setSelectedName(e.target.value)}>
-					${(doc.people || []).map((p) => html`<option key=${p.name} value=${p.name}>${p.name}</option>`)}
-				</select>
-			</div>
-			${isMissingDir() ? html`<span class="text-xs" style="color:var(--error);">Missing: people/${selectedName}/</span>` : null}
+			<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:0;">
+				Public directory stored in <code>PEOPLE.md</code>. <span style="color:var(--muted);">Name/Emoji/Creature are synced from <code>people/${"<name>"}/IDENTITY.md</code>.</span>
+			</p>
 		</div>
 
 		<div style="max-width:900px;display:flex;flex-direction:column;gap:10px;">
