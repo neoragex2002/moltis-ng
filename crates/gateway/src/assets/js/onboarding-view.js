@@ -1,7 +1,7 @@
 // ── Onboarding wizard ──────────────────────────────────────
 //
 // Multi-step setup page shown to first-time users.
-// Steps: Auth (conditional) → Identity → Provider → Voice (conditional) → Channel → Summary
+// Steps: Auth (conditional) → Agent → Provider → Voice (conditional) → Channel → Summary
 // No new Rust code — all existing RPC methods and REST endpoints.
 
 import { html } from "htm/preact";
@@ -32,8 +32,8 @@ function ensureWsConnected() {
 
 // ── Step indicator ──────────────────────────────────────────
 
-var BASE_STEP_LABELS = ["Security", "Identity", "LLM", "Channel", "Summary"];
-var VOICE_STEP_LABELS = ["Security", "Identity", "LLM", "Voice", "Channel", "Summary"];
+var BASE_STEP_LABELS = ["Security", "Agent", "LLM", "Channel", "Summary"];
+var VOICE_STEP_LABELS = ["Security", "Agent", "LLM", "Voice", "Channel", "Summary"];
 
 function preferredChatPath() {
 	var sessionId = localStorage.getItem("moltis-sessionId") || "main";
@@ -426,7 +426,7 @@ function AuthStep({ onNext, skippable }) {
 	</div>`;
 }
 
-// ── Identity step ───────────────────────────────────────────
+// ── Agent step ─────────────────────────────────────────────
 
 function IdentityStep({ onNext, onBack }) {
 	var identity = getGon("identity") || {};
@@ -468,7 +468,7 @@ function IdentityStep({ onNext, onBack }) {
 	}
 
 	return html`<div class="flex flex-col gap-4">
-		<h2 class="text-lg font-medium text-[var(--text-strong)]">Set up your identity</h2>
+		<h2 class="text-lg font-medium text-[var(--text-strong)]">Set up your agent</h2>
 		<p class="text-xs text-[var(--muted)] leading-relaxed">Tell us about yourself and customise your agent.</p>
 		<form onSubmit=${onSubmit} class="flex flex-col gap-4">
 			<!-- User section -->
@@ -2161,15 +2161,15 @@ function SummaryStep({ onBack, onFinish }) {
 		<p class="text-xs text-[var(--muted)] leading-relaxed">Overview of your configuration. You can change any of these later in Settings.</p>
 
 		<div class="flex flex-col gap-2 max-h-80 overflow-y-auto -mr-4 pr-4">
-			<!-- Identity -->
+			<!-- Owner & Agent -->
 			<${SummaryRow}
 				icon=${data.identity?.user_name && data.identity?.name ? html`<${CheckIcon} />` : html`<${WarnIcon} />`}
-				label="Identity">
+				label="Owner & Agent">
 				${
 					data.identity?.user_name && data.identity?.name
 						? html`You: <span class="font-medium text-[var(--text)]">${data.identity.user_name}</span>
 						Agent: <span class="font-medium text-[var(--text)]">${data.identity.emoji || ""} ${data.identity.name}</span>`
-						: html`<span class="text-[var(--warn)]">Identity not fully configured</span>`
+						: html`<span class="text-[var(--warn)]">Owner/agent not fully configured</span>`
 				}
 			<//>
 

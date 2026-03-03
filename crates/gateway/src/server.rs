@@ -5125,8 +5125,6 @@ fn seed_skill_if_missing(name: &str, content: &str) {
 fn seed_default_workspace_markdown_files() {
     let data_dir = moltis_config::data_dir();
     seed_file_if_missing(data_dir.join("BOOT.md"), DEFAULT_BOOT_MD);
-    seed_file_if_missing(data_dir.join("AGENTS.md"), DEFAULT_WORKSPACE_AGENTS_MD);
-    seed_file_if_missing(data_dir.join("TOOLS.md"), DEFAULT_TOOLS_MD);
     seed_file_if_missing(data_dir.join("HEARTBEAT.md"), DEFAULT_HEARTBEAT_MD);
 }
 
@@ -5377,30 +5375,6 @@ How Moltis uses this file:
 Recommended usage:
 - Keep it short and explicit.
 - Use for startup checks/reminders, not onboarding identity setup.
--->"#;
-
-/// Default workspace AGENTS.md content seeded into workspace root.
-const DEFAULT_WORKSPACE_AGENTS_MD: &str = r#"<!--
-Workspace AGENTS.md contains global instructions for this workspace.
-
-	How Moltis uses this file:
-	- Loaded from <data_dir>/AGENTS.md when present.
-	- Injected as workspace context in the system prompt.
-	- Separate from project AGENTS.md/CLAUDE.md discovery.
-
-Use this for cross-project rules that should apply everywhere in this workspace.
--->"#;
-
-/// Default TOOLS.md content seeded into workspace root.
-const DEFAULT_TOOLS_MD: &str = r#"<!--
-TOOLS.md contains workspace-specific tool notes and constraints.
-
-	How Moltis uses this file:
-	- Loaded from <data_dir>/TOOLS.md when present.
-	- Injected as workspace context in the system prompt.
-
-Use this for local setup details (hosts, aliases, device names) and
-tool behavior constraints (safe defaults, forbidden actions, etc.).
 -->"#;
 
 /// Default HEARTBEAT.md content seeded into workspace root.

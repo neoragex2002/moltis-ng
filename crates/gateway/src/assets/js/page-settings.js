@@ -29,9 +29,7 @@ import * as S from "./state.js";
 import { fetchPhrase } from "./tts-phrases.js";
 import { Modal } from "./ui.js";
 
-var identity = signal(null);
-var loading = signal(true);
-var activeSection = signal("identity");
+var activeSection = signal("user");
 var mounted = false;
 var containerRef = null;
 
@@ -39,40 +37,10 @@ function rerender() {
 	if (containerRef) render(html`<${SettingsPage} />`, containerRef);
 }
 
-function isSafariBrowser() {
-	if (typeof navigator === "undefined") return false;
-	var ua = navigator.userAgent || "";
-	var vendor = navigator.vendor || "";
-	if (!ua.includes("Safari/")) return false;
-	if (/(Chrome|CriOS|Chromium|Edg|OPR|FxiOS|Firefox|SamsungBrowser)/.test(ua)) return false;
-	return /Apple/i.test(vendor) || ua.includes("Safari/");
-}
-
-function fetchIdentity() {
-	if (!mounted) return;
-	sendRpc("agent.identity.get", {}).then((res) => {
-		if (res?.ok) {
-			identity.value = res.payload;
-			loading.value = false;
-			rerender();
-		} else if (mounted && !S.connected) {
-			setTimeout(fetchIdentity, 500);
-		} else {
-			loading.value = false;
-			rerender();
-		}
-	});
-}
-
 // ── Sidebar navigation items ─────────────────────────────────
 
 var sections = [
 	{ group: "General" },
-	{
-		id: "identity",
-		label: "Identity",
-		icon: html`<span class="icon icon-person"></span>`,
-	},
 	{
 		id: "user",
 		label: "User",
@@ -81,6 +49,11 @@ var sections = [
 	{
 		id: "people",
 		label: "People",
+		icon: html`<span class="icon icon-person"></span>`,
+	},
+	{
+		id: "contacts",
+		label: "Contacts",
 		icon: html`<span class="icon icon-person"></span>`,
 	},
 	{
@@ -224,281 +197,12 @@ function SettingsSidebar() {
 
 // EmojiPicker imported from emoji-picker.js
 
-// ── Soul defaults ────────────────────────────────────────────
-
-var DEFAULT_SOUL =
-	"Be genuinely helpful, not performatively helpful. Skip the filler words \u2014 just help.\n" +
-	"Have opinions. You're allowed to disagree, prefer things, find stuff amusing or boring.\n" +
-	"Be resourceful before asking. Try to figure it out first \u2014 read the context, search for it \u2014 then ask if you're stuck.\n" +
-	"Earn trust through competence. Be careful with external actions. Be bold with internal ones.\n" +
-	"Remember you're a guest. You have access to someone's life. Treat it with respect.\n" +
-	"Private things stay private. When in doubt, ask before acting externally.\n" +
-	"Be concise when needed, thorough when it matters. Not a corporate drone. Not a sycophant. Just good.";
-
-// ── Identity section (editable form) ─────────────────────────
-
-function IdentitySection() {
-	var id = identity.value;
-	var isNew = !(id && (id.name || id.user_name));
-
-	var [name, setName] = useState(id?.name || "");
-	var [emoji, setEmoji] = useState(id?.emoji || "");
-	var [creature, setCreature] = useState(id?.creature || "");
-	var [vibe, setVibe] = useState(id?.vibe || "");
-	var [userName, setUserName] = useState(id?.user_name || "");
-	var [soul, setSoul] = useState(id?.soul || "");
-	var [saving, setSaving] = useState(false);
-	var [emojiSaving, setEmojiSaving] = useState(false);
-	var [nameSaving, setNameSaving] = useState(false);
-	var [userNameSaving, setUserNameSaving] = useState(false);
-	var [saved, setSaved] = useState(false);
-	var [showFaviconReloadHint, setShowFaviconReloadHint] = useState(false);
-	var [error, setError] = useState(null);
-
-	// Sync state when identity loads asynchronously
-	useEffect(() => {
-		if (!id) return;
-		setName(id.name || "");
-		setEmoji(id.emoji || "");
-		setCreature(id.creature || "");
-		setVibe(id.vibe || "");
-		setUserName(id.user_name || "");
-		setSoul(id.soul || "");
-	}, [id]);
-
-	function flashSaved() {
-		setSaved(true);
-		setTimeout(() => {
-			setSaved(false);
-			rerender();
-		}, 2000);
-	}
-
-	if (loading.value) {
-		return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-			<div class="text-xs text-[var(--muted)]">Loading\u2026</div>
-		</div>`;
-	}
-
-	function onSave(e) {
-		e.preventDefault();
-		if (!(name.trim() || userName.trim())) {
-			setError("Agent display name and your name are required.");
-			return;
-		}
-		if (!name.trim()) {
-			setError("Agent display name is required.");
-			return;
-		}
-		if (!userName.trim()) {
-			setError("Your name is required.");
-			return;
-		}
-		setError(null);
-		setSaving(true);
-		setSaved(false);
-
-		sendRpc("agent.identity.update", {
-			name: name.trim(),
-			emoji: emoji.trim() || "",
-			creature: creature.trim() || "",
-			vibe: vibe.trim() || "",
-			soul: soul.trim() || null,
-			user_name: userName.trim(),
-		}).then((res) => {
-			setSaving(false);
-			if (res?.ok) {
-				identity.value = res.payload;
-				gon.set("identity", res.payload);
-				refreshGon();
-				var emojiChanged = (emoji.trim() || "") !== (id?.emoji || "").trim();
-				setShowFaviconReloadHint(emojiChanged && isSafariBrowser());
-				flashSaved();
-			} else {
-				setError(res?.error?.message || "Failed to save");
-			}
-			rerender();
-		});
-	}
-
-	function onEmojiSelect(nextEmoji) {
-		setEmoji(nextEmoji);
-		setError(null);
-		setSaved(false);
-		setEmojiSaving(true);
-		sendRpc("agent.identity.update", { emoji: nextEmoji.trim() || "" }).then((res) => {
-			setEmojiSaving(false);
-			if (res?.ok) {
-				identity.value = res.payload;
-				setEmoji(res.payload?.emoji || "");
-				gon.set("identity", res.payload);
-				refreshGon();
-				var emojiChanged = (nextEmoji.trim() || "") !== (id?.emoji || "").trim();
-				setShowFaviconReloadHint(emojiChanged && isSafariBrowser());
-				flashSaved();
-			} else {
-				setError(res?.error?.message || "Failed to save emoji");
-			}
-			rerender();
-		});
-	}
-
-	function autoSaveNameField(field, value) {
-		if (saving || emojiSaving || nameSaving || userNameSaving) return;
-		var trimmed = value.trim();
-		var currentValue = (identity.value?.[field] || "").trim();
-		if (trimmed === currentValue) return;
-
-		if (!trimmed) {
-			setError(field === "name" ? "Agent display name is required." : "Your name is required.");
-			return;
-		}
-
-		setError(null);
-		setSaved(false);
-		if (field === "name") {
-			setNameSaving(true);
-		} else {
-			setUserNameSaving(true);
-		}
-
-		var payload = {};
-		payload[field] = trimmed;
-		sendRpc("agent.identity.update", payload).then((res) => {
-			if (field === "name") {
-				setNameSaving(false);
-			} else {
-				setUserNameSaving(false);
-			}
-
-			if (res?.ok) {
-				identity.value = res.payload;
-				gon.set("identity", res.payload);
-				refreshGon();
-				setName(res.payload?.name || "");
-				setUserName(res.payload?.user_name || "");
-				flashSaved();
-			} else {
-				setError(res?.error?.message || "Failed to save");
-			}
-			rerender();
-		});
-	}
-
-	function onNameBlur() {
-		autoSaveNameField("name", name);
-	}
-
-	function onUserNameBlur() {
-		autoSaveNameField("user_name", userName);
-	}
-
-	function onResetSoul() {
-		setSoul("");
-		rerender();
-	}
-
-	function onReloadForFavicon() {
-		window.location.reload();
-	}
-
-	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-		<h2 class="text-lg font-medium text-[var(--text-strong)]">Identity</h2>
-		${
-			isNew
-				? html`<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:600px;margin:0;">
-				Welcome! Set up your agent's identity to get started.
-			</p>`
-				: null
-		}
-		<form onSubmit=${onSave} style="max-width:600px;display:flex;flex-direction:column;gap:16px;">
-			<!-- Agent section -->
-			<div>
-				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Agent</h3>
-				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
-					Display name is saved to <code>PEOPLE.md</code> (public). Emoji/Creature/Vibe are saved to <code>people/default/IDENTITY.md</code> (private).
-				</p>
-				<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;">
-						<div>
-							<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Display name *</div>
-							<input type="text" class="provider-key-input" style="width:100%;"
-								value=${name} onInput=${(e) => setName(e.target.value)} onBlur=${onNameBlur}
-								placeholder="e.g. Rex" />
-					</div>
-						<div>
-							<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Emoji</div>
-							<${EmojiPicker} value=${emoji} onChange=${setEmoji} onSelect=${onEmojiSelect} />
-						</div>
-					<div>
-						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Creature</div>
-						<input type="text" class="provider-key-input" style="width:100%;"
-							value=${creature} onInput=${(e) => setCreature(e.target.value)}
-							placeholder="e.g. dog" />
-					</div>
-						<div>
-							<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Vibe</div>
-							<input type="text" class="provider-key-input" style="width:100%;"
-								value=${vibe} onInput=${(e) => setVibe(e.target.value)}
-								placeholder="e.g. chill" />
-						</div>
-					</div>
-					${
-						showFaviconReloadHint
-							? html`<div class="mt-3 rounded border border-[var(--border)] bg-[var(--surface2)] p-2 text-xs text-[var(--muted)]">
-								favicon updates requires reload and may be cached for minutes, <button type="button" class="cursor-pointer bg-transparent p-0 text-xs text-[var(--text)] underline" onClick=${onReloadForFavicon}>requires reload</button>.
-							</div>`
-							: null
-					}
-				</div>
-
-			<!-- User section -->
-			<div>
-				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">User</h3>
-				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">Saved to <code>USER.md</code> in your workspace root.</p>
-					<div>
-						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Your name *</div>
-						<input type="text" class="provider-key-input" style="width:100%;max-width:280px;"
-							value=${userName} onInput=${(e) => setUserName(e.target.value)} onBlur=${onUserNameBlur}
-							placeholder="e.g. Alice" />
-					</div>
-				</div>
-
-			<!-- Soul section -->
-			<div>
-				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:4px;">Soul</h3>
-				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">Personality and tone injected into every conversation. Saved to <code>people/default/SOUL.md</code>. Leave empty for the default.</p>
-				<textarea
-					class="provider-key-input"
-					rows="8"
-					style="width:100%;min-height:8rem;resize:vertical;font-size:.8rem;line-height:1.5;"
-					placeholder=${DEFAULT_SOUL}
-					value=${soul}
-					onInput=${(e) => setSoul(e.target.value)}
-				/>
-				${
-					soul
-						? html`<button type="button" class="provider-btn" style="margin-top:6px;font-size:.75rem;"
-							onClick=${onResetSoul}>Reset to default</button>`
-						: null
-				}
-			</div>
-
-					<div style="display:flex;align-items:center;gap:8px;">
-						<button type="submit" class="provider-btn" disabled=${saving || emojiSaving || nameSaving || userNameSaving}>
-							${saving || emojiSaving || nameSaving || userNameSaving ? "Saving\u2026" : "Save"}
-						</button>
-				${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
-				${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
-			</div>
-		</form>
-	</div>`;
-}
-
 // ── User section ────────────────────────────────────────────
 
 function UserSection() {
 	var [loadingUser, setLoadingUser] = useState(true);
-	var [userDoc, setUserDoc] = useState({ name: "", timezone: "", location: null, body: "" });
+	var [baseDoc, setBaseDoc] = useState({ name: "", timezone: "", location: null, body: "" });
+	var [draft, setDraft] = useState({ name: "", timezone: "", location: null, body: "" });
 	var [error, setError] = useState(null);
 	var [saved, setSaved] = useState(false);
 	var [saving, setSaving] = useState(false);
@@ -517,7 +221,9 @@ function UserSection() {
 		sendRpc("workspace.user.get", {}).then((res) => {
 			setLoadingUser(false);
 			if (res?.ok) {
-				setUserDoc(res.payload || { name: "", timezone: "", location: null, body: "" });
+				var next = res.payload || { name: "", timezone: "", location: null, body: "" };
+				setBaseDoc(next);
+				setDraft(next);
 			} else {
 				setError(res?.error?.message || "Failed to load USER.md");
 			}
@@ -529,13 +235,33 @@ function UserSection() {
 		loadUser();
 	}, []);
 
-	function patchUser(patch) {
+	function normalizedPatch(doc) {
+		return {
+			name: (doc?.name || "").trim(),
+			timezone: (doc?.timezone || "").trim(),
+		};
+	}
+
+	function isDirty() {
+		var a = normalizedPatch(baseDoc);
+		var b = normalizedPatch(draft);
+		if (a.name !== b.name) return true;
+		if (a.timezone !== b.timezone) return true;
+		return (baseDoc.body || "") !== (draft.body || "");
+	}
+
+	function onSave() {
 		setSaving(true);
 		setError(null);
-		sendRpc("workspace.user.update", { patch }).then((res) => {
+		sendRpc("workspace.user.update", {
+			patch: normalizedPatch(draft),
+			body: draft.body || "",
+		}).then((res) => {
 			setSaving(false);
 			if (res?.ok) {
-				setUserDoc(res.payload || userDoc);
+				var next = res.payload || draft;
+				setBaseDoc(next);
+				setDraft(next);
 				flashSaved();
 			} else {
 				setError(res?.error?.message || "Failed to save USER.md");
@@ -544,69 +270,432 @@ function UserSection() {
 		});
 	}
 
-	function onFieldBlur(field, value) {
-		var patch = {};
-		patch[field] = (value || "").trim();
-		patchUser(patch);
-	}
-
 	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-		<h2 class="text-lg font-medium text-[var(--text-strong)]">User</h2>
-		<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:0;">
-			Public owner profile stored in <code>USER.md</code>. Only YAML fields are editable here; the body is read-only.
-		</p>
-
-		<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadUser} disabled=${saving}>
-				Reload
-			</button>
-			${loadingUser ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
-			${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
-			${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+		<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+			<div>
+				<h2 class="text-lg font-medium text-[var(--text-strong)]" style="margin:0;">User</h2>
+				<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:4px 0 0;">
+					Public owner profile stored in <code>USER.md</code>.
+				</p>
+			</div>
+			<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadUser} disabled=${saving}>
+					Reload
+				</button>
+				<button type="button" class="provider-btn provider-btn-sm" onClick=${onSave} disabled=${saving || !isDirty()}>
+					${saving ? "Saving\u2026" : "Save"}
+				</button>
+				${loadingUser ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
+				${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+				${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+			</div>
 		</div>
 
 		<div style="max-width:900px;display:flex;flex-direction:column;gap:10px;">
 			<div>
-				<label class="text-xs text-[var(--muted)]">Owner name</label>
-				<input class="provider-key-input" style="width:320px;"
-					value=${userDoc.name || ""}
-					onInput=${(e) => setUserDoc({ ...userDoc, name: e.target.value })}
-					onBlur=${() => onFieldBlur("name", userDoc.name)} />
+				<label class="text-xs text-[var(--muted)]">Owner </label>
+				<input class="provider-key-input" style="width:100px;"
+					value=${draft.name || ""}
+					onInput=${(e) => setDraft({ ...draft, name: e.target.value })} />
 			</div>
 			<div>
-				<label class="text-xs text-[var(--muted)]">Timezone (IANA)</label>
-				<input class="provider-key-input" style="width:320px;"
+				<label class="text-xs text-[var(--muted)]">Timezone </label>
+				<input class="provider-key-input" style="width:220px;"
 					placeholder="Asia/Shanghai"
-					value=${userDoc.timezone || ""}
-					onInput=${(e) => setUserDoc({ ...userDoc, timezone: e.target.value })}
-					onBlur=${() => onFieldBlur("timezone", userDoc.timezone)} />
+					value=${draft.timezone || ""}
+					onInput=${(e) => setDraft({ ...draft, timezone: e.target.value })} />
 			</div>
-			${userDoc.location
+			${draft.location
 				? html`<div class="text-xs text-[var(--muted)]">
-					Location: ${userDoc.location.place || (userDoc.location.latitude + "," + userDoc.location.longitude)}
-					${userDoc.location.updatedAt ? html`<span> (updated ${userDoc.location.updatedAt})</span>` : null}
+					Location: ${draft.location.place || (draft.location.latitude + "," + draft.location.longitude)}
+					${draft.location.updatedAt ? html`<span> (updated ${draft.location.updatedAt})</span>` : null}
 				</div>`
 				: null}
 		</div>
 
 		<div style="max-width:900px;">
-			<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin:8px 0 4px;">USER.md body (read-only)</h3>
+			<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin:8px 0 4px;">USER.md body</h3>
 			<textarea
 				class="provider-key-input"
 				rows="10"
 				style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
-				value=${userDoc.body || ""}
-				disabled=${true}
+				value=${draft.body || ""}
+				onInput=${(e) => setDraft({ ...draft, body: e.target.value })}
 			/>
 		</div>
 	</div>`;
 }
 
-// ── People section ───────────────────────────────────────────
+// ── People section (private agents under people/<name>/) ─────
 
-function PeopleSection() {
-	var [loadingPeople, setLoadingPeople] = useState(true);
-	var [peopleDoc, setPeopleDoc] = useState({ schemaVersion: 1, people: [], body: "" });
+function PeoplePrivateSection() {
+	var [loadingList, setLoadingList] = useState(true);
+	var [peopleList, setPeopleList] = useState([]);
+	var [selectedName, setSelectedName] = useState("default");
+	var [loadingDoc, setLoadingDoc] = useState(true);
+	var [baseDoc, setBaseDoc] = useState(null);
+	var [error, setError] = useState(null);
+	var [savedKey, setSavedKey] = useState("");
+	var [savingKey, setSavingKey] = useState("");
+
+	var [emoji, setEmoji] = useState("");
+	var [creature, setCreature] = useState("");
+	var [vibe, setVibe] = useState("");
+	var [identityBody, setIdentityBody] = useState("");
+	var [soul, setSoul] = useState("");
+	var [tools, setTools] = useState("");
+	var [agents, setAgents] = useState("");
+
+	var [showNewModal, setShowNewModal] = useState(false);
+	var [showCloneModal, setShowCloneModal] = useState(false);
+	var [showDeleteModal, setShowDeleteModal] = useState(false);
+	var [newName, setNewName] = useState("");
+	var [cloneName, setCloneName] = useState("");
+
+	function flashSaved(key) {
+		setSavedKey(key);
+		setTimeout(() => {
+			setSavedKey("");
+			rerender();
+		}, 1200);
+	}
+
+	function loadList(nextSelected) {
+		setLoadingList(true);
+		setError(null);
+		sendRpc("workspace.person.list", {}).then((res) => {
+			setLoadingList(false);
+			if (res?.ok) {
+				var list = res.payload?.people || [];
+				setPeopleList(list);
+				if (nextSelected) {
+					setSelectedName(nextSelected);
+				} else if (!list.some((p) => p.name === selectedName) && list.length > 0) {
+					setSelectedName(list[0].name);
+				}
+			} else {
+				setError(res?.error?.message || "Failed to load people/<name>/");
+			}
+			rerender();
+		});
+	}
+
+	function loadDoc(name) {
+		if (!name) return;
+		setLoadingDoc(true);
+		setError(null);
+		sendRpc("workspace.person.get", { name }).then((res) => {
+			setLoadingDoc(false);
+			if (res?.ok) {
+				var doc = res.payload;
+				setBaseDoc(doc);
+				setEmoji(doc?.identity?.emoji || "");
+				setCreature(doc?.identity?.creature || "");
+				setVibe(doc?.identity?.vibe || "");
+				setIdentityBody(doc?.identity?.body || "");
+				setSoul(doc?.soul || "");
+				setTools(doc?.tools || "");
+				setAgents(doc?.agents || "");
+			} else {
+				setError(res?.error?.message || "Failed to load agent files");
+				setBaseDoc(null);
+			}
+			rerender();
+		});
+	}
+
+	useEffect(() => {
+		loadList();
+	}, []);
+
+	useEffect(() => {
+		loadDoc(selectedName);
+	}, [selectedName]);
+
+	function saveIdentity() {
+		setSavingKey("identity");
+		setError(null);
+		sendRpc("workspace.person.save", {
+			name: selectedName,
+			identityPatch: {
+				emoji: (emoji || "").trim() || null,
+				creature: (creature || "").trim() || null,
+				vibe: (vibe || "").trim() || null,
+			},
+			identityBody: identityBody || "",
+		}).then((res) => {
+			setSavingKey("");
+			if (res?.ok) {
+				loadDoc(selectedName);
+				flashSaved("identity");
+			} else {
+				setError(res?.error?.message || "Failed to save IDENTITY.md");
+			}
+			rerender();
+		});
+	}
+
+	function saveText(key, value) {
+		setSavingKey(key);
+		setError(null);
+		var payload = { name: selectedName };
+		payload[key] = value || "";
+		sendRpc("workspace.person.save", payload).then((res) => {
+			setSavingKey("");
+			if (res?.ok) {
+				loadDoc(selectedName);
+				flashSaved(key);
+			} else {
+				setError(res?.error?.message || "Failed to save");
+			}
+			rerender();
+		});
+	}
+
+	function isDefault() {
+		return selectedName === "default";
+	}
+
+	function onCreate() {
+		var name = (newName || "").trim();
+		if (!name) return;
+		setSavingKey("new");
+		setError(null);
+		sendRpc("workspace.person.save", { name }).then((res) => {
+			setSavingKey("");
+			if (res?.ok) {
+				setShowNewModal(false);
+				setNewName("");
+				loadList(name);
+				flashSaved("new");
+			} else {
+				setError(res?.error?.message || "Failed to create agent");
+			}
+			rerender();
+		});
+	}
+
+	function onClone() {
+		var name = (cloneName || "").trim();
+		if (!name || !baseDoc) return;
+		setSavingKey("clone");
+		setError(null);
+		sendRpc("workspace.person.save", {
+			name,
+			identityPatch: {
+				emoji: baseDoc.identity?.emoji ?? null,
+				creature: baseDoc.identity?.creature ?? null,
+				vibe: baseDoc.identity?.vibe ?? null,
+			},
+			identityBody: baseDoc.identity?.body || "",
+			soul: baseDoc.soul || "",
+			tools: baseDoc.tools || "",
+			agents: baseDoc.agents || "",
+		}).then((res) => {
+			setSavingKey("");
+			if (res?.ok) {
+				setShowCloneModal(false);
+				setCloneName("");
+				loadList(name);
+				flashSaved("clone");
+			} else {
+				setError(res?.error?.message || "Failed to clone agent");
+			}
+			rerender();
+		});
+	}
+
+	function onDelete() {
+		if (isDefault()) return;
+		setSavingKey("delete");
+		setError(null);
+		sendRpc("workspace.person.delete", { name: selectedName }).then((res) => {
+			setSavingKey("");
+			if (res?.ok) {
+				setShowDeleteModal(false);
+				loadList("default");
+				flashSaved("delete");
+			} else {
+				setError(res?.error?.message || "Failed to delete agent");
+			}
+			rerender();
+		});
+	}
+
+	function isIdentityDirty() {
+		if (!baseDoc) return false;
+		if ((baseDoc.identity?.emoji || "") !== emoji) return true;
+		if ((baseDoc.identity?.creature || "") !== creature) return true;
+		if ((baseDoc.identity?.vibe || "") !== vibe) return true;
+		return (baseDoc.identity?.body || "") !== identityBody;
+	}
+	function isTextDirty(key, value) {
+		if (!baseDoc) return false;
+		return (baseDoc[key] || "") !== (value || "");
+	}
+
+	var selectStyle =
+		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:.85rem;cursor:pointer;";
+
+	function renderSection(title, filePath, dirty, key, content, setContent, onSave) {
+		return html`<div style="max-width:900px;border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--surface);">
+			<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+				<div>
+					<div class="text-sm font-medium text-[var(--text-strong)]">${title}</div>
+					<div class="text-xs text-[var(--muted)]"><code>${filePath}</code></div>
+				</div>
+				<div style="display:flex;align-items:center;gap:8px;">
+					<button type="button" class="provider-btn provider-btn-sm" disabled=${savingKey || !dirty} onClick=${onSave}>
+						${savingKey === key ? "Saving\u2026" : "Save"}
+					</button>
+					${savedKey === key ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+				</div>
+			</div>
+			<textarea
+				class="provider-key-input"
+				rows="10"
+				style="width:100%;min-height:10rem;resize:vertical;margin-top:10px;font-size:.8rem;line-height:1.5;"
+				value=${content || ""}
+				onInput=${(e) => setContent(e.target.value)}
+			/>
+		</div>`;
+	}
+
+	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
+		<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+			<div>
+				<h2 class="text-lg font-medium text-[var(--text-strong)]" style="margin:0;">People</h2>
+				<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:4px 0 0;">
+					Private agent configuration under <code>people/${"<name>"}/</code>.
+				</p>
+			</div>
+			<div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;">
+				<div style="display:flex;flex-direction:column;gap:4px;">
+					<label class="text-xs text-[var(--muted)]">Agent</label>
+					<select style=${selectStyle} value=${selectedName} onChange=${(e) => setSelectedName(e.target.value)}>
+						${peopleList.map(
+							(p) => html`<option key=${p.name} value=${p.name}>${p.name}${p.isDefault ? " (default)" : ""}</option>`,
+						)}
+					</select>
+				</div>
+				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${() => setShowNewModal(true)} disabled=${savingKey}>
+					New
+				</button>
+				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${() => setShowCloneModal(true)} disabled=${savingKey || !baseDoc}>
+					Clone
+				</button>
+				<button
+					type="button"
+					class="provider-btn provider-btn-sm provider-btn-danger"
+					onClick=${() => setShowDeleteModal(true)}
+					disabled=${savingKey || isDefault()}
+					title=${isDefault() ? "Default agent cannot be deleted" : "Delete this agent"}
+				>
+					Delete
+				</button>
+				${loadingList || loadingDoc ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
+			</div>
+		</div>
+
+		${error ? html`<div class="text-xs" style="color:var(--error);max-width:900px;">${error}</div>` : null}
+
+		<div style="max-width:900px;border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--surface);">
+			<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+				<div>
+					<div class="text-sm font-medium text-[var(--text-strong)]">Identity</div>
+					<div class="text-xs text-[var(--muted)]"><code>people/${selectedName}/IDENTITY.md</code></div>
+				</div>
+				<div style="display:flex;align-items:center;gap:8px;">
+					<button type="button" class="provider-btn provider-btn-sm" disabled=${savingKey || !isIdentityDirty()} onClick=${saveIdentity}>
+						${savingKey === "identity" ? "Saving\u2026" : "Save"}
+					</button>
+					${savedKey === "identity" ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+				</div>
+			</div>
+			<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;">
+				<div style="display:flex;flex-direction:column;gap:4px;">
+					<label class="text-xs text-[var(--muted)]">Emoji</label>
+					<input
+						class="provider-key-input"
+						style="width:3.2rem;text-align:center;font-size:1rem;"
+						value=${emoji}
+						onInput=${(e) => setEmoji(e.target.value)}
+					/>
+				</div>
+				<div style="display:flex;flex-direction:column;gap:4px;">
+					<label class="text-xs text-[var(--muted)]">Creature</label>
+					<input class="provider-key-input" style="width:220px;" value=${creature} onInput=${(e) => setCreature(e.target.value)} />
+				</div>
+				<div style="flex:1;min-width:240px;display:flex;flex-direction:column;gap:4px;">
+					<label class="text-xs text-[var(--muted)]">Vibe</label>
+					<input class="provider-key-input" style="width:100%;" value=${vibe} onInput=${(e) => setVibe(e.target.value)} />
+				</div>
+			</div>
+			<textarea
+				class="provider-key-input"
+				rows="10"
+				style="width:100%;min-height:10rem;resize:vertical;margin-top:10px;font-size:.8rem;line-height:1.5;"
+				value=${identityBody || ""}
+				onInput=${(e) => setIdentityBody(e.target.value)}
+			/>
+		</div>
+
+		${renderSection("Soul", `people/${selectedName}/SOUL.md`, isTextDirty("soul", soul), "soul", soul, setSoul, () => saveText("soul", soul))}
+		${renderSection("Tools", `people/${selectedName}/TOOLS.md`, isTextDirty("tools", tools), "tools", tools, setTools, () => saveText("tools", tools))}
+		${renderSection("Agents", `people/${selectedName}/AGENTS.md`, isTextDirty("agents", agents), "agents", agents, setAgents, () => saveText("agents", agents))}
+
+		<${Modal} show=${showNewModal} onClose=${() => setShowNewModal(false)} title="New agent">
+			<div style="display:flex;flex-direction:column;gap:10px;">
+				<div class="text-xs text-[var(--muted)]">Creates <code>people/${"<name>"}/</code> and seeds default files.</div>
+				<label class="text-xs text-[var(--muted)]">Agent name</label>
+				<input class="provider-key-input" placeholder="e.g. ops" value=${newName} onInput=${(e) => setNewName(e.target.value)} />
+				<button class="provider-btn" onClick=${onCreate} disabled=${savingKey === "new" || !(newName || "").trim()}>
+					${savingKey === "new" ? "Creating\u2026" : "Create"}
+				</button>
+			</div>
+		</${Modal}>
+
+		<${Modal} show=${showCloneModal} onClose=${() => setShowCloneModal(false)} title="Clone agent">
+			<div style="display:flex;flex-direction:column;gap:10px;">
+				<div class="text-xs text-[var(--muted)]">Clones <code>${selectedName}</code> into a new agent.</div>
+				<label class="text-xs text-[var(--muted)]">New agent name</label>
+				<input class="provider-key-input" placeholder="e.g. research" value=${cloneName} onInput=${(e) => setCloneName(e.target.value)} />
+				<button class="provider-btn" onClick=${onClone} disabled=${savingKey === "clone" || !(cloneName || "").trim() || !baseDoc}>
+					${savingKey === "clone" ? "Cloning\u2026" : "Clone"}
+				</button>
+			</div>
+		</${Modal}>
+
+		<${Modal} show=${showDeleteModal} onClose=${() => setShowDeleteModal(false)} title="Delete agent">
+			<div style="display:flex;flex-direction:column;gap:10px;">
+				<div class="text-sm text-[var(--text)]">Delete <code>${selectedName}</code>?</div>
+				<div class="text-xs text-[var(--muted)]">This removes <code>people/${selectedName}/</code> from disk. It does not remove any entry from <code>PEOPLE.md</code>.</div>
+				<button class="provider-btn provider-btn-danger" onClick=${onDelete} disabled=${savingKey === "delete" || isDefault()}>
+					${savingKey === "delete" ? "Deleting\u2026" : "Delete"}
+				</button>
+			</div>
+		</${Modal}>
+	</div>`;
+}
+
+// ── Contacts section (public PEOPLE.md) ──────────────────────
+
+function ContactsSection() {
+	var [loading, setLoading] = useState(true);
+	var [doc, setDoc] = useState({ schemaVersion: 1, people: [], body: "" });
+	var [baseDoc, setBaseDoc] = useState({ schemaVersion: 1, people: [], body: "" });
+	var [personNames, setPersonNames] = useState([]);
+	var [selectedName, setSelectedName] = useState("");
+	var [entry, setEntry] = useState({
+		name: "",
+		displayName: "",
+		emoji: "",
+		creature: "",
+		telegramUserId: "",
+		telegramUserName: "",
+		telegramDisplayName: "",
+	});
+	var [body, setBody] = useState("");
 	var [error, setError] = useState(null);
 	var [saved, setSaved] = useState(false);
 	var [saving, setSaving] = useState(false);
@@ -619,13 +708,29 @@ function PeopleSection() {
 		}, 1200);
 	}
 
-	function loadPeople() {
-		setLoadingPeople(true);
+	function loadPersonList() {
+		sendRpc("workspace.person.list", {}).then((res) => {
+			if (res?.ok) {
+				setPersonNames((res.payload?.people || []).map((p) => p.name));
+			}
+			rerender();
+		});
+	}
+
+	function loadContacts() {
+		setLoading(true);
 		setError(null);
 		sendRpc("workspace.people.get", {}).then((res) => {
-			setLoadingPeople(false);
+			setLoading(false);
 			if (res?.ok) {
-				setPeopleDoc(res.payload || { schemaVersion: 1, people: [], body: "" });
+				var next = res.payload || { schemaVersion: 1, people: [], body: "" };
+				setDoc(next);
+				setBaseDoc(next);
+				setBody(next.body || "");
+				var initialName = selectedName || next.people?.[0]?.name || "";
+				setSelectedName(initialName);
+				var found = (next.people || []).find((p) => p.name === initialName) || next.people?.[0] || null;
+				if (found) setEntry({ ...found });
 			} else {
 				setError(res?.error?.message || "Failed to load PEOPLE.md");
 			}
@@ -634,25 +739,51 @@ function PeopleSection() {
 	}
 
 	useEffect(() => {
-		loadPeople();
+		loadPersonList();
+		loadContacts();
 	}, []);
 
-	function setEntryField(idx, field, value) {
-		var next = (peopleDoc.people || []).slice();
-		var entry = { ...(next[idx] || {}) };
-		entry[field] = value;
-		next[idx] = entry;
-		setPeopleDoc({ ...peopleDoc, people: next });
+	useEffect(() => {
+		var found = (doc.people || []).find((p) => p.name === selectedName);
+		if (found) setEntry({ ...found });
 		rerender();
+	}, [selectedName]);
+
+	function isMissingDir() {
+		return Boolean(selectedName && personNames.length > 0 && !personNames.includes(selectedName));
 	}
 
-	function saveEntryPatch(name, patch) {
+	function isDirty() {
+		var baseEntry = (baseDoc.people || []).find((p) => p.name === selectedName) || {};
+		var keys = ["displayName", "telegramUserId", "telegramUserName", "telegramDisplayName"];
+		for (var k of keys) {
+			if ((baseEntry[k] || "") !== (entry[k] || "")) return true;
+		}
+		return (baseDoc.body || "") !== (body || "");
+	}
+
+	function onSave() {
+		if (!selectedName) return;
 		setSaving(true);
 		setError(null);
-		sendRpc("workspace.people.updateEntry", { name, patch }).then((res) => {
+		sendRpc("workspace.people.updateEntry", {
+			name: selectedName,
+			patch: {
+				displayName: entry.displayName || "",
+				telegramUserId: entry.telegramUserId || "",
+				telegramUserName: entry.telegramUserName || "",
+				telegramDisplayName: entry.telegramDisplayName || "",
+			},
+			body: body || "",
+		}).then((res) => {
 			setSaving(false);
 			if (res?.ok) {
-				setPeopleDoc(res.payload || peopleDoc);
+				var next = res.payload || doc;
+				setDoc(next);
+				setBaseDoc(next);
+				setBody(next.body || "");
+				var found = (next.people || []).find((p) => p.name === selectedName) || null;
+				if (found) setEntry({ ...found });
 				flashSaved();
 			} else {
 				setError(res?.error?.message || "Failed to save PEOPLE.md");
@@ -661,19 +792,13 @@ function PeopleSection() {
 		});
 	}
 
-	function onFieldBlur(entry, field, value) {
-		var patch = {};
-		patch[field] = (value || "").trim();
-		saveEntryPatch(entry.name, patch);
-	}
-
 	function onSync() {
 		setSaving(true);
 		setError(null);
 		sendRpc("workspace.people.sync", {}).then((res) => {
 			setSaving(false);
 			if (res?.ok) {
-				loadPeople();
+				loadContacts();
 				flashSaved();
 			} else {
 				setError(res?.error?.message || "Failed to sync PEOPLE.md");
@@ -682,77 +807,95 @@ function PeopleSection() {
 		});
 	}
 
-	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-		<h2 class="text-lg font-medium text-[var(--text-strong)]">People</h2>
-		<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:0;">
-			Public directory stored in <code>PEOPLE.md</code>. Emoji/Creature are synced from <code>people/&lt;name&gt;/IDENTITY.md</code> and are read-only here.
-		</p>
+	var selectStyle =
+		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:.85rem;cursor:pointer;";
 
-		<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadPeople} disabled=${saving}>
-				Reload
-			</button>
-			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onSync} disabled=${saving}>
-				Sync emoji/creature
-			</button>
-			${loadingPeople ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
-			${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
-			${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
+		<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+			<div>
+				<h2 class="text-lg font-medium text-[var(--text-strong)]" style="margin:0;">Contacts</h2>
+				<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:4px 0 0;">
+					Public directory stored in <code>PEOPLE.md</code>. <span style="color:var(--muted);">Name/Emoji/Creature are synced from <code>people/${"<name>"}/IDENTITY.md</code>.</span>
+				</p>
+			</div>
+			<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadContacts} disabled=${saving}>
+					Reload
+				</button>
+				<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onSync} disabled=${saving}>
+					Sync emoji/creature
+				</button>
+				<button type="button" class="provider-btn provider-btn-sm" onClick=${onSave} disabled=${saving || !isDirty()}>
+					${saving ? "Saving\u2026" : "Save"}
+				</button>
+				${loading ? html`<span class="text-xs text-[var(--muted)]">Loading\u2026</span>` : null}
+				${saved ? html`<span class="text-xs" style="color:var(--accent);">Saved</span>` : null}
+				${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
+			</div>
 		</div>
 
-		<div style="max-width:1100px;overflow:auto;border:1px solid var(--border);border-radius:10px;">
-			<table class="w-full text-sm" style="border-collapse:collapse;min-width:900px;">
-				<thead>
-					<tr style="background:var(--surface2);">
-						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">name</th>
-						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">emoji</th>
-						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">creature</th>
-						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">display name</th>
-						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">telegram user id</th>
-						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">telegram username</th>
-						<th class="p-2 text-left" style="border-bottom:1px solid var(--border);">telegram display</th>
-					</tr>
-				</thead>
-				<tbody>
-					${(peopleDoc.people || []).map((p, idx) => html`
-						<tr key=${p.name}>
-							<td class="p-2" style="border-bottom:1px solid var(--border);font-family:ui-monospace, SFMono-Regular, Menlo, monospace;">${p.name}</td>
-							<td class="p-2" style="border-bottom:1px solid var(--border);color:var(--muted);">${p.emoji || ""}</td>
-							<td class="p-2" style="border-bottom:1px solid var(--border);color:var(--muted);">${p.creature || ""}</td>
-							<td class="p-2" style="border-bottom:1px solid var(--border);">
-								<input class="provider-key-input" style="width:180px;" value=${p.displayName || ""}
-									onInput=${(e) => setEntryField(idx, "displayName", e.target.value)}
-									onBlur=${() => onFieldBlur(p, "displayName", p.displayName)} />
-							</td>
-							<td class="p-2" style="border-bottom:1px solid var(--border);">
-								<input class="provider-key-input" style="width:160px;" value=${p.telegramUserId || ""}
-									onInput=${(e) => setEntryField(idx, "telegramUserId", e.target.value)}
-									onBlur=${() => onFieldBlur(p, "telegramUserId", p.telegramUserId)} />
-							</td>
-							<td class="p-2" style="border-bottom:1px solid var(--border);">
-								<input class="provider-key-input" style="width:180px;" value=${p.telegramUserName || ""}
-									onInput=${(e) => setEntryField(idx, "telegramUserName", e.target.value)}
-									onBlur=${() => onFieldBlur(p, "telegramUserName", p.telegramUserName)} />
-							</td>
-							<td class="p-2" style="border-bottom:1px solid var(--border);">
-								<input class="provider-key-input" style="width:180px;" value=${p.telegramDisplayName || ""}
-									onInput=${(e) => setEntryField(idx, "telegramDisplayName", e.target.value)}
-									onBlur=${() => onFieldBlur(p, "telegramDisplayName", p.telegramDisplayName)} />
-							</td>
-						</tr>
-					`)}
-				</tbody>
-			</table>
+		<div style="max-width:900px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+			<div style="display:flex;flex-direction:column;gap:4px;min-width:260px;">
+				<label class="text-xs text-[var(--muted)]">Agent</label>
+				<select style=${selectStyle} value=${selectedName} onChange=${(e) => setSelectedName(e.target.value)}>
+					${(doc.people || []).map((p) => html`<option key=${p.name} value=${p.name}>${p.name}</option>`)}
+				</select>
+			</div>
+			${isMissingDir() ? html`<span class="text-xs" style="color:var(--error);">Missing: people/${selectedName}/</span>` : null}
+		</div>
+
+		<div style="max-width:900px;display:flex;flex-direction:column;gap:10px;">
+			<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+				<div style="min-width:220px;display:flex;flex-direction:column;gap:4px;">
+					<label class="text-xs text-[var(--muted)]">Name</label>
+					<input class="provider-key-input" style="width:220px;" value=${entry.name || ""} disabled=${true} />
+				</div>
+				<div style="min-width:3.2rem;display:flex;flex-direction:column;gap:4px;">
+					<label class="text-xs text-[var(--muted)]">Emoji</label>
+					<input class="provider-key-input" style="width:3.2rem;text-align:center;font-size:1rem;" value=${entry.emoji || ""} disabled=${true} />
+				</div>
+				<div style="flex:1;min-width:260px;display:flex;flex-direction:column;gap:4px;">
+					<label class="text-xs text-[var(--muted)]">Creature</label>
+					<input class="provider-key-input" style="width:100%;" value=${entry.creature || ""} disabled=${true} />
+				</div>
+			</div>
+
+			<div>
+				<label class="text-xs text-[var(--muted)]">Display</label>
+				<input class="provider-key-input" style="width:320px;"
+					value=${entry.displayName || ""}
+					onInput=${(e) => setEntry({ ...entry, displayName: e.target.value })} />
+			</div>
+			<div style="display:flex;gap:12px;flex-wrap:wrap;">
+				<div>
+					<label class="text-xs text-[var(--muted)]">Telegram ID</label>
+					<input class="provider-key-input" style="width:220px;"
+						value=${entry.telegramUserId || ""}
+						onInput=${(e) => setEntry({ ...entry, telegramUserId: e.target.value })} />
+				</div>
+				<div>
+					<label class="text-xs text-[var(--muted)]">Telegram @</label>
+					<input class="provider-key-input" style="width:220px;"
+						value=${entry.telegramUserName || ""}
+						onInput=${(e) => setEntry({ ...entry, telegramUserName: e.target.value })} />
+				</div>
+				<div>
+					<label class="text-xs text-[var(--muted)]">Telegram name</label>
+					<input class="provider-key-input" style="width:220px;"
+						value=${entry.telegramDisplayName || ""}
+						onInput=${(e) => setEntry({ ...entry, telegramDisplayName: e.target.value })} />
+				</div>
+			</div>
 		</div>
 
 		<div style="max-width:900px;">
-			<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin:8px 0 4px;">PEOPLE.md body (read-only)</h3>
+			<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin:8px 0 4px;">PEOPLE.md body</h3>
 			<textarea
 				class="provider-key-input"
 				rows="10"
 				style="width:100%;min-height:10rem;resize:vertical;font-size:.8rem;line-height:1.5;"
-				value=${peopleDoc.body || ""}
-				disabled=${true}
+				value=${body || ""}
+				onInput=${(e) => setBody(e.target.value)}
 			/>
 		</div>
 	</div>`;
@@ -3549,9 +3692,9 @@ function SettingsPage() {
 	return html`<div class="settings-layout">
 		<${SettingsSidebar} />
 		${ps ? html`<${PageSection} key=${section} initFn=${ps.init} teardownFn=${ps.teardown} />` : null}
-		${section === "identity" ? html`<${IdentitySection} />` : null}
 		${section === "user" ? html`<${UserSection} />` : null}
-		${section === "people" ? html`<${PeopleSection} />` : null}
+		${section === "people" ? html`<${PeoplePrivateSection} />` : null}
+		${section === "contacts" ? html`<${ContactsSection} />` : null}
 		${section === "memory" ? html`<${MemorySection} />` : null}
 		${section === "environment" ? html`<${EnvironmentSection} />` : null}
 		${section === "security" ? html`<${SecuritySection} />` : null}
@@ -3562,7 +3705,7 @@ function SettingsPage() {
 	</div>`;
 }
 
-var DEFAULT_SECTION = "identity";
+var DEFAULT_SECTION = "user";
 
 registerPrefix(
 	routes.settings,
@@ -3582,8 +3725,6 @@ registerPrefix(
 		mounted = false;
 		if (containerRef) render(null, containerRef);
 		containerRef = null;
-		identity.value = null;
-		loading.value = true;
 		activeSection.value = DEFAULT_SECTION;
 	},
 );

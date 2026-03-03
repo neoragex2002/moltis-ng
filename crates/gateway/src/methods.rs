@@ -91,6 +91,8 @@ const READ_METHODS: &[&str] = &[
     "agent.identity.get",
     "workspace.user.get",
     "workspace.people.get",
+    "workspace.person.list",
+    "workspace.person.get",
     "skills.list",
     "skills.status",
     "skills.security.status",
@@ -146,6 +148,8 @@ const WRITE_METHODS: &[&str] = &[
     "workspace.user.update",
     "workspace.people.updateEntry",
     "workspace.people.sync",
+    "workspace.person.save",
+    "workspace.person.delete",
     "wake",
     "talk.mode",
     "tts.enable",
@@ -1330,6 +1334,48 @@ impl MethodRegistry {
                     crate::people::people_sync_from_identities()
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
                     Ok(serde_json::json!({}))
+                })
+            }),
+        );
+
+        // Workspace (private people/<name>/...)
+        self.register(
+            "workspace.person.list",
+            Box::new(|_ctx| {
+                Box::pin(async move {
+                    let payload = crate::person::person_list()
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(payload)
+                })
+            }),
+        );
+        self.register(
+            "workspace.person.get",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    let payload = crate::person::person_get(&ctx.params)
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(payload)
+                })
+            }),
+        );
+        self.register(
+            "workspace.person.save",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    let payload = crate::person::person_save(&ctx.params)
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(payload)
+                })
+            }),
+        );
+        self.register(
+            "workspace.person.delete",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    let payload = crate::person::person_delete(&ctx.params)
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    Ok(payload)
                 })
             }),
         );

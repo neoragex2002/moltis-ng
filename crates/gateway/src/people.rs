@@ -229,6 +229,13 @@ pub(crate) fn people_update_entry(params: &serde_json::Value) -> anyhow::Result<
         anyhow::bail!("patch must be an object");
     }
 
+    let body_param = params.get("body");
+    if let Some(v) = body_param {
+        if !(v.is_string() || v.is_null()) {
+            anyhow::bail!("body must be a string or null");
+        }
+    }
+
     let mut doc = load_people_md()?;
     let Some(map) = doc.frontmatter.as_mapping_mut() else {
         anyhow::bail!("PEOPLE.md frontmatter is not a mapping");
@@ -266,6 +273,10 @@ pub(crate) fn people_update_entry(params: &serde_json::Value) -> anyhow::Result<
 
     if !found {
         anyhow::bail!("person not found");
+    }
+
+    if body_param.is_some() {
+        doc.body = body_param.and_then(|v| v.as_str()).unwrap_or("").to_string();
     }
 
     save_people_md(&doc)?;
@@ -335,5 +346,25 @@ mod tests {
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("KEEP THIS BODY LINE"));
+    }
+
+    #[test]
+    fn people_update_entry_updates_body() {
+        let _guard = crate::test_support::TestDirsGuard::new();
+
+        moltis_config::ensure_default_person_seeded().unwrap();
+        moltis_config::ensure_people_md_seeded().unwrap();
+        moltis_config::sync_people_md_from_identities().unwrap();
+
+        let updated = people_update_entry(&serde_json::json!({
+            "name": "default",
+            "patch": {},
+            "body": "\n# PEOPLE.md\n\nNew body.\n"
+        }))
+        .unwrap();
+        assert_eq!(updated["body"].as_str().unwrap(), "\n# PEOPLE.md\n\nNew body.\n");
+
+        let after = std::fs::read_to_string(moltis_config::people_path()).unwrap();
+        assert!(after.contains("\n# PEOPLE.md\n\nNew body.\n"));
     }
 }

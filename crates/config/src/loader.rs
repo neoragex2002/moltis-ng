@@ -307,7 +307,7 @@ pub fn ensure_default_person_seeded() -> anyhow::Result<()> {
     if !identity.exists() {
         std::fs::write(
             &identity,
-            "---\nname: default\nemoji: 🤖\ncreature: 助手\nvibe: 直接、清晰、效率优先\n---\n\n# IDENTITY.md\n\n（在这里写更长的自我定义。正文仅手工编辑；UI/程序只会修改上面的字段。）\n",
+            "---\nname: default\nemoji: 🤖\ncreature: Assistant\nvibe: Direct, clear, efficient\n---\n\n# IDENTITY.md\n\nWrite your longer self-definition here.\n",
         )?;
     }
 
@@ -337,7 +337,7 @@ pub fn ensure_people_md_seeded() -> anyhow::Result<()> {
     }
     std::fs::write(
         &path,
-        "---\nschema_version: 1\npeople:\n  - name: default\n    display_name: 默认\n---\n\n# PEOPLE.md\n\n（公共通信录：只在这里维护对外展示名与对外联系信息。emoji/creature 由系统从 people/<name>/IDENTITY.md 自动对齐。）\n",
+        "---\nschema_version: 1\npeople:\n  - name: default\n    display_name: Default\n---\n\n# PEOPLE.md\n\nPublic directory.\n\n- Edit display/contact fields here.\n- emoji/creature are synced from people/<name>/IDENTITY.md.\n",
     )?;
     Ok(())
 }

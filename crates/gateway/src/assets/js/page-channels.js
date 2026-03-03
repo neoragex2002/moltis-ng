@@ -11,11 +11,14 @@ import { connected } from "./signals.js";
 import * as S from "./state.js";
 import { models as modelsSig } from "./stores/model-store.js";
 import { ConfirmDialog, Modal, ModelSelect, requestConfirm, showToast } from "./ui.js";
-import { isPersonaListLoaded, isPersonaMissing } from "./persona-utils.js";
 
 var channels = signal([]);
-var personaIds = signal([]);
-var personaIdsLoaded = signal(false);
+var agentNames = signal([]);
+var agentNamesLoaded = signal(false);
+
+function isAgentListLoaded(names) {
+	return Array.isArray(names) && names.includes("default");
+}
 
 export function prefetchChannels() {
 	sendRpc("channels.status", {}).then((res) => {
@@ -25,14 +28,13 @@ export function prefetchChannels() {
 			S.setCachedChannels(ch);
 		}
 	});
-	sendRpc("workspace.people.get", {}).then((res) => {
+	sendRpc("workspace.person.list", {}).then((res) => {
 		if (res?.ok) {
 			var ids = (res.payload?.people || []).map((p) => p.name).filter(Boolean);
-			personaIds.value = ids;
-			// Avoid false "(missing → default)" warnings before we have a reliable list.
-			personaIdsLoaded.value = isPersonaListLoaded(ids);
+			agentNames.value = ids;
+			agentNamesLoaded.value = isAgentListLoaded(ids);
 		} else {
-			personaIdsLoaded.value = false;
+			agentNamesLoaded.value = false;
 		}
 	});
 }
@@ -51,13 +53,13 @@ function loadChannels() {
 			updateNavCount("channels", ch.length);
 		}
 	});
-	sendRpc("workspace.people.get", {}).then((res) => {
+	sendRpc("workspace.person.list", {}).then((res) => {
 		if (res?.ok) {
 			var ids = (res.payload?.people || []).map((p) => p.name).filter(Boolean);
-			personaIds.value = ids;
-			personaIdsLoaded.value = isPersonaListLoaded(ids);
+			agentNames.value = ids;
+			agentNamesLoaded.value = isAgentListLoaded(ids);
 		} else {
-			personaIdsLoaded.value = false;
+			agentNamesLoaded.value = false;
 		}
 	});
 }
@@ -82,11 +84,12 @@ function TelegramIcon() {
 function ChannelCard(props) {
 	var ch = props.channel;
 	var cfg = ch.config || {};
-	var configuredPersona = cfg.persona_id || "";
-	var personaMissing = isPersonaMissing(
-		configuredPersona,
-		personaIds.value,
-		personaIdsLoaded.value,
+	var configuredAgent = cfg.persona_id || "";
+	var agentMissing = Boolean(
+		configuredAgent &&
+			agentNamesLoaded.value &&
+			Array.isArray(agentNames.value) &&
+			!agentNames.value.includes(configuredAgent),
 	);
 
 	function copyText(label, text) {
@@ -166,8 +169,8 @@ function ChannelCard(props) {
 				<${DetailRow} label="chanUserName" value=${cfg.chan_user_name ? "@" + cfg.chan_user_name : ""} />
 				<${DetailRow} label="chanNickname" value=${cfg.chan_nickname} />
 				<${DetailRow}
-					label="personaId"
-					value=${personaMissing ? `${configuredPersona} (missing → default)` : configuredPersona}
+					label="agentName"
+					value=${agentMissing ? `Missing: ${configuredAgent} (defaults to default)` : configuredAgent}
 				/>
 			</div>
 		</details>
@@ -330,7 +333,7 @@ function AddChannelModal() {
 			error.value = "Bot token is required.";
 			return;
 		}
-		var personaId = form.querySelector("[data-field=personaId]")?.value?.trim() || "";
+		var agentName = form.querySelector("[data-field=agentName]")?.value?.trim() || "";
 		error.value = "";
 		saving.value = true;
 			var addConfig = {
@@ -342,8 +345,8 @@ function AddChannelModal() {
 				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
 				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
-		if (personaId) {
-			addConfig.persona_id = personaId;
+		if (agentName) {
+			addConfig.persona_id = agentName;
 		}
 		if (addModel.value) {
 			addConfig.model = addModel.value;
@@ -387,12 +390,19 @@ function AddChannelModal() {
         <div class="text-xs text-[var(--muted)]">3. Copy the bot token (looks like 123456:ABC-DEF...) and paste it below</div>
         <div class="text-xs text-[var(--muted)] channel-help" style="margin-top:2px;">See the <a href="https://core.telegram.org/bots/tutorial" target="_blank" class="text-[var(--accent)]" style="text-decoration:underline;">Telegram Bot Tutorial</a> for more details.</div>
       </div>
-	      <label class="text-xs text-[var(--muted)]">Persona ID (optional)</label>
-	      <input data-field="personaId" type="text" placeholder="e.g. default / ops / research" style=${inputStyle}
-	        autocapitalize="none"
-	        autocorrect="off"
-	        spellcheck="false"
-	        name="telegram_persona_id" />
+	      <label class="text-xs text-[var(--muted)]">Agent (optional)</label>
+				<div class="text-xs text-[var(--muted)]" style="margin-top:-2px;margin-bottom:6px;">
+					Choose an agent under <code>${"people/<name>/"}</code>.
+				</div>
+	      <select data-field="agentName" style=${selectStyle} name="telegram_agent_name">
+					<option value="">(default)</option>
+					${agentNames.value.map((id) => html`<option key=${id} value=${id}>${id}</option>`)}
+				</select>
+				${
+					!agentNamesLoaded.value
+						? html`<div class="text-xs text-[var(--muted)]" style="margin-top:4px;">Loading agents\u2026</div>`
+						: null
+				}
 	      <label class="text-xs text-[var(--muted)]">Bot Token (from @BotFather)</label>
 	      <input data-field="token" type="password" placeholder="123456:ABC-DEF..." style=${inputStyle}
 	        autocomplete="new-password"
@@ -461,7 +471,7 @@ function EditChannelModal() {
 		var form = e.target.closest(".channel-form");
 		error.value = "";
 		saving.value = true;
-		var personaId = form.querySelector("[data-field=personaId]")?.value?.trim() || "";
+		var agentName = form.querySelector("[data-field=agentName]")?.value?.trim() || "";
 			var updateConfig = {
 				token: cfg.token || "",
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
@@ -471,8 +481,8 @@ function EditChannelModal() {
 				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
 				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
-		// Allow clearing persona binding by sending explicit null.
-		updateConfig.persona_id = personaId ? personaId : null;
+		// Allow clearing agent binding by sending explicit null.
+		updateConfig.persona_id = agentName ? agentName : null;
 		if (editModel.value) {
 			updateConfig.model = editModel.value;
 			var found = modelsSig.value.find((x) => x.id === editModel.value);
@@ -500,18 +510,28 @@ function EditChannelModal() {
 	var selectStyle =
 		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;cursor:pointer;";
 
+	var configuredAgent = cfg.persona_id || "";
+	var agentMissing = Boolean(
+		configuredAgent &&
+			agentNamesLoaded.value &&
+			Array.isArray(agentNames.value) &&
+			!agentNames.value.includes(configuredAgent),
+	);
+
 	return html`<${Modal} show=${true} onClose=${() => {
 		editingChannel.value = null;
 	}} title="Edit Telegram Bot">
     <div class="channel-form">
 			<div class="text-sm text-[var(--text-strong)]">${ch.name || ch.chanAccountKey}</div>
-      <label class="text-xs text-[var(--muted)]">Persona ID (optional)</label>
-      <input data-field="personaId" type="text" value=${cfg.persona_id || ""} placeholder="e.g. default / ops / research"
-        style="font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;"
-        autocapitalize="none"
-        autocorrect="off"
-        spellcheck="false"
-        name="telegram_persona_id_edit" />
+      <label class="text-xs text-[var(--muted)]">Agent (optional)</label>
+			<div class="text-xs text-[var(--muted)]" style="margin-top:-2px;margin-bottom:6px;">
+				Choose an agent under <code>${"people/<name>/"}</code>.
+			</div>
+      <select data-field="agentName" style=${selectStyle} value=${configuredAgent || ""} name="telegram_agent_name_edit">
+        <option value="">(default)</option>
+        ${agentNames.value.map((id) => html`<option key=${id} value=${id}>${id}</option>`)}
+        ${agentMissing ? html`<option value=${configuredAgent}>Missing: ${configuredAgent}</option>` : null}
+      </select>
       <label class="text-xs text-[var(--muted)]">DM Policy</label>
       <select data-field="dmPolicy" style=${selectStyle} value=${cfg.dm_policy || "open"}>
         <option value="open">Open (anyone)</option>
