@@ -291,26 +291,26 @@ function UserSection() {
 			</p>
 		</div>
 
-			<div style="max-width:900px;display:flex;flex-direction:column;gap:10px;">
-				<div>
-					<label class="text-xs text-[var(--muted)]">Owner</label>
-					<input class="provider-key-input" style="width:320px;"
-						value=${draft.name || ""}
-						onInput=${(e) => setDraft({ ...draft, name: e.target.value })} />
-				</div>
-				<div>
-					<label class="text-xs text-[var(--muted)]">Timezone</label>
-					<input class="provider-key-input" style="width:320px;"
-						placeholder="Asia/Shanghai"
-						value=${draft.timezone || ""}
-						onInput=${(e) => setDraft({ ...draft, timezone: e.target.value })} />
-				</div>
-			${draft.location
-				? html`<div class="text-xs text-[var(--muted)]">
+		<div style="max-width:900px;display:flex;flex-direction:column;gap:10px;">
+			<div>
+				<label class="text-xs text-[var(--muted)]">Owner</label>
+				<input class="provider-key-input" style="width:170px;margin-left:10px"
+					value=${draft.name || ""}
+					onInput=${(e) => setDraft({ ...draft, name: e.target.value })} />
+			</div>
+			<div>
+				<label class="text-xs text-[var(--muted)]">Timezone</label>
+				<input class="provider-key-input" style="width:152px;margin-left:10px"
+					placeholder="Asia/Shanghai"
+					value=${draft.timezone || ""}
+					onInput=${(e) => setDraft({ ...draft, timezone: e.target.value })} />
+			</div>
+			${draft.location ? 
+				html`<div class="text-xs text-[var(--muted)]">
 					Location: ${draft.location.place || (draft.location.latitude + "," + draft.location.longitude)}
 					${draft.location.updatedAt ? html`<span> (updated ${draft.location.updatedAt})</span>` : null}
 				</div>`
-				: null}
+			: null}
 		</div>
 
 		<div style="max-width:900px;">
@@ -535,7 +535,7 @@ function PeoplePrivateSection() {
 	}
 
 	var selectStyle =
-		"height:32px;font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0 10px;font-size:.85rem;cursor:pointer;";
+		"height:26px;width=150px;font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0 10px;font-size:.85rem;cursor:pointer;";
 
 	function renderSection(title, filePath, dirty, key, content, setContent, onSave) {
 		return html`<div style="max-width:900px;border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--surface);">
@@ -562,18 +562,18 @@ function PeoplePrivateSection() {
 	}
 
 	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-			<div style="display:flex;flex-direction:column;gap:6px;">
-				<div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;">
-					<h2 class="text-lg font-medium text-[var(--text-strong)]" style="margin:0;">People</h2>
-					<div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;">
-						<select style=${selectStyle} value=${selectedName} onChange=${(e) => setSelectedName(e.target.value)}>
-							${peopleList.map(
-								(p) => html`<option key=${p.name} value=${p.name}>${p.name}${p.isDefault ? " (default)" : ""}</option>`,
-							)}
-						</select>
-						<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${() => setShowNewModal(true)} disabled=${savingKey}>
-							New
-						</button>
+		<div style="display:flex;flex-direction:column;gap:6px;">
+			<div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;">
+				<h2 class="text-lg font-medium text-[var(--text-strong)]" style="margin:0;">People</h2>
+				<div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;">
+					<select style=${selectStyle} value=${selectedName} onChange=${(e) => setSelectedName(e.target.value)}>
+						${peopleList.map(
+							(p) => html`<option key=${p.name} value=${p.name}>${p.name}${p.isDefault ? " (default)" : ""}</option>`,
+						)}
+					</select>
+					<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${() => setShowNewModal(true)} disabled=${savingKey}>
+						New
+					</button>
 					<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${() => setShowCloneModal(true)} disabled=${savingKey || !baseDoc}>
 						Clone
 					</button>
@@ -614,7 +614,7 @@ function PeoplePrivateSection() {
 					<label class="text-xs text-[var(--muted)]">Emoji</label>
 					<input
 						class="provider-key-input"
-						style="width:3.2rem;text-align:center;font-size:1rem;"
+						style="width:3.2rem;text-align:center;font-size:1rem;height:2.3rem;"
 						value=${emoji}
 						onInput=${(e) => setEmoji(e.target.value)}
 					/>
@@ -805,7 +805,7 @@ function ContactsSection() {
 	}
 
 	var selectStyle =
-		"height:32px;font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0 10px;font-size:.85rem;cursor:pointer;";
+		"height:26px;width:150px;font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0 10px;font-size:.85rem;cursor:pointer;";
 
 	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
 		<div style="display:flex;flex-direction:column;gap:6px;">
@@ -837,42 +837,42 @@ function ContactsSection() {
 
 		<div style="max-width:900px;display:flex;flex-direction:column;gap:10px;">
 			<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
-				<div style="min-width:220px;display:flex;flex-direction:column;gap:4px;">
+				<div style="display:flex;flex-direction:column;gap:4px;">
 					<label class="text-xs text-[var(--muted)]">Name</label>
-					<input class="provider-key-input" style="width:220px;" value=${entry.name || ""} disabled=${true} />
+					<input class="provider-key-input" style="width:100px;" value=${entry.name || ""} disabled=${true} />
 				</div>
-				<div style="min-width:3.2rem;display:flex;flex-direction:column;gap:4px;">
+				<div style="display:flex;flex-direction:column;gap:4px;">
 					<label class="text-xs text-[var(--muted)]">Emoji</label>
-					<input class="provider-key-input" style="width:3.2rem;text-align:center;font-size:1rem;" value=${entry.emoji || ""} disabled=${true} />
+					<input class="provider-key-input" style="width:3.2rem;text-align:center;font-size:1rem;height:2.3rem" value=${entry.emoji || ""} disabled=${true} />
 				</div>
-				<div style="flex:1;min-width:260px;display:flex;flex-direction:column;gap:4px;">
+				<div style="flex:1;display:flex;flex-direction:column;gap:4px;">
 					<label class="text-xs text-[var(--muted)]">Creature</label>
-					<input class="provider-key-input" style="width:100%;" value=${entry.creature || ""} disabled=${true} />
+					<input class="provider-key-input" style="width:463px;" value=${entry.creature || ""} disabled=${true} />
 				</div>
 			</div>
 
-			<div>
-				<label class="text-xs text-[var(--muted)]">Display</label>
-				<input class="provider-key-input" style="width:320px;"
-					value=${entry.displayName || ""}
-					onInput=${(e) => setEntry({ ...entry, displayName: e.target.value })} />
-			</div>
 			<div style="display:flex;gap:12px;flex-wrap:wrap;">
 				<div>
-					<label class="text-xs text-[var(--muted)]">Telegram ID</label>
-					<input class="provider-key-input" style="width:220px;"
+					<label class="text-xs text-[var(--muted)]">Display</label>
+					<input class="provider-key-input" style="width:120px; margin-left:5px"
+						value=${entry.displayName || ""}
+						onInput=${(e) => setEntry({ ...entry, displayName: e.target.value })} />
+				</div>
+				<div>
+					<label class="text-xs text-[var(--muted)]">TG_ID</label>
+					<input class="provider-key-input" style="width:100px; margin-left:5px"
 						value=${entry.telegramUserId || ""}
 						onInput=${(e) => setEntry({ ...entry, telegramUserId: e.target.value })} />
 				</div>
 				<div>
-					<label class="text-xs text-[var(--muted)]">Telegram @</label>
-					<input class="provider-key-input" style="width:220px;"
+					<label class="text-xs text-[var(--muted)]">TG_@</label>
+					<input class="provider-key-input" style="width:100px; margin-left:5px"
 						value=${entry.telegramUserName || ""}
 						onInput=${(e) => setEntry({ ...entry, telegramUserName: e.target.value })} />
 				</div>
 				<div>
-					<label class="text-xs text-[var(--muted)]">Telegram name</label>
-					<input class="provider-key-input" style="width:220px;"
+					<label class="text-xs text-[var(--muted)]">TG_Name</label>
+					<input class="provider-key-input" style="width:100px; margin-left:5px"
 						value=${entry.telegramDisplayName || ""}
 						onInput=${(e) => setEntry({ ...entry, telegramDisplayName: e.target.value })} />
 				</div>
