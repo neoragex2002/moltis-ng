@@ -420,7 +420,7 @@ HookPayload 对外字段必须为 `camelCase`：
 - Drift hotspots：`docs/src/session-branching.md`、`docs/src/session-state.md`、`docs/src/hooks.md`、`docs/src/mobile-pwa.md`
 - Related issues：
   - `issues/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md`
-  - `issues/issue-spawn-agent-session-key-model-selection-timeout-and-errors.md`
+  - `issues/issue-spawn-agent-inheritance-semantics-sync-timeouts-observability.md`
 
 ## 未决问题（Open Questions）
 
