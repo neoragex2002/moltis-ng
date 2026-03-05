@@ -3,6 +3,7 @@
 ## 实施现状（Status）【增量更新主入口】
 - Status: PARTIAL（部分问题已核实/修复；仍有关键 TODO）
 - Priority: P1（子代理不可控：可能无故失败/超时/错误提示不足）
+- Updated: 2026-03-05
 - Components: tools(spawn_agent) / agents runner / gateway chat timeout / openai-responses provider
 - Affected providers/models: 特别影响 `openai-responses::*`（complete 走 streaming collect）
 
@@ -60,12 +61,18 @@
   - 两者必须收敛（要么改实现、要么改描述并显式说明）。
 - [x] 子代理继承父 run 的关键 tool_context（至少 `_sandbox/_acceptLanguage/_connId/_sessionId`，以及 channel-bound 场景下的 `_chanChatKey`），避免同一 session 内“主代理与子代理的工具行为口径不一致”。
 - [ ] 子代理必须使用“本轮有效工具集”（filtered registry）或明确声明差异；不得因为使用静态 registry 而出现“父能用、子不能用”或“父禁用、子仍可用”的不一致。
+- [ ] 子代理 persona 继承语义必须明确并收敛：
+  - 当前 schema 明确：`persona_id` 默认不从父会话继承（见 `crates/tools/src/spawn_agent.rs:119`–`crates/tools/src/spawn_agent.rs:121`）。
+  - 需要明确：默认到底应继承父 run 的 persona（更符合“委派给同一人格的子线程”），还是保持系统默认 persona（更隔离但更容易产生“父/子行为不一致”）。
 - [ ] hooks 语义必须明确并收敛：
   - 子代理是否继承父 run 的 hooks（默认建议继承，至少继承审计/阻断类 hooks）。
   - 不允许子代理绕过 hooks 导致安全/策略层失效。
 - [ ] 子代理长程运行必须具备可控的超时/取消语义：
   - 至少应避免“子代理无限阻塞导致父 run 只能靠 gateway 600s 超时兜底”。
   - 超时后用户/日志必须可解释（是子代理超时还是上游断流）。
+- [ ] 子代理的 reply medium（Text vs Markdown vs Multimodal）口径必须明确并收敛：
+  - 当前实现固定 `PromptReplyMedium::Text`（不跟随父 run 的推断结果），可能导致输出媒介不一致。
+  - 需要明确：子代理是否应继承父 run 的 reply medium，或由工具参数显式指定。
 - [ ] 必须明确 `spawn_agent` 的执行形态（同步 vs 异步）并收敛：
   - 当前实现为**同步阻塞**（父 run 等待 tool 完成才能继续）；这会放大 600s 超时风险，也会让“异步结果驱动父会话总结”在机制上做不到。
   - 若需要“子代理异步执行 + 结果回推”，应在工具层引入 job id / 后台队列 / 结果事件或轮询接口（否则应该把文案写清楚，避免误用）。
@@ -100,6 +107,8 @@
 - 子代理已继承父 run 的关键 tool_context（降低行为漂移风险）：
   - 透传字段：`_sessionId/_chanChatKey/_connId/_acceptLanguage/_sandbox`：`crates/tools/src/spawn_agent.rs:181`–`crates/tools/src/spawn_agent.rs:218`
   - 结论：**“子代理只透传 sessionId”已不成立；但仍缺少覆盖这些字段的回归测试**
+- spawn_agent 自己实现了一套 persona 文件加载/合并逻辑（与 gateway/chat 的 persona 组装链路分离，存在 drift 风险）：
+  - `load_persona(...)`：`crates/tools/src/spawn_agent.rs:39`–`crates/tools/src/spawn_agent.rs:54`
 - 子代理“默认模型”不是父会话模型：
   - `crates/gateway/src/server.rs:2488`：`SpawnAgentTool::new(... default_provider, ...)`（default_provider 来自 gateway 启动配置，而非父 run 的 session metadata）
   - 结论：**未指定 tool 参数 `model` 时，子代理使用的是启动时选择的 default_provider，而非父 run 当前模型**
@@ -119,9 +128,16 @@
     - `on_event=None`（子代理内部事件不会进入主 run 的 runner event 流）
     - `history=None`（子代理无对话上下文）
     - `hook_registry=None`（子代理绕过 hooks）
+- 子代理会在 canonical system prompt 末尾硬编码追加 “## Sub-agent ...” 段落（存在与模板/主路径漂移风险）：
+  - `crates/tools/src/spawn_agent.rs:228`–`crates/tools/src/spawn_agent.rs:231`
+- 子代理 reply medium 当前固定为 Text（不继承父 run 的推断结果）：
+  - `PromptReplyMedium::Text`：`crates/tools/src/spawn_agent.rs:224`–`crates/tools/src/spawn_agent.rs:227`
 - 子代理使用的是静态工具集快照（与本轮 filtered registry 可能不一致）：
   - 子代理工具集：`crates/tools/src/spawn_agent.rs:176`（从 SpawnAgentTool 持有的 registry clone）
   - 主 run 工具集：`crates/gateway/src/chat.rs:4745`（传入 `filtered_registry`）
+- `spawn_agent` tool output schema 缺少结构化错误/进度语义：
+  - 成功仅返回 `text/iterations/tool_calls_made/model`：`crates/tools/src/spawn_agent.rs:268`–`crates/tools/src/spawn_agent.rs:273`
+  - 失败直接 tool error（父 run 只能拿到一条错误字符串；无法表达“已运行多久/最后一步/可重试性/是否超时”）。
 - 子代理生命周期事件缺少与父 run 的关联字段（UI 难归因）：
 - gateway 注册 spawn_tool 时广播子代理 start/end，但 payload 不含 `runId/sessionId/toolCallId`：`crates/gateway/src/server.rs:2360`–`crates/gateway/src/server.rs:2385`
 - gateway run 超时（600s）：
@@ -129,6 +145,8 @@
 - 执行形态为同步阻塞（无法“子代理异步完成后驱动父会话总结”）：
   - 同步阻塞约束（注释）：`crates/tools/src/spawn_agent.rs:23`–`crates/tools/src/spawn_agent.rs:28`
   - 实现也为同步 await：`crates/tools/src/spawn_agent.rs:233`–`crates/tools/src/spawn_agent.rs:243`
+- 最大嵌套深度硬编码（可能与实际编排需求不匹配）：
+  - `MAX_SPAWN_DEPTH=3`：`crates/tools/src/spawn_agent.rs:18`、`crates/tools/src/spawn_agent.rs:146`
 
 ## 根因分析（Root Cause）
 可能是多因素叠加（需进一步定位）：
@@ -142,6 +160,76 @@
 - H) **长程缺少 tool-level 超时/取消**：`spawn_agent` 作为 tool call 没有独立超时，容易拖死父 run，最终只能靠 gateway 600s 超时兜底。
 - I) **可观测性缺口**：子代理生命周期事件缺少与父 run 的关联字段；openai-responses 的 EOF 错误缺少 request/stage 等上下文。
 - J) **同步阻塞形态**：当前 `spawn_agent` 不能“后台异步执行并回推结果”，因此长任务会直接拉长父 run，并更易触发 600s 超时兜底。
+- K) **子代理 prompt 追加段落漂移**：子代理会额外硬编码追加 “## Sub-agent ...” 指令段，缺少可配置入口/与主路径不对齐，可能导致模板与行为漂移。
+- L) **缺少结构化失败出口**：`spawn_agent` 失败时只能返回一条 error 字符串，无法表达“是否超时/可重试/已进行到哪一步”等诊断信息。
+
+## 产品待决策事项（Decisions）& 初步建议（Recommendations）
+排序口径：按“影响范围（会影响所有子代理调用）/失败概率/安全风险/排障成本”综合优先级从高到低。
+
+1) **默认 model 行为收敛（文案 vs 实现）**
+   - 决策点：未指定 `model` 时，子代理到底应使用“父 run 的 effective model”，还是“gateway 启动时注入的 `default_provider`”。
+   - 建议：默认**继承父 run 的 effective model**；若无法拿到父模型，则明确 fallback（并同步 tool schema 文案与 debug 面板可见）。
+   - 理由：这是最高频、最高隐性失败来源（父会话正常但子代理偷偷换模型，触发不兼容/限流/工具支持差异）。
+
+2) **子代理有效工具集继承策略（filtered registry vs 静态 registry）**
+   - 决策点：子代理是否必须使用父 run 的 filtered tool registry（或其子集），还是允许使用 server 启动时的静态 registry 快照。
+   - 建议：默认**使用父 run 的 filtered registry（或更严格的子集）**，并在 UI/debug 中可见。
+   - 理由：不收敛会出现“父禁用、子仍可用”的策略绕过风险，也会制造“父能用、子不能用”的离奇失败。
+
+3) **hooks 继承（审计/阻断）**
+   - 决策点：子代理是否继承父 run hooks（至少审计/阻断类），还是允许 `hook_registry=None` 绕过。
+   - 建议：默认**继承 hooks**（至少安全/审计类）；若出于隔离需要不继承，必须显式配置且在 debug/事件里标注。
+   - 理由：不继承会造成策略层断链，属于安全风险与排障断证据链问题。
+
+4) **超时/取消语义（tool-level vs 仅 gateway 600s）**
+   - 决策点：是否为 `spawn_agent` 引入 tool-level timeout/cancel（与 gateway 600s 并存），以及超时后如何向父 run/渠道用户解释。
+   - 建议：优先引入**tool-level timeout（默认值 + 可配置）**；取消（cancel）可后置但要有明确错误类型/字段。
+   - 理由：同步阻塞形态下，缺少 tool-level timeout 会直接把系统拖到 600s 兜底，且难解释。
+
+5) **同步阻塞 vs 异步 job（“异步回推结果驱动父会话总结”）**
+   - 决策点：`spawn_agent` 是否要升级为异步 job（返回 jobId，后台执行，完成后事件回推/轮询拿结果）。
+   - 建议：短期保持同步阻塞但必须补齐 timeout/可观测性；中长期如确需“异步回推驱动父会话”，应单独引入 job/queue 机制（不要用“假异步”）。
+   - 理由：这属于架构级决策，没 job 系统就做不到可靠的异步回推。
+
+6) **`sessionId` 策略（继承 vs 派生）**
+   - 决策点：子代理是否默认继承父 `sessionId`（共享 prompt-cache bucket），还是派生子 `sessionId` 隔离缓存/归属。
+   - 建议：默认**派生子 `sessionId`**（例如 `${parent}:spawn:${toolCallId}`），并提供 `inheritSessionId=true` 作为显式开关。
+   - 理由：默认继承会混淆缓存归属与调试归因；派生更可控、更利于可观测性。
+
+7) **错误可观测性最小闭环（尤其 openai-responses 断流）**
+   - 决策点：`stream ended unexpectedly` 等错误需要补哪些上下文（request id/stage/received events count/runId/toolCallId/是否超时）。
+   - 建议：把“可定位上下文”作为 P0：日志与 debug 至少包含 `runId/toolCallId/effective model/effective sessionId/provider request id(若有)`。
+   - 理由：没有这些，问题只能停留在“偶发断流”无法定位。
+
+8) **`model=""` 兼容策略**
+   - 决策点：空字符串 model 是报错还是当作未提供。
+   - 建议：把 `model=""` **视为未提供**（等价 None）；unknown model 错误要包含可用 model 提示。
+   - 理由：这是低风险、高收益的止血项，能避免无意义的 `unknown model:`。
+
+9) **结构化 tool output / 结构化失败出口**
+   - 决策点：是否将 `spawn_agent` 输出从“仅 text”升级为结构化（含 status、error_type、timed_out、partial/progress 等）。
+   - 建议：至少补齐结构化 error（`timedOut`, `retryable`, `stage`）与可观测字段；progress 可后置。
+   - 理由：同步阻塞 + 长任务下，没有结构化错误就无法解释也无法自动恢复。
+
+10) **persona 继承语义（默认 persona vs 继承父 persona）**
+   - 决策点：子代理默认 persona 是否继承父 run persona，还是保持系统 `default`（现状是后者，且 schema 已写“does not implicitly inherit”）。
+   - 建议：先保持现状（默认不继承，仅显式 `persona_id` 切换），并在文档/UX 上强调；若要改为默认继承，需同步评估权限边界/隔离策略。
+   - 理由：隐式继承会扩大“人格/策略”传播范围，容易引入难以解释的隐式行为。
+
+11) **子代理 `## Sub-agent` 固定追加段落的治理方式**
+   - 决策点：保留硬编码 suffix，还是把它纳入 canonical builder 的可配置项/模板化，避免漂移。
+   - 建议：中期改为可配置（builder 参数/模板变量），短期至少在文档中冻结其存在与目的。
+   - 理由：硬编码 suffix 是典型 drift 源。
+
+12) **reply medium 继承（Text/Markdown/Multimodal）**
+   - 决策点：子代理是否应继承父 run 的 reply medium，还是固定 Text（现状固定 Text）。
+   - 建议：默认**继承父 run 的 reply medium**；无法继承时允许 tool 参数显式指定。
+   - 理由：否则同一会话内父/子输出媒介不一致，影响用户体验与可用性。
+
+13) **嵌套深度上限策略（`MAX_SPAWN_DEPTH`）**
+   - 决策点：上限是否要可配置/是否与 task 编排策略绑定。
+   - 建议：保持有上限，但支持配置，并在错误里输出当前深度/上限。
+   - 理由：硬编码容易与未来编排需求冲突，但无限递归也必须禁止。
 
 ## 期望行为（Desired Behavior / Spec）【尽量冻结】
 - 必须：

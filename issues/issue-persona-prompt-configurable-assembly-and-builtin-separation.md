@@ -36,6 +36,14 @@
 - provider 路径存在“注入内容不一致”的硬编码差异（例如 `IDENTITY.md` raw 是否注入）。
 - 术语收敛（低优先级）：将 UI/文档/对外口径中 “USER/USER.md/UserProfile/user” 的称呼统一为 **Owner**（更贴近实际语义：primary operator）；内部代码类型/文件名是否改名另行评估（改名面广、优先级可后置）。
 
+**Update（2026-03-05，对齐现状：Phase 1+ TODO Rebase on canonical v1）**
+- Phase 1+ 的落点不再是 `PromptBundle`/Responses 三段 developer items；后续应以 canonical v1 为唯一权威产物（单条 cross-provider system prompt），围绕“输入/固定块/布局”的治理与复用继续推进。
+- 仍待解决（Phase 1+）：
+  - 统一 persona sources 的加载/合并逻辑（gateway/chat vs tools.spawn_agent 仍重复实现，易漂移）。
+  - 形成一个“Prompt blocks 清单（Inputs vs FixedBlocks）+ 默认顺序/requiredness + provider mapping” 的集中表述（避免文案与规则散落）。
+  - Surface 分层（UI vs Channel）策略化：避免 “UI 工具面板/静默回复” 假设对 Telegram 等渠道造成体验退化。
+  - 子代理（spawn_agent）相关的继承/超时/观测等决策与实现收敛（详见：`issues/issue-spawn-agent-inheritance-semantics-sync-timeouts-observability.md`）。
+
 ---
 
 ## 背景（Background）
@@ -95,11 +103,11 @@
 2) 可配置（文件/配置）与不可配置（硬编码）混杂：同一类内容的“来源/优先级/注入层级”不一致，且存在 provider 路径分叉，导致行为不可预测。
 3) 大量硬编码散落各处：固定文案、默认 seed、引用路径、缺失占位符等没有统一的 FixedBlock 注册表；难以统一调整与评审，也不利于后续做更灵活但不冗余的配置化。
 4) prompt 表述效果不佳：系统级 guidelines 与 persona 级内容的边界不够清晰，部分段落冗长/重复，影响模型理解与用户心智模型一致性。
-5) USER.md 可能发生“数据被覆盖/丢失”：用户在 `<data_dir>/USER.md` 中写了自然语言 prompt/备注正文后，系统在自动持久化 timezone/location 时会调用 `save_user()` 覆盖写回模板化文件（并可能删除正文），导致用户辛苦维护的内容被意外抹掉（dirty behavior / data-loss risk）。
+5)（Historical，Phase 0 已止血）USER.md 曾可能发生“数据被覆盖/丢失”：用户在 `<data_dir>/USER.md` 中写了自然语言 prompt/备注正文后，系统在自动持久化 timezone/location 时调用 `save_user()` 的覆盖式写回可能抹掉正文（data-loss risk）。现状：`save_user()` 仅更新 YAML frontmatter 的 managed keys，正文保留且不再自动删除文件。
 6) “我是谁”类问题效果差：当前 prompt 没有在 `Owner (USER.md)` 小节显式指令 agent “遇到 owner/user 身份相关问题要主动读取/参考 `<data_dir>/USER.md`”，导致当用户问“我是谁/我的信息是什么”时，agent 往往不会主动去该文件查找信息（心智模型与行为不一致）。
 7) “你认识哪些人/有哪些 bots”类问题效果差：`People (reference)` 小节当前只给出路径引用且强调“不要内联 roster”，但没有显式指令 agent 在被问到“你认识哪些人/有哪些机器人/有哪些账号”时应主动读取并基于 `/moltis/data/PEOPLE.md` 作答，导致 agent 往往不会主动溯源该文件。
 8) PEOPLE.md 的“可编辑性”心智模型不一致：当前 PEOPLE roster 文件会被 gateway 按 channels 配置自动再生（覆盖写回），若用户手工编辑 PEOPLE.md，后续 channels.add/remove/update 会覆盖掉手工内容（这在实现上是设计如此，但需要在 prompt/docs 中明确，否则属于 surprise / data-loss risk）。
-9) IDENTITY.md 可能发生“数据被覆盖/丢失”：`agent.identity.update` / onboarding 会调用 `save_identity()` 用模板化文件覆盖写回 `<data_dir>/people/default/IDENTITY.md`，若用户在该文件中写了自然语言 prompt/备注正文，会被覆盖抹掉（dirty behavior / data-loss risk，与 USER.md 类似）。
+9)（Historical，Phase 0 已止血）IDENTITY.md 曾可能发生“数据被覆盖/丢失”：`agent.identity.update` / onboarding 调用 `save_identity()` 的覆盖式写回可能抹掉正文（data-loss risk）。现状：`save_identity()` 仅更新 YAML frontmatter 的 managed keys，正文保留且不再自动删除文件。
 10) “编辑入口/文件落点”口径不一致：UI 文案仍在暗示 identity 等落点是“workspace root”，但实际 canonical 路径已是 `<data_dir>/people/default/IDENTITY.md` / `<data_dir>/USER.md` 等，用户容易编辑错文件、认为“不生效”。
 11) 文件“溯源可执行性”普遍不足：多处小节展示的是“结构化摘取结果”（如 Identity 字段行、Owner 两行），但未提供明确的“去哪里看完整源文件”的指引（路径、何时需要查），导致 agent 在被问到相关信息时不主动查源文件（治理不当/心智模型不一致）。
 12) provider 分支导致 People 能力不一致：OpenAI Responses 路径存在 `People (reference)` 小节；非 Responses 路径当前没有等价的小节，导致“你认识哪些人/有哪些 bots”类问题在不同 provider 下表现不一致。
@@ -118,7 +126,7 @@
 25) “as-sent prompt” 不可追溯：gateway/chat 在 send 入口会先构造一份 `system_prompt` 仅用于 token 估算/compaction 决策；真正发送给模型时又会在 `run_with_tools` / `run_streaming` 里重新生成 prompt（且 registry/skills/include_tools 可能不同）。此外，OpenAI Responses 的 as-sent 形态是多条 `role=developer` items，但估算时常把三段先拼成一个字符串当作单条 system message 来估算，进一步放大“估算 vs 实发”的潜在偏差。这导致缺乏一个统一的可观测入口输出 as-sent 文本/块清单。
 26) role=developer layering 形态不稳定：虽然 OpenAI Responses 设计是三段 developer preamble（system/persona/runtime_snapshot）并可按多条 message 保序发送，但当前不同调用点对 layering 的表达方式不一致（有的走 prefix_messages 多条 system message，有的把三段先拼成单字符串/或仅用于估算），增加治理与测试复杂度。
 27) sub-agent 追加段落不一致：`tools.spawn_agent` 在 openai-responses 路径会额外硬编码追加 `## Sub-agent...` 指令，而主 agent 路径没有等价机制/可配置入口；同类“运行形态差异”缺少集中治理与明确口径。
-28) IDENTITY.md raw 注入包含 frontmatter，导致重复与噪声：OpenAI Responses 路径在 `## Identity` 小节会先注入“结构化字段行”（从 frontmatter 抽取），随后又原样注入 `IDENTITY.md` raw markdown；由于 raw 当前包含 YAML frontmatter（seed 也包含），这会把同一信息重复两次并把 YAML 暴露给模型，降低结构清晰度与可预测性。
+28)（Historical，Phase 0 已修复）IDENTITY.md raw 注入包含 frontmatter，导致重复与噪声：旧实现会把 `IDENTITY.md` 的 YAML frontmatter 原样注入，造成重复并暴露 YAML。现状：注入前剥离 YAML frontmatter（见 canonical v1 的 `strip_yaml_frontmatter()`）。
 29) debug/context 口径与 OpenAI Responses “as-sent” 不一致：`chat.context` / `chat.full_context` 当前构造的是“单段 system prompt + openai chat-completions 格式 messages”，并声称“shows what the LLM actually saw”，但对 openai-responses 来说实际发送的是 `input[]` items 且 system 会被映射为 `role=developer`；因此 context view 会误导排障（看不到三段 developer layering，也看不到 as-sent input item 形态）。
 30) hook/trace 的 messages 序列化口径不一致：runner 在 `BeforeLLMCall` hook payload 中一律把 typed messages 转成 `to_openai_value()`（chat-completions 形态）；对 openai-responses 来说这不是 as-sent 请求体形态，导致可观测性层面进一步丢失“最终发送给 Responses API 的 developer items”证据（与 Symptoms 25/29 叠加）。
 31) debug/raw_prompt/context 在 persona 选择上可能漂移：`chat.raw_prompt` / `chat.context` / `chat.full_context` 当前直接调用 `load_prompt_persona()`（default persona），没有走 `resolve_session_persona_id(...)`（Telegram 绑定/会话 persona 路由），因此 debug 面板可能展示的并非“effective persona_id / effective persona sources”，进一步削弱可观测性与排障可信度。
@@ -137,13 +145,13 @@
 > 目标：把“散落的症状”收敛为少数几类可治理的问题，便于后续方案与验收对齐。
 
 1) **溯源缺失（Traceability gap）**：prompt 输出了结构化摘要（Identity/Owner/Workspace Files），但缺少“source of truth 在哪、何时必须去读”的可执行指引，导致 agent 不主动查文件、用户难以排障（Symptoms 6/7/11/14）。
-2) **自动写回导致内容丢失（Auto-write data loss）**：`save_user()`/`save_identity()` 覆盖写回模板，PEOPLE.md 自动再生覆盖写回，都会在用户“把 md 当 prompt 文档写”的场景下造成 surprise 与 data-loss risk（Symptoms 5/8/9）。
+2) **自动写回导致内容丢失（Auto-write data loss）**：Phase 0 已止血 `save_user()`/`save_identity()`（仅更新 frontmatter、正文保留、不删文件），但 PEOPLE.md 仍存在自动再生覆盖写回；需要在 prompt/docs/UI 中明确“哪些文件可手工编辑、哪些会被系统再生覆盖”，避免 surprise（Symptoms 5/8/9）。
 3) **provider 分支漂移（Provider divergence）**：Responses vs 非 Responses 的章节/内容不一致，导致同一问题在不同 provider 下行为不同（Symptoms 2/12/14 + 相关证据）。
 4) **口径与命名不收敛（Mental model mismatch）**：UI/章节标题（workspace root / “(workspace)”）与实际文件落点/注入来源不一致，诱发“改了不生效/看错文件”（Symptoms 10/14）。
 5) **治理结构缺失（Governance / Build sprawl）**：缺少“块清单 + 默认顺序 + required/optional + 层归属 + FixedBlock 注册表”的集中表述与校验，且 prompt build/layout 入口分散/受运行模式影响，导致硬编码散落与重复注入、难以统一审阅与测试（Symptoms 1/2/3/4/15/17/19）。
 6) **Surface 未分层（UI vs Channel）**：prompt 中存在“UI 工具面板/空回复”假设，但没有按运行 surface（gateway UI / telegram 等）做差异化，导致 channel 体验退化（Symptoms 16）。
 7) **结构化/手工内容未解耦（Auto vs Manual）**：结构化 profile（Owner/Identity frontmatter）与手工自然语言 prompt 文档混用同一文件，并存在自动覆盖写回；此外 PEOPLE roster 作为“reference”但本质为 auto-generated 文件。缺乏明确边界与写入策略，导致 data-loss risk 与治理困难（Symptoms 5/8/9/22）。
-8) **可观测口径不一致（Observability mismatch）**：debug/context 与 hooks 仍以 chat-completions 的 messages 形态表达上下文，无法表达 OpenAI Responses 的 as-sent `input[]` developer items（含三段 layering），导致排障证据链断裂（Symptoms 25/29/30）。
+8) **可观测口径不一致（Observability mismatch）**：Phase 0 已在 debug endpoints 补齐 `asSentPreamble`/provider-aware `asSent` 与 `personaIdEffective`，显著缓解“看不到 effective persona / 看不到 as-sent preamble”的证据链问题；但 hooks payload 仍以 `to_openai_value()`（chat-completions messages）序列化表达上下文，与 openai-responses 的 `input[]` items 形态并非一一对应，仍需后续治理（Symptoms 25/29/30）。
 
 ### 影响（Impact）
 - 用户体验：想做“极简但可控”的 persona 编排只能改代码；即便能改文件，也很难预测最终 prompt 结构与效果。
@@ -172,19 +180,19 @@
   - voice reply suffix 文案：`crates/agents/src/prompt.rs:250`
   - 默认 persona seed 文本（IDENTITY/TOOLS/AGENTS 等）：`crates/gateway/src/personas.rs:33`
   - DEFAULT_SOUL 内置模板与缺文件自动 seed：`crates/config/src/loader.rs:378`
-  - USER.md 自动覆盖写回（覆盖式模板渲染 + 可能删除正文）：`crates/config/src/loader.rs:568`
+  - [DONE] USER.md frontmatter 写回止血：`save_user()` 仅更新 managed keys、正文保留、不删文件：`crates/config/src/loader.rs:794`
   - 自动持久化触发点（会调用 `save_user()` 覆盖写回）：
     - ws 首次连接自动写 timezone：`crates/gateway/src/ws.rs:299`
     - location.result 自动写 location：`crates/gateway/src/methods.rs:816`
     - channel 位置更新写 location：`crates/gateway/src/channel_events.rs:638`
-  - UI 侧 Owner 编辑是“整文件原文写回”（与 `save_user()` 模板化覆盖写存在潜在冲突）：`crates/gateway/src/owner.rs:12`
+  - UI 侧 Owner 编辑是“整文件原文写回”（与 `save_user()` 的 frontmatter-only 更新可能存在并发/覆盖冲突，需一致性策略）：`crates/gateway/src/owner.rs:12`
   - PEOPLE.md 再生机制（覆盖写回 + 声明“Do not edit manually”）：`crates/gateway/src/people.rs:3`、`crates/gateway/src/people.rs:46`
   - PEOPLE.md 自动再生触发点（channels.add/remove/update）：`crates/gateway/src/channel.rs:213`
-  - IDENTITY.md 模板化覆盖写回：`crates/config/src/loader.rs:527`
+  - [DONE] IDENTITY.md frontmatter 写回止血：`save_identity()` 仅更新 managed keys、正文保留、不删文件：`crates/config/src/loader.rs:761`
   - 覆盖写回触发点（identity 更新会同时写 IDENTITY.md 与 USER.md）：`crates/onboarding/src/service.rs:159`（`identity_update` 内调用 `save_identity`/`save_user`）、`crates/onboarding/src/wizard.rs:64`
   - UI 文案口径可能误导（workspace root vs `<data_dir>`）：`crates/gateway/src/assets/js/page-settings.js:417`
-  - People reference 固定为 sandbox 路径：`crates/agents/src/prompt.rs:123`（`SANDBOX_DATA_DIR` 拼接）
-  - 非 Responses prompt 未包含 People reference 小节：`crates/agents/src/prompt.rs:380`（见其章节清单）
+  - People reference 固定为 sandbox 路径（legacy builder）：`crates/agents/src/prompt.rs:47`（`SANDBOX_DATA_DIR`）
+  - 非 Responses prompt 的 People reference 小节差异（legacy builder）：`crates/agents/src/prompt.rs:871`（`build_system_prompt_full`）
   - Workspace Files 标注为 workspace 但实际注入 persona 文件：`crates/agents/src/prompt.rs:479`（渲染小节标题）+ persona 来源：`crates/gateway/src/chat.rs:799`
   - “UI 工具面板 / 空回复”假设：`crates/agents/src/prompt.rs:20`（SYSTEM_GUIDELINES_AND_SILENT_REPLIES）与 `crates/agents/src/prompt.rs:548`（非 Responses Guidelines/Silent Replies）
   - OpenAI Responses project_context 空占位符：`crates/agents/src/prompt.rs:174`
@@ -194,27 +202,26 @@
   - 额外 system prompt（ad-hoc）：`crates/gateway/src/chat.rs:5543`（compaction summarizer）、`crates/agents/src/silent_turn.rs:131`（silent memory turn）、`crates/gateway/src/methods.rs:2557`（tts.generate_phrase）
   - Base intro 与工具能力不一致（shell exec vs web_fetch）：`crates/agents/src/prompt.rs:55`（base intro）+ `crates/agents/src/prompt.rs:22`（web_fetch guideline）
   - Project Context reference + snapshot 并存：`crates/agents/src/prompt.rs:148`（reference）+ `crates/agents/src/prompt.rs:174`（snapshot）
-  - as-sent 不可追溯（估算用 prompt 与实际发送路径分离）：`crates/gateway/src/chat.rs:2370`（预构造用于估算）+ `crates/gateway/src/chat.rs:4332` / `crates/gateway/src/chat.rs:5713`（实际 run 内重建）
-  - role=developer layering 形态分裂（多条 system vs 拼接字符串）：`crates/gateway/src/chat.rs:2391`（拼接字符串）+ `crates/gateway/src/chat.rs:4352`（prefix_messages 多条）+ `crates/tools/src/spawn_agent.rs:267`（prefix_messages 多条）
-  - sub-agent 额外硬编码追加：`crates/tools/src/spawn_agent.rs:266`
-  - IDENTITY.md raw 注入会包含 frontmatter：raw 加载不剥离 YAML：`crates/config/src/loader.rs:313`；raw 注入位置：`crates/agents/src/prompt.rs:97`；seed 默认 identity 含 frontmatter：`crates/gateway/src/personas.rs:53`
-  - debug/context 当前不区分 openai-responses：一律用 `build_system_prompt_*` 生成单段 system prompt 并输出 openai messages（与 Responses as-sent developer items 不一致）：`crates/gateway/src/chat.rs:3429`
-  - raw_prompt 当前不区分 openai-responses：一律用 `build_system_prompt_*` 生成单段 system prompt（无法表达 Responses 三段 developer preamble）：`crates/gateway/src/chat.rs:3781`（入口）+ `crates/gateway/src/chat.rs:3843`（实际构造）
-  - raw_prompt/context/full_context 未走 session persona 路由：使用 `load_prompt_persona()`（default persona）：`crates/gateway/src/chat.rs:3665`、`crates/gateway/src/chat.rs:3906`（对比 persona 路由：`crates/gateway/src/chat.rs:237`）
-  - channels/API 的 send_sync 预检/估算使用 default persona + 非 Responses prompt builder：`crates/gateway/src/chat.rs:2985`（`load_prompt_persona()`）+ `crates/gateway/src/chat.rs:2986`（`build_system_prompt_*`）+ `crates/gateway/src/chat.rs:3038`（估算入口）；后续实际执行走 `run_with_tools` / `run_streaming`（Responses 三段）：`crates/gateway/src/chat.rs:3113`
-  - send_sync 未传播 accept_language：`crates/gateway/src/chat.rs:3151`
-  - send_sync 失败时持久化 system error（后续注入→Responses developer items）：`crates/gateway/src/chat.rs:3046`（keep-window overflow）+ `crates/gateway/src/chat.rs:3202`（run failed）+ `crates/agents/src/model.rs:192` + `crates/agents/src/providers/openai_responses.rs:33`
-  - spawn_agent 的 Responses runtime/project context 缺失且禁用 hooks：`crates/tools/src/spawn_agent.rs:250`、`crates/tools/src/spawn_agent.rs:263`、`crates/tools/src/spawn_agent.rs:281`
+  - [DONE/mitigated] as-sent 可追溯：gateway 主路径与 debug endpoints 统一使用 canonical v1 builder，并输出 provider-aware `asSent` 摘要与 `asSentPreamble`：`crates/gateway/src/chat.rs:3331`
+  - [DONE] role=developer layering 形态收敛：跨 provider 仅 1 条 `ChatMessage::System`，openai-responses adapter 映射为单条 developer item：`crates/agents/src/prompt.rs:385`、`docs/src/system-prompt.md:6`
+  - sub-agent 额外硬编码追加：`crates/tools/src/spawn_agent.rs:229`
+  - [DONE] IDENTITY.md raw 注入剥离 YAML frontmatter：`strip_yaml_frontmatter()`：`crates/agents/src/prompt.rs:49`；canonical v1 注入：`crates/agents/src/prompt.rs:430`
+  - [DONE] debug endpoints（`chat.context`/`chat.raw_prompt`/`chat.full_context`）已 provider-aware 且展示 `personaIdEffective` + `asSentPreamble`：`crates/gateway/src/chat.rs:3331`、`crates/gateway/src/chat.rs:3666`、`crates/gateway/src/chat.rs:3814`
+  - [DONE] send_sync 已使用 `resolve_session_persona_id(...)` + canonical v1 builder，并传播 `_acceptLanguage` 到 runtime_context：`crates/gateway/src/chat.rs:2819`
+  - [DONE] send_sync 错误持久化不再写入 persisted `role=system`（改为 assistant `ui_error_notice` 并在 prompt 构造过滤）：`crates/gateway/src/chat.rs:2819`
+  - spawn_agent 缺少 runtime/project context 且禁用 hooks：`crates/tools/src/spawn_agent.rs:213`、`crates/tools/src/spawn_agent.rs:241`
   - `BeforeLLMCall` hook payload 一律走 `to_openai_value()` 序列化（chat-completions 形态；非 Responses as-sent）：`crates/agents/src/runner.rs:768`
   - 文档口径漂移（影响 as-sent/可观测性理解）：
-    - `docs/src/system-prompt.md:9`：仍按“单段 system prompt”描述 layout/build，不包含 OpenAI Responses 多 developer-item as-sent 形态。
+    - [DONE] `docs/src/system-prompt.md` 已更新为 canonical v1（单条 system → provider adapter 映射；Responses 为单条 developer item）：`docs/src/system-prompt.md:3`
     - `issues/done/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md:574`：声称 raw_prompt/as-sent 可观察到不同 persona developer message，但当前 raw_prompt/context 并未走 effective persona 路由且非 Responses-aware。
     - `issues/done/issue-named-personas-per-telegram-bot-identity-and-openai-developer-role.md:596`：提到 `ChatMessage::Developer`（当前 typed messages 并不存在该 role）。
 
 ### Persona Prompt 总体结构清单（As-is）【逐章：可配置/来源/证据】
-> 说明：当前存在两种“最终 prompt 形态”：
-> 1) **OpenAI Responses**：三段 developer preamble（`system` / `persona` / `runtime_snapshot`）。入口：`crates/agents/src/prompt.rs:40`
-> 2) **非 Responses provider**：单段 system prompt（内部包含多个小节）。入口：`crates/agents/src/prompt.rs:380`
+> Update（2026-03-05）：下述 “OpenAI Responses 三段 developer preamble” 属于 canonical v1 之前的历史审计结构。
+>
+> 现行（canonical v1）最终形态为：
+> 1) **跨 provider**：统一产出 1 条 system prompt 字符串（由 Type4 四文件模板控制结构）；
+> 2) **openai-responses**：adapter 将该 system prompt 映射为单条 `role=developer` input item（不再是三段 layering）。
 >
 > 下文按“章节”逐一列出：每章是否可配置（不改代码）、可配置来源（文件在哪里）、以及硬编码位置（代码在哪里）。
 
@@ -1078,7 +1085,7 @@ After the tool executes, you will receive the result and can then respond to the
 - **Phase 1（块化 Layout：默认清单复刻现状）**：把硬编码 prompt 组织方式收敛为 block 清单渲染，但暂不开放用户 layout 文件；先用测试把“默认输出等价”钉死。
 - **Phase 2（可选 layout 配置）**：在 Phase 1 稳定后再引入 `LAYOUT.toml`（严格校验 required blocks / 错误提示 / 回滚）。
 - **Phase 3（Surface 分层与质量收敛）**：UI vs Channel（Telegram 等）差异化注入 guidelines/silent replies，并清理 spawn_agent 与主路径的剩余漂移点；同时补齐 hooks/trace 的 as-sent 证据链（例如 `BeforeLLMCall` 对 openai-responses 输出 `input[]` developer items 口径，而不是 chat-completions 的 `messages[]` 口径）。
-- **Phase 4（术语/文档收敛）**：Owner 命名收敛、`docs/src/system-prompt.md` 更新为 Responses 多 developer-item as-sent 形态、清理 done doc 的过时描述。
+- **Phase 4（术语/文档收敛）**：Owner 命名收敛、[DONE] `docs/src/system-prompt.md` 已更新为 canonical v1（Responses: 单条 developer item as-sent）、清理 done doc 的过时描述。
 
 #### 行为规范（Normative Rules）
 - R0（Phase 0）：所有“会发给模型 / 用于估算 / 用于 debug 展示”的 prompt，都必须由同一套 **PromptBundle** 入口生成；禁止各调用点自行拼接/自行选 persona。
