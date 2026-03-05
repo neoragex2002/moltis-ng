@@ -24,7 +24,7 @@
 - spawn_agent（openai-responses provider 下仍只注入 1 条 system）：`crates/gateway/tests/spawn_agent_openai_responses.rs:43`
 
 **已知差异/后续优化（非阻塞）**
-- 目前 `asSent` 证据链已覆盖 openai-responses / anthropic / local-llm；其余 provider 的 as-sent 摘要可按需逐步补齐（见：`issues/issue-prompt-as-sent-observability.md`）。
+- 目前 `asSent` 证据链已覆盖 openai-responses / anthropic / local-llm；其余 provider 的 as-sent 摘要可按需逐步补齐（见：`issues/done/issue-prompt-as-sent-observability.md`）。
 
 ---
 
@@ -48,7 +48,7 @@
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [x] 支持四文件拼接：`people/<name>/{IDENTITY,SOUL,AGENTS,TOOLS}.md`，并按固定分隔线拼成 persona 模板正文。
+- [x] 支持四文件拼接：`people/<name>/{IDENTITY,SOUL,AGENTS,TOOLS}.md`，按固定顺序拼成 persona 模板正文（仅拼接非空段落，段间用 `\n\n` 连接；不自动插入固定分隔线或占位符）。
 - [x] 支持 `{{var}}` 纯字符串替换（对四文件均生效），无其它模板逻辑。
 - [x] 提供 v1 vars（至少覆盖 skills/tools 的三类运行模式：native / non-native / no-tools）。
 
@@ -84,14 +84,15 @@
 
 ## 期望行为（Desired Behavior / Spec）【尽量冻结】
 ### 模板所有权与拼接规则（必须写死）
-- 必须：Type4 persona 模板正文只由下列四个文件按顺序拼接得到，并使用固定分隔线（单行 `--------------------`）：
+- 必须：Type4 persona 模板正文只由下列四个文件按顺序拼接得到：
   1) `IDENTITY.md`
   2) `SOUL.md`
   3) `AGENTS.md`
   4) `TOOLS.md`
 
-  拼接格式：
-  - `<IDENTITY>`\n`--------------------`\n`<SOUL>`\n`--------------------`\n`<AGENTS>`\n`--------------------`\n`<TOOLS>`
+  拼接规则（现行 v1）：
+  - 对每个文件先 strip YAML frontmatter（如存在），再做 strict `{{var}}` 替换（同一 vars map）。
+  - 仅拼接非空段落；段落之间用 `\n\n` 连接；系统不自动插入固定分隔线或“（未配置）”占位符。
 
 - 必须：对四个文件都执行 `{{var}}` 替换（同一 vars map）。
 - 必须：替换仅做纯字符串替换（无 if/loop/表达式）；可选段落通过“var=空字符串”实现。

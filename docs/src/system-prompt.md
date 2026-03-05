@@ -1,6 +1,6 @@
 # System Prompt Architecture
 
-Update (2026-03-04):
+Update (2026-03-05):
 - The primary entry point is now `build_canonical_system_prompt_v1()` in `crates/agents/src/prompt.rs`.
 - The previous `build_system_prompt_*()` functions are legacy compatibility helpers and are no longer the main runtime path.
 - OpenAI Responses maps the canonical `ChatMessage::System` to a single `role=developer` input item (and omits top-level `instructions`).
@@ -18,6 +18,9 @@ each provider adapter to map it to its protocol:
 - User-owned Type4 templates: `people/<persona_id>/{IDENTITY,SOUL,AGENTS,TOOLS}.md`
 - Strict template vars: `{{var}}` (with `{{{{` / `}}}}` escapes), rendered via
   `crates/config/src/prompt_subst.rs`
+- Canonical v1 does not add wrapper headings (e.g. `# System`) or fixed runtime
+  blocks automatically; templates must opt-in by referencing the corresponding
+  `{{..._md}}` variables.
 - Debug observability: gateway debug endpoints expose `asSentPreamble` and
   provider-aware `asSent` summaries (see `crates/gateway/src/chat.rs`)
 

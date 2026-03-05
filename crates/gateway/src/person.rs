@@ -260,12 +260,17 @@ pub(crate) fn person_save(params: &serde_json::Value) -> anyhow::Result<serde_js
         anyhow::bail!("invalid name");
     }
 
+    let (identity_path, soul_path, tools_path, agents_path) = person_paths(&name)?;
+    let identity_existed_before = identity_path.exists();
+
     ensure_person_seeded(&name)?;
 
-    let (identity_path, soul_path, tools_path, agents_path) = person_paths(&name)?;
+    let identity_patch_present = params.get("identityPatch").is_some();
+    let identity_body_present = params.get("identityBody").is_some();
+    let mut identity_written = false;
 
     // IDENTITY.md
-    {
+    if identity_patch_present || identity_body_present {
         let mut doc = load_frontmatter_doc(&identity_path)?;
         if !doc.has_frontmatter {
             doc.has_frontmatter = true;
@@ -310,6 +315,7 @@ pub(crate) fn person_save(params: &serde_json::Value) -> anyhow::Result<serde_js
         }
 
         save_frontmatter_doc(&identity_path, &doc)?;
+        identity_written = true;
     }
 
     // SOUL/TOOLS/AGENTS markdown
@@ -320,8 +326,11 @@ pub(crate) fn person_save(params: &serde_json::Value) -> anyhow::Result<serde_js
         }
     }
 
-    // Keep Contacts read-only fields in sync.
-    moltis_config::sync_people_md_from_identities()?;
+    // Keep Contacts read-only fields in sync when identity changes (or when
+    // creating a new person directory).
+    if identity_written || !identity_existed_before {
+        moltis_config::sync_people_md_from_identities()?;
+    }
 
     person_get(&serde_json::json!({ "name": name }))
 }
@@ -414,5 +423,126 @@ mod tests {
         let err = person_delete(&serde_json::json!({ "name": "default" })).unwrap_err();
         assert!(format!("{err}").contains("cannot delete default"));
     }
-}
 
+    #[test]
+    fn saving_soul_does_not_modify_identity_or_people_md() {
+        let _guard = crate::test_support::TestDirsGuard::new();
+
+        let dir = moltis_config::people_dir().join("ops");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("IDENTITY.md"),
+            "# IDENTITY.md\n\nPlain body without frontmatter.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("SOUL.md"), "old soul").unwrap();
+        std::fs::write(dir.join("TOOLS.md"), "old tools").unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "old agents").unwrap();
+
+        let people_path = moltis_config::people_path();
+        if let Some(parent) = people_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &people_path,
+            "---\nschema_version: 1\npeople:\n  - name: ops\n    display_name: Ops\n---\n\n# PEOPLE.md\n\nKeep body.\n",
+        )
+        .unwrap();
+
+        let identity_before = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
+        let people_before = std::fs::read_to_string(&people_path).unwrap();
+
+        let out = person_save(&serde_json::json!({ "name": "ops", "soul": "new soul" })).unwrap();
+        assert_eq!(out["soul"], "new soul");
+        assert_eq!(out["tools"], "old tools");
+        assert_eq!(out["agents"], "old agents");
+
+        let identity_after = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
+        assert_eq!(identity_after, identity_before, "IDENTITY.md must not change");
+
+        let people_after = std::fs::read_to_string(&people_path).unwrap();
+        assert_eq!(people_after, people_before, "PEOPLE.md must not change");
+    }
+
+    #[test]
+    fn saving_tools_does_not_modify_identity_or_people_md() {
+        let _guard = crate::test_support::TestDirsGuard::new();
+
+        let dir = moltis_config::people_dir().join("ops");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("IDENTITY.md"),
+            "# IDENTITY.md\n\nPlain body without frontmatter.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("SOUL.md"), "old soul").unwrap();
+        std::fs::write(dir.join("TOOLS.md"), "old tools").unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "old agents").unwrap();
+
+        let people_path = moltis_config::people_path();
+        if let Some(parent) = people_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &people_path,
+            "---\nschema_version: 1\npeople:\n  - name: ops\n    display_name: Ops\n---\n\n# PEOPLE.md\n\nKeep body.\n",
+        )
+        .unwrap();
+
+        let identity_before = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
+        let people_before = std::fs::read_to_string(&people_path).unwrap();
+
+        let out =
+            person_save(&serde_json::json!({ "name": "ops", "tools": "new tools" })).unwrap();
+        assert_eq!(out["soul"], "old soul");
+        assert_eq!(out["tools"], "new tools");
+        assert_eq!(out["agents"], "old agents");
+
+        let identity_after = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
+        assert_eq!(identity_after, identity_before, "IDENTITY.md must not change");
+
+        let people_after = std::fs::read_to_string(&people_path).unwrap();
+        assert_eq!(people_after, people_before, "PEOPLE.md must not change");
+    }
+
+    #[test]
+    fn saving_agents_does_not_modify_identity_or_people_md() {
+        let _guard = crate::test_support::TestDirsGuard::new();
+
+        let dir = moltis_config::people_dir().join("ops");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("IDENTITY.md"),
+            "# IDENTITY.md\n\nPlain body without frontmatter.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("SOUL.md"), "old soul").unwrap();
+        std::fs::write(dir.join("TOOLS.md"), "old tools").unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "old agents").unwrap();
+
+        let people_path = moltis_config::people_path();
+        if let Some(parent) = people_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &people_path,
+            "---\nschema_version: 1\npeople:\n  - name: ops\n    display_name: Ops\n---\n\n# PEOPLE.md\n\nKeep body.\n",
+        )
+        .unwrap();
+
+        let identity_before = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
+        let people_before = std::fs::read_to_string(&people_path).unwrap();
+
+        let out =
+            person_save(&serde_json::json!({ "name": "ops", "agents": "new agents" })).unwrap();
+        assert_eq!(out["soul"], "old soul");
+        assert_eq!(out["tools"], "old tools");
+        assert_eq!(out["agents"], "new agents");
+
+        let identity_after = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
+        assert_eq!(identity_after, identity_before, "IDENTITY.md must not change");
+
+        let people_after = std::fs::read_to_string(&people_path).unwrap();
+        assert_eq!(people_after, people_before, "PEOPLE.md must not change");
+    }
+}

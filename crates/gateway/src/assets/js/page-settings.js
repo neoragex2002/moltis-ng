@@ -351,6 +351,7 @@ function PeoplePrivateSection() {
 	var [showDeleteModal, setShowDeleteModal] = useState(false);
 	var [newName, setNewName] = useState("");
 	var [cloneName, setCloneName] = useState("");
+	var docRequestId = useRef(0);
 
 	function flashSaved(key) {
 		setSavedKey(key);
@@ -382,9 +383,11 @@ function PeoplePrivateSection() {
 
 	function loadDoc(name) {
 		if (!name) return;
+		var requestId = ++docRequestId.current;
 		setLoadingDoc(true);
 		setError(null);
 		sendRpc("workspace.person.get", { name }).then((res) => {
+			if (docRequestId.current !== requestId) return;
 			setLoadingDoc(false);
 			if (res?.ok) {
 				var doc = res.payload;
@@ -413,10 +416,11 @@ function PeoplePrivateSection() {
 	}, [selectedName]);
 
 	function saveIdentity() {
+		var name = selectedName;
 		setSavingKey("identity");
 		setError(null);
 		sendRpc("workspace.person.save", {
-			name: selectedName,
+			name,
 			identityPatch: {
 				emoji: (emoji || "").trim() || null,
 				creature: (creature || "").trim() || null,
@@ -425,8 +429,21 @@ function PeoplePrivateSection() {
 			identityBody: identityBody || "",
 		}).then((res) => {
 			setSavingKey("");
+			if (selectedName !== name) {
+				rerender();
+				return;
+			}
 			if (res?.ok) {
-				loadDoc(selectedName);
+				var doc = res.payload;
+				if (doc && doc.name === name) {
+					setBaseDoc(doc);
+					setEmoji(doc?.identity?.emoji || "");
+					setCreature(doc?.identity?.creature || "");
+					setVibe(doc?.identity?.vibe || "");
+					setIdentityBody(doc?.identity?.body || "");
+				} else {
+					loadDoc(name);
+				}
 				flashSaved("identity");
 			} else {
 				setError(res?.error?.message || "Failed to save IDENTITY.md");
@@ -436,14 +453,27 @@ function PeoplePrivateSection() {
 	}
 
 	function saveText(key, value) {
+		var name = selectedName;
 		setSavingKey(key);
 		setError(null);
-		var payload = { name: selectedName };
+		var payload = { name };
 		payload[key] = value || "";
 		sendRpc("workspace.person.save", payload).then((res) => {
 			setSavingKey("");
+			if (selectedName !== name) {
+				rerender();
+				return;
+			}
 			if (res?.ok) {
-				loadDoc(selectedName);
+				var doc = res.payload;
+				if (doc && doc.name === name) {
+					setBaseDoc(doc);
+					if (key === "soul") setSoul(doc?.soul || "");
+					if (key === "tools") setTools(doc?.tools || "");
+					if (key === "agents") setAgents(doc?.agents || "");
+				} else {
+					loadDoc(name);
+				}
 				flashSaved(key);
 			} else {
 				setError(res?.error?.message || "Failed to save");
@@ -638,8 +668,8 @@ function PeoplePrivateSection() {
 		</div>
 
 		${renderSection("Soul", `people/${selectedName}/SOUL.md`, isTextDirty("soul", soul), "soul", soul, setSoul, () => saveText("soul", soul))}
-		${renderSection("Tools", `people/${selectedName}/TOOLS.md`, isTextDirty("tools", tools), "tools", tools, setTools, () => saveText("tools", tools))}
 		${renderSection("Agents", `people/${selectedName}/AGENTS.md`, isTextDirty("agents", agents), "agents", agents, setAgents, () => saveText("agents", agents))}
+		${renderSection("Tools", `people/${selectedName}/TOOLS.md`, isTextDirty("tools", tools), "tools", tools, setTools, () => saveText("tools", tools))}
 
 		<${Modal} show=${showNewModal} onClose=${() => setShowNewModal(false)} title="New agent">
 			<div style="display:flex;flex-direction:column;gap:10px;">

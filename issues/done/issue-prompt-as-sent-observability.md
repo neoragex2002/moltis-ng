@@ -144,7 +144,7 @@
 ## 交叉引用（Cross References）
 - Related issues/docs：
   - `issues/overall_type4_system_prompt_assembly_v1.md`
-  - `issues/issue-prompt-assembly-entrypoint-dedup.md`
+  - `issues/done/issue-prompt-assembly-entrypoint-dedup.md`
 
 ## 未决问题（Open Questions）
 - Q1: as-sent 摘要由 gateway 生成还是由各 provider adapter 生成（避免重复）？

@@ -272,6 +272,7 @@ fn build_template_vars_v1(
     tools: &ToolRegistry,
     supports_tools: bool,
     stream_only: bool,
+    project_context: Option<&str>,
     project_skills: &[SkillMetadata],
     reply_medium: PromptReplyMedium,
     runtime: Option<&PromptRuntimeContext>,
@@ -320,6 +321,12 @@ fn build_template_vars_v1(
 
     let voice_reply_suffix_md = render_voice_reply_suffix_md(reply_medium);
 
+    let project_context_md = project_context
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| ensure_md_paragraph(s.to_string()))
+        .unwrap_or_default();
+
     let mut vars = BTreeMap::new();
     vars.insert("host_os".to_string(), map_host_os_zh(runtime.and_then(|rt| rt.host.os.as_deref())));
     vars.insert("session_id".to_string(), session_id.to_string());
@@ -347,6 +354,10 @@ fn build_template_vars_v1(
         map_host_privilege_policy_zh(runtime),
     );
 
+    // Project context (multi-line). Unlike legacy builders, canonical v1 does not
+    // auto-inject a "项目上下文" section; templates must opt-in via this var.
+    vars.insert("project_context_md".to_string(), project_context_md);
+
     // Skills/tools/memory/voice (multi-line) vars.
     vars.insert("skills_md".to_string(), skills_md);
     vars.insert("native_tools_index_md".to_string(), native_tools_index_md);
@@ -363,24 +374,6 @@ fn build_template_vars_v1(
 
     vars
 }
-
-const SYSTEM_FIXED_PROMPT_TEMPLATE_V1: &str = "\
-# 系统（System）\n\
-\n\
-你是一个乐于助人的助手。\n\
-\n\
-执行路由与环境（本次运行的事实）：\n\
-- 操作系统：{{host_os}}\n\
-- 会话：{{session_id}}\n\
-- 执行位置：{{exec_location}}\n\
-- 网络策略：{{network_policy}}\n\
-- 数据目录：{{system_data_dir_path}}（访问：{{data_dir_access}}；复用：{{sandbox_reuse_policy}}）\n\
-- 宿主机权限：{{host_privilege_policy}}\n\
-\n\
-重要规则：\n\
-- 当你被问到“我是谁 / Owner 是谁 / 主操作者资料”等问题时：必须先读取 {{system_data_dir_path}}/USER.md 再回答；不得凭空猜测。\n\
-- 当你被问到“你认识哪些人 / 有哪些账号或 bots / 有哪些代理或角色”等问题时：必须先读取 {{system_data_dir_path}}/PEOPLE.md 再回答；不得靠记忆猜测。\n\
-\n";
 
 pub fn build_canonical_system_prompt_v1(
     tools: &ToolRegistry,
@@ -426,6 +419,7 @@ pub fn build_canonical_system_prompt_v1(
         tools,
         supports_tools,
         stream_only,
+        project_context,
         project_skills,
         reply_medium,
         runtime,
@@ -438,14 +432,17 @@ pub fn build_canonical_system_prompt_v1(
     let mut warnings: Vec<String> = Vec::new();
     let identity_body = identity_md_raw
         .map(strip_yaml_frontmatter)
-        .unwrap_or("（未配置 IDENTITY.md）");
-    let soul_body = soul_text.unwrap_or(DEFAULT_SOUL).trim();
-    let agents_body = agents_text.unwrap_or("（未配置）").trim();
-    let tools_body = tools_text.unwrap_or("（未配置）").trim();
+        .unwrap_or("")
+        .trim();
+    let soul_body = soul_text.unwrap_or("").trim();
+    let agents_body = agents_text.unwrap_or("").trim();
+    let tools_body = tools_text.unwrap_or("").trim();
 
-    let type4_template_raw = format!(
-        "{identity_body}\n--------------------\n{soul_body}\n--------------------\n{agents_body}\n--------------------\n{tools_body}\n"
-    );
+    let type4_template_raw = [identity_body, soul_body, agents_body, tools_body]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
     let referenced_vars =
         moltis_config::prompt_subst::extract_strict_vars(&type4_template_raw);
@@ -476,12 +473,6 @@ pub fn build_canonical_system_prompt_v1(
         }
     }
 
-    let fixed = moltis_config::prompt_subst::render_strict_template(
-        SYSTEM_FIXED_PROMPT_TEMPLATE_V1,
-        &template_vars,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
-
     // Render the four user-owned templates individually (non-recursive).
     let render = |s: &str| {
         moltis_config::prompt_subst::render_strict_template(s, &template_vars)
@@ -493,21 +484,20 @@ pub fn build_canonical_system_prompt_v1(
     let agents_rendered = render(agents_body)?;
     let tools_rendered = render(tools_body)?;
 
-    let type4_rendered = format!(
-        "{identity_rendered}\n--------------------\n{soul_rendered}\n--------------------\n{agents_rendered}\n--------------------\n{tools_rendered}\n"
-    );
-
-    let mut system_prompt = String::new();
-    system_prompt.push_str(&fixed);
-    if let Some(ctx) = project_context.map(str::trim)
-        && !ctx.is_empty()
-    {
-        system_prompt.push_str("## 项目上下文\n\n");
-        system_prompt.push_str(ctx);
-        system_prompt.push_str("\n\n");
-    }
-    system_prompt.push_str("# Type4 Persona（模板渲染结果）\n\n");
-    system_prompt.push_str(&type4_rendered);
+    // Canonical v1: **no automatic wrapper headings** ("系统"/"Type4 Persona")
+    // and no auto-injected runtime/context blocks. The final prompt is fully
+    // controlled by user-owned templates plus `{{var}}` substitutions.
+    let system_prompt = [
+        identity_rendered.as_str(),
+        soul_rendered.as_str(),
+        agents_rendered.as_str(),
+        tools_rendered.as_str(),
+    ]
+    .into_iter()
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
 
     Ok(CanonicalSystemPromptV1 {
         system_prompt,
@@ -1735,7 +1725,7 @@ mod tests {
             Some("Project context here."),
             &[],
             "default",
-            Some("# IDENTITY.md\n\nLiteral: {{{{foo}}}}\n"),
+            Some("# IDENTITY.md\n\n{{project_context_md}}Literal: {{{{foo}}}}\n"),
             Some("# SOUL.md\n\nOS={{host_os}}\n"),
             Some("# AGENTS.md\n\n（空）\n"),
             Some("# TOOLS.md\n\n{{voice_reply_suffix_md}}\n"),
@@ -1745,8 +1735,6 @@ mod tests {
         )
         .expect("canonical prompt should build");
 
-        assert!(canonical.system_prompt.contains("# 系统（System）"));
-        assert!(canonical.system_prompt.contains("## 项目上下文"));
         assert!(canonical.system_prompt.contains("Project context here."));
         assert!(canonical.system_prompt.contains("Literal: {{foo}}"));
         assert!(canonical.system_prompt.contains("OS=Linux 系统"));

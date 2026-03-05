@@ -72,11 +72,11 @@ Updated: 2026-03-05
 | ID | Status | Pri | Title | Owner | Component | Depends On | Evidence | Tests | Doc |
 |---:|:---:|:---:|---|---|---|---|---|---|---|
 | 1 | DONE | P0 | Canonical PromptParts + renderer（v1: 统一 system 文本） | TBD | agents/prompt + gateway |  | `crates/agents/src/prompt.rs:385` | `crates/agents/src/prompt.rs:1718` | `issues/issue-persona-prompt-configurable-assembly-and-builtin-separation.md` |
-| 2 | DONE | P0 | 去重：gateway chat / spawn_agent prompt assembly | TBD | gateway + tools | 1 | `crates/gateway/src/chat.rs:2401` | `crates/gateway/tests/spawn_agent_openai_responses.rs:43` | `issues/issue-prompt-assembly-entrypoint-dedup.md` |
-| 3 | DONE | P0 | 统一 as-sent 证据链（debug + hooks） | TBD | gateway + agents/runner | 1 | `crates/gateway/src/chat.rs:3679` | `crates/gateway/src/chat.rs:8298`、`crates/gateway/src/chat.rs:8448` | `issues/issue-prompt-as-sent-observability.md` |
+| 2 | DONE | P0 | 去重：gateway chat / spawn_agent prompt assembly | TBD | gateway + tools | 1 | `crates/gateway/src/chat.rs:2401` | `crates/gateway/tests/spawn_agent_openai_responses.rs:43` | `issues/done/issue-prompt-assembly-entrypoint-dedup.md` |
+| 3 | DONE | P0 | 统一 as-sent 证据链（debug + hooks） | TBD | gateway + agents/runner | 1 | `crates/gateway/src/chat.rs:3679` | `crates/gateway/src/chat.rs:8298`、`crates/gateway/src/chat.rs:8448` | `issues/done/issue-prompt-as-sent-observability.md` |
 | 4 | SURVEY | P1 | Surface-aware Guidelines（Web UI vs Telegram） | TBD | agents/prompt | 1 | `crates/gateway/src/chat.rs:2274` | 缺口 | `issues/issue-surface-aware-guidelines.md` |
 | 5 | SURVEY | P2 | Provider 角色模型统一（system/developer） | TBD | agents/model + providers | 1 | `crates/agents/src/providers/openai_responses.rs:37` | 缺口 | `issues/issue-provider-role-normalization.md` |
-| 6 | DONE | P0 | Type4 模板化拼接 v1（{{var}} + 中文化 + 稳定性） | TBD | config + gateway + agents/prompt | 1,2,3 | `crates/config/src/prompt_subst.rs:60` | `crates/config/src/prompt_subst.rs:157` | `issues/issue-type4-template-assembly-v1.md` |
+| 6 | DONE | P0 | Type4 模板化拼接 v1（{{var}} + 中文化 + 稳定性） | TBD | config + gateway + agents/prompt | 1,2,3 | `crates/config/src/prompt_subst.rs:60` | `crates/config/src/prompt_subst.rs:157` | `issues/done/issue-type4-template-assembly-v1.md` |
 
 说明：ID=1 已存在且覆盖面最大（Phase 0 DONE / Phase 1+ TODO）；其余为本 audit 拆出的收尾项。
 
@@ -251,6 +251,7 @@ Updated: 2026-03-05
 
 - **定义**：先构造一个跨 provider 统一的“大 system prompt 文本”，并把它作为内部 typed messages 的首条 `ChatMessage::System`。
 - **适用范围**：该 canonical 文本对 provider 无关；即使最终 as-sent 不是 `role=system`（例如 openai-responses 的 `role=developer`、Anthropic 的 top-level `system`、local-llm 的模板字符串），内部也仍统一以 `ChatMessage::System` 承载。
+- **规则确认（现行 v1）**：canonical v1 不再自动添加任何“包装标题”（例如 `# 系统（System）`、`# Type4 Persona…`）或额外固定块；最终文本完全由 `people/<persona_id>/{IDENTITY,SOUL,AGENTS,TOOLS}.md` 模板内容 + `{{var}}` 替换决定（project context/runtime/tools/skills 也必须通过模板显式引用对应变量才会出现）。
 - **MUST**：所有 provider 路径都必须以 canonical v1 builder 产出该文本（`build_canonical_system_prompt_v1`）；legacy 的 `build_system_prompt_*` / `build_openai_responses_developer_prompts` 仅保留作兼容入口，不作为主路径依赖。
 - **MUST**：gateway/tools 在组装 typed messages 时只负责把 `system_prompt` 放进 `ChatMessage::System`，其余历史消息/用户消息保持 typed message 语义不变。
   - Example（streaming/no-tools 路径）：`crates/gateway/src/chat.rs:6001`
@@ -338,8 +339,9 @@ Updated: 2026-03-05
   3) `AGENTS.md`
   4) `TOOLS.md`
 
-  拼接格式（分隔线固定为一行 `--------------------`）：
-  - `<IDENTITY.md>`\n`--------------------`\n`<SOUL.md>`\n`--------------------`\n`<AGENTS.md>`\n`--------------------`\n`<TOOLS.md>`
+  拼接规则（现行 v1）：
+  - 按上述顺序渲染四个文件（对每个文件执行 strict `{{var}}` 替换，且 strip YAML frontmatter）。
+  - 仅拼接非空段落；段落之间用 `\n\n` 连接；系统不再自动插入任何固定分隔线或占位符文本。
 - 运行环境事实（Runtime vars）由用户在 `AGENTS.md` 中自行引用；工具/技能声明由用户在 `TOOLS.md` 中自行引用。
 - 变量替换必须对四个文件都生效（用户可在任意文件中引用 `{{var}}`）。
 
