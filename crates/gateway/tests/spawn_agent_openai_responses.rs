@@ -46,7 +46,7 @@ impl LlmProvider for CapturingProvider {
 }
 
 #[tokio::test]
-async fn spawn_agent_uses_three_system_messages_for_openai_responses_provider() {
+async fn spawn_agent_uses_single_system_message_for_openai_responses_provider() {
     let captured: Arc<tokio::sync::Mutex<Vec<ChatMessage>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
@@ -63,11 +63,10 @@ async fn spawn_agent_uses_three_system_messages_for_openai_responses_provider() 
 
     let msgs = captured.lock().await;
     assert!(
-        msgs.len() >= 4,
-        "expected 3 system preamble messages + user task, got {}",
+        msgs.len() >= 2,
+        "expected system + user task, got {}",
         msgs.len()
     );
     assert!(matches!(msgs[0], ChatMessage::System { .. }));
-    assert!(matches!(msgs[1], ChatMessage::System { .. }));
-    assert!(matches!(msgs[2], ChatMessage::System { .. }));
+    assert!(matches!(msgs[1], ChatMessage::User { .. }));
 }

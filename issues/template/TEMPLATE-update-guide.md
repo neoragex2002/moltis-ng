@@ -7,6 +7,7 @@
 ### 0.1 更新顺序（推荐）
 1) 先更新 **证据**（`path/to/file:line`、测试名、日志关键词）
 2) 再更新 **状态**（TODO → IN-PROGRESS → DONE）
+   - 同步更新文档顶部的 `Updated: YYYY-MM-DD`（或 Status 区块的 `Updated:` 字段）
 3) 最后更新 **交叉引用**（Doc/Index/Related issues）
 
 ### 0.2 术语/口径变更

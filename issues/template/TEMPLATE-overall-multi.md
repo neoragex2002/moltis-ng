@@ -1,5 +1,7 @@
 # Overall Issues (<v?>) — <主题>（Audit + Roadmap）
 
+Updated: <YYYY-MM-DD>
+
 ## 范围与约束（Scope & Constraints）
 - 覆盖范围：<模块/路径/场景>
 - 重点场景：<如 openai-responses + base_url + api key>

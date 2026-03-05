@@ -8,8 +8,25 @@ pub fn generate_skills_prompt(skills: &[SkillMetadata]) -> String {
 
     use crate::types::SkillSource;
 
-    let mut out = String::from("## Available Skills\n\n<available_skills>\n");
-    for skill in skills {
+    let mut sorted: Vec<(String, u8, String, &SkillMetadata)> = skills
+        .iter()
+        .map(|s| {
+            let source_key = match s.source.as_ref() {
+                Some(SkillSource::Project) => 1,
+                Some(SkillSource::Personal) => 2,
+                Some(SkillSource::Registry) => 3,
+                Some(SkillSource::Plugin) => 4,
+                None => 0,
+            };
+            (s.name.clone(), source_key, s.path.display().to_string(), s)
+        })
+        .collect();
+    // Stable ordering is required for prompt stability (diff/cache/debug).
+    // Sort by (name, source, path).
+    sorted.sort_by(|a, b| (a.0.as_str(), a.1, a.2.as_str()).cmp(&(b.0.as_str(), b.1, b.2.as_str())));
+
+    let mut out = String::from("## 可用技能\n\n<available_skills>\n");
+    for (_, _, _, skill) in sorted {
         let is_plugin = skill.source.as_ref() == Some(&SkillSource::Plugin);
         let path_display = if is_plugin {
             skill.path.display().to_string()
@@ -30,7 +47,7 @@ pub fn generate_skills_prompt(skills: &[SkillMetadata]) -> String {
     }
     out.push_str("</available_skills>\n\n");
     out.push_str(
-        "To activate a skill, read its SKILL.md file (or the plugin's .md file at the given path) for full instructions.\n\n",
+        "启用技能：阅读对应的 SKILL.md（或插件 .md）以获取完整说明，然后按其中步骤执行。\n\n",
     );
     out
 }

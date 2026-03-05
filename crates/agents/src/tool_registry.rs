@@ -90,7 +90,8 @@ impl ToolRegistry {
     }
 
     pub fn list_schemas(&self) -> Vec<serde_json::Value> {
-        self.tools
+        let mut schemas: Vec<serde_json::Value> = self
+            .tools
             .values()
             .map(|e| {
                 let mut schema = serde_json::json!({
@@ -109,7 +110,22 @@ impl ToolRegistry {
                 }
                 schema
             })
-            .collect()
+            .collect();
+
+        // Stable ordering is required for prompt stability (diff/cache/debug).
+        // Sort by (name, source, mcpServer) using bytewise string ordering.
+        schemas.sort_by(|a, b| {
+            let a_name = a["name"].as_str().unwrap_or_default();
+            let b_name = b["name"].as_str().unwrap_or_default();
+            let a_source = a["source"].as_str().unwrap_or_default();
+            let b_source = b["source"].as_str().unwrap_or_default();
+            let a_server = a["mcpServer"].as_str().unwrap_or_default();
+            let b_server = b["mcpServer"].as_str().unwrap_or_default();
+
+            (a_name, a_source, a_server).cmp(&(b_name, b_source, b_server))
+        });
+
+        schemas
     }
 
     /// List registered tool names.
@@ -341,6 +357,30 @@ mod tests {
             .expect("mcp tool should exist");
         assert_eq!(mcp["source"], "mcp");
         assert_eq!(mcp["mcpServer"], "github");
+    }
+
+    #[test]
+    fn test_list_schemas_is_stably_sorted() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(DummyTool {
+            name: "zeta".to_string(),
+        }));
+        registry.register(Box::new(DummyTool {
+            name: "alpha".to_string(),
+        }));
+        registry.register_mcp(
+            Box::new(DummyTool {
+                name: "beta".to_string(),
+            }),
+            "server".to_string(),
+        );
+
+        let names: Vec<String> = registry
+            .list_schemas()
+            .into_iter()
+            .map(|s| s["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(names, vec!["alpha", "beta", "zeta"]);
     }
 
     #[test]

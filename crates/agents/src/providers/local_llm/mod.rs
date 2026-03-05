@@ -20,6 +20,7 @@ use {
 };
 
 use crate::model::{ChatMessage, CompletionResponse, LlmProvider, StreamEvent};
+use crate::as_sent_summary::{sha256_hex, text_preview_value, DEFAULT_MAX_LIST_ITEMS};
 
 pub use {
     backend::{BackendType, LocalBackend},
@@ -146,6 +147,48 @@ impl LlmProvider for LocalLlmProvider {
     fn supports_tools(&self) -> bool {
         // Local models don't support tool calling yet
         false
+    }
+
+    fn debug_as_sent_summary(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> Option<serde_json::Value> {
+        let hint = models::find_model(&self.config.model_id)
+            .and_then(|d| d.chat_template)
+            .unwrap_or(models::ChatTemplateHint::Auto);
+
+        let prompt = models::chat_templates::format_messages(messages, hint);
+        let hint_str = match hint {
+            models::ChatTemplateHint::Auto => "auto",
+            models::ChatTemplateHint::Llama3 => "llama3",
+            models::ChatTemplateHint::ChatML => "chatml",
+            models::ChatTemplateHint::Mistral => "mistral",
+            models::ChatTemplateHint::DeepSeek => "deepseek",
+        };
+
+        let roles_preview: Vec<&str> = messages
+            .iter()
+            .take(DEFAULT_MAX_LIST_ITEMS)
+            .map(|m| match m {
+                ChatMessage::System { .. } => "system",
+                ChatMessage::User { .. } => "user",
+                ChatMessage::Assistant { .. } => "assistant",
+                ChatMessage::Tool { .. } => "tool",
+            })
+            .collect();
+
+        Some(serde_json::json!({
+            "method": "as-sent-summary",
+            "provider": self.name(),
+            "kind": "local_llm_prompt_v1",
+            "model": self.config.model_id,
+            "chatTemplateHint": hint_str,
+            "prompt": text_preview_value(&prompt),
+            "hash": format!("sha256:{}", sha256_hex(&prompt)),
+            "messagesCount": messages.len(),
+            "rolesPreview": roles_preview,
+        }))
     }
 
     async fn complete(

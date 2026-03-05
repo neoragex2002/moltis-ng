@@ -3,7 +3,12 @@ use {
     moltis_config::{AgentIdentity, DEFAULT_SOUL, UserProfile},
     moltis_skills::types::SkillMetadata,
 };
+use std::collections::BTreeMap;
 
+// Legacy prompt builders (pre-v1 canonical Type4 assembly).
+//
+// These are kept for now to avoid breaking external users, but the gateway/tools
+// runtime paths should use `build_canonical_system_prompt_v1` exclusively.
 #[derive(Debug, Clone)]
 pub struct OpenAiResponsesDeveloperPrompts {
     pub system: String,
@@ -51,6 +56,464 @@ fn strip_yaml_frontmatter(input: &str) -> &str {
     };
     let after = &rest[(end_idx + "\n---".len())..];
     after.trim_start_matches('\n').trim()
+}
+
+#[derive(Debug, Clone)]
+pub struct CanonicalSystemPromptV1 {
+    pub system_prompt: String,
+    pub template_vars: BTreeMap<String, String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptReplyMedium {
+    Text,
+    Voice,
+}
+
+fn canonicalize_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> =
+                map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            map.clear();
+            for (k, mut v) in entries {
+                canonicalize_json_value(&mut v);
+                map.insert(k, v);
+            }
+        },
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                canonicalize_json_value(v);
+            }
+        },
+        _ => {},
+    }
+}
+
+fn ensure_md_paragraph(mut s: String) -> String {
+    if s.trim().is_empty() {
+        return String::new();
+    }
+    // v1 contract: do not start with a newline; must end with exactly one blank line.
+    while s.starts_with('\n') {
+        s.remove(0);
+    }
+    if !s.ends_with("\n\n") {
+        if s.ends_with('\n') {
+            s.push('\n');
+        } else {
+            s.push_str("\n\n");
+        }
+    }
+    s
+}
+
+fn render_native_tools_index_md(tool_schemas: &[serde_json::Value]) -> String {
+    if tool_schemas.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## 可用工具\n\n");
+    for schema in tool_schemas {
+        let name = schema["name"].as_str().unwrap_or("unknown");
+        let desc = schema["description"].as_str().unwrap_or("");
+        let compact_desc = truncate_prompt_text(desc, 160);
+        if compact_desc.is_empty() {
+            out.push_str(&format!("- `{name}`\n"));
+        } else {
+            out.push_str(&format!("- `{name}`: {compact_desc}\n"));
+        }
+    }
+    out.push('\n');
+    ensure_md_paragraph(out)
+}
+
+fn render_non_native_tools_catalog_md(tool_schemas: &[serde_json::Value]) -> String {
+    if tool_schemas.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## 工具目录与参数\n\n");
+    for schema in tool_schemas {
+        let name = schema["name"].as_str().unwrap_or("unknown");
+        let desc = schema["description"].as_str().unwrap_or("");
+        let mut params = schema["parameters"].clone();
+        canonicalize_json_value(&mut params);
+        let pretty = serde_json::to_string_pretty(&params).unwrap_or_default();
+        out.push_str(&format!(
+            "### {name}\n{desc}\n\n参数（Parameters）：\n```json\n{pretty}\n```\n\n"
+        ));
+    }
+    ensure_md_paragraph(out)
+}
+
+fn render_non_native_tools_calling_guide_md(tool_schemas: &[serde_json::Value]) -> String {
+    if tool_schemas.is_empty() {
+        return String::new();
+    }
+    ensure_md_paragraph(String::from(
+        "## 如何调用工具\n\n\
+要调用工具，你必须输出且只输出一个 JSON 代码块，格式如下（前后不能有任何其它文字）：\n\n\
+```tool_call\n\
+{\"tool\": \"<tool_name>\", \"arguments\": {<arguments>}}\n\
+```\n\n\
+你必须把该 `tool_call` 代码块作为**整段回复**，前后不要添加任何解释（即便当前是语音输出模式；工具调用回合不属于最终语音回复）。\n\
+工具执行完成后，你会收到结果，然后再正常回复用户。\n\n",
+    ))
+}
+
+fn render_long_term_memory_md(has_memory: bool) -> String {
+    if !has_memory {
+        return String::new();
+    }
+    ensure_md_paragraph(String::from(
+        "## 长期记忆\n\n\
+你可以使用长期记忆系统。\n\
+- 使用 `memory_search` 回忆过去的对话、决策与上下文。\n\
+- 当用户提到“之前做过什么 / 上次说到哪 / 之前的结论 / 旧的文件或约定”等需要历史上下文的内容时，应先搜索再回答。\n\n",
+    ))
+}
+
+fn render_voice_reply_suffix_md(reply_medium: PromptReplyMedium) -> String {
+    if reply_medium != PromptReplyMedium::Voice {
+        return String::new();
+    }
+    // Normalize the existing constant to match the v1 paragraph contract.
+    ensure_md_paragraph(VOICE_REPLY_SUFFIX.to_string())
+}
+
+fn map_host_os_zh(os: Option<&str>) -> String {
+    match os.unwrap_or_default() {
+        "windows" => "Windows 系统".to_string(),
+        "linux" => "Linux 系统".to_string(),
+        "macos" => "macOS 系统".to_string(),
+        "" => "未知系统".to_string(),
+        _ => "未知系统".to_string(),
+    }
+}
+
+fn map_exec_location_zh(runtime: Option<&PromptRuntimeContext>) -> String {
+    if let Some(rt) = runtime
+        && let Some(sb) = rt.sandbox.as_ref()
+        && sb.exec_sandboxed
+    {
+        "沙箱内".to_string()
+    } else {
+        "宿主机上".to_string()
+    }
+}
+
+fn map_network_policy_zh(runtime: Option<&PromptRuntimeContext>) -> String {
+    if let Some(rt) = runtime
+        && let Some(sb) = rt.sandbox.as_ref()
+        && sb.exec_sandboxed
+        && let Some(no_network) = sb.no_network
+    {
+        if no_network {
+            "禁止网络".to_string()
+        } else {
+            "允许网络".to_string()
+        }
+    } else {
+        "允许网络".to_string()
+    }
+}
+
+fn map_sandbox_reuse_policy_zh(runtime: Option<&PromptRuntimeContext>) -> String {
+    let Some(rt) = runtime else {
+        return "不适用（未启用沙盒）".to_string();
+    };
+    let Some(sb) = rt.sandbox.as_ref() else {
+        return "不适用（未启用沙盒）".to_string();
+    };
+    if !sb.exec_sandboxed {
+        return "不适用（未启用沙盒）".to_string();
+    }
+    match sb.scope.as_deref().unwrap_or_default() {
+        "session" => "按会话复用".to_string(),
+        "chat" => "按聊天复用".to_string(),
+        "bot" => "按账号复用".to_string(),
+        "global" => "全局复用".to_string(),
+        _ => "按聊天复用".to_string(),
+    }
+}
+
+fn map_data_dir_access_zh(runtime: Option<&PromptRuntimeContext>) -> String {
+    let Some(rt) = runtime else {
+        return "可用（宿主机）".to_string();
+    };
+    let Some(sb) = rt.sandbox.as_ref() else {
+        return "可用（宿主机）".to_string();
+    };
+    if !sb.exec_sandboxed {
+        return "可用（宿主机）".to_string();
+    }
+    match sb.data_mount.as_deref().unwrap_or_default() {
+        "rw" => "读写".to_string(),
+        "ro" => "只读".to_string(),
+        "none" => "不可用".to_string(),
+        "" => "只读".to_string(),
+        _ => "只读".to_string(),
+    }
+}
+
+fn map_host_privilege_policy_zh(runtime: Option<&PromptRuntimeContext>) -> String {
+    let Some(rt) = runtime else {
+        return "任何宿主机安装/系统改动必须先征求用户同意".to_string();
+    };
+    match rt.host.sudo_non_interactive {
+        Some(true) => "可非交互 sudo（允许宿主机安装）".to_string(),
+        Some(false) => "宿主机安装需先征求用户同意".to_string(),
+        None => "任何宿主机安装/系统改动必须先征求用户同意".to_string(),
+    }
+}
+
+fn build_template_vars_v1(
+    tools: &ToolRegistry,
+    supports_tools: bool,
+    stream_only: bool,
+    project_skills: &[SkillMetadata],
+    reply_medium: PromptReplyMedium,
+    runtime: Option<&PromptRuntimeContext>,
+    system_data_dir_path: &str,
+    agent_data_dir_path: &str,
+    session_id: &str,
+) -> BTreeMap<String, String> {
+    let tool_schemas = if stream_only {
+        Vec::new()
+    } else {
+        tools.list_schemas()
+    };
+    let tools_inventory_non_empty = !tool_schemas.is_empty();
+    let tools_usable = !stream_only && tools_inventory_non_empty;
+    let native_tool_calling = tools_usable && supports_tools;
+    let non_native_tool_calling = tools_usable && !supports_tools;
+
+    let has_memory = tools_usable
+        && tool_schemas
+            .iter()
+            .any(|s| s["name"].as_str() == Some("memory_search"));
+
+    let skills_md = ensure_md_paragraph(moltis_skills::prompt_gen::generate_skills_prompt(project_skills));
+
+    let native_tools_index_md = if native_tool_calling {
+        render_native_tools_index_md(&tool_schemas)
+    } else {
+        String::new()
+    };
+    let non_native_tools_catalog_md = if non_native_tool_calling {
+        render_non_native_tools_catalog_md(&tool_schemas)
+    } else {
+        String::new()
+    };
+    let non_native_tools_calling_guide_md = if non_native_tool_calling {
+        render_non_native_tools_calling_guide_md(&tool_schemas)
+    } else {
+        String::new()
+    };
+
+    let long_term_memory_md = if tools_usable {
+        render_long_term_memory_md(has_memory)
+    } else {
+        String::new()
+    };
+
+    let voice_reply_suffix_md = render_voice_reply_suffix_md(reply_medium);
+
+    let mut vars = BTreeMap::new();
+    vars.insert("host_os".to_string(), map_host_os_zh(runtime.and_then(|rt| rt.host.os.as_deref())));
+    vars.insert("session_id".to_string(), session_id.to_string());
+    vars.insert(
+        "reply_medium".to_string(),
+        match reply_medium {
+            PromptReplyMedium::Text => "文字".to_string(),
+            PromptReplyMedium::Voice => "语音".to_string(),
+        },
+    );
+    vars.insert("exec_location".to_string(), map_exec_location_zh(runtime));
+    vars.insert(
+        "sandbox_reuse_policy".to_string(),
+        map_sandbox_reuse_policy_zh(runtime),
+    );
+    vars.insert("system_data_dir_path".to_string(), system_data_dir_path.to_string());
+    vars.insert(
+        "agent_data_dir_path".to_string(),
+        agent_data_dir_path.to_string(),
+    );
+    vars.insert("data_dir_access".to_string(), map_data_dir_access_zh(runtime));
+    vars.insert("network_policy".to_string(), map_network_policy_zh(runtime));
+    vars.insert(
+        "host_privilege_policy".to_string(),
+        map_host_privilege_policy_zh(runtime),
+    );
+
+    // Skills/tools/memory/voice (multi-line) vars.
+    vars.insert("skills_md".to_string(), skills_md);
+    vars.insert("native_tools_index_md".to_string(), native_tools_index_md);
+    vars.insert(
+        "non_native_tools_catalog_md".to_string(),
+        non_native_tools_catalog_md,
+    );
+    vars.insert(
+        "non_native_tools_calling_guide_md".to_string(),
+        non_native_tools_calling_guide_md,
+    );
+    vars.insert("long_term_memory_md".to_string(), long_term_memory_md);
+    vars.insert("voice_reply_suffix_md".to_string(), voice_reply_suffix_md);
+
+    vars
+}
+
+const SYSTEM_FIXED_PROMPT_TEMPLATE_V1: &str = "\
+# 系统（System）\n\
+\n\
+你是一个乐于助人的助手。\n\
+\n\
+执行路由与环境（本次运行的事实）：\n\
+- 操作系统：{{host_os}}\n\
+- 会话：{{session_id}}\n\
+- 执行位置：{{exec_location}}\n\
+- 网络策略：{{network_policy}}\n\
+- 数据目录：{{system_data_dir_path}}（访问：{{data_dir_access}}；复用：{{sandbox_reuse_policy}}）\n\
+- 宿主机权限：{{host_privilege_policy}}\n\
+\n\
+重要规则：\n\
+- 当你被问到“我是谁 / Owner 是谁 / 主操作者资料”等问题时：必须先读取 {{system_data_dir_path}}/USER.md 再回答；不得凭空猜测。\n\
+- 当你被问到“你认识哪些人 / 有哪些账号或 bots / 有哪些代理或角色”等问题时：必须先读取 {{system_data_dir_path}}/PEOPLE.md 再回答；不得靠记忆猜测。\n\
+\n";
+
+pub fn build_canonical_system_prompt_v1(
+    tools: &ToolRegistry,
+    supports_tools: bool,
+    stream_only: bool,
+    project_context: Option<&str>,
+    project_skills: &[SkillMetadata],
+    persona_id_effective: &str,
+    identity_md_raw: Option<&str>,
+    soul_text: Option<&str>,
+    agents_text: Option<&str>,
+    tools_text: Option<&str>,
+    reply_medium: PromptReplyMedium,
+    runtime: Option<&PromptRuntimeContext>,
+    session_id: &str,
+) -> anyhow::Result<CanonicalSystemPromptV1> {
+    let exec_sandboxed = runtime
+        .and_then(|rt| rt.sandbox.as_ref())
+        .map(|sb| sb.exec_sandboxed)
+        .unwrap_or(false);
+    let system_data_dir_path = if exec_sandboxed {
+        "/moltis/data".to_string()
+    } else {
+        moltis_config::data_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| moltis_config::data_dir())
+            .display()
+            .to_string()
+    };
+    let agent_data_dir_path = if exec_sandboxed {
+        String::new()
+    } else {
+        moltis_config::data_dir()
+            .join("people")
+            .join(persona_id_effective)
+            .canonicalize()
+            .unwrap_or_else(|_| moltis_config::data_dir().join("people").join(persona_id_effective))
+            .display()
+            .to_string()
+    };
+
+    let template_vars = build_template_vars_v1(
+        tools,
+        supports_tools,
+        stream_only,
+        project_skills,
+        reply_medium,
+        runtime,
+        &system_data_dir_path,
+        &agent_data_dir_path,
+        session_id,
+    );
+
+    // Validate required vars against the user-owned Type4 template (four files).
+    let mut warnings: Vec<String> = Vec::new();
+    let identity_body = identity_md_raw
+        .map(strip_yaml_frontmatter)
+        .unwrap_or("（未配置 IDENTITY.md）");
+    let soul_body = soul_text.unwrap_or(DEFAULT_SOUL).trim();
+    let agents_body = agents_text.unwrap_or("（未配置）").trim();
+    let tools_body = tools_text.unwrap_or("（未配置）").trim();
+
+    let type4_template_raw = format!(
+        "{identity_body}\n--------------------\n{soul_body}\n--------------------\n{agents_body}\n--------------------\n{tools_body}\n"
+    );
+
+    let referenced_vars =
+        moltis_config::prompt_subst::extract_strict_vars(&type4_template_raw);
+
+    // Hard-required vars for non-native tool calling.
+    let tool_schemas = if stream_only {
+        Vec::new()
+    } else {
+        tools.list_schemas()
+    };
+    let tools_usable = !stream_only && !tool_schemas.is_empty();
+    let non_native_tool_calling = tools_usable && !supports_tools;
+    if non_native_tool_calling {
+        for required in [
+            "non_native_tools_catalog_md",
+            "non_native_tools_calling_guide_md",
+        ] {
+            if !referenced_vars.contains(required) {
+                anyhow::bail!("PROMPT_TEMPLATE_MISSING_REQUIRED_VAR: missing `{{{{{required}}}}}`");
+            }
+        }
+    }
+
+    // Soft-required vars (warn only).
+    for soft in ["skills_md", "long_term_memory_md", "voice_reply_suffix_md"] {
+        if !referenced_vars.contains(soft) {
+            warnings.push(format!("PROMPT_TEMPLATE_MISSING_SOFT_VAR: missing `{{{{{soft}}}}}`"));
+        }
+    }
+
+    let fixed = moltis_config::prompt_subst::render_strict_template(
+        SYSTEM_FIXED_PROMPT_TEMPLATE_V1,
+        &template_vars,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    // Render the four user-owned templates individually (non-recursive).
+    let render = |s: &str| {
+        moltis_config::prompt_subst::render_strict_template(s, &template_vars)
+            .map_err(|e| anyhow::anyhow!(e))
+    };
+
+    let identity_rendered = render(identity_body)?;
+    let soul_rendered = render(soul_body)?;
+    let agents_rendered = render(agents_body)?;
+    let tools_rendered = render(tools_body)?;
+
+    let type4_rendered = format!(
+        "{identity_rendered}\n--------------------\n{soul_rendered}\n--------------------\n{agents_rendered}\n--------------------\n{tools_rendered}\n"
+    );
+
+    let mut system_prompt = String::new();
+    system_prompt.push_str(&fixed);
+    if let Some(ctx) = project_context.map(str::trim)
+        && !ctx.is_empty()
+    {
+        system_prompt.push_str("## 项目上下文\n\n");
+        system_prompt.push_str(ctx);
+        system_prompt.push_str("\n\n");
+    }
+    system_prompt.push_str("# Type4 Persona（模板渲染结果）\n\n");
+    system_prompt.push_str(&type4_rendered);
+
+    Ok(CanonicalSystemPromptV1 {
+        system_prompt,
+        template_vars,
+        warnings,
+    })
 }
 
 /// Build the three-layer OpenAI Responses developer preamble.
@@ -1249,5 +1712,218 @@ mod tests {
         assert!(prompts.persona.contains("# IDENTITY.md"));
         assert!(prompts.persona.contains("Hello."));
         assert!(!prompts.persona.contains("name: Rex"));
+    }
+
+    #[test]
+    fn canonical_v1_renders_type4_templates_and_escape_sequences() {
+        let tools = ToolRegistry::new();
+        let runtime = PromptRuntimeContext {
+            host: PromptHostRuntimeContext {
+                os: Some("linux".into()),
+                ..Default::default()
+            },
+            sandbox: Some(PromptSandboxRuntimeContext {
+                exec_sandboxed: true,
+                ..Default::default()
+            }),
+        };
+
+        let canonical = build_canonical_system_prompt_v1(
+            &tools,
+            true,
+            false,
+            Some("Project context here."),
+            &[],
+            "default",
+            Some("# IDENTITY.md\n\nLiteral: {{{{foo}}}}\n"),
+            Some("# SOUL.md\n\nOS={{host_os}}\n"),
+            Some("# AGENTS.md\n\n（空）\n"),
+            Some("# TOOLS.md\n\n{{voice_reply_suffix_md}}\n"),
+            PromptReplyMedium::Voice,
+            Some(&runtime),
+            "main",
+        )
+        .expect("canonical prompt should build");
+
+        assert!(canonical.system_prompt.contains("# 系统（System）"));
+        assert!(canonical.system_prompt.contains("## 项目上下文"));
+        assert!(canonical.system_prompt.contains("Project context here."));
+        assert!(canonical.system_prompt.contains("Literal: {{foo}}"));
+        assert!(canonical.system_prompt.contains("OS=Linux 系统"));
+        assert!(canonical.system_prompt.contains("## 语音回复模式"));
+    }
+
+    #[test]
+    fn canonical_v1_non_native_tools_missing_required_vars_fails_fast() {
+        let mut tools = ToolRegistry::new();
+        struct Dummy;
+        #[async_trait::async_trait]
+        impl crate::tool_registry::AgentTool for Dummy {
+            fn name(&self) -> &str {
+                "tool_x"
+            }
+            fn description(&self) -> &str {
+                "x"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            async fn execute(&self, _: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+        tools.register(Box::new(Dummy));
+
+        let err = build_canonical_system_prompt_v1(
+            &tools,
+            false, // supports_tools=false => non-native tool calling
+            false,
+            None,
+            &[],
+            "default",
+            Some("identity"),
+            Some("soul"),
+            Some("agents"),
+            Some("tools"),
+            PromptReplyMedium::Text,
+            None,
+            "main",
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("PROMPT_TEMPLATE_MISSING_REQUIRED_VAR"));
+    }
+
+    #[test]
+    fn canonical_v1_non_native_tools_catalog_canonicalizes_json_key_order() {
+        let mut tools = ToolRegistry::new();
+        struct Dummy;
+        #[async_trait::async_trait]
+        impl crate::tool_registry::AgentTool for Dummy {
+            fn name(&self) -> &str {
+                "sort_test"
+            }
+            fn description(&self) -> &str {
+                "sort"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                // Intentionally put b_key before a_key to test canonicalization.
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "b_key": {"type": "string"},
+                        "a_key": {"type": "string"}
+                    }
+                })
+            }
+            async fn execute(&self, _: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+        tools.register(Box::new(Dummy));
+
+        let canonical = build_canonical_system_prompt_v1(
+            &tools,
+            false, // non-native
+            false,
+            None,
+            &[],
+            "default",
+            Some("identity"),
+            Some("soul"),
+            Some("agents"),
+            Some(
+                "{{non_native_tools_catalog_md}}\n{{non_native_tools_calling_guide_md}}\n",
+            ),
+            PromptReplyMedium::Text,
+            None,
+            "main",
+        )
+        .expect("canonical prompt should build");
+
+        let a_idx = canonical
+            .system_prompt
+            .find("\"a_key\"")
+            .expect("a_key should exist");
+        let b_idx = canonical
+            .system_prompt
+            .find("\"b_key\"")
+            .expect("b_key should exist");
+        assert!(
+            a_idx < b_idx,
+            "expected canonicalized key order: a_key before b_key"
+        );
+    }
+
+    #[test]
+    fn canonical_v1_native_tools_index_includes_compact_tool_list() {
+        let mut tools = ToolRegistry::new();
+        struct Dummy;
+        #[async_trait::async_trait]
+        impl crate::tool_registry::AgentTool for Dummy {
+            fn name(&self) -> &str {
+                "native_tool"
+            }
+            fn description(&self) -> &str {
+                "A native tool"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            async fn execute(&self, _: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+        tools.register(Box::new(Dummy));
+
+        let canonical = build_canonical_system_prompt_v1(
+            &tools,
+            true,  // native tools
+            false, // not stream_only
+            None,
+            &[],
+            "default",
+            Some("identity"),
+            Some("soul"),
+            Some("agents"),
+            Some("{{native_tools_index_md}}\n"),
+            PromptReplyMedium::Text,
+            None,
+            "main",
+        )
+        .expect("canonical prompt should build");
+
+        assert!(canonical.system_prompt.contains("## 可用工具"));
+        assert!(canonical.system_prompt.contains("`native_tool`"));
+        assert!(canonical.system_prompt.contains("A native tool"));
+        assert!(!canonical.system_prompt.contains("```tool_call"));
+    }
+
+    #[test]
+    fn canonical_v1_warns_when_soft_vars_are_missing() {
+        let tools = ToolRegistry::new();
+        let canonical = build_canonical_system_prompt_v1(
+            &tools,
+            true,
+            true,
+            None,
+            &[],
+            "default",
+            Some("identity"),
+            Some("soul"),
+            Some("agents"),
+            Some("tools"),
+            PromptReplyMedium::Text,
+            None,
+            "main",
+        )
+        .expect("canonical prompt should build");
+
+        assert!(canonical
+            .warnings
+            .iter()
+            .any(|w| w.contains("PROMPT_TEMPLATE_MISSING_SOFT_VAR")));
     }
 }

@@ -3,24 +3,28 @@
 ## 实施现状（Status）【增量更新主入口】
 - Status: Phase 0 DONE（2026-03-01）；Phase 1+ TODO
 - Priority: P0
+- Updated: 2026-03-05
 - Owners: <TBD>
 - Components: agents / config / gateway / tools / ui
 - Affected providers/models: openai-responses / others（当前存在 provider 路径差异）
 
 **已实现（如有，写日期）**
-- Persona 内容文件（可编辑）：`<data_dir>/personas/<persona_id>/{IDENTITY.md,SOUL.md,TOOLS.md,AGENTS.md}`（UI 提示）：`crates/gateway/src/assets/js/page-settings.js:671`
+- Persona 内容文件（可编辑）：`<data_dir>/people/<persona_id>/{IDENTITY.md,SOUL.md,TOOLS.md,AGENTS.md}`（UI 提示）：`crates/gateway/src/assets/js/page-settings.js:671`
 - Persona 文件加载（默认 persona 路径与 named persona 路径规则）：`crates/config/src/loader.rs:251`
-- Prompt 生成入口（OpenAI Responses 三段 developer preamble + 非 Responses 单段 system prompt）：`crates/agents/src/prompt.rs:40`
+- (2026-03-04) Canonical System Prompt v1（跨 provider 层统一为 1 条 `ChatMessage::System`）：`crates/agents/src/prompt.rs:385`
+- NOTE（2026-03-05）：Phase 0 初版设想的 `PromptBundle`/“Responses 三段 developer items”已被 canonical v1 的“单条 system → provider adapter 映射”模型取代；本文中 `PromptBundle`/三段 layering 的描述保留作历史审计与对比，不再作为现行实现依据。
+- Prompt 生成入口（历史/legacy：OpenAI Responses 三段 developer preamble + 非 Responses 单段 system prompt）：`crates/agents/src/prompt.rs:478`
 - gateway/chat 侧按 session/channel 选择 persona_id 并加载 persona：`crates/gateway/src/chat.rs:237`
 - spawn_agent tool 侧也实现了“按 persona_id 合并加载”的一套逻辑（重复实现）：`crates/tools/src/spawn_agent.rs:42`
-- Phase 0（2026-03-01）：OpenAI Responses 三段 developer item 文案/布局冻结为中文，并在 `build_openai_responses_developer_prompts(...)` 中落地（system/persona/runtime_snapshot 均固定结构 + 动态填充）。
-- Phase 0（2026-03-01）：Phase 0 的“统一入口/权威产物”以 `OpenAiResponsesDeveloperPrompts`（agents）+ `openai_responses_as_sent_from_prompts(...)`（gateway）形式落地，作为 openai-responses 的 as-sent/estimate/debug 单一事实来源。
+- Legacy（2026-03-01）：OpenAI Responses 三段 developer preamble（system/persona/runtime_snapshot）文案/布局冻结为中文，并在 `build_openai_responses_developer_prompts(...)` 中落地（保留为历史实现与兼容入口）。
 - Phase 0（2026-03-01）：`include_tools=true/false` 不再导致 Responses developer item 1（system）分叉；该分叉点已从 builder 参数层面移除（Responses system 文案固定一份）。
-- Phase 0（2026-03-01）：debug endpoints（`chat.raw_prompt` / `chat.context` / `chat.full_context`）在 openai-responses 下输出 **as-sent developer items（三段 + 顺序）**，并展示 `personaIdEffective`（不再固定 default）。
+- (2026-03-04) Responses as-sent 折叠：跨 provider 层仅 1 条 `ChatMessage::System`，openai-responses adapter 映射为单条 `role=developer` input item；debug endpoints 输出 `asSentPreamble`（长度=1）与 provider-aware `asSent` 摘要，并展示 `personaIdEffective`。
+  - Evidence：`crates/gateway/src/chat.rs:254`、`crates/agents/src/providers/openai_responses.rs:34`、`crates/gateway/src/chat.rs:3679`
 - Phase 0（2026-03-01）：`send_sync` 的两条错误持久化路径（keep-window overflow + run failed）不再写入 persisted `role=system`；改为 `role=assistant` 且带 `moltis_internal_kind="ui_error_notice"`，并在 LLM prompt 构造时过滤掉。
 - Phase 0（2026-03-01）：写回止血：`save_user()` / `save_identity()` 仅更新 YAML frontmatter 的 managed keys，**正文永远原样保留**，且不再自动删除文件。
 - Phase 0（2026-03-01）：Responses 注入 `IDENTITY.md` raw markdown 时剥离 YAML frontmatter（避免重复/噪声）。
-- Phase 0（2026-03-01）：语音模式固定块（`VOICE_REPLY_SUFFIX`）中文化，且在 Responses 的 developer item 3（runtime_snapshot）按需追加；长期记忆提示块中文化并按 tool registry 注入。
+- (2026-03-04) 语音模式固定块作为 canonical v1 模板变量 `voice_reply_suffix_md` 提供（不再在 gateway 针对 Responses runtime_snapshot 特判追加）；长期记忆提示块中文化并按 tool registry 生成。
+  - Evidence：`crates/agents/src/prompt.rs:177`、`crates/agents/src/prompt.rs:321`
 
 **已覆盖测试（如有）**
 - Prompt 生成基础测试（包含 workspace files 注入等）：`crates/agents/src/prompt.rs:775`
@@ -37,10 +41,10 @@
 ## 背景（Background）
 - 目标：让用户能够以“极简一致的心智模型”灵活调整 persona prompt（结构/顺序/哪些块出现/哪些块归属到 system/persona/runtime），同时**不损失 persona 的结构与内容**。
 - 现状：persona 的“内容”大多来自文件，但“结构与规则文案”大量硬编码在 prompt builder 中；并且出现了“不同 provider 路径拼装行为不一致”的情况，导致难以预测与维护。
-- 当前审计聚焦（Scope）：优先聚焦 **OpenAI Responses / role=developer 的三段 persona preamble**（`system` / `persona` / `runtime_snapshot`）相关的 prompt 治理问题；非 Responses provider 仅记录差异，不作为本阶段主要优化目标。
-- Phase 0 实施范围（Scope freeze）：
-  - Phase 0 **只保证** `openai-responses` 路径的 as-sent 三段 developer preamble 口径正确生效（结构、顺序、可观测性、溯源规则、写回止血）。
-  - 非 Responses provider（chat-messages 单段 system prompt）在 Phase 0 仅做“入口收敛/漂移修复”的必要改动；**不强制**同步中文文案与章节结构（作为后续遗留事项排后）。
+- 当前审计聚焦（legacy）：本文 Phase 0 最初聚焦 **OpenAI Responses / role=developer 的三段 persona preamble**（`system` / `persona` / `runtime_snapshot`）相关治理问题；自 2026-03-04 起已收敛为 canonical v1（跨 provider 层单条 `ChatMessage::System`，在 adapter 层映射），三段相关内容保留为历史审计记录。
+- Phase 0 实施范围（Scope freeze, historical）：
+  - Phase 0 最初只保证 `openai-responses` 路径的三段 developer preamble 口径正确生效；现已在 v1 中进一步收敛为“单条 system message → provider 映射”的统一模型（见：`issues/overall_type4_system_prompt_assembly_v1.md`）。
+  - 非 Responses provider 的中文文案/章节结构仍可作为后续治理项，但不再阻断 v1 的入口收敛与 as-sent 证据链。
 - Out of scope：
   - 不引入模板语言（如 mustache/jinja）以免用户构造无限复杂 prompt（冗余 + 不可控）。
   - 不改变 persona 内容的四文件模型（IDENTITY/SOUL/TOOLS/AGENTS）与 USER/PEOPLE 的存在意义。
@@ -95,12 +99,12 @@
 6) “我是谁”类问题效果差：当前 prompt 没有在 `Owner (USER.md)` 小节显式指令 agent “遇到 owner/user 身份相关问题要主动读取/参考 `<data_dir>/USER.md`”，导致当用户问“我是谁/我的信息是什么”时，agent 往往不会主动去该文件查找信息（心智模型与行为不一致）。
 7) “你认识哪些人/有哪些 bots”类问题效果差：`People (reference)` 小节当前只给出路径引用且强调“不要内联 roster”，但没有显式指令 agent 在被问到“你认识哪些人/有哪些机器人/有哪些账号”时应主动读取并基于 `/moltis/data/PEOPLE.md` 作答，导致 agent 往往不会主动溯源该文件。
 8) PEOPLE.md 的“可编辑性”心智模型不一致：当前 PEOPLE roster 文件会被 gateway 按 channels 配置自动再生（覆盖写回），若用户手工编辑 PEOPLE.md，后续 channels.add/remove/update 会覆盖掉手工内容（这在实现上是设计如此，但需要在 prompt/docs 中明确，否则属于 surprise / data-loss risk）。
-9) IDENTITY.md 可能发生“数据被覆盖/丢失”：`agent.identity.update` / onboarding 会调用 `save_identity()` 用模板化文件覆盖写回 `<data_dir>/personas/default/IDENTITY.md`，若用户在该文件中写了自然语言 prompt/备注正文，会被覆盖抹掉（dirty behavior / data-loss risk，与 USER.md 类似）。
-10) “编辑入口/文件落点”口径不一致：UI 文案仍在暗示 identity 等落点是“workspace root”，但实际 canonical 路径已是 `<data_dir>/personas/default/IDENTITY.md` / `<data_dir>/USER.md` 等，用户容易编辑错文件、认为“不生效”。
+9) IDENTITY.md 可能发生“数据被覆盖/丢失”：`agent.identity.update` / onboarding 会调用 `save_identity()` 用模板化文件覆盖写回 `<data_dir>/people/default/IDENTITY.md`，若用户在该文件中写了自然语言 prompt/备注正文，会被覆盖抹掉（dirty behavior / data-loss risk，与 USER.md 类似）。
+10) “编辑入口/文件落点”口径不一致：UI 文案仍在暗示 identity 等落点是“workspace root”，但实际 canonical 路径已是 `<data_dir>/people/default/IDENTITY.md` / `<data_dir>/USER.md` 等，用户容易编辑错文件、认为“不生效”。
 11) 文件“溯源可执行性”普遍不足：多处小节展示的是“结构化摘取结果”（如 Identity 字段行、Owner 两行），但未提供明确的“去哪里看完整源文件”的指引（路径、何时需要查），导致 agent 在被问到相关信息时不主动查源文件（治理不当/心智模型不一致）。
 12) provider 分支导致 People 能力不一致：OpenAI Responses 路径存在 `People (reference)` 小节；非 Responses 路径当前没有等价的小节，导致“你认识哪些人/有哪些 bots”类问题在不同 provider 下表现不一致。
 13) People reference 在非 sandbox 场景下可能不可执行：当前 People reference 固定引用 `/moltis/data/PEOPLE.md`（sandbox 内路径），但在 sandbox 未启用时该路径可能不存在，prompt 仍会给出该路径，造成“给了路径但不可达”的指引问题。
-14) Workspace Files 章节口径可能误导：非 Responses prompt 的 `## Workspace Files` 小节会展示 AGENTS/TOOLS 内容，但标题写的是 `AGENTS.md (workspace)` / `TOOLS.md (workspace)`；而实际注入来源是 persona 的 `AGENTS.md`/`TOOLS.md`（`<data_dir>/personas/<persona_id>/...`），容易导致 agent/用户去查错文件、认为修改不生效。
+14) Workspace Files 章节口径可能误导：非 Responses prompt 的 `## Workspace Files` 小节会展示 AGENTS/TOOLS 内容，但标题写的是 `AGENTS.md (workspace)` / `TOOLS.md (workspace)`；而实际注入来源是 persona 的 `AGENTS.md`/`TOOLS.md`（`<data_dir>/people/<persona_id>/...`），容易导致 agent/用户去查错文件、认为修改不生效。
 15) prompt build/layout 入口分散：同一类“生成最终 prompt”的逻辑在 gateway/chat 的多个路径（send / run_with_tools / run_streaming）与 `tools.spawn_agent` 各自内联实现；缺少单一权威入口导致 drift 风险高，也不利于统一治理与测试。
 16) “UI 工具面板”假设泄漏到所有场景：Guidelines/Silent Replies 明确假设“用户 UI 有 tool 输出面板、无需复述”，并鼓励 tool 后“空回复”；但在 Telegram 等 channel 场景下用户并没有 tool 面板，这会导致“工具执行了但用户看不到结果/甚至无回复”的体验问题（prompt 治理不当：未按 surface 分层）。
 17) prompt 行为受“运行模式”影响：同一 provider 下，`stream_only`/`run_streaming`/`run_with_tools` 等路径会生成不同的 prompt（是否 include_tools、是否注入 tool schemas/skills 等），导致行为随调用路径漂移，而非仅由“配置/布局/provider”决定（治理不可控）。
@@ -124,6 +128,10 @@
 35) `send_sync` 失败时会把 error 以 `role=system` 写入会话历史：之后这些 persisted `system` messages 会被 `values_to_chat_messages` 重新注入；在 OpenAI Responses 下会被映射为 `role=developer` input items，等价于把 `"[error] ..."` 变成高优先级 developer 指令，可能污染后续运行（poisoning risk）。
 36) sub-agent 的 Responses runtime/project context 缺失：`tools.spawn_agent` 在 openai-responses 路径调用 `build_openai_responses_developer_prompts` 时传 `project_context=None`、`runtime_context=None`，导致 runtime_snapshot 缺少 host/sandbox snapshot 行（但仍可能包含 Execution routing），让子代理对实际执行环境判断更模糊。
 37) sub-agent 缺少 hooks 可观测性：`tools.spawn_agent` 调用 `run_agent_loop_with_context_prefix(...)` 时把 `hook_registry=None`，即便主 agent 有 hooks，sub-agent 的 as-sent/hook 证据链也会断掉。
+
+> Update（2026-03-05）：
+> - 已在 Phase 0 落地中修复/缓解：29/30/31/32/33/34/35（canonical v1 builder、debug endpoints 的 `asSentPreamble`/`asSent`、hooks 的 `asSentSummary`、`_acceptLanguage` 传播、`ui_error_notice` 过滤等）。
+> - 仍需后续评估：36/37（sub-agent 是否需要补齐 runtime/project context 与 hooks 证据链）。
 
 ### 归纳总结（Issue Taxonomy / Themes）
 > 目标：把“散落的症状”收敛为少数几类可治理的问题，便于后续方案与验收对齐。
@@ -278,8 +286,8 @@
      - 结构/标题/合并规则：否（硬编码）
    - 来源：
      - `moltis.toml [identity]`（基础默认值）
-     - `<data_dir>/personas/<persona_id>/IDENTITY.md`（frontmatter + raw markdown）
-     - 默认 persona：`<data_dir>/personas/default/IDENTITY.md`
+     - `<data_dir>/people/<persona_id>/IDENTITY.md`（frontmatter + raw markdown）
+     - 默认 persona：`<data_dir>/people/default/IDENTITY.md`
    - 证据：
      - 拼装位置：`crates/agents/src/prompt.rs:78`
      - 默认 persona identity 路径：`crates/config/src/loader.rs:275`
@@ -296,7 +304,7 @@
        Your vibe: {vibe}.
        ```
    - 现状限制（重要）：
-     - 这几行是“结构化摘取”结果，但当前缺乏一条“溯源指引”告诉 agent：如果需要更完整/更准确的身份描述，应查看 `<data_dir>/personas/<persona_id>/IDENTITY.md`（尤其是 raw markdown 部分），否则 agent 倾向只依赖这几行或上下文猜测。
+     - 这几行是“结构化摘取”结果，但当前缺乏一条“溯源指引”告诉 agent：如果需要更完整/更准确的身份描述，应查看 `<data_dir>/people/<persona_id>/IDENTITY.md`（尤其是 raw markdown 部分），否则 agent 倾向只依赖这几行或上下文猜测。
 3) `<IDENTITY.md missing>`
    - 可配置：否（硬编码占位符）
    - 硬编码位置：`crates/agents/src/prompt.rs:103`
@@ -309,8 +317,8 @@
      - 内容：是（SOUL.md）
      - 结构/标题：否（硬编码）
    - 来源：
-     - `<data_dir>/personas/<persona_id>/SOUL.md`
-     - 默认 persona：`<data_dir>/personas/default/SOUL.md`
+     - `<data_dir>/people/<persona_id>/SOUL.md`
+     - 默认 persona：`<data_dir>/people/default/SOUL.md`
      - 缺文件兜底：`DEFAULT_SOUL`（会 seed 到磁盘）
    - 证据：
      - 拼装位置：`crates/agents/src/prompt.rs:106`
@@ -379,7 +387,7 @@
    - 可配置：
      - 内容：是（TOOLS.md）
      - 结构/标题/缺失占位：否（硬编码）
-   - 来源：`<data_dir>/personas/<persona_id>/TOOLS.md`（默认 persona：`<data_dir>/personas/default/TOOLS.md`）
+   - 来源：`<data_dir>/people/<persona_id>/TOOLS.md`（默认 persona：`<data_dir>/people/default/TOOLS.md`）
    - 证据：
      - 拼装：`crates/agents/src/prompt.rs:128`
      - 默认 persona tools 路径：`crates/config/src/loader.rs:285`
@@ -398,7 +406,7 @@
    - 可配置：
      - 内容：是（AGENTS.md）
      - 结构/标题/缺失占位：否（硬编码）
-   - 来源：`<data_dir>/personas/<persona_id>/AGENTS.md`（默认 persona：`<data_dir>/personas/default/AGENTS.md`）
+   - 来源：`<data_dir>/people/<persona_id>/AGENTS.md`（默认 persona：`<data_dir>/people/default/AGENTS.md`）
    - 证据：
      - 拼装：`crates/agents/src/prompt.rs:138`
      - 默认 persona agents 路径：`crates/config/src/loader.rs:270`
@@ -499,7 +507,7 @@
        ```
 2) Identity 字段（name/emoji/creature/vibe）
    - 可配置：是（内容）；结构硬编码
-   - 来源：`moltis.toml [identity]` + `<data_dir>/personas/<id>/IDENTITY.md` frontmatter（注意：此路径不注入 raw markdown）
+   - 来源：`moltis.toml [identity]` + `<data_dir>/people/<id>/IDENTITY.md` frontmatter（注意：此路径不注入 raw markdown）
    - 硬编码位置：`crates/agents/src/prompt.rs:407`
    - 硬编码文本（模板）：
      ```text
@@ -510,7 +518,7 @@
      ```
 3) `## Soul`
    - 可配置：是（内容）；结构硬编码
-   - 来源：`<data_dir>/personas/<id>/SOUL.md`（或默认 persona / 默认模板）
+   - 来源：`<data_dir>/people/<id>/SOUL.md`（或默认 persona / 默认模板）
    - 硬编码位置：`crates/agents/src/prompt.rs:425`
    - 硬编码文本（结构/标题）：
      ```text
@@ -552,7 +560,7 @@
       ### TOOLS.md (workspace)
       ```
    - 现状限制（重要）：
-     - 小节标题标注为 “(workspace)”，但实际注入的是 persona 文件（`<data_dir>/personas/<persona_id>/AGENTS.md` 与 `.../TOOLS.md`）；此外 gateway/server 还会 seed `<data_dir>/AGENTS.md` 与 `<data_dir>/TOOLS.md`（历史遗留），进一步加剧“到底该看哪个文件”的心智模型混乱。
+     - 小节标题标注为 “(workspace)”，但实际注入的是 persona 文件（`<data_dir>/people/<persona_id>/AGENTS.md` 与 `.../TOOLS.md`）；此外 gateway/server 还会 seed `<data_dir>/AGENTS.md` 与 `<data_dir>/TOOLS.md`（历史遗留），进一步加剧“到底该看哪个文件”的心智模型混乱。
 9) `## Available Tools` / `## How to call tools` / `## Guidelines` / `## Silent Replies`
    - 可配置：否（硬编码）
    - 硬编码位置：`crates/agents/src/prompt.rs:507` / `:536` / `:548`
@@ -702,11 +710,11 @@ The user's UI already shows tool results, so there is no need to repeat or ackno
 
 Your name is <name> <emoji>. You are a <creature>. Your vibe: <vibe>.
 
-<IDENTITY.md raw markdown>  # (可配置文件：<data_dir>/personas/<persona_id>/IDENTITY.md)
+<IDENTITY.md raw markdown>  # (可配置文件：<data_dir>/people/<persona_id>/IDENTITY.md)
 
 ## Soul
 
-<SOUL.md content>           # (可配置文件：<data_dir>/personas/<persona_id>/SOUL.md；缺失时用 DEFAULT_SOUL)
+<SOUL.md content>           # (可配置文件：<data_dir>/people/<persona_id>/SOUL.md；缺失时用 DEFAULT_SOUL)
 
 ## Owner (USER.md)
 
@@ -721,11 +729,11 @@ Note: do not inline the roster here; keep this message cache-friendly.
 
 ## Tools
 
-<TOOLS.md content>          # (可配置文件：<data_dir>/personas/<persona_id>/TOOLS.md)
+<TOOLS.md content>          # (可配置文件：<data_dir>/people/<persona_id>/TOOLS.md)
 
 ## Agents
 
-<AGENTS.md content>         # (可配置文件：<data_dir>/personas/<persona_id>/AGENTS.md)
+<AGENTS.md content>         # (可配置文件：<data_dir>/people/<persona_id>/AGENTS.md)
 
 ## Workspace/Project Context (reference)
 
@@ -790,11 +798,11 @@ Execution routing:
 
 ### AGENTS.md (workspace)
 
-<AGENTS.md content>         # (可配置文件：<data_dir>/personas/<persona_id>/AGENTS.md)
+<AGENTS.md content>         # (可配置文件：<data_dir>/people/<persona_id>/AGENTS.md)
 
 ### TOOLS.md (workspace)
 
-<TOOLS.md content>          # (可配置文件：<data_dir>/personas/<persona_id>/TOOLS.md)
+<TOOLS.md content>          # (可配置文件：<data_dir>/people/<persona_id>/TOOLS.md)
 
 ## Long-Term Memory          # (仅当 memory_search tool 存在)
 
@@ -929,7 +937,7 @@ After the tool executes, you will receive the result and can then respond to the
        - 交付：在 Responses 的 developer persona（或其固定块）中加入**极简但可执行**的溯源规则：
          - 当被问到 Owner/身份/个人信息：必须先读取 `<data_dir>/USER.md` 再回答。
          - 当被问到认识哪些人/有哪些账号：必须先读取 `<data_dir>/PEOPLE.md` 再回答。
-         - 当被问到 persona 身份细节：必须先读取 `<data_dir>/personas/<persona_id>/IDENTITY.md` 再回答（raw 注入时需剥离 frontmatter，避免噪声）。
+         - 当被问到 persona 身份细节：必须先读取 `<data_dir>/people/<persona_id>/IDENTITY.md` 再回答（raw 注入时需剥离 frontmatter，避免噪声）。
          - 必须明确说明 PEOPLE.md 的治理口径（避免 surprise）：是否允许手工编辑、是否会被系统自动再生覆盖；并指示 agent 不要“靠记忆/猜测 roster”，以 PEOPLE.md 为权威来源。
        - 约束：规则要“短、硬、可执行”，且在 **as-sent** 的三段 preamble 中位置固定（便于 debug/排障）。
        - 范围：本次 Phase 0 的“中文化与标题统一”只要求在 `openai-responses` 路径生效；非 Responses provider 的 system prompt 文案与章节结构可暂不改（遗留到后续 Phase）。
@@ -940,10 +948,10 @@ After the tool executes, you will receive the result and can then respond to the
            - system 段内容不大动，但整体翻译为中文，作为 Responses 的 developer item 1 文案。
          - 动态填充内容（Phase 0 必须按来源正确填充；缺失时用明确占位/错误）：
            - `<persona_id>`（effective persona id）
-           - `<IDENTITY.md 正文>`（从 `<data_dir>/personas/<persona_id>/IDENTITY.md` 读取；注入时需剥离 YAML frontmatter）
-           - `<SOUL.md 正文>`（从 `<data_dir>/personas/<persona_id>/SOUL.md` 读取）
-           - `<AGENTS.md 正文>`（从 `<data_dir>/personas/<persona_id>/AGENTS.md` 读取；这是“个人偏好/长期规则”）
-           - `<TOOLS.md 正文>`（从 `<data_dir>/personas/<persona_id>/TOOLS.md` 读取；这是“个人偏好/工具说明”）
+           - `<IDENTITY.md 正文>`（从 `<data_dir>/people/<persona_id>/IDENTITY.md` 读取；注入时需剥离 YAML frontmatter）
+           - `<SOUL.md 正文>`（从 `<data_dir>/people/<persona_id>/SOUL.md` 读取）
+           - `<AGENTS.md 正文>`（从 `<data_dir>/people/<persona_id>/AGENTS.md` 读取；这是“个人偏好/长期规则”）
+           - `<TOOLS.md 正文>`（从 `<data_dir>/people/<persona_id>/TOOLS.md` 读取；这是“个人偏好/工具说明”）
            - 运行环境（host/sandbox/provider/model/session 等快照，来自 `runtime_context`）
            - 项目级上下文（来自 `project_context`，其中可能包含项目目录层级的 `CLAUDE.md/CLAUDE.local.md/AGENTS.md/.claude/rules/*.md` 等）
            - 项目级可用技能（来自 discovered/activated skills）
@@ -1114,7 +1122,7 @@ After the tool executes, you will receive the result and can then respond to the
   - `USER.md` / `IDENTITY.md`：frontmatter 可被系统更新；frontmatter 之外正文为用户资产，必须原样保留；系统不得自动删除文件（即便 managed keys 全为空）。
 
 #### 失败模式与降级（Failure modes & Degrade）
-- Phase 0：`PromptBundle` 构建失败时，必须返回可定位错误（provider/model/session/personaIdEffective），并禁止 fallback 到旧的“各处自行拼装”逻辑（否则 drift 更难排）。
+- Phase 0：canonical v1 prompt 构建失败时，必须返回可定位错误（provider/model/session/personaIdEffective），并禁止 fallback 到旧的“各处自行拼装”逻辑（否则 drift 更难排）。
 - Phase 0：`send_sync` 的错误可见性必须保留，但不得写入 persisted `role=system`（避免 Responses 下 poisoning）。
 - Phase 0：`spawn_agent` 的 runtime/project context：
   - 选择 B（quick win）：保持 `runtime_context=None` / `project_context=None`，但在 debug_view 中**明确标注缺失**，避免误导；后续 Phase 3 再评估补齐。
@@ -1125,16 +1133,16 @@ After the tool executes, you will receive the result and can then respond to the
 
 ## 验收标准（Acceptance Criteria）【不可省略】
 ### Phase 0（Quick Wins）
-- [x] AC0.1：存在 `PromptBundle` builder（单一权威入口），且 gateway/chat 与 tools/spawn_agent 的主路径不再自行拼装 prompt（全部改为只调用该入口）。
-- [x] AC0.2：`chat.raw_prompt` / `chat.context` / `chat.full_context` 在 openai-responses 下能展示 **as-sent developer items**（三段 + 顺序 + `personaIdEffective`），不再退化为“单段 system prompt”口径。
+- [x] AC0.1：存在 canonical v1 builder（单一权威入口：`build_canonical_system_prompt_v1`），且 gateway/chat 与 tools/spawn_agent 的主路径不再自行拼装 prompt（全部改为只调用该入口）。
+- [x] AC0.2：`chat.raw_prompt` / `chat.context` / `chat.full_context` 在 openai-responses 下能展示 **as-sent developer preamble**（折叠为 1 条 developer item）+ `personaIdEffective`（并提供 provider-aware `asSent` 摘要），不再退化为“只展示内部拼接的 system prompt、无法复盘 as-sent 语义”的口径。
 - [x] AC0.3：debug endpoints 与主 run 的 persona 口径一致：不再固定 default persona；展示的 `personaIdEffective` 必须与实际 run 一致（可用于排障）。
 - [x] AC0.4：`send_sync` 的预检估算/compaction gating 与实际 as-sent 复用同一入口（同一 persona / 同一 runtime_context / 同一工具过滤口径），并传播 `_acceptLanguage`。
 - [x] AC0.5：`send_sync` 错误不再以 persisted `role=system` 进入会话历史（避免 OpenAI Responses 下 developer poisoning）；必须有回归测试覆盖两条写入路径（keep-window overflow + run failed）。
 - [x] AC0.5b：`send_sync` 的 `[error] ...` 仍可在 UI/history 中可见（以 `role=assistant` 持久化，并带 `moltis_internal_kind="ui_error_notice"` 标记），但在后续 LLM prompt 构造时会被过滤掉（不进入 as-sent history）。
 - [x] AC0.6：结构化写回止血：`save_user()` / `save_identity()` 只更新 frontmatter、正文完全保留（含用户自定义段落/未知 keys），并有单元测试覆盖。
   - [x] AC0.7：`IDENTITY.md` raw markdown 注入剥离 YAML frontmatter（无重复/无噪声），并有单元测试覆盖。
-  - [x] AC0.8：语音回复模式：当 `desired_reply_medium == Voice` 时，Responses 的 developer item 3 会追加“语音回复模式”固定块（中文文案），且 debug/as-sent 可观测。
-  - [x] AC0.9：长期记忆提示：当 ToolRegistry 存在 `memory_search` 时，Responses 的 developer item 3 会注入“长期记忆”固定提示（中文文案），且 debug/as-sent 可观测。
+  - [x] AC0.8：语音回复模式：当 `reply_medium == Voice` 时，canonical v1 提供模板变量 `voice_reply_suffix_md`；当 Type4 模板引用该变量时，最终 system prompt 会包含“语音回复模式”固定块（中文文案）；未引用时必须 warning（不 fail-fast）。
+  - [x] AC0.9：长期记忆提示：当 ToolRegistry 存在 `memory_search` 时，canonical v1 提供模板变量 `long_term_memory_md`；当 Type4 模板引用该变量时，最终 system prompt 会包含“长期记忆”固定提示（中文文案）；未引用时必须 warning（不 fail-fast）。
 
 ### Phase 1+（后续，暂不在 Phase 0 实施）
 - [ ] AC1：无任何 layout 配置时，生成的 prompt 与现状等价（至少通过 snapshot/golden tests 验证）。
@@ -1148,7 +1156,7 @@ After the tool executes, you will receive the result and can then respond to the
 ## 测试计划（Test Plan）【不可省略】
 ### Phase 0（Quick Wins）
 #### Unit
-- [ ] `PromptBundle` builder：Responses/非 Responses 两种输出形态均可断言（Responses=三段 developer；非 Responses=单段 system）。
+- [x] canonical v1 builder：覆盖 native/non-native/no-tools 三种模式 + hard/soft requiredness（并对 escape/稳定排序做断言）。
 - [x] debug endpoints：`chat.raw_prompt` / `chat.context` / `chat.full_context` 在 Responses 下展示 as-sent developer items（且包含 `personaIdEffective`）。
 - [x] persona 路由回归：debug endpoints 必须走 `resolve_session_persona_id(...)`，不允许固定 default persona。
 - [x] `send_sync`：预检估算与实际 as-sent 复用同一入口（并覆盖 `_acceptLanguage` 传播）。
@@ -1158,7 +1166,7 @@ After the tool executes, you will receive the result and can then respond to the
 - [x] IDENTITY raw 注入去 frontmatter：`IDENTITY.md` raw markdown 注入不含 YAML frontmatter（避免重复/噪声）。
 
 #### Integration
-- [ ] gateway/chat 主路径：send / run_with_tools / run_streaming / send_sync / debug endpoints 全部走统一入口（并验证 `personaIdEffective` 一致）。
+- [x] gateway/chat 主路径：send / run_with_tools / run_streaming / send_sync / debug endpoints 全部走统一入口（并验证 `personaIdEffective` 一致）。
 
 ### Phase 1+（后续）
 #### Unit

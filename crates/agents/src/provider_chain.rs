@@ -236,6 +236,14 @@ impl LlmProvider for ProviderChain {
         self.primary().provider.output_limit()
     }
 
+    fn debug_as_sent_summary(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> Option<serde_json::Value> {
+        self.primary().provider.debug_as_sent_summary(messages, tools)
+    }
+
     async fn complete(
         &self,
         messages: &[ChatMessage],

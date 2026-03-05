@@ -767,6 +767,7 @@ pub async fn run_agent_loop_with_context_prefix(
         if let Some(ref hooks) = hook_registry {
             let msgs_json: Vec<serde_json::Value> =
                 messages.iter().map(|m| m.to_openai_value()).collect();
+            let as_sent_summary = provider.debug_as_sent_summary(&messages, schemas_for_api);
             let payload = HookPayload::BeforeLLMCall {
                 session_id: session_id_for_hooks.clone(),
                 chan_chat_key: chan_chat_key_for_hooks.clone(),
@@ -774,6 +775,7 @@ pub async fn run_agent_loop_with_context_prefix(
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 messages: serde_json::Value::Array(msgs_json),
+                as_sent_summary,
                 tool_count: schemas_for_api.len(),
                 iteration: iterations,
             };
@@ -1291,6 +1293,7 @@ pub async fn run_agent_loop_streaming_with_prefix(
         if let Some(ref hooks) = hook_registry {
             let msgs_json: Vec<serde_json::Value> =
                 messages.iter().map(|m| m.to_openai_value()).collect();
+            let as_sent_summary = provider.debug_as_sent_summary(&messages, &schemas_for_api);
             let payload = HookPayload::BeforeLLMCall {
                 session_id: session_id_for_hooks.clone(),
                 chan_chat_key: chan_chat_key_for_hooks.clone(),
@@ -1298,6 +1301,7 @@ pub async fn run_agent_loop_streaming_with_prefix(
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 messages: serde_json::Value::Array(msgs_json),
+                as_sent_summary,
                 tool_count: schemas_for_api.len(),
                 iteration: iterations,
             };

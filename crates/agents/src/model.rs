@@ -416,6 +416,19 @@ pub trait LlmProvider: Send + Sync {
     fn debug_request_overrides(&self, _ctx: Option<&LlmRequestContext>) -> serde_json::Value {
         serde_json::json!({})
     }
+
+    /// Optional debug helper: returns a **provider-specific** "as-sent" summary
+    /// for observability surfaces (debug endpoints, hooks).
+    ///
+    /// Default implementation returns `None` to avoid implying correctness for
+    /// providers with complex protocol mappings.
+    fn debug_as_sent_summary(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Response from an LLM completion call.

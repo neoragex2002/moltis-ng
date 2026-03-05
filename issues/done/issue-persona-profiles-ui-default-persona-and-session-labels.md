@@ -7,7 +7,7 @@
 - Affected providers/models: all（主要是 UI/配置/会话元数据；与 provider 无强耦合）
 
 **已实现（2026-02-24）**
-- 默认 persona canonical 路径收敛到 `<data_dir>/personas/default/*`（无 root fallback）：`crates/config/src/loader.rs:266`
+- 默认 persona canonical 路径收敛到 `<data_dir>/people/default/*`（无 root fallback）：`crates/config/src/loader.rs:266`
 - Settings → General：新增 `Personas` 与 `Owner`（替换原 Identity 导航入口）：`crates/gateway/src/assets/js/page-settings.js:69`
 - Personas CRUD（list/get/save/delete/clone）+ `default` 不可删除 + persona_id 校验：`crates/gateway/src/personas.rs:47`、`crates/gateway/src/methods.rs:1253`
 - Owner（`USER.md`）全局编辑 RPC + UI：`crates/gateway/src/owner.rs:3`、`crates/gateway/src/assets/js/page-settings.js:847`
@@ -221,7 +221,7 @@ Out of scope（本单不做）：
 ### Unit
 - [x] persona_id 合法性校验与路径约束：`crates/gateway/src/personas.rs:169`
 - [x] personas CRUD（create/clone/delete；禁止删除 `default`）：`crates/gateway/src/personas.rs:180`
-- [x] 默认 persona canonical 路径（`<data_dir>/personas/default/*`）：`crates/config/src/loader.rs:1316`
+- [x] 默认 persona canonical 路径（`<data_dir>/people/default/*`）：`crates/config/src/loader.rs:1316`
 - [x] Telegram session label 生成：`crates/gateway/src/chat.rs:9884`
 - [x] PEOPLE.md 生成且不泄露 token：`crates/gateway/src/people.rs:61`
 
@@ -244,7 +244,7 @@ Out of scope（本单不做）：
      - Create：输入 `ops`（示例），确认 clone 自 `default` 成功，dropdown 出现 `ops`。
      - Clone：将 `ops` clone 为 `ops2`，验证内容一致。
      - Delete：删除 `ops2` 成功；尝试删除 `default` 应被拒绝。
-     - 文件落点：确认对应文件写入 `<data_dir>/personas/<persona_id>/{IDENTITY,SOUL,TOOLS,AGENTS}.md`。
+     - 文件落点：确认对应文件写入 `<data_dir>/people/<persona_id>/{IDENTITY,SOUL,TOOLS,AGENTS}.md`。
   4. Settings → General → Owner：
      - 编辑 USER.md 保存并 Reload，确认内容持久化。
      - 文件落点：确认写入 `<data_dir>/USER.md`。

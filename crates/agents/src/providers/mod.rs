@@ -331,6 +331,14 @@ impl LlmProvider for RegistryModelProvider {
     ) -> serde_json::Value {
         self.inner.debug_request_overrides(ctx)
     }
+
+    fn debug_as_sent_summary(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> Option<serde_json::Value> {
+        self.inner.debug_as_sent_summary(messages, tools)
+    }
 }
 
 /// Resolve an API key from config (Secret) or environment variable,

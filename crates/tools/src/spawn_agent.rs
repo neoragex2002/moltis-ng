@@ -5,13 +5,12 @@ use std::sync::Arc;
 use {anyhow::Result, async_trait::async_trait, tracing::info};
 
 use moltis_agents::{
-    model::{ChatMessage, LlmProvider, UserContent},
+    model::{LlmProvider, UserContent},
     prompt::{
-        build_openai_responses_developer_prompts, build_system_prompt_minimal_runtime,
-        build_system_prompt_with_session_runtime,
+        PromptReplyMedium, build_canonical_system_prompt_v1,
     },
     providers::ProviderRegistry,
-    runner::{RunnerEvent, run_agent_loop_with_context, run_agent_loop_with_context_prefix},
+    runner::{RunnerEvent, run_agent_loop_with_context},
     tool_registry::{AgentTool, ToolRegistry},
 };
 
@@ -31,8 +30,6 @@ const SPAWN_DEPTH_KEY: &str = "_spawn_depth";
 pub type OnSpawnEvent = Arc<dyn Fn(RunnerEvent) + Send + Sync>;
 
 struct LoadedPersona {
-    identity: moltis_config::AgentIdentity,
-    user: moltis_config::UserProfile,
     identity_md_raw: Option<String>,
     soul_text: Option<String>,
     agents_text: Option<String>,
@@ -40,30 +37,10 @@ struct LoadedPersona {
 }
 
 fn load_persona(persona_id: Option<&str>) -> LoadedPersona {
-    let mut identity = moltis_config::AgentIdentity::default();
-    let file_identity = persona_id
-        .and_then(moltis_config::load_persona_identity)
-        .or_else(moltis_config::load_identity);
-    if let Some(file_identity) = file_identity {
-        identity = file_identity;
-    }
-
-    let mut user = moltis_config::UserProfile::default();
-    if let Some(file_user) = moltis_config::load_user() {
-        if file_user.name.is_some() {
-            user.name = file_user.name;
-        }
-        if file_user.timezone.is_some() {
-            user.timezone = file_user.timezone;
-        }
-    }
-
     LoadedPersona {
-        identity,
         identity_md_raw: persona_id
             .and_then(moltis_config::load_persona_identity_md_raw)
             .or_else(moltis_config::load_identity_md_raw),
-        user,
         soul_text: persona_id
             .and_then(moltis_config::load_persona_soul)
             .or_else(moltis_config::load_soul),
@@ -227,82 +204,43 @@ impl AgentTool for SpawnAgentTool {
         };
         let user_content = UserContent::text(user_text);
 
-        let is_openai_responses = provider
-            .name()
-            .trim()
-            .eq_ignore_ascii_case("openai-responses");
-        let result = if is_openai_responses {
-            let persona_label = persona_id.unwrap_or("default");
-            let prompts = build_openai_responses_developer_prompts(
-                &sub_tools,
-                provider.supports_tools(),
-                None,
-                &[],
-                persona_label,
-                persona.identity_md_raw.as_deref(),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                None,
-            );
-            let mut runtime_snapshot = prompts.runtime_snapshot;
-            runtime_snapshot.push_str("\n## Sub-agent\n\nYou are a sub-agent spawned to complete the user's task thoroughly and return a clear result.\n");
-            let prefix_messages = vec![
-                ChatMessage::system(prompts.system),
-                ChatMessage::system(prompts.persona),
-                ChatMessage::system(runtime_snapshot),
-            ];
+        let session_id = params
+            .get("_sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("main");
 
-            run_agent_loop_with_context_prefix(
-                provider,
-                &sub_tools,
-                prefix_messages,
-                &user_content,
-                None,
-                None,
-                Some(tool_context),
-                None,
-            )
-            .await
-        } else {
-            let native_tools = provider.supports_tools();
-            let system_prompt = if native_tools {
-                build_system_prompt_with_session_runtime(
-                    &sub_tools,
-                    native_tools,
-                    None,
-                    &[],
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    None,
-                )
-            } else {
-                build_system_prompt_minimal_runtime(
-                    None,
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    None,
-                )
-            };
+        let persona_label = persona_id.unwrap_or("default");
+        let canonical = build_canonical_system_prompt_v1(
+            &sub_tools,
+            provider.supports_tools(),
+            false, // sub-agent: include tool inventory when available
+            None,
+            &[],
+            persona_label,
+            persona.identity_md_raw.as_deref(),
+            persona.soul_text.as_deref(),
+            persona.agents_text.as_deref(),
+            persona.tools_text.as_deref(),
+            PromptReplyMedium::Text,
+            None,
+            session_id,
+        )?;
+        let mut system_prompt = canonical.system_prompt;
+        system_prompt.push_str(
+            "\n\n## Sub-agent\n\nYou are a sub-agent spawned to complete the user's task thoroughly and return a clear result.\n",
+        );
 
-            run_agent_loop_with_context(
-                provider,
-                &sub_tools,
-                &system_prompt,
-                &user_content,
-                None,
-                None, // no history
-                Some(tool_context),
-                None, // no hooks for sub-agents
-            )
-            .await
-        };
+        let result = run_agent_loop_with_context(
+            provider,
+            &sub_tools,
+            &system_prompt,
+            &user_content,
+            None,
+            None, // no history
+            Some(tool_context),
+            None, // no hooks for sub-agents
+        )
+        .await;
 
         // Emit SubAgentEnd regardless of success/failure.
         let (iterations, tool_calls_made) = match &result {
@@ -360,6 +298,10 @@ mod tests {
 
         fn id(&self) -> &str {
             &self.model_id
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
         }
 
         async fn complete(

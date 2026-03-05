@@ -118,6 +118,8 @@ pub enum HookPayload {
         provider: String,
         model: String,
         messages: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_sent_summary: Option<Value>,
         tool_count: usize,
         iteration: usize,
     },
@@ -881,6 +883,7 @@ mod tests {
             provider: "openai".into(),
             model: "gpt-4o".into(),
             messages: serde_json::json!([{"role": "user", "content": "hello"}]),
+            as_sent_summary: None,
             tool_count: 3,
             iteration: 1,
         };
@@ -920,6 +923,7 @@ mod tests {
             provider: "p".into(),
             model: "m".into(),
             messages: serde_json::json!([]),
+            as_sent_summary: None,
             tool_count: 0,
             iteration: 1,
         };
@@ -953,6 +957,7 @@ mod tests {
             provider: "p".into(),
             model: "m".into(),
             messages: serde_json::json!([]),
+            as_sent_summary: None,
             tool_count: 0,
             iteration: 1,
         };

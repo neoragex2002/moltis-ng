@@ -1,10 +1,27 @@
 # System Prompt Architecture
 
+Update (2026-03-04):
+- The primary entry point is now `build_canonical_system_prompt_v1()` in `crates/agents/src/prompt.rs`.
+- The previous `build_system_prompt_*()` functions are legacy compatibility helpers and are no longer the main runtime path.
+- OpenAI Responses maps the canonical `ChatMessage::System` to a single `role=developer` input item (and omits top-level `instructions`).
+
 The system prompt sent to the LLM is assembled dynamically from multiple
 components. Each piece is optional and loaded only when relevant, keeping the
 prompt compact while adapting to the current session context.
 
-## Assembly Order
+## Canonical v1 (Current)
+
+Canonical v1 builds a single cross-provider system prompt string, then relies on
+each provider adapter to map it to its protocol:
+
+- Entry point: `build_canonical_system_prompt_v1()` (`crates/agents/src/prompt.rs`)
+- User-owned Type4 templates: `people/<persona_id>/{IDENTITY,SOUL,AGENTS,TOOLS}.md`
+- Strict template vars: `{{var}}` (with `{{{{` / `}}}}` escapes), rendered via
+  `crates/config/src/prompt_subst.rs`
+- Debug observability: gateway debug endpoints expose `asSentPreamble` and
+  provider-aware `asSent` summaries (see `crates/gateway/src/chat.rs`)
+
+## Assembly Order (Legacy, pre-v1)
 
 The prompt is built in `crates/agents/src/prompt.rs` by
 `build_system_prompt_full()`. Components are appended in this order:
@@ -177,7 +194,7 @@ The final section contains:
 - **Silent reply protocol**: when tool output speaks for itself, the LLM should
   return an empty response rather than acknowledging it
 
-## Entry Points
+## Entry Points (Legacy, pre-v1)
 
 | Function | Use case |
 |----------|----------|

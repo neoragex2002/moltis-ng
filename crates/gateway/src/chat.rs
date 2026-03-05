@@ -28,13 +28,11 @@ use {
         model::{StreamEvent, values_to_chat_messages},
         multimodal::parse_data_uri,
         prompt::{
-            OpenAiResponsesDeveloperPrompts, PromptHostRuntimeContext, PromptRuntimeContext,
-            PromptSandboxRuntimeContext,
-            VOICE_REPLY_SUFFIX, build_openai_responses_developer_prompts,
-            build_system_prompt_minimal_runtime, build_system_prompt_with_session_runtime,
+            PromptHostRuntimeContext, PromptRuntimeContext, PromptSandboxRuntimeContext,
+            PromptReplyMedium, build_canonical_system_prompt_v1,
         },
         providers::{ProviderRegistry, raw_model_id},
-        runner::{RunnerEvent, run_agent_loop_streaming, run_agent_loop_streaming_with_prefix},
+        runner::{RunnerEvent, run_agent_loop_streaming},
         tool_registry::ToolRegistry,
     },
     moltis_sessions::{
@@ -116,6 +114,13 @@ fn to_user_content(mc: &MessageContent) -> UserContent {
 enum ReplyMedium {
     Text,
     Voice,
+}
+
+fn to_prompt_reply_medium(m: ReplyMedium) -> PromptReplyMedium {
+    match m {
+        ReplyMedium::Text => PromptReplyMedium::Text,
+        ReplyMedium::Voice => PromptReplyMedium::Voice,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,43 +251,19 @@ fn is_openai_responses_provider(provider_name: &str) -> bool {
     normalize_provider_key(provider_name) == "openai-responses"
 }
 
-struct OpenAiResponsesAsSentPrompt {
-    system_text: String,
-    persona_text: String,
-    runtime_text: String,
-    joined_for_token_estimate: String,
-    prefix_messages: Vec<ChatMessage>,
-}
-
-fn openai_responses_as_sent_from_prompts(
-    prompts: OpenAiResponsesDeveloperPrompts,
-    desired_reply_medium: ReplyMedium,
-) -> OpenAiResponsesAsSentPrompt {
-    let OpenAiResponsesDeveloperPrompts {
-        system,
-        persona,
-        mut runtime_snapshot,
-    } = prompts;
-
-    if desired_reply_medium == ReplyMedium::Voice {
-        runtime_snapshot.push_str(VOICE_REPLY_SUFFIX);
-    }
-
-    let joined_for_token_estimate =
-        format!("{system}\n\n{persona}\n\n{runtime_snapshot}");
-
-    let prefix_messages = vec![
-        ChatMessage::system(system.clone()),
-        ChatMessage::system(persona.clone()),
-        ChatMessage::system(runtime_snapshot.clone()),
-    ];
-
-    OpenAiResponsesAsSentPrompt {
-        system_text: system,
-        persona_text: persona,
-        runtime_text: runtime_snapshot,
-        joined_for_token_estimate,
-        prefix_messages,
+fn as_sent_preamble_for_provider(provider_name: &str, system_prompt: &str) -> Vec<serde_json::Value> {
+    if is_openai_responses_provider(provider_name) {
+        vec![serde_json::json!({
+            "index": 1,
+            "role": "developer",
+            "text": system_prompt,
+        })]
+    } else {
+        vec![serde_json::json!({
+            "index": 1,
+            "role": "system",
+            "text": system_prompt,
+        })]
     }
 }
 
@@ -796,41 +777,23 @@ async fn detect_host_sudo_access() -> (Option<bool>, Option<String>) {
 /// Pre-loaded persona data used to build the system prompt.
 struct PromptPersona {
     config: moltis_config::MoltisConfig,
-    identity: moltis_config::AgentIdentity,
     identity_md_raw: Option<String>,
-    user: moltis_config::UserProfile,
     soul_text: Option<String>,
     agents_text: Option<String>,
     tools_text: Option<String>,
 }
 
-/// Load identity, user profile, soul, and workspace text from config + data files.
+/// Load persona Type4 templates + config used for runtime tool filtering.
 ///
 /// Both `run_with_tools` and `run_streaming` need the same persona data;
 /// this function avoids duplicating the merge logic.
 fn load_prompt_persona_with_id(persona_id: Option<&str>) -> PromptPersona {
     let config = moltis_config::discover_and_load();
-    let file_identity = persona_id
-        .and_then(moltis_config::load_persona_identity)
-        .or_else(moltis_config::load_identity);
-    let identity = file_identity.unwrap_or_default();
-
-    let mut user = moltis_config::UserProfile::default();
-    if let Some(file_user) = moltis_config::load_user() {
-        if file_user.name.is_some() {
-            user.name = file_user.name;
-        }
-        if file_user.timezone.is_some() {
-            user.timezone = file_user.timezone;
-        }
-    }
     PromptPersona {
         config,
-        identity,
         identity_md_raw: persona_id
             .and_then(moltis_config::load_persona_identity_md_raw)
             .or_else(moltis_config::load_identity_md_raw),
-        user,
         soul_text: persona_id
             .and_then(moltis_config::load_persona_soul)
             .or_else(moltis_config::load_soul),
@@ -2401,110 +2364,42 @@ impl ChatService for LiveChatService {
         }
 
         let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
+        let persona_id_effective = persona_id.as_deref().unwrap_or("default");
         let persona = load_prompt_persona_with_id(persona_id.as_deref());
-        let system_prompt = if is_openai_responses_provider(provider.name()) {
-            if stream_only {
-                let prompts = build_openai_responses_developer_prompts(
-                    &ToolRegistry::new(),
-                    provider.supports_tools(),
-                    project_context.as_deref(),
-                    &[],
-                    persona_id.as_deref().unwrap_or("default"),
-                    persona.identity_md_raw.as_deref(),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                );
-                let as_sent = openai_responses_as_sent_from_prompts(prompts, desired_reply_medium);
-                as_sent.joined_for_token_estimate
-            } else {
-                let native_tools = provider.supports_tools();
-                let filtered_registry = {
-                    let registry_guard = self.tool_registry.read().await;
-                    if native_tools {
-                        apply_runtime_tool_filters(
-                            &registry_guard,
-                            &persona.config,
-                            &discovered_skills,
-                            mcp_disabled,
-                        )
-                    } else {
-                        registry_guard.clone_without(&[])
-                    }
-                };
-                let prompts = build_openai_responses_developer_prompts(
-                    &filtered_registry,
-                    native_tools,
-                    project_context.as_deref(),
-                    &discovered_skills,
-                    persona_id.as_deref().unwrap_or("default"),
-                    persona.identity_md_raw.as_deref(),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                );
-                let as_sent = openai_responses_as_sent_from_prompts(prompts, desired_reply_medium);
-                as_sent.joined_for_token_estimate
-            }
+
+        let supports_tools = provider.supports_tools();
+        let filtered_registry = if stream_only {
+            ToolRegistry::new()
         } else {
-            let system_prompt = if stream_only {
-                build_system_prompt_minimal_runtime(
-                    project_context.as_deref(),
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            } else {
-                let native_tools = provider.supports_tools();
-                let filtered_registry = {
-                    let registry_guard = self.tool_registry.read().await;
-                    if native_tools {
-                        apply_runtime_tool_filters(
-                            &registry_guard,
-                            &persona.config,
-                            &discovered_skills,
-                            mcp_disabled,
-                        )
-                    } else {
-                        registry_guard.clone_without(&[])
-                    }
-                };
-                if native_tools {
-                    build_system_prompt_with_session_runtime(
-                        &filtered_registry,
-                        native_tools,
-                        project_context.as_deref(),
-                        &discovered_skills,
-                        Some(&persona.identity),
-                        Some(&persona.user),
-                        persona.soul_text.as_deref(),
-                        persona.agents_text.as_deref(),
-                        persona.tools_text.as_deref(),
-                        Some(&runtime_context),
-                    )
-                } else {
-                    build_system_prompt_minimal_runtime(
-                        project_context.as_deref(),
-                        Some(&persona.identity),
-                        Some(&persona.user),
-                        persona.soul_text.as_deref(),
-                        persona.agents_text.as_deref(),
-                        persona.tools_text.as_deref(),
-                        Some(&runtime_context),
-                    )
-                }
-            };
-            if desired_reply_medium == ReplyMedium::Voice {
-                format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
-            } else {
-                system_prompt
-            }
+            let registry_guard = self.tool_registry.read().await;
+            apply_runtime_tool_filters(
+                &registry_guard,
+                &persona.config,
+                &discovered_skills,
+                mcp_disabled,
+            )
         };
+
+        let canonical = build_canonical_system_prompt_v1(
+            &filtered_registry,
+            supports_tools,
+            stream_only,
+            project_context.as_deref(),
+            &discovered_skills,
+            persona_id_effective,
+            persona.identity_md_raw.as_deref(),
+            persona.soul_text.as_deref(),
+            persona.agents_text.as_deref(),
+            persona.tools_text.as_deref(),
+            to_prompt_reply_medium(desired_reply_medium),
+            Some(&runtime_context),
+            &session_key,
+        )
+        .map_err(|e| e.to_string())?;
+        for w in &canonical.warnings {
+            warn!(session = %session_key, warning = %w, "prompt template warning");
+        }
+        let system_prompt = canonical.system_prompt;
 
         let estimated_next_input_tokens =
             estimate_next_input_tokens(&system_prompt, &history, &user_content);
@@ -3007,102 +2902,39 @@ impl ChatService for LiveChatService {
         let persona_id_effective = persona_id.as_deref().unwrap_or("default");
         let persona = load_prompt_persona_with_id(persona_id.as_deref());
 
-        let system_prompt = if is_openai_responses_provider(provider.name()) {
-            if stream_only {
-                let prompts = build_openai_responses_developer_prompts(
-                    &ToolRegistry::new(),
-                    provider.supports_tools(),
-                    None,
-                    &[],
-                    persona_id_effective,
-                    persona.identity_md_raw.as_deref(),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                );
-                let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
-                as_sent.joined_for_token_estimate
-            } else {
-                let native_tools = provider.supports_tools();
-                let filtered_registry = {
-                    let registry_guard = self.tool_registry.read().await;
-                    if native_tools {
-                        apply_runtime_tool_filters(
-                            &registry_guard,
-                            &persona.config,
-                            &[],
-                            false, // send_sync: MCP tools always enabled for API calls
-                        )
-                    } else {
-                        registry_guard.clone_without(&[])
-                    }
-                };
-                let prompts = build_openai_responses_developer_prompts(
-                    &filtered_registry,
-                    native_tools,
-                    None,
-                    &[],
-                    persona_id_effective,
-                    persona.identity_md_raw.as_deref(),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                );
-                let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
-                as_sent.joined_for_token_estimate
-            }
-        } else if stream_only {
-            build_system_prompt_minimal_runtime(
-                None,
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-            )
+        let supports_tools = provider.supports_tools();
+        let filtered_registry = if stream_only {
+            ToolRegistry::new()
         } else {
-            let native_tools = provider.supports_tools();
-            let filtered_registry = {
-                let registry_guard = self.tool_registry.read().await;
-                if native_tools {
-                    apply_runtime_tool_filters(
-                        &registry_guard,
-                        &persona.config,
-                        &[],
-                        false, // send_sync: MCP tools always enabled for API calls
-                    )
-                } else {
-                    registry_guard.clone_without(&[])
-                }
-            };
-            if native_tools {
-                build_system_prompt_with_session_runtime(
-                    &filtered_registry,
-                    native_tools,
-                    None,
-                    &[],
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            } else {
-                build_system_prompt_minimal_runtime(
-                    None,
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            }
+            let registry_guard = self.tool_registry.read().await;
+            apply_runtime_tool_filters(
+                &registry_guard,
+                &persona.config,
+                &[],
+                false, // send_sync: MCP tools always enabled for API calls
+            )
         };
+
+        let canonical = build_canonical_system_prompt_v1(
+            &filtered_registry,
+            supports_tools,
+            stream_only,
+            None,
+            &[],
+            persona_id_effective,
+            persona.identity_md_raw.as_deref(),
+            persona.soul_text.as_deref(),
+            persona.agents_text.as_deref(),
+            persona.tools_text.as_deref(),
+            to_prompt_reply_medium(desired_reply_medium),
+            Some(&runtime_context),
+            &session_key,
+        )
+        .map_err(|e| e.to_string())?;
+        for w in &canonical.warnings {
+            warn!(session = %session_key, warning = %w, "prompt template warning");
+        }
+        let system_prompt = canonical.system_prompt;
 
         let user_content = UserContent::text(text.clone());
         let estimated_next_input_tokens =
@@ -3749,121 +3581,58 @@ impl ChatService for LiveChatService {
             .to_string();
         let persona = load_prompt_persona_with_id(persona_id.as_deref());
 
-        let mut as_sent_preamble: Option<Vec<serde_json::Value>> = None;
-
-        let system_prompt = if is_openai_responses_provider(provider.name()) {
-            let prompts = if stream_only {
-                build_openai_responses_developer_prompts(
-                    &ToolRegistry::new(),
-                    provider.supports_tools(),
-                    project_context.as_deref(),
-                    &[],
-                    &persona_id_effective,
-                    persona.identity_md_raw.as_deref(),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            } else {
-                let native_tools = provider.supports_tools();
-                let filtered_registry = {
-                    let registry_guard = self.tool_registry.read().await;
-                    if native_tools {
-                        apply_runtime_tool_filters(
-                            &registry_guard,
-                            &persona.config,
-                            &discovered_skills,
-                            mcp_disabled,
-                        )
-                    } else {
-                        registry_guard.clone_without(&[])
-                    }
-                };
-                build_openai_responses_developer_prompts(
-                    &filtered_registry,
-                    native_tools,
-                    project_context.as_deref(),
-                    &discovered_skills,
-                    &persona_id_effective,
-                    persona.identity_md_raw.as_deref(),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            };
-            let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
-            as_sent_preamble = Some(vec![
-                serde_json::json!({
-                    "index": 1,
-                    "layer": "system",
-                    "role": "developer",
-                    "text": as_sent.system_text,
-                }),
-                serde_json::json!({
-                    "index": 2,
-                    "layer": "persona",
-                    "role": "developer",
-                    "text": as_sent.persona_text,
-                }),
-                serde_json::json!({
-                    "index": 3,
-                    "layer": "runtime_snapshot",
-                    "role": "developer",
-                    "text": as_sent.runtime_text,
-                }),
-            ]);
-            as_sent.joined_for_token_estimate
-        } else if stream_only {
-            build_system_prompt_minimal_runtime(
-                project_context.as_deref(),
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-            )
+        let filtered_registry = if stream_only {
+            ToolRegistry::new()
         } else {
-            let native_tools = provider.supports_tools();
-            let filtered_registry = {
-                let registry_guard = self.tool_registry.read().await;
-                if native_tools {
-                    apply_runtime_tool_filters(
-                        &registry_guard,
-                        &persona.config,
-                        &discovered_skills,
-                        mcp_disabled,
-                    )
-                } else {
-                    registry_guard.clone_without(&[])
-                }
-            };
-            if native_tools {
-                build_system_prompt_with_session_runtime(
-                    &filtered_registry,
-                    native_tools,
-                    project_context.as_deref(),
-                    &discovered_skills,
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            } else {
-                build_system_prompt_minimal_runtime(
-                    project_context.as_deref(),
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            }
+            let registry_guard = self.tool_registry.read().await;
+            apply_runtime_tool_filters(
+                &registry_guard,
+                &persona.config,
+                &discovered_skills,
+                mcp_disabled,
+            )
+        };
+
+        let canonical = build_canonical_system_prompt_v1(
+            &filtered_registry,
+            supports_tools,
+            stream_only,
+            project_context.as_deref(),
+            &discovered_skills,
+            &persona_id_effective,
+            persona.identity_md_raw.as_deref(),
+            persona.soul_text.as_deref(),
+            persona.agents_text.as_deref(),
+            persona.tools_text.as_deref(),
+            PromptReplyMedium::Text,
+            Some(&runtime_context),
+            &session_key,
+        )
+        .map_err(|e| e.to_string())?;
+        for w in &canonical.warnings {
+            warn!(session = %session_key, warning = %w, "prompt template warning");
+        }
+        let prompt_template_warnings = canonical.warnings.clone();
+        let system_prompt = canonical.system_prompt;
+
+        let tools_for_api: Vec<serde_json::Value> = if stream_only || !supports_tools {
+            Vec::new()
+        } else {
+            filtered_registry.list_schemas()
+        };
+        let history_with_tools = reconstruct_tool_history_for_prompt_estimate(
+            &messages,
+            app_config.tools.max_tool_result_bytes,
+        );
+        let mut msgs_for_as_sent = Vec::with_capacity(1 + history_with_tools.len());
+        msgs_for_as_sent.push(ChatMessage::system(system_prompt.clone()));
+        msgs_for_as_sent.extend(values_to_chat_messages(&history_with_tools));
+        let as_sent = provider.debug_as_sent_summary(&msgs_for_as_sent, &tools_for_api);
+
+        let as_sent_preamble = if is_openai_responses_provider(provider.name()) {
+            Some(as_sent_preamble_for_provider(provider.name(), &system_prompt))
+        } else {
+            None
         };
 
         let token_debug = build_token_debug_info(
@@ -3888,7 +3657,9 @@ impl ChatService for LiveChatService {
             "compaction": compaction_info,
             "tokenDebug": token_debug,
             "personaIdEffective": persona_id_effective,
-            "asSentPreamble": as_sent_preamble
+            "asSentPreamble": as_sent_preamble,
+            "asSent": as_sent,
+            "promptTemplateWarnings": prompt_template_warnings
         }))
     }
 
@@ -3973,92 +3744,57 @@ impl ChatService for LiveChatService {
         let stream_only = !self.has_tools_sync();
 
         // Build filtered tool registry.
-        let filtered_registry = {
+        let filtered_registry = if stream_only {
+            ToolRegistry::new()
+        } else {
             let registry_guard = self.tool_registry.read().await;
-            if native_tools {
-                apply_runtime_tool_filters(
-                    &registry_guard,
-                    &persona.config,
-                    &discovered_skills,
-                    mcp_disabled,
-                )
-            } else {
-                registry_guard.clone_without(&[])
-            }
+            apply_runtime_tool_filters(
+                &registry_guard,
+                &persona.config,
+                &discovered_skills,
+                mcp_disabled,
+            )
         };
 
-        let mut as_sent_preamble: Option<Vec<serde_json::Value>> = None;
-
-        let (system_prompt, tool_count) = if is_openai_responses_provider(provider.name()) {
-            let empty_tools;
-            let (tools_for_prompt, skills_for_prompt) = if stream_only {
-                empty_tools = ToolRegistry::new();
-                (&empty_tools, &[] as &[moltis_skills::types::SkillMetadata])
-            } else {
-                (&filtered_registry, discovered_skills.as_slice())
-            };
-
-            let prompts = build_openai_responses_developer_prompts(
-                tools_for_prompt,
-                native_tools,
-                project_context.as_deref(),
-                skills_for_prompt,
-                &persona_id_effective,
-                persona.identity_md_raw.as_deref(),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-            );
-            let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
-            as_sent_preamble = Some(vec![
-                serde_json::json!({
-                    "index": 1,
-                    "layer": "system",
-                    "role": "developer",
-                    "text": as_sent.system_text,
-                }),
-                serde_json::json!({
-                    "index": 2,
-                    "layer": "persona",
-                    "role": "developer",
-                    "text": as_sent.persona_text,
-                }),
-                serde_json::json!({
-                    "index": 3,
-                    "layer": "runtime_snapshot",
-                    "role": "developer",
-                    "text": as_sent.runtime_text,
-                }),
-            ]);
-
-            (as_sent.joined_for_token_estimate, tools_for_prompt.list_schemas().len())
+        let canonical = build_canonical_system_prompt_v1(
+            &filtered_registry,
+            native_tools,
+            stream_only,
+            project_context.as_deref(),
+            &discovered_skills,
+            &persona_id_effective,
+            persona.identity_md_raw.as_deref(),
+            persona.soul_text.as_deref(),
+            persona.agents_text.as_deref(),
+            persona.tools_text.as_deref(),
+            PromptReplyMedium::Text,
+            Some(&runtime_context),
+            &session_key,
+        )
+        .map_err(|e| e.to_string())?;
+        for w in &canonical.warnings {
+            warn!(session = %session_key, warning = %w, "prompt template warning");
+        }
+        let prompt_template_warnings = canonical.warnings.clone();
+        let system_prompt = canonical.system_prompt;
+        let tool_count = if stream_only {
+            0
         } else {
-            let system_prompt = if native_tools {
-                build_system_prompt_with_session_runtime(
-                    &filtered_registry,
-                    native_tools,
-                    project_context.as_deref(),
-                    &discovered_skills,
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            } else {
-                build_system_prompt_minimal_runtime(
-                    project_context.as_deref(),
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            };
-            (system_prompt, filtered_registry.list_schemas().len())
+            filtered_registry.list_schemas().len()
+        };
+
+        let tools_for_api: Vec<serde_json::Value> = if stream_only || !native_tools {
+            Vec::new()
+        } else {
+            filtered_registry.list_schemas()
+        };
+        let msgs_for_as_sent = vec![ChatMessage::system(system_prompt.clone())];
+        let as_sent = provider.debug_as_sent_summary(&msgs_for_as_sent, &tools_for_api);
+
+        let as_sent_preamble = if is_openai_responses_provider(provider.name()) {
+            Some(as_sent_preamble_for_provider(provider.name(), &system_prompt))
+        } else {
+            None
         };
 
         Ok(serde_json::json!({
@@ -4068,6 +3804,8 @@ impl ChatService for LiveChatService {
             "toolCount": tool_count,
             "personaIdEffective": persona_id_effective,
             "asSentPreamble": as_sent_preamble,
+            "asSent": as_sent,
+            "promptTemplateWarnings": prompt_template_warnings,
         }))
     }
 
@@ -4097,6 +3835,7 @@ impl ChatService for LiveChatService {
             .unwrap_or_default();
         let provider = self.resolve_provider(&session_key, &history).await?;
         let native_tools = provider.supports_tools();
+        let app_config = moltis_config::discover_and_load();
 
         // Build runtime context.
         let session_entry = self.session_metadata.get(&session_key).await;
@@ -4151,102 +3890,68 @@ impl ChatService for LiveChatService {
             .and_then(|entry| entry.mcp_disabled)
             .unwrap_or(false);
 
-        // Build filtered tool registry.
-        let filtered_registry = {
-            let registry_guard = self.tool_registry.read().await;
-            if native_tools {
-                apply_runtime_tool_filters(
-                    &registry_guard,
-                    &persona.config,
-                    &discovered_skills,
-                    mcp_disabled,
-                )
-            } else {
-                registry_guard.clone_without(&[])
-            }
-        };
-
-        // Reconstruct `role: "tool"` messages from persisted `tool_result`
-        // entries so the context view shows what the LLM actually saw.
-        let history_with_tools: Vec<Value> = history
-            .into_iter()
-            .map(|val| {
-                if val.get("role").and_then(|r| r.as_str()) != Some("tool_result") {
-                    return val;
-                }
-                let tool_call_id = val
-                    .get("tool_call_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let content = if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
-                    format!("Error: {err}")
-                } else if let Some(res) = val.get("result") {
-                    res.to_string()
-                } else {
-                    String::new()
-                };
-                serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": content,
-                })
-            })
-            .collect();
-
         let stream_only = !self.has_tools_sync();
 
-        let mut as_sent_preamble: Option<Vec<serde_json::Value>> = None;
+        // Build filtered tool registry.
+        let filtered_registry = if stream_only {
+            ToolRegistry::new()
+        } else {
+            let registry_guard = self.tool_registry.read().await;
+            apply_runtime_tool_filters(
+                &registry_guard,
+                &persona.config,
+                &discovered_skills,
+                mcp_disabled,
+            )
+        };
+
+        let history_with_tools = reconstruct_tool_history_for_prompt_estimate(
+            &history,
+            app_config.tools.max_tool_result_bytes,
+        );
+
+        let canonical = build_canonical_system_prompt_v1(
+            &filtered_registry,
+            native_tools,
+            stream_only,
+            project_context.as_deref(),
+            &discovered_skills,
+            &persona_id_effective,
+            persona.identity_md_raw.as_deref(),
+            persona.soul_text.as_deref(),
+            persona.agents_text.as_deref(),
+            persona.tools_text.as_deref(),
+            PromptReplyMedium::Text,
+            Some(&runtime_context),
+            &session_key,
+        )
+        .map_err(|e| e.to_string())?;
+        for w in &canonical.warnings {
+            warn!(session = %session_key, warning = %w, "prompt template warning");
+        }
+        let prompt_template_warnings = canonical.warnings.clone();
+        let system_prompt = canonical.system_prompt;
+
+        let tools_for_api: Vec<serde_json::Value> = if stream_only || !native_tools {
+            Vec::new()
+        } else {
+            filtered_registry.list_schemas()
+        };
+        let mut msgs_for_as_sent = Vec::with_capacity(1 + history_with_tools.len());
+        msgs_for_as_sent.push(ChatMessage::system(system_prompt.clone()));
+        msgs_for_as_sent.extend(values_to_chat_messages(&history_with_tools));
+        let as_sent = provider.debug_as_sent_summary(&msgs_for_as_sent, &tools_for_api);
+
+        let as_sent_preamble = if is_openai_responses_provider(provider.name()) {
+            Some(as_sent_preamble_for_provider(provider.name(), &system_prompt))
+        } else {
+            None
+        };
 
         let (openai_messages, system_prompt_chars) = if is_openai_responses_provider(provider.name())
         {
-            let empty_tools;
-            let (tools_for_prompt, skills_for_prompt) = if stream_only {
-                empty_tools = ToolRegistry::new();
-                (&empty_tools, &[] as &[moltis_skills::types::SkillMetadata])
-            } else {
-                (&filtered_registry, discovered_skills.as_slice())
-            };
-
-            let prompts = build_openai_responses_developer_prompts(
-                tools_for_prompt,
-                native_tools,
-                project_context.as_deref(),
-                skills_for_prompt,
-                &persona_id_effective,
-                persona.identity_md_raw.as_deref(),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                Some(&runtime_context),
-            );
-            let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Text);
-
-            as_sent_preamble = Some(vec![
-                serde_json::json!({
-                    "index": 1,
-                    "layer": "system",
-                    "role": "developer",
-                    "text": as_sent.system_text.clone(),
-                }),
-                serde_json::json!({
-                    "index": 2,
-                    "layer": "persona",
-                    "role": "developer",
-                    "text": as_sent.persona_text.clone(),
-                }),
-                serde_json::json!({
-                    "index": 3,
-                    "layer": "runtime_snapshot",
-                    "role": "developer",
-                    "text": as_sent.runtime_text.clone(),
-                }),
-            ]);
-
             let mut msgs: Vec<Value> = Vec::new();
-            msgs.push(serde_json::json!({"role": "developer", "content": as_sent.system_text}));
-            msgs.push(serde_json::json!({"role": "developer", "content": as_sent.persona_text}));
-            msgs.push(serde_json::json!({"role": "developer", "content": as_sent.runtime_text}));
+            msgs.push(serde_json::json!({"role": "developer", "content": system_prompt.clone()}));
 
             for msg in values_to_chat_messages(&history_with_tools) {
                 let mut val = msg.to_openai_value();
@@ -4256,34 +3961,8 @@ impl ChatService for LiveChatService {
                 msgs.push(val);
             }
 
-            (msgs, as_sent.joined_for_token_estimate.len())
+            (msgs, system_prompt.len())
         } else {
-            // Build the system prompt.
-            let system_prompt = if native_tools {
-                build_system_prompt_with_session_runtime(
-                    &filtered_registry,
-                    native_tools,
-                    project_context.as_deref(),
-                    &discovered_skills,
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            } else {
-                build_system_prompt_minimal_runtime(
-                    project_context.as_deref(),
-                    Some(&persona.identity),
-                    Some(&persona.user),
-                    persona.soul_text.as_deref(),
-                    persona.agents_text.as_deref(),
-                    persona.tools_text.as_deref(),
-                    Some(&runtime_context),
-                )
-            };
-
             // Build the full messages array: system prompt + conversation history.
             let mut messages = Vec::with_capacity(1 + history_with_tools.len());
             messages.push(ChatMessage::system(system_prompt.clone()));
@@ -4308,6 +3987,8 @@ impl ChatService for LiveChatService {
             "totalChars": total_chars,
             "personaIdEffective": persona_id_effective,
             "asSentPreamble": as_sent_preamble,
+            "asSent": as_sent,
+            "promptTemplateWarnings": prompt_template_warnings,
         }))
     }
 }
@@ -4584,75 +4265,57 @@ async fn run_with_tools(
     client_seq: Option<u64>,
 ) -> Option<ChatRunOutput> {
     let persona_id = resolve_session_persona_id(state, runtime_context).await;
+    let persona_id_effective = persona_id.as_deref().unwrap_or("default");
     let persona = load_prompt_persona_with_id(persona_id.as_deref());
 
     let native_tools = provider.supports_tools();
-    let openai_responses = is_openai_responses_provider(provider_name);
 
     let filtered_registry = {
         let registry_guard = tool_registry.read().await;
-        if native_tools {
-            apply_runtime_tool_filters(&registry_guard, &persona.config, skills, mcp_disabled)
-        } else {
-            registry_guard.clone_without(&[])
-        }
+        apply_runtime_tool_filters(&registry_guard, &persona.config, skills, mcp_disabled)
     };
 
-    let (system_prompt_text, prefix_messages) = if openai_responses {
-        let prompts = build_openai_responses_developer_prompts(
-            &filtered_registry,
-            native_tools,
-            project_context,
-            skills,
-            persona_id.as_deref().unwrap_or("default"),
-            persona.identity_md_raw.as_deref(),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
-            runtime_context,
-        );
-        let as_sent = openai_responses_as_sent_from_prompts(prompts, desired_reply_medium);
-        (
-            as_sent.joined_for_token_estimate,
-            Some(as_sent.prefix_messages),
-        )
-    } else {
-        // Use a minimal prompt without tool schemas for providers that don't support tools.
-        // This reduces context size and avoids confusing the LLM with unusable instructions.
-        let system_prompt = if native_tools {
-            build_system_prompt_with_session_runtime(
-                &filtered_registry,
-                native_tools,
-                project_context,
-                skills,
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                runtime_context,
+    let canonical = match build_canonical_system_prompt_v1(
+        &filtered_registry,
+        native_tools,
+        false, // run_with_tools: include tool inventory when available
+        project_context,
+        skills,
+        persona_id_effective,
+        persona.identity_md_raw.as_deref(),
+        persona.soul_text.as_deref(),
+        persona.agents_text.as_deref(),
+        persona.tools_text.as_deref(),
+        to_prompt_reply_medium(desired_reply_medium),
+        runtime_context,
+        session_key,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            handle_run_failed_event(
+                state,
+                model_store,
+                RunFailedEvent {
+                    run_id: run_id.to_string(),
+                    session_key: session_key.to_string(),
+                    provider_name: provider_name.to_string(),
+                    model_id: model_id.to_string(),
+                    stage_hint: FailureStage::Runner,
+                    raw_error: e.to_string(),
+                    details: serde_json::json!({
+                        "kind": "canonical_system_prompt_v1_build_failed",
+                    }),
+                    seq: client_seq,
+                },
             )
-        } else {
-            // Minimal prompt without tools for local LLMs
-            build_system_prompt_minimal_runtime(
-                project_context,
-                Some(&persona.identity),
-                Some(&persona.user),
-                persona.soul_text.as_deref(),
-                persona.agents_text.as_deref(),
-                persona.tools_text.as_deref(),
-                runtime_context,
-            )
-        };
-
-        // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
-        let system_prompt = if desired_reply_medium == ReplyMedium::Voice {
-            format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
-        } else {
-            system_prompt
-        };
-        (system_prompt, None)
+            .await;
+            return None;
+        },
     };
+    for w in &canonical.warnings {
+        warn!(session = %session_key, warning = %w, "prompt template warning");
+    }
+    let system_prompt_text = canonical.system_prompt;
 
     // Determine if this session is sandboxed (for browser tool execution mode)
     let session_is_sandboxed = if let Some(ref router) = state.sandbox_router {
@@ -5073,31 +4736,17 @@ async fn run_with_tools(
     }
 
     let provider_ref = provider.clone();
-    let first_result = if let Some(prefix) = prefix_messages.clone() {
-        run_agent_loop_streaming_with_prefix(
-            provider,
-            &filtered_registry,
-            prefix,
-            user_content,
-            Some(&on_event),
-            hist,
-            Some(tool_context.clone()),
-            hook_registry.clone(),
-        )
-        .await
-    } else {
-        run_agent_loop_streaming(
-            provider,
-            &filtered_registry,
-            &system_prompt_text,
-            user_content,
-            Some(&on_event),
-            hist,
-            Some(tool_context.clone()),
-            hook_registry.clone(),
-        )
-        .await
-    };
+    let first_result = run_agent_loop_streaming(
+        provider,
+        &filtered_registry,
+        &system_prompt_text,
+        user_content,
+        Some(&on_event),
+        hist,
+        Some(tool_context.clone()),
+        hook_registry.clone(),
+    )
+    .await;
 
     // On context-window overflow, compact the session and retry once.
     let result = match first_result {
@@ -5171,31 +4820,17 @@ async fn run_with_tools(
                         Some(compacted_chat)
                     };
 
-                    if let Some(prefix) = prefix_messages {
-                        run_agent_loop_streaming_with_prefix(
-                            provider_ref.clone(),
-                            &filtered_registry,
-                            prefix,
-                            user_content,
-                            Some(&on_event),
-                            retry_hist,
-                            Some(tool_context),
-                            hook_registry.clone(),
-                        )
-                        .await
-                    } else {
-                        run_agent_loop_streaming(
-                            provider_ref.clone(),
-                            &filtered_registry,
-                            &system_prompt_text,
-                            user_content,
-                            Some(&on_event),
-                            retry_hist,
-                            Some(tool_context),
-                            hook_registry.clone(),
-                        )
-                        .await
-                    }
+                    run_agent_loop_streaming(
+                        provider_ref.clone(),
+                        &filtered_registry,
+                        &system_prompt_text,
+                        user_content,
+                        Some(&on_event),
+                        retry_hist,
+                        Some(tool_context),
+                        hook_registry.clone(),
+                    )
+                    .await
                 },
                 Err(e) => {
                     warn!(run_id, error = %e, "retry compaction failed");
@@ -5965,41 +5600,47 @@ async fn run_streaming(
     }
 
     let mut messages: Vec<ChatMessage> = Vec::new();
-    if is_openai_responses_provider(provider_name) {
-        let prompts = build_openai_responses_developer_prompts(
-            &ToolRegistry::new(),
-            provider.supports_tools(),
-            project_context,
-            &[],
-            persona_id.as_deref().unwrap_or("default"),
-            persona.identity_md_raw.as_deref(),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
-            runtime_context,
-        );
-        let as_sent = openai_responses_as_sent_from_prompts(prompts, desired_reply_medium);
-        messages.extend(as_sent.prefix_messages);
-    } else {
-        let system_prompt = build_system_prompt_minimal_runtime(
-            project_context,
-            Some(&persona.identity),
-            Some(&persona.user),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
-            runtime_context,
-        );
-
-        // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
-        let system_prompt = if desired_reply_medium == ReplyMedium::Voice {
-            format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
-        } else {
-            system_prompt
-        };
-
-        messages.push(ChatMessage::system(system_prompt));
+    let canonical = match build_canonical_system_prompt_v1(
+        &ToolRegistry::new(),
+        provider.supports_tools(),
+        true, // run_streaming: no tools
+        project_context,
+        _skills,
+        persona_id.as_deref().unwrap_or("default"),
+        persona.identity_md_raw.as_deref(),
+        persona.soul_text.as_deref(),
+        persona.agents_text.as_deref(),
+        persona.tools_text.as_deref(),
+        to_prompt_reply_medium(desired_reply_medium),
+        runtime_context,
+        session_key,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            handle_run_failed_event(
+                state,
+                model_store,
+                RunFailedEvent {
+                    run_id: run_id.to_string(),
+                    session_key: session_key.to_string(),
+                    provider_name: provider_name.to_string(),
+                    model_id: model_id.to_string(),
+                    stage_hint: FailureStage::Runner,
+                    raw_error: e.to_string(),
+                    details: serde_json::json!({
+                        "kind": "canonical_system_prompt_v1_build_failed",
+                    }),
+                    seq: client_seq,
+                },
+            )
+            .await;
+            return None;
+        },
+    };
+    for w in &canonical.warnings {
+        warn!(session = %session_key, warning = %w, "prompt template warning");
     }
+    messages.push(ChatMessage::system(canonical.system_prompt));
     // Convert persisted JSON history to typed ChatMessages for the LLM provider.
     messages.extend(values_to_chat_messages(history_raw));
     messages.push(ChatMessage::User {
@@ -7924,6 +7565,10 @@ mod tests {
             &self.id
         }
 
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
         async fn complete(
             &self,
             _messages: &[ChatMessage],
@@ -7948,6 +7593,10 @@ mod tests {
 
         fn id(&self) -> &str {
             "ctx-stream-model"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
         }
 
         async fn complete(
@@ -8641,18 +8290,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn openai_responses_as_sent_appends_voice_suffix_to_runtime_snapshot() {
-        let prompts = OpenAiResponsesDeveloperPrompts {
-            system: "sys".to_string(),
-            persona: "persona".to_string(),
-            runtime_snapshot: "runtime".to_string(),
-        };
-        let as_sent = openai_responses_as_sent_from_prompts(prompts, ReplyMedium::Voice);
-        assert!(as_sent.runtime_text.contains("## 语音回复模式"));
-        assert!(as_sent.joined_for_token_estimate.contains("## 语音回复模式"));
-    }
-
     #[tokio::test]
     async fn debug_endpoints_expose_as_sent_preamble_for_openai_responses() {
         let tmp = tempfile::tempdir().unwrap();
@@ -8709,9 +8346,8 @@ mod tests {
             .unwrap();
         assert_eq!(ctx["personaIdEffective"], "default");
         let preamble = ctx["asSentPreamble"].as_array().expect("asSentPreamble array");
-        assert_eq!(preamble.len(), 3);
+        assert_eq!(preamble.len(), 1);
         assert_eq!(preamble[0]["role"], "developer");
-        assert_eq!(preamble[0]["layer"], "system");
         assert!(preamble[0]["text"]
             .as_str()
             .unwrap_or("")
@@ -8726,7 +8362,7 @@ mod tests {
             .unwrap();
         assert_eq!(raw["personaIdEffective"], "default");
         let preamble = raw["asSentPreamble"].as_array().expect("asSentPreamble array");
-        assert_eq!(preamble.len(), 3);
+        assert_eq!(preamble.len(), 1);
 
         // chat.full_context
         let full = chat
@@ -8737,19 +8373,179 @@ mod tests {
             .unwrap();
         assert_eq!(full["personaIdEffective"], "default");
         let preamble = full["asSentPreamble"].as_array().expect("asSentPreamble array");
-        assert_eq!(preamble.len(), 3);
+        assert_eq!(preamble.len(), 1);
         let messages = full["messages"].as_array().expect("messages array");
         assert!(
-            messages.len() >= 3,
-            "expected at least 3 messages (developer preamble)"
+            !messages.is_empty(),
+            "expected at least 1 message (system preamble)"
         );
         assert_eq!(messages[0]["role"], "developer");
-        assert_eq!(messages[1]["role"], "developer");
-        assert_eq!(messages[2]["role"], "developer");
         assert!(messages[0]["content"]
             .as_str()
             .unwrap_or("")
             .contains("# 系统（System）"));
+    }
+
+    #[tokio::test]
+    async fn debug_endpoints_expose_as_sent_summary_for_anthropic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
+
+        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(
+            &store,
+        ));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(moltis_agents::providers::anthropic::AnthropicProvider::new(
+                secrecy::Secret::new("test".to_string()),
+                "claude-test".to_string(),
+                "https://api.anthropic.com".to_string(),
+            ));
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_agents::providers::ModelInfo {
+                id: "anthropic::test".to_string(),
+                provider: "anthropic".to_string(),
+                display_name: "anthropic test".to_string(),
+                created_at: None,
+            },
+            Arc::clone(&provider),
+        );
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::clone(&state),
+            Arc::clone(&store),
+            metadata,
+        );
+
+        // chat.context
+        let ctx = chat
+            .context(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        let as_sent = ctx["asSent"].as_object().expect("asSent object");
+        assert_eq!(as_sent["kind"], "anthropic_messages_v1");
+        assert!(as_sent["system"]["preview"]
+            .as_str()
+            .unwrap_or("")
+            .contains("# 系统（System）"));
+
+        // chat.raw_prompt
+        let raw = chat
+            .raw_prompt(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        let as_sent = raw["asSent"].as_object().expect("asSent object");
+        assert_eq!(as_sent["kind"], "anthropic_messages_v1");
+
+        // chat.full_context
+        let full = chat
+            .full_context(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        let as_sent = full["asSent"].as_object().expect("asSent object");
+        assert_eq!(as_sent["kind"], "anthropic_messages_v1");
+    }
+
+    #[tokio::test]
+    async fn debug_endpoints_expose_as_sent_summary_for_local_llm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
+
+        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(
+            &store,
+        ));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(moltis_agents::providers::local_llm::LocalLlmProvider::new(
+                moltis_agents::providers::local_llm::LocalLlmConfig {
+                    model_id: "local-test".to_string(),
+                    model_path: None,
+                    backend: None,
+                    context_size: Some(4096),
+                    gpu_layers: 0,
+                    temperature: 0.7,
+                    cache_dir: tmp.path().to_path_buf(),
+                },
+            ));
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_agents::providers::ModelInfo {
+                id: "local-llm::test".to_string(),
+                provider: "local-llm".to_string(),
+                display_name: "local-llm test".to_string(),
+                created_at: None,
+            },
+            Arc::clone(&provider),
+        );
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::clone(&state),
+            Arc::clone(&store),
+            metadata,
+        );
+
+        // chat.context
+        let ctx = chat
+            .context(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        let as_sent = ctx["asSent"].as_object().expect("asSent object");
+        assert_eq!(as_sent["kind"], "local_llm_prompt_v1");
+        assert!(as_sent["prompt"]["preview"]
+            .as_str()
+            .unwrap_or("")
+            .contains("<|im_start|>system"));
+
+        // chat.raw_prompt
+        let raw = chat
+            .raw_prompt(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        let as_sent = raw["asSent"].as_object().expect("asSent object");
+        assert_eq!(as_sent["kind"], "local_llm_prompt_v1");
+
+        // chat.full_context
+        let full = chat
+            .full_context(serde_json::json!({
+                "_sessionId": "main",
+            }))
+            .await
+            .unwrap();
+        let as_sent = full["asSent"].as_object().expect("asSent object");
+        assert_eq!(as_sent["kind"], "local_llm_prompt_v1");
     }
 
     struct PersonaChannelService {

@@ -3,6 +3,7 @@
 ## 实施现状（Status）【增量更新主入口】
 - Status: [TODO|IN-PROGRESS|DONE|SURVEY]
 - Priority: [P0|P1|P2|P3]
+- Updated: <YYYY-MM-DD>
 - Owners: <人/组，可选>
 - Components: <gateway/agents/sessions/ui/telegram/...>
 - Affected providers/models: <如 openai-responses::gpt-5.2，可选>

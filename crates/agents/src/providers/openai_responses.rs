@@ -18,6 +18,7 @@ use crate::model::{
     ChatMessage, CompletionResponse, ContentPart, LlmProvider, LlmRequestContext, StreamEvent,
     ToolCall, Usage, UserContent,
 };
+use crate::as_sent_summary::{sha256_hex, text_preview_value, DEFAULT_MAX_LIST_ITEMS};
 
 use super::openai_compat::to_responses_api_tools;
 
@@ -1051,6 +1052,164 @@ impl LlmProvider for OpenAiResponsesProvider {
 
     fn supports_vision(&self) -> bool {
         super::supports_vision_for_model(&self.model)
+    }
+
+    fn debug_as_sent_summary(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> Option<serde_json::Value> {
+        let developer_preamble = messages
+            .iter()
+            .filter_map(|m| match m {
+                ChatMessage::System { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let tool_names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+            .take(DEFAULT_MAX_LIST_ITEMS)
+            .collect();
+
+        let developer_message_count = messages
+            .iter()
+            .filter(|m| matches!(m, ChatMessage::System { .. }))
+            .count();
+        let user_message_count = messages
+            .iter()
+            .filter(|m| matches!(m, ChatMessage::User { .. }))
+            .count();
+        let function_call_output_count = messages
+            .iter()
+            .filter(|m| matches!(m, ChatMessage::Tool { .. }))
+            .count();
+
+        let mut assistant_message_item_count: usize = 0;
+        let mut function_call_count: usize = 0;
+
+        let mut roles_preview: Vec<&'static str> = Vec::new();
+        let mut tool_call_names_preview: Vec<&str> = Vec::new();
+        let has_multimodal_images = messages.iter().any(|m| match m {
+            ChatMessage::User {
+                content: UserContent::Multimodal(parts),
+            } => parts.iter().any(|p| matches!(p, ContentPart::Image { .. })),
+            _ => false,
+        });
+
+        let mut input_types_preview: Vec<&'static str> = Vec::new();
+
+        for msg in messages.iter().take(DEFAULT_MAX_LIST_ITEMS) {
+            match msg {
+                ChatMessage::System { .. } => {
+                    roles_preview.push("developer");
+                    if input_types_preview.len() < DEFAULT_MAX_LIST_ITEMS {
+                        input_types_preview.push("message:developer");
+                    }
+                },
+                ChatMessage::User { .. } => roles_preview.push("user"),
+                ChatMessage::Assistant { tool_calls, .. } => {
+                    roles_preview.push("assistant");
+                    if tool_calls.is_empty() {
+                        if input_types_preview.len() < DEFAULT_MAX_LIST_ITEMS {
+                            input_types_preview.push("message:assistant");
+                        }
+                    } else {
+                        let has_text = matches!(msg, ChatMessage::Assistant { content: Some(t), .. } if !t.is_empty());
+                        if has_text {
+                            if input_types_preview.len() < DEFAULT_MAX_LIST_ITEMS {
+                                input_types_preview.push("message:assistant");
+                            }
+                        }
+                        for _ in 0..tool_calls.len() {
+                            if input_types_preview.len() >= DEFAULT_MAX_LIST_ITEMS {
+                                break;
+                            }
+                            input_types_preview.push("function_call");
+                        }
+                    }
+                    for tc in tool_calls.iter().take(DEFAULT_MAX_LIST_ITEMS) {
+                        if tool_call_names_preview.len() >= DEFAULT_MAX_LIST_ITEMS {
+                            break;
+                        }
+                        tool_call_names_preview.push(tc.name.as_str());
+                    }
+                },
+                ChatMessage::Tool { .. } => {
+                    roles_preview.push("function_call_output");
+                    if input_types_preview.len() < DEFAULT_MAX_LIST_ITEMS {
+                        input_types_preview.push("function_call_output");
+                    }
+                },
+            }
+
+            if matches!(msg, ChatMessage::User { .. }) && input_types_preview.len() < DEFAULT_MAX_LIST_ITEMS {
+                input_types_preview.push("message:user");
+            }
+        }
+
+        // Count all tool calls and assistant message items (not just preview).
+        for msg in messages {
+            if let ChatMessage::Assistant { tool_calls, .. } = msg {
+                if tool_calls.is_empty() {
+                    assistant_message_item_count = assistant_message_item_count.saturating_add(1);
+                    continue;
+                }
+
+                function_call_count = function_call_count.saturating_add(tool_calls.len());
+                if matches!(msg, ChatMessage::Assistant { content: Some(t), .. } if !t.is_empty()) {
+                    assistant_message_item_count = assistant_message_item_count.saturating_add(1);
+                }
+            }
+        }
+
+        let input_count = developer_message_count
+            .saturating_add(user_message_count)
+            .saturating_add(assistant_message_item_count)
+            .saturating_add(function_call_count)
+            .saturating_add(function_call_output_count);
+
+        let hash_seed = serde_json::json!({
+            "provider": self.provider_name,
+            "model": self.model,
+            "developerPreambleSha256": sha256_hex(&developer_preamble),
+            "rolesPreview": roles_preview,
+            "inputTypesPreview": input_types_preview,
+            "toolCallNamesPreview": tool_call_names_preview,
+            "toolsCount": tools.len(),
+            "toolNamesPreview": tool_names,
+            "messagesCount": messages.len(),
+            "inputCount": input_count,
+        });
+
+        Some(serde_json::json!({
+            "method": "as-sent-summary",
+            "provider": self.provider_name,
+            "kind": "openai_responses_v1",
+            "model": self.model,
+            "hash": format!("sha256:{}", sha256_hex(&serde_json::to_string(&hash_seed).unwrap_or_default())),
+            "developerPreamble": text_preview_value(&developer_preamble),
+            "inputCount": input_count,
+            "inputCounts": {
+                "messageDeveloper": developer_message_count,
+                "messageUser": user_message_count,
+                "messageAssistant": assistant_message_item_count,
+                "functionCall": function_call_count,
+                "functionCallOutput": function_call_output_count,
+            },
+            "inputTypesPreview": input_types_preview,
+            "rolesPreview": roles_preview,
+            "toolCallsTotal": function_call_count,
+            "toolCallNamesPreview": tool_call_names_preview,
+            "omitsImages": has_multimodal_images,
+            "omitsToolSchemas": true,
+            "tools": {
+                "count": tools.len(),
+                "namesPreview": tool_names,
+            }
+        }))
     }
 
     async fn complete(

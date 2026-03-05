@@ -8,6 +8,9 @@ use crate::model::{
     ChatMessage, CompletionResponse, ContentPart, LlmProvider, StreamEvent, ToolCall, Usage,
     UserContent,
 };
+use crate::as_sent_summary::{
+    sha256_hex, text_preview_value, text_preview_value_with_limit, DEFAULT_MAX_LIST_ITEMS,
+};
 
 pub struct AnthropicProvider {
     api_key: secrecy::Secret<String>,
@@ -188,6 +191,125 @@ impl LlmProvider for AnthropicProvider {
 
     fn supports_vision(&self) -> bool {
         super::supports_vision_for_model(&self.model)
+    }
+
+    fn debug_as_sent_summary(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> Option<serde_json::Value> {
+        let system_text = messages
+            .iter()
+            .filter_map(|m| match m {
+                ChatMessage::System { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let system_text = system_text.trim();
+
+        let tool_names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+            .take(DEFAULT_MAX_LIST_ITEMS)
+            .collect();
+
+        let system_preview = if system_text.is_empty() {
+            serde_json::Value::Null
+        } else {
+            text_preview_value(system_text)
+        };
+
+        let mut roles_preview: Vec<&'static str> = Vec::new();
+        let mut messages_preview: Vec<serde_json::Value> = Vec::new();
+        let mut has_multimodal_images = false;
+
+        for msg in messages.iter().filter(|m| !matches!(m, ChatMessage::System { .. })) {
+            if roles_preview.len() >= DEFAULT_MAX_LIST_ITEMS {
+                break;
+            }
+
+            match msg {
+                ChatMessage::User { content } => match content {
+                    UserContent::Text(text) => {
+                        roles_preview.push("user");
+                        messages_preview.push(serde_json::json!({
+                            "role": "user",
+                            "contentType": "text",
+                            "content": text_preview_value_with_limit(text, 512),
+                        }));
+                    },
+                    UserContent::Multimodal(parts) => {
+                        roles_preview.push("user");
+                        let image_count = parts
+                            .iter()
+                            .filter(|p| matches!(p, ContentPart::Image { .. }))
+                            .count();
+                        has_multimodal_images |= image_count > 0;
+                        messages_preview.push(serde_json::json!({
+                            "role": "user",
+                            "contentType": "multimodal",
+                            "parts": parts.len(),
+                            "images": image_count,
+                        }));
+                    },
+                },
+                ChatMessage::Assistant { content, tool_calls } => {
+                    roles_preview.push("assistant");
+                    let text = content.as_deref().unwrap_or("");
+                    messages_preview.push(serde_json::json!({
+                        "role": "assistant",
+                        "contentType": "text",
+                        "content": text_preview_value_with_limit(text, 512),
+                        "toolCalls": tool_calls.len(),
+                    }));
+                },
+                ChatMessage::Tool { content, .. } => {
+                    // In Anthropic protocol, tool results are sent as user messages
+                    // with tool_result content blocks.
+                    roles_preview.push("user");
+                    messages_preview.push(serde_json::json!({
+                        "role": "user",
+                        "contentType": "tool_result",
+                        "content": text_preview_value_with_limit(content, 512),
+                    }));
+                },
+                ChatMessage::System { .. } => {},
+            }
+        }
+
+        let message_count = messages
+            .iter()
+            .filter(|m| !matches!(m, ChatMessage::System { .. }))
+            .count();
+
+        let hash_seed = serde_json::json!({
+            "provider": self.name(),
+            "model": self.model,
+            "systemSha256": system_preview.get("sha256"),
+            "rolesPreview": roles_preview,
+            "toolsCount": tools.len(),
+            "toolNamesPreview": tool_names,
+            "messagesCount": message_count,
+        });
+
+        Some(serde_json::json!({
+            "method": "as-sent-summary",
+            "provider": self.name(),
+            "kind": "anthropic_messages_v1",
+            "model": self.model,
+            "hash": format!("sha256:{}", sha256_hex(&serde_json::to_string(&hash_seed).unwrap_or_default())),
+            "system": system_preview,
+            "messagesCount": message_count,
+            "rolesPreview": roles_preview,
+            "messagesPreview": messages_preview,
+            "omitsImages": has_multimodal_images,
+            "omitsToolSchemas": true,
+            "tools": {
+                "count": tools.len(),
+                "namesPreview": tool_names,
+            }
+        }))
     }
 
     async fn complete(

@@ -3,37 +3,38 @@
 ## 实施现状（Status）【增量更新主入口】
 - Status: DONE（2026-02-24）
 - Priority: P1（多 bot/多用途的根能力；影响可控性与缓存命中）
+- Updated: 2026-03-05
 - Components: gateway / agents / config / sessions metadata / channels(telegram) / providers(openai-responses) / Web UI
 - Affected providers/models: openai-responses（重点）；其它 providers 需兼容降级
 
 **已实现（如有，写日期）**
 - OpenAI Responses：`instructions` 字段 **完全省略**；所有 `ChatMessage::System` 映射为 `input[]` 中 `role=developer` 的 message item：`crates/agents/src/providers/openai_responses.rs:33`
-- Gateway：对 OpenAI Responses provider 注入三条 preamble（system/persona/runtime snapshot）并在 run 前置：`crates/gateway/src/chat.rs:4269`
-- Prompt builder：新增 `build_openai_responses_developer_prompts()` 构造三段 developer 文本（含 People reference、runtime snapshot、tools/skills/memory）：`crates/agents/src/prompt.rs:38`
-- Runtime snapshot：默认脱敏 `remote_ip/location`（不进入 prompt）以降低隐私泄露风险：`crates/agents/src/prompt.rs:154`
-- Runner：新增 `*_with_prefix` 入口支持多条 preamble messages：`crates/agents/src/runner.rs:660`
+- (2026-03-04) Gateway：prompt assembly 收敛为 canonical v1（跨 provider 层仅 1 条 `ChatMessage::System`）；openai-responses 在 provider adapter 层映射为单条 `role=developer` input item：`crates/gateway/src/chat.rs:2401`
+- Legacy：`build_openai_responses_developer_prompts()` 仍保留以避免破坏外部使用（历史三段 developer 文本：system/persona/runtime_snapshot），但 gateway/tools 主路径不再依赖：`crates/agents/src/prompt.rs:523`
 - Telegram 接入：Add Bot 仅提交 token；后端通过 `getMe` 派生稳定账号句柄 `telegram:<chan_user_id>` 并写入 config（含 `persona_id/chan_user_*`）：`crates/gateway/src/channel.rs:137`
 - Session key：Telegram 默认会话键从 `telegram:{account_id}:{chat_id}` 改为 `telegram:{chan_user_id}:{chat_id}`（自动 strip `telegram:` 前缀避免双前缀）：`crates/gateway/src/channel_events.rs:35`
 - UI：Channels 与 Onboarding 的 Telegram 表单改为 token-only，并支持 `persona_id`：`crates/gateway/src/assets/js/page-channels.js:246`、`crates/gateway/src/assets/js/onboarding-view.js:1957`
-- spawn_agent：支持显式 `persona_id` 参数；在 OpenAI Responses provider 下同样注入三条 preamble：`crates/tools/src/spawn_agent.rs:168`
+- (2026-03-04) spawn_agent：支持显式 `persona_id` 参数；并复用 canonical v1 builder（openai-responses provider 下同样只注入 1 条 system message）：`crates/tools/src/spawn_agent.rs:235`
 
 **已覆盖测试（如有）**
 - Responses `instructions` omission + developer input mapping（含 user item `type=message`）：`crates/agents/src/providers/openai_responses.rs:1243`
 - 三段 developer prompt（system/persona/runtime snapshot）内容完整性 + runtime 脱敏：`crates/agents/src/prompt.rs:1052`
 - Telegram session_key strip 双前缀回归：`crates/gateway/src/channel_events.rs:1524`
-- spawn_agent 在 openai-responses 下三条 system preamble：`crates/gateway/tests/spawn_agent_openai_responses.rs:44`
+- spawn_agent 在 openai-responses 下单条 system message：`crates/gateway/tests/spawn_agent_openai_responses.rs:43`
 
 **已知差异/后续优化（非阻塞）**
 - prompt cache（OpenAI Responses）按 `session_key` 分桶即可；本单不改分桶策略（persona 与 prompt cache key 无强绑定关系）。
 - 术语/字段名：实现层未做“`account_id` → `account_handle`”大范围重命名；当前 `account_id` 承载稳定句柄 `telegram:<chan_user_id>`，`account_handle` 仍保留为人类可读 `@username`（避免 UI/RPC/存储 churn）。
+
+> NOTE（2026-03-05）：本单早期方案曾采用三条 developer messages（system/persona/runtime_snapshot）以表达分层；当前已在 v1 canonical 中统一为“跨 provider 层单条 `ChatMessage::System` → OpenAI Responses 单条 developer item”。本文后续保留的“三段/三条”细节仅作历史记录，不再作为现行行为依据。
 
 ---
 
 ## 背景（Background）
 - 场景：同一 Moltis 实例管理多个 Telegram bot（多个“agent”），希望每个 bot 有独立 persona；并且希望 OpenAI Responses 的 prompt cache 能稳定复用 persona 前缀。
 - 约束：
-  - 当前实现只有一条“系统提示”（内部是 `ChatMessage::System`），把 identity/soul/workspace/tools/runtime 混合拼接在一起；在 OpenAI Responses 上游请求中，这条 system 会被映射为顶级 `instructions` 字段（`input` 中不会出现 `role=system` message）。
-  - OpenAI Responses 支持 `role=developer`，但当前消息抽象没有 developer role，导致无法表达“system / persona / runtime snapshot”三段分层，也无法得到稳定可缓存的 developer 前缀。
+  - 当前实现跨 provider 层只有一条“系统提示”（内部是 `ChatMessage::System`），把 identity/soul/tools/runtime 等整合为同一条 system prompt 文本；在 OpenAI Responses 上游请求中，这条 system 会被映射为 `input[]` 中 `role=developer` 的 message item（并省略顶级 `instructions` 字段）。
+  - OpenAI Responses 支持 `role=developer`；Moltis 通过 provider adapter 明确做 system→developer 映射，并在 v1 canonical 中把 developer preamble 折叠为单条 item（降低入口漂移与排障成本）。
   - 真实上游仍存在不可见的“平台级 system”（模型侧硬约束）；developer persona 只能在其边界内塑造风格与行为（见 `issues/Codex CLI Prompt Dump 深度分析报告.md`）。
 - Out of scope：
   - V1 不做“多租户权限隔离”。
@@ -85,13 +86,13 @@
   - 代码证据：`crates/gateway/src/chat.rs:2106`（“Generate run_id early … link … agent run”）。
 
 - **OpenAI Responses: instructions**：请求体字段 `instructions`（独立字段，不是 message role）。
-  - 口径（现状 / as-is）：`ChatMessage::System` 会被拼成 `instructions`（`input` 中不包含 `role=system` message）。
-  - 口径（目标 / to-be，本单冻结）：对 OpenAI Responses **不得**用 `instructions` 注入 Moltis 的 system/persona；必须改为三条 `role=developer` messages（system > persona > runtime snapshot），以获得稳定可缓存前缀与可观测的分层。
+  - 口径（现状 / as-is）：Moltis **省略** `instructions` 字段；所有 `ChatMessage::System` 映射为 `input[]` 中 `role=developer` 的 message item（见：`crates/agents/src/providers/openai_responses.rs:34`）。
+  - 口径（现行冻结，2026-03-04）：跨 provider 层仅生成 1 条 `ChatMessage::System`（整合后的 system prompt），openai-responses 的 as-sent developer preamble 折叠为单条 developer item（见：`issues/overall_type4_system_prompt_assembly_v1.md`）。
 
 - **OpenAI Responses: `role=developer`**：`input` 数组中的 message item 角色之一。
-  - 口径（本单冻结）：
-    - OpenAI Responses 场景下，Moltis 的 **system** 与 **persona** 都必须用 `role=developer` 表达（不得发送 `role=system`）。
-    - developer messages 必须按优先级排序：`system > persona > runtime_snapshot`（system developer message 在前，persona developer message 在后，runtime snapshot 最后）。
+  - 口径（现行冻结，2026-03-04）：
+    - OpenAI Responses 场景下，Moltis 的 system 指令以 `role=developer` message item 表达（不得发送 `role=system`）。
+    - v1 canonical 下 developer preamble 折叠为单条 item（文本内保留清晰 section 边界，便于 debug/比对）。
 
 - **stable vs volatile（缓存相关口径）**
   - stable：在同一 `prompt_cache_key` 桶内应保持不变的文本（应优先进入 `role=developer`，以最大化 cached_tokens）。
@@ -113,7 +114,7 @@
 - [x] 支持按 **Telegram bot identity** 绑定 persona（每个 bot 可独立 persona；不做 session 覆盖）。
   - Telegram bot identity = (`channel="telegram"`, `chan_user_id`)
 - [x] 保留 Moltis 系统默认 persona（`default`），用于非 Telegram 场景（例如 `main`）。
-- [x] OpenAI Responses provider：每次 run 必须显式发送 **三条** `role=developer` messages（`system > persona > runtime_snapshot`），且不得使用顶级 `instructions` 字段注入 Moltis system/persona。
+- [x] OpenAI Responses provider：每次 run 必须**省略**顶级 `instructions` 字段；`ChatMessage::System` 映射为 `role=developer` input item。v1 canonical 下跨 provider 层仅 1 条 `ChatMessage::System`（因此 as-sent developer preamble 为单条 item）。
 - [x] `spawn_agent` 子代理默认使用系统 `default` persona（允许显式指定 persona/model）；不从父 session“继承 persona”（避免隐式传播与口径混乱）。
 - [x] debug/context/raw_prompt 可见 effective persona（persona_id + 来源）。
 - [x] agent 之间彼此“认识”（通过 `## People (reference)` 指向 `PEOPLE.md`，提供“本实例可用 agent roster”的统一来源 + 委派注意事项）。
@@ -124,7 +125,7 @@
     - Add Telegram Bot：不再要求输入 username；仅输入 token（后端 `getMe` 自动发现 `chan_user_id/chan_user_name/chan_nickname` 并生成 `account_handle`）。
     - Edit Telegram Bot（`EditChannelModal`）增加一个 `Persona ID` 字段（可选 string；为空视为 `default` 生效）。
     - 表单控件建议用 text input（而不是下拉），减少“列举 persona”后端依赖；后续再补下拉/自动补全。
-    - UI 文案：`Persona ID (empty = default)`；旁边加一行提示：`Create personas under ~/.moltis/personas/<persona_id>/...`。
+    - UI 文案：`Persona ID (empty = default)`；旁边加一行提示：`Create personas under <data_dir>/people/<persona_id>/...`。
     - UI 摆放建议：放在 `Default Model` 上方或下方（同属“bot 行为配置”），避免散落在 gating/relay 配置之间。
     - 落点文件：
       - Add 表单渲染/保存：`crates/gateway/src/assets/js/page-channels.js`（AddChannelModal：删除 `Bot username` 字段与 `account_id` 提交）
