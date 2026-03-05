@@ -96,16 +96,13 @@ fn ensure_md_paragraph(mut s: String) -> String {
     if s.trim().is_empty() {
         return String::new();
     }
-    // v1 contract: do not start with a newline; must end with exactly one blank line.
-    while s.starts_with('\n') {
+    // Canonical v1 template-var contract: do not add any implicit padding.
+    // We only strip leading/trailing newlines so templates fully control spacing.
+    while s.starts_with('\n') || s.starts_with('\r') {
         s.remove(0);
     }
-    if !s.ends_with("\n\n") {
-        if s.ends_with('\n') {
-            s.push('\n');
-        } else {
-            s.push_str("\n\n");
-        }
+    while s.ends_with('\n') || s.ends_with('\r') {
+        s.pop();
     }
     s
 }

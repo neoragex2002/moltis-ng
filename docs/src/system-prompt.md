@@ -21,6 +21,8 @@ each provider adapter to map it to its protocol:
 - Canonical v1 does not add wrapper headings (e.g. `# System`) or fixed runtime
   blocks automatically; templates must opt-in by referencing the corresponding
   `{{..._md}}` variables.
+- Multi-line `..._md` variables do not auto-insert any blank-line/newline padding
+  (leading/trailing newlines are stripped); templates control surrounding whitespace.
 - Debug observability: gateway debug endpoints expose `asSentPreamble` and
   provider-aware `asSent` summaries (see `crates/gateway/src/chat.rs`)
 
