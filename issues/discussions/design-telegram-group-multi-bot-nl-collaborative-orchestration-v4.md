@@ -6,6 +6,8 @@
 > - **任务不断链**（Reply 挂链 + WAIT 挂起 + 自动追赶）
 > - **抗竞态/时序**（epoch 版本收敛：只认最新快照，过期输出丢弃并重跑）
 
+Implementation tracking issue：`issues/issue-telegram-group-multi-bot-nl-collaborative-orchestration.md`
+
 ---
 
 ## 0. 背景、需求与核心约束
@@ -85,6 +87,7 @@ Bot（LLM 推理）
 
 ### 2.1 上下文读写分离（全员静默旁听）
 - 群里每条消息都会进入**全局事件流/消息库**（用于审计、追溯、构建上下文）。
+- 前提：看门大爷需要能接收到群里**未点名**的消息（例如关闭 Telegram bot privacy mode，或使用 1 个 sentinel account 负责 ingest + 后台 fan-out）；否则 listen-only 与 C 路由无法对“未点名交付”生效。
 - 但 **只有被路由命中（A/B/C）** 的 bot 才会真正发起 LLM 推理。
 - “看门大爷”可以实现为：
   - 方案 1：每个 bot 有独立上下文库（写入时 fan-out），读取时直接取自己的窗口
@@ -101,6 +104,7 @@ Bot（LLM 推理）
 - `username`（Telegram @username）
 - `telegram_user_id`（用于 B 路由/鉴权）
 - `capabilities`（可选：Search/Coding/...）
+- `handoff_tokens`（用于 D 路由 token 识别）：canonical 名称 + aliases（例如 `bot2` / `CoderBot`）；由配置维护（纯程序匹配，不跑 LLM）
 
 ### 3.2 MessageRootMap（消息 -> Root 映射）
 用途：解决“Reply 到非 root 也能追溯到 root”。
@@ -111,6 +115,8 @@ Bot（LLM 推理）
 规则：
 - root 自己映射到自己：`root_id -> root_id`
 - 任何由系统发出的 bot/system 消息，都写入映射：`msg_id -> root_id`
+- 分段/多条出站（chunked send）：**每一条**发到 Telegram 的消息都必须写 `msg_id -> root_id`；否则用户 Reply 到“第二段/后续补发”时无法追溯 root（断链）。建议：能 thread 到 root 的都 thread；但即使未 thread，也必须写 RootMap 保证可追溯。
+  - 实现提醒：若出站接口只返回“primary message_id（首段）”，仍需在发送循环中采集每个 chunk 的 message_id 并写 RootMap。
 
 ### 3.3 TaskCard（任务卡/锚点摘要）
 用途：把“根指令”变成可查询的结构化锚点，避免因 FIFO 截断导致 Bot 被叫醒后“忘了自己在等什么/要干什么”。
@@ -126,6 +132,12 @@ Bot（LLM 推理）
 - `status`：`OPEN | DONE | CANCELED`（最小就够用）
 - `updated_at`
 
+V1 最小口径（数据面约束，配合控制面“不断链”）：
+- `original_text` 必须是 root 原文（authoritative），不得由看门大爷做语义总结替换。
+- `expected_handoff`（若启用 D）：只能来自 token 识别（见 4.1 的 D），不做语义推断。
+- `buildContext()` 必须注入 `TaskCard.original_text`（至少一条固定块），避免 session compact/FIFO 截断导致“被唤醒但失忆”。
+  - 注意：TaskCard 不改变 A/B/C 的唤醒规则；它是“被唤醒后能做对事”的数据锚点。
+
 可选增强（不是必须，但有用）：
 - `brief`：1 行摘要（可由某个 bot 在正常输出里顺手给，也可由 ManagerBot 做；**看门大爷不需要用 LLM 总结**）
 - `risk_flags`：是否涉及敏感操作（用于二次确认/审计）
@@ -137,6 +149,12 @@ Bot（LLM 推理）
 - `agent_id`
 - `status`：`WAITING`
 - `updated_at`
+- `expires_at`（建议）：TTL（避免永久 WAITING；**默认 7d**，可配置）
+
+V1 最小口径（必须冻结）：
+- 写入时机：仅当 bot 在最新快照下输出严格全等的 `<SILENCE:WAIT>` 才写入 WAITING（过期输出不得写表）。
+- 清理时机：当 bot 在该 root 下输出 Action 或 `<SILENCE:PASS>` 时，必须清理该 bot 的 WAITING（避免持续被 C 路由反复唤醒）。
+- 过期行为：当 `now >= expires_at` 时，WAITING 必须视为无效（C 路由不得唤醒），并应当被清理（可在入站事件/定时器触发时清理）。
 
 > 重要：WaitingTable 不要求记录“等什么”的语义（那会把语义压力转回后台/LLM）。  
 > **等待的正确性靠 epoch 机制保证**：等早了/等晚了都能收敛到最新快照。
@@ -152,9 +170,12 @@ Bot（LLM 推理）
 
 ### 3.6 Idempotency（去重表）
 用途：Telegram update 可能重放/重复投递，必须去重。
+- `chan_account_key`（或 `account_handle`）：用于命名空间 `update_id`（Telegram 的 `update_id` 是 per-bot token 单调序列）
 - `chat_id`
 - `update_id` 或 `message_id`
 - `processed_at`
+
+建议：优先用 `(chan_account_key, update_id)` 做去重键；`message_id` 在 `edited_message` 场景下不变，单用它可能导致“编辑事件被误判为重复而丢失”。
 
 ---
 
@@ -178,6 +199,10 @@ Bot（LLM 推理）
 
 #### D：隐式交接约束（严格匹配 bot 名，但不直接唤醒）
 - 条件：Owner 的根指令里出现了某个已注册 bot 名（严格匹配，例如 `bot2`），但没有 `@bot2`。
+- 实现（纯程序，不跑 LLM）：基于 AgentsRegistry 的 `handoff_tokens`（canonical name + aliases）做 token 识别（边界匹配，避免 substring 误伤），并排除已显式 `@` 命中的 bots：`expected_handoff = matched_tokens - explicit_mentions`。
+  - 示例（边界匹配）：
+    - ✅ 命中：`bot2 等拿到结果后...`（后面接中文/空格/标点都算边界）
+    - ❌ 不命中：`bot21` / `robot2`（substring 误伤）
 - 动作（推荐做法）：
   1) 在 `TaskCard.expected_handoff` 里记录该 bot（例如 `bot2`）
   2) 要求当前负责人（被 @ 的 bot1）在交付时**必须显式 `@bot2`** 完成交接
@@ -319,6 +344,7 @@ onMessage(update):
 - 返回集合：所有 `running=true` 且 `last_trigger_root_id == root` 的 bot。
 - 作用：只做 **epoch 作废**，不额外制造新的并发请求。
 - 解决的问题：当 bot 基于旧快照即将输出 WAIT/旧方案时，只要 root 线程里来了新消息（交付/插话），它的旧输出就会被判定过期并重跑，从而避免“lost wakeup / 发旧答案”。
+- 注意（记录风险，不额外处理）：若某个 root 线程极度嘈杂（高频 Reply/插话），`routeE` 会导致旧快照频繁作废、出现多次重跑与延迟；本设计默认接受（本群预计不嘈杂）。如未来需要，可加 debounce/节流或“只对 Owner/授权人消息触发 routeE”。
 
 ### 6.3 Root 追溯：resolveRoot（关键，不然 Reply 链会断）
 
@@ -366,9 +392,9 @@ onLLMResult(bot, run_epoch, text):
 
 ### 6.6 输出处理：handleBotOutput（要点）
 1) `trim(text)` 后：
-   - `== "<SILENCE:PASS>"`：丢弃。
+   - `== "<SILENCE:PASS>"`：丢弃（若曾 WAITING，则清理 WAITING，避免持续被 C 路由反复唤醒）。
    - `== "<SILENCE:WAIT>"`：在当前 `root_id`（通常为 `bot.last_trigger_root_id`）下写入 `WaitingTable[root_id, bot] = WAITING`，丢弃。
-   - 否则：当作 Action。
+   - 否则：当作 Action（并清理该 bot 在该 root 下的 WAITING 记录）。
 2) Action 转发规则：
    - **强制 Reply 到 `bot.last_trigger_root_id`**
    - 写入 `MessageRootMap`，保证后续 Reply 可追溯 root
@@ -389,7 +415,7 @@ onLLMResult(bot, run_epoch, text):
   - 恢复后代发“已恢复在线”
 
 ### 6.8 鉴权与防越权（建议至少做 L1）
-- L1（网关白名单）：只有 `OWNER_ID` 与授权 bot 的 `user_id` 产生的 @ 才允许触发唤醒。
+- L1（网关白名单）：只有 `OWNER_ID` 与授权 bot 的 `user_id` 产生的消息才允许进入唤醒路由（A/B/C）；未授权用户消息最多 ingest-only，不得触发 run（含 C 路由的 waiter wakeup）。
 - L2（身份贴标）：入库前将消息重写为带身份前缀（如 `[Owner]` / `[Agent-Coder]`），并在 prompt 中规定高危操作仅响应 `[Owner]`。
 
 ### 6.9 可观测性（强烈建议）
@@ -398,6 +424,79 @@ onLLMResult(bot, run_epoch, text):
 - `affected_bots`（A/B/C 命中原因）
 - `agent_id, run_epoch, current_epoch, running`
 - `output_type`（PASS/WAIT/ACTION/STALE_DROPPED）
+
+### 6.10 最小控制面状态机（proof-oriented，便于实现/验收）
+> 目的：把“不断链/低成本/低噪声/抗竞态/幂等”收敛为一个最小闭环，避免靠场景枚举堆特判。
+
+#### 6.10.1 状态（最小集合）
+> 记号只是为了说明最小性；实现时可映射到本章 3.x 的表/字段。
+
+- `Seen(chat_id, update_id)`：去重表（3.6 Idempotency）
+- `RootOf(chat_id, message_id) -> root_id`：Root 追溯映射（3.2 MessageRootMap）
+- `Waiters(chat_id, root_id) -> set<agent_id>`：挂起登记（3.4 WaitingTable）
+- `BotVer(agent_id) -> {ver, running, target_root}`：把 `epoch + singleflight + “只跑最新”` 合并成一个版本戳（3.5 BotRuntimeState 的最小子集）
+- `TaskCard(chat_id, root_id)`：数据面锚点（3.3 TaskCard；不影响“唤醒正确性”，但影响“被唤醒后是否失忆”）
+
+#### 6.10.2 入站事件（Router）管线（伪代码）
+
+```pseudo
+onInbound(update):
+  if Seen.contains(chat_id, update_id): return
+  Seen.insert(chat_id, update_id)
+
+  root = resolveRoot(update)  // 6.3：RootOf(reply_to) ?? reply_to ; else message_id
+  RootOf.insert(chat_id, message_id, root)
+
+  upsertTaskCard(root, update)          // 写 root 原文/参与者等
+  if isOwner(update) and isRootMessage(update):
+    enforceHandoffConstraintD(root, update) // 仅 token 识别 -> TaskCard.expected_handoff；不唤醒
+
+  wake = union(
+    routeA_mentions(update),            // @ 唤醒
+    routeB_replyAuthorBot(update),      // Reply 唤醒作者
+    routeC_waiters(root, update),       // WAIT 续链唤醒
+  )
+
+  touch = wake ∪ routeE_inflightSameRoot(root) // 只作废旧快照（epoch++），不额外并发跑
+
+  for bot in touch:
+    BotVer[bot].ver += 1
+    BotVer[bot].target_root = root
+    if bot ∈ wake and BotVer[bot].running == false:
+      startRun(bot, root, BotVer[bot].ver)
+```
+
+#### 6.10.3 Bot 回包处理（Latest-only side effects）
+
+```pseudo
+onLlmResult(bot, run_root, run_ver, text):
+  BotVer[bot].running = false
+
+  if run_ver != BotVer[bot].ver:
+    discard(text)              // 旧快照不得产生任何副作用（含 WAIT 写表）
+    startRun(bot, BotVer[bot].target_root, BotVer[bot].ver)  // 只跑最新
+    return
+
+  t = trim(text)
+  if t == "<SILENCE:PASS>":
+    Waiters[chat_id, run_root].remove(bot)   // 若曾 WAITING，则清理（避免持续被 C 路由反复唤醒）
+    discard
+  else if t == "<SILENCE:WAIT>":
+    Waiters[chat_id, run_root].insert(bot)
+    discard
+  else:
+    Waiters[chat_id, run_root].remove(bot)     // 建议：避免持续被 C 路由反复唤醒
+    sent_id = sendToTelegram(reply_to = run_root, text = t) // 4.3：强制 Reply root
+    RootOf.insert(chat_id, sent_id, run_root)  // 6.3：保证后续 Reply 可追溯
+```
+
+#### 6.10.4 不变量（最小验收口径）
+- P1（线程闭包）：任意 Reply 都可通过 `RootOf` 追溯到 root；任意 Action 出站都强制 Reply root 并写 `RootOf(sent)=root`。
+- P2（唤醒纪律）：只有 A/B/C 进入唤醒集合；D 只写 `TaskCard.expected_handoff`，不直接唤醒（不破坏“@ 才醒”成本开关）。
+- P3（只认最新快照）：只有 `run_ver == current_ver` 的结果允许写表/发群；过期输出一律丢弃并只跑最新（解决乱序/慢 bot/lost wakeup/插话改需求）。
+- P4（幂等）：同一 `update_id` 至多处理一次，避免重复触发与重复副作用。
+
+最小性说明（直觉）：去掉 `RootOf/强制 Reply` 会断链；去掉 `Waiters` 无法续链；去掉 `BotVer` 无法收敛竞态；去掉 `Seen` 会被重复投递打穿。D 属于体验兜底项，可选但推荐。
 
 ---
 
@@ -454,6 +553,77 @@ V4（epoch 收敛）怎么解决：
 | S14 | 编辑更正 | epoch | STALE 丢弃重跑 | 改需求可追溯 |
 | S15 | 多任务并发 | epoch | latest wins | 需要优先级/排队 |
 | S16 | 人类不 Reply 交付 | N/A | N/A | 作为群规强制 Reply |
+
+### 8.2 对话示例（覆盖最小闭环：Seen/RootOf/Waiters/BotVer + TaskCard）
+> 目标：用最少的例子覆盖全部机制；每条示例都可用 6.10 的状态机推演。
+
+#### E01 标准派活（A，强制 Reply root）
+- Owner（root=M100）：`@bot1 你去干A`
+- bot1（Action）：`A 的结果是...`
+- 关键：看门大爷强制 `reply_to=M100` 发群，并写 `RootOf(sent)=M100`（保证后续 Reply 可追溯）。
+
+#### E02 噪声引用（PASS 严格拦截）
+- 成员：`@bot1 上次你干得不错`
+- bot1：`<SILENCE:PASS>`
+- 关键：`trim()==PASS` → 丢弃，不发群（低噪声；但仍消耗一次“被 @ 叫醒”的判定成本）。
+
+#### E03 显式依赖不断链（WAIT -> Waiters -> C 唤醒）
+- Owner（root=M200）：`@SearchBot 查资料；@CoderBot 等资料后写 patch`
+- CoderBot：`<SILENCE:WAIT>`（不进群，但写 `Waiters[M200] += CoderBot`）
+- SearchBot（Action，Reply root）：`资料如下...`
+- 关键：交付消息在 root 线程内 → C 路由命中 `Waiters[M200]`，即使没再次 `@CoderBot` 也会唤醒并续链。
+
+#### E04 Reply 到中间消息（RootOf 追溯 + B/C）
+- 前提：SearchBot 的交付消息 `D201` 已被系统写入 `RootOf(D201)=M200`（出站必须写 RootOf）。
+- Owner Reply `D201`：`补充：要兼容 Windows`
+- 关键：`resolveRoot` 追溯回 `M200`；B 可唤醒 SearchBot（追问闭环），C 可唤醒 `Waiters[M200]`（等待续链）。
+
+#### E05 隐式交接（D：token 识别，只记约束不唤醒）
+- Owner（root=M300）：`@bot1 你去干A，bot2 等拿到结果后再去干B`（注意：没有 `@bot2`）
+- 关键：
+  - D：token 识别命中 `bot2` → `TaskCard.expected_handoff=[bot2]`（仅记约束）
+  - bot2 不会被唤醒；必须靠显式交接完成激活：
+    - bot1 交付时显式 `@bot2 ...`（A 路由唤醒），或
+    - 系统按策略提醒/代发一次交接 ping（仍是纯程序，不做语义推断）。
+
+#### E06 竞态收敛（BotVer：旧快照输出丢弃并只跑最新）
+- 时间线：
+  1) `M400` 触发 bot2 运行（`run_ver=10`）
+  2) root 线程里来了新消息（交付/插话）→ `routeE_inflightSameRoot(M400)` touch bot2（`current_ver=11`）
+  3) bot2 返回旧结果（可能是旧 WAIT/旧方案）→ `run_ver!=current_ver` → 丢弃，不得写 `Waiters`、不得发群；然后只跑 `ver=11` 的最新快照
+
+#### E07 重复投递（Seen：幂等）
+- Telegram 可能重放同一 update。
+- 关键：命中 `Seen(chat_id, update_id)` 直接忽略；避免重复触发/重复发群/重复写表。
+
+#### E08 人类交付不 Reply（默认视为新 root，不做高风险猜测）
+- 前提：`Waiters[M500]` 里有 CoderBot（在等交付）。
+- 人类成员新发一条“资料如下...”但未 Reply `M500`。
+- 关键：默认当作新 root；C 不触发；需要把“交付必须 Reply root”当群规（或引入额外但更冒险的启发式，默认不推荐）。
+
+#### E09 edited_message（更新 TaskCard + touch BotVer；去重键优先 update_id）
+- Owner 编辑 root `M600`（message_id 不变，但 update_id 变）。
+- 关键：
+  - 不能用 message_id 做唯一去重键，否则会丢掉“编辑事件”。
+  - edited_message 视为新事件：更新 `TaskCard.original_text`，并 touch 相关 bot 的 `BotVer`，让旧快照输出过期丢弃。
+
+#### E10 上下文截断（TaskCard 注入，数据面兜底）
+- 群聊很长导致 session FIFO/compact，root 原文被截断。
+- 关键：`buildContext()` 必须注入 `TaskCard.original_text`（以及必要的 `expected_handoff/WAITING` 快照），否则 bot 被唤醒后容易“失忆”并输出错误动作。
+
+#### E11 WAITING TTL（默认 7d，过期视为无效）
+- 前提：`Waiters[M700]` 里有 CoderBot（之前输出过 `<SILENCE:WAIT>`）。
+- 过了 7 天（超过 `expires_at`），群里有人 Reply root `M700`：`当时那个链接在哪？`
+- 关键：过期 WAITING 不得触发 C 路由唤醒；并应被清理。若仍需继续任务，需要重新 `@CoderBot` 或让其再次输出 WAIT 记账。
+
+#### E12 routeE 在“嘈杂 root”下的影响（记录风险）
+- root 线程高频插话时，in-flight bot 会被频繁 touch（epoch++），旧输出大量变 STALE。
+- 关键：旧输出不会污染群（P3 仍成立），但会出现延迟/重跑成本；本设计默认不额外处理（群不嘈杂），后续可加 debounce/节流。
+
+#### E13 分段出站与 RootOf（每个 chunk 都写 Root）
+- bot 输出很长被拆成两条 Telegram 消息：`S1`、`S2`（`S1` 通常 Reply root；`S2` 可能是续发 chunk，也可能同样 Reply root）。
+- 用户 Reply `S2`：`第二段再解释下`
+- 关键：必须写 `RootOf(S1)=root` 且 `RootOf(S2)=root`；否则 Reply 到 `S2` 会追溯失败导致断链（B/C 失效）。
 
 ### S01 标准派活（单点直派）
 **Owner**：`@bot1 写个脚本`
@@ -550,7 +720,7 @@ V4（epoch 收敛）怎么解决：
 **Owner**：
 - `M400`: `@bot1 做 A`
 - `M401`: `@bot1 做 B`（很快又来）
-- V4 默认语义：bot1 singleflight + epoch 会“只认最新快照”，倾向先把 B 跑到稳定。
+- V4 默认语义（设计选择）：bot1 singleflight + epoch 会“只认最新快照”（latest-wins），倾向先把 B 跑到稳定；不保证旧 root 一定被完成（便于快速 steer bot 工作方向）。
 - 建议工作流（更稳也更像真实团队）：
   1) Owner 让 `@ManagerBot` 做排队与拆分
   2) 或 Owner 明确优先级：`@bot1 先 B，A 等会`
@@ -586,3 +756,18 @@ V4（epoch 收敛）怎么解决：
 1) **成本指标**：没有 @ 的消息不会唤醒 bot（除 B 的追问闭环），D 不直接唤醒。
 2) **噪声指标**：PASS/WAIT 不进群；Action 默认 Reply root，避免线程散落。
 3) **竞态指标**：任何“慢 bot / 快交付 / 插话改需求”都能靠 epoch 收敛到最新，不会等死、不发旧答案。
+
+### 10.1 特别关注事项（已冻结/已记录的默认口径）
+- WAITING TTL：默认 7d；过期视为无效且应清理；Action/PASS 时必须清理该 bot 在该 root 下的 WAITING（见 3.4 / E11）。
+- routeE：记录“嘈杂 root 下可能导致反复重跑/延迟”的风险；本群预计不嘈杂，默认不做额外节流（见 6.2 / E12）。
+- 多 root 公平性：latest-wins 是设计选择（便于 steer），不保证旧 root 完成；需要排队请交给 ManagerBot/Owner（见 S15）。
+- RootOf 完整性：分段/多条出站必须每条都写 RootOf，否则 Reply 到后续消息会断链（见 3.2 / E13）。
+- “能看到未点名消息”的前提：
+  - 人类未点名消息：需要 Telegram 平台把消息 update 投递给看门大爷（通常要求 privacy mode OFF 或 sentinel ingest）；Moltis 收到后可做 ingest-only（见 2.1 / E08）。
+  - 其他 bot 的群消息：Telegram 平台不会投递给别的 bot，必须依赖 Moltis 侧 outbound mirror（见本仓库已落地的 mirror/relay 方案）。
+- 本仓库现状核实（已落地能力，便于排障）：
+  - 群聊未点名消息 listen-only ingest：`crates/telegram/src/handlers.rs:249`
+  - ingest-only 写入入口（不触发 run）：`crates/gateway/src/channel_events.rs`
+  - outbound mirror（bot 输出复制到其他 bot sessions）：`crates/gateway/src/chat.rs:6743`
+  - outbound relay（bot@bot 指派必达触发）：`crates/gateway/src/chat.rs:6411`
+  - 相关已关单实现说明：`issues/done/issue-telegram-group-ingest-reply-decoupling.md` / `issues/done/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md` / `issues/done/issue-telegram-group-bot-to-bot-mentions-relay-via-moltis.md`

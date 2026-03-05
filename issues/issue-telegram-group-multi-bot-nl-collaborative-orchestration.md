@@ -1,15 +1,16 @@
-# Issue: Telegram 群聊多 Bot 协作补齐 V4 “不断链”（WAIT 挂起续链 / Root 追溯 / TaskCard / 过期输出收敛）
+# Issue: Telegram 群聊多 Bot 协作补齐 V4 “不断链”（静默协议 / WAIT 挂起续链 / Root 追溯 / TaskCard / 过期输出收敛）
 
 ## 实施现状（Status）【增量更新主入口】
 - Status: SURVEY
 - Priority: P1
+- Updated: 2026-03-05
 - Owners: <TBD>
 - Components: telegram / gateway / sessions / agents
 - Affected providers/models: <N/A>
 
 **已实现（相关基础能力，写日期）**
 - 群聊门禁与旁听：点名/回复 bot 才触发 run；未点名进入 listen-only ingest：`crates/telegram/src/access.rs:55` / `crates/telegram/src/handlers.rs:249`
-- ingest-only 写入入口（不触发 LLM）：`crates/channels/src/plugin.rs:24` / `crates/gateway/src/channel_events.rs:361`
+- ingest-only 写入入口（不触发 LLM）：`crates/channels/src/plugin.rs:94` / `crates/gateway/src/channel_events.rs:361`
 - 群聊 bot@bot relay（解析出站 @bot 指令并内部触发目标 bot）：`crates/gateway/src/chat.rs:6394` / `issues/done/issue-telegram-group-bot-to-bot-mentions-relay-via-moltis.md`
 - 群聊 bot1→bot2 可见性补偿（outbound mirror into sessions）：`issues/done/issue-telegram-bot-to-bot-outbound-mirror-into-sessions.md`
 
@@ -18,7 +19,7 @@
 - mention gating + reply-to-bot 激活：`crates/telegram/src/handlers.rs:3828`
 
 **已知差异/后续优化（非阻塞）**
-- 目前缺少 Bot 级“静默协议”（`<SILENCE:PASS>` / `<SILENCE:WAIT>`）的拦截与持久化动作：仓库代码中未见对应协议字符串（仅存在于 `issues/problems/v4.md`）。
+- 目前缺少 Bot 级“静默协议”（`<SILENCE:PASS>` / `<SILENCE:WAIT>`）的拦截与持久化动作：仓库代码中未见对应协议字符串（规范见 `issues/discussions/design-telegram-group-multi-bot-nl-collaborative-orchestration-v4.md`）。
 - 目前缺少 WAIT 挂起续链（C 路由）：当 bot2 被点名但需要等待 bot1 交付时，无法登记等待、也无法在后续“未点名但 Reply root”的交付消息到来时自动唤醒 bot2。
 - 目前缺少 Root 追溯（MessageRootMap）：无法把“Reply 到非 root 的消息”追溯回 root 进行续链。
 - 目前缺少 TaskCard 注入：当 session compact/FIFO 截断后，WAIT 续链可能“失忆”（root 原文与当前状态不可稳定找回）。
@@ -32,6 +33,7 @@
   - A 路由：显式 `@bot` / reply-to-bot 才触发 run（降低成本、减少抢话）。
   - listen-only：未点名消息也会写入 session（上下文不断档）。
   - relay：bot1 出站可以触发 bot2（确定性行首，或 loose 模式用 LLM 打标）。
+- 平台前提（必须明确）：要让“未点名的交付消息”也能参与不断链（listen-only / waiter wakeup），至少需要 Telegram 平台把这类 update 投递给某个入口（通常是各 bot privacy mode=OFF；或引入 sentinel 账号负责 ingest + 后台 fan-out）。否则 “未点名消息” 在数据面就不存在，C 路由与 TaskCard 只能对“已投递到本机的消息”生效。
 - 仍然缺的关键体验：**不断链**（V4 的 “WAIT 挂起 + Reply 挂链 + 自动追赶 + 竞态收敛”）。
 - Out of scope：
   - 不改变 Telegram 平台投递约束（other bots messages 不投递等）。
@@ -79,6 +81,9 @@
 - [ ] 支持 Root 追溯：Reply 到非 root 的消息也能解析出 root，用于 WAIT 续链与可观测。
 - [ ] 支持 TaskCard（最小版）：root 原文与 WAITING 状态可稳定注入上下文（不依赖 session 历史“刚好没被 compact”）。
 - [ ] 支持 epoch 收敛（最小版）：当同一 root 下有新消息到来时，正在运行的旧快照输出不得落地（至少不得发群；理想是丢弃并重跑）。
+- [ ] 支持 per-bot singleflight：同一 bot 同一时刻最多 1 个推理在路上；其余触发合并为“只跑最新”。
+- [ ] 支持 Telegram update/message 去重（idempotency）：重复投递不应触发重复 run/重复写表。
+- [ ] 支持“隐式交接约束”（D 路由，非直接唤醒）：root 指令隐式点到 bot 名时，仅记约束与提醒（基于 token 识别；不破坏“@ 才醒”）。
 
 ### 非功能目标（Non-functional）
 - 正确性口径（必须/不得）：
@@ -130,9 +135,12 @@
 ## 期望行为（Desired Behavior / Spec）【尽量冻结】
 - 必须：
   - Bot 输出严格等于 `<SILENCE:PASS>` 时：系统丢弃该输出（不发群），不写 WAITING。
-  - Bot 输出严格等于 `<SILENCE:WAIT>` 时：系统丢弃该输出（不发群），并写入 WaitingTable（key 至少包含 `chat_id + root_message_id + bot_account_handle`）。
+  - Bot 输出严格等于 `<SILENCE:WAIT>` 时：系统丢弃该输出（不发群），并写入 WaitingTable（key 至少包含 `chat_id + root_message_id + bot_account_key`）。
   - 当任意新入站消息到来时：
     - 若它能解析到 `root_message_id`，且 WaitingTable 命中当前 bot 在该 root 上 WAITING，则必须触发一次 run（即使未点名）。
+  - WAIT 续链必须覆盖两类交付事件：
+    - 人类/Owner 入站交付：Telegram update（可能未点名，但 Reply 到 root/链路中间消息）。
+    - bot 出站交付：Telegram send 成功后，gateway 必须把这次“出站交付”视为 root 线程的新事件并触发 waiter wakeup（因为 Telegram 平台不会把 bot 的消息投递给其它 bot）。
   - Root 追溯必须可用：Reply 到非 root 时也能解析 root（通过 MessageRootMap）。
   - TaskCard 至少包含 root 原文，并在构建上下文时注入（无论 session 是否 compact）。
 - 不得：
@@ -155,7 +163,33 @@
 - 缺点：无法“不断链”；只能降低噪声，不能解决依赖协作的自动推进。
 
 ### 最终方案（Chosen Approach）
-- 采用方案 1，但按阶段交付（优先把 WAIT+RootMap 跑通，再补 TaskCard 与 epoch 收敛）。
+- 采用方案 1，但按阶段交付：
+  - Phase 1：先把静默协议（PASS/WAIT）拦截 + RootMap + WaitingTable 跑通（具备最小不断链闭环）。
+  - Phase 2：补齐 TaskCard 注入与 epoch 收敛的完整体验。
+  - 重要：为避免“WAIT 晚到/旧快照落地”的竞态，启用 waiter wakeup（C 路由）进入常用路径前，至少需要实现 **epoch 最小版**：过期输出不得产生任何副作用（不得发群、不得写 WAITING/TaskCard）。
+
+#### 开工前必须冻结的关键点（阻塞实现）
+- F1（waiter wakeup 的事件源必须包含 bot 出站交付）：
+  - 仅靠“入站消息触发 C 路由”不够：Telegram 平台不会把 bot1 的消息投递给 bot2，因此 bot2 无法靠“入站 update”看到 bot1 的交付消息。
+  - 必须冻结：在 gateway 的 Telegram 出站成功路径（已拿到 sent message_id 的主消息）中，把本次出站视为“root 线程新事件”，用于触发 `WaitingTable[chat_id, root_message_id]` 的 waiter wakeup（并同时更新 RootMap/TaskCard）。
+- F2（RootMap 必须覆盖“可被 Reply 的所有出站 message_id”）：
+  - V4 要求 Reply 到任意中间消息/分段输出都能追溯 root；但当前 `ChannelOutbound::send_*_with_ref` 仅承诺返回 *primary message* 的 message_id（分段发送时通常是首段）：`crates/channels/src/plugin.rs:274`。
+  - 必须冻结其一：
+    - A) 让 Telegram outbound 返回每个 chunk 的 message_id（或由 gateway 负责分 chunk，每次 send 都拿到 ref），从而为每个 chunk 写 RootMap；
+    - B) 或明确接受限制：仅 root/首段可追溯，用户 Reply 到后续 chunk 可能断链（并在验收/文档中写明）。
+- F3（epoch 收敛与现有 per-session singleflight/message_queue 的整合方式）：
+  - 现状：gateway 已有 per-session semaphore + message queue（合并触发/重放）：`crates/gateway/src/chat.rs:2310`。
+  - 必须冻结：
+    - 过期输出边界：当 `run_epoch != current_epoch` 时，输出不得发群、不得写 WAITING/TaskCard、不得产生任何状态副作用（仅允许记录日志/指标）。
+    - `routeE_inflightSameRoot` 的 touch 范围：哪些“root 线程事件”（入站/出站/Owner 插话/交付）会 bump epoch，如何定位“in-flight 且 last_trigger_root==root”的 bot 集合。
+    - 重跑策略：丢弃后是否立即重跑最新快照，还是仅标脏等待下一触发（成本/风暴权衡）。
+
+#### 建议提前定的点（非阻塞，但会显著影响实现范围）
+- D1（C 路由的鉴权边界）：waiter wakeup 会绕过 mention gating 成本开关；需要明确“哪些 sender 的 Reply 可以触发 waiter wakeup”（例如仅 Owner/allowlist/或所有成员），否则存在被群成员低成本刷 Reply 触发 LLM 的风险。
+- D2（RootMap/TaskCard 的 retention/清理）：WaitingTable 有 TTL=7d，但 RootMap/TaskCard 若无限增长会膨胀；建议提前冻结保留/清理策略（例如按 `updated_at_ms` 定期清理、或按 session 生命周期清理）。
+- D3（idempotency key 与 edited_message 策略）：V4 建议优先 `(chan_account_key, update_id)` 去重以支持 edited_message 语义；但当前 Telegram handler 链路拿不到 `update_id`（`crates/telegram/src/bot.rs:154` 处未透传）。建议提前决定：
+  - 是否要把 `update_id` 透传进 handler/meta/RootMap 写入链路；
+  - edited_message 是否触发 RootMap/TaskCard 更新与 epoch touch（routeE）。
 
 #### 行为规范（Normative Rules）
 - R1：静默协议严格全等匹配（PASS/WAIT），匹配后输出不进入 Telegram。
@@ -163,18 +197,66 @@
 - R3：C 路由（waiter wakeup）：当新入站消息解析出的 `root_message_id` 命中 WAITING 时，即使未点名也触发 run。
 - R4：Root 追溯：每条入站消息必须写入 MessageRootMap；每条 bot/system 出站消息也必须写入 MessageRootMap（否则后续 Reply 会断链）。
 - R5：TaskCard 注入（最小版）：构建上下文时必须注入 root 原文 + WAITING 状态快照。
-- R6：epoch（最小版）：同一 root 下新消息到来时，旧快照输出不得落地（至少不得发群）；实现上允许“丢弃并重跑”或“丢弃并等待下一触发”，但必须冻结一种行为。
+- R6：epoch（最小版）：同一 root 下有新入站消息到来时，必须使该 root 上所有 in-flight bot 的旧快照过期；LLM 返回时若 `run_epoch != current_epoch`，输出必须被丢弃（至少不得发群），并按冻结策略决定是否立即重跑。
+- R7：singleflight：同一 bot 同时只能有 1 个 LLM 请求在路上；期间的新触发只能“标脏”，不得并发跑；当 in-flight 结束后若仍是脏的，必须只跑最新快照。
+- R8：idempotency：重复的 Telegram update/message 不得触发重复 run、重复写 RootMap/WaitingTable/TaskCard（至少需要按 chat_id + message_id/update_id 去重）。
+- R9：隐式交接约束（D 路由）：当 root 指令隐式提及某 bot（无 `@`）时，仅记录约束并提醒补交接，不得直接唤醒该 bot。
+- R10：D 路由的“隐式提及”必须为 token 识别（基于 AgentsRegistry 的 `handoff_tokens` 做边界匹配，禁止 substring 误伤）；并定义 `expected_handoff = matched_tokens - explicit_mentions`。
 
 #### 接口与数据结构（Contracts）
 - Channel inbound 元信息（为 root 追溯提供事实来源）：
   - 为 Telegram 入站消息在 `ChannelMessageMeta`（或其 channel JSON）中增加：
-    - `inReplyToMessageId`（可选，字符串）
     - `telegramMessageId`（必填，字符串；即当前入站 message_id）
+    - `inReplyToMessageId`（可选，字符串；即 reply_to 的 message_id）
   - 注意：现有 `ChannelReplyTarget.message_id` 是“出站 reply threading 的目标”，不能用来表达“入站 reply_to”。
+  - 字段命名约束：
+    - Rust struct 字段用 `snake_case`（建议：`telegram_message_id` / `in_reply_to_message_id`），对外 JSON 用 `camelCase`（通过 `serde(rename_all = \"camelCase\")` 映射）。
+    - 相关位置：`crates/channels/src/plugin.rs:150`（`ChannelMessageMeta`），`crates/channels/src/plugin.rs:221`（`ChannelReplyTarget`）。
 - 存储（建议落在 gateway 的 SQLite 体系内，避免随 session compact 丢失）：
   - `telegram_message_root_map(chat_id, message_id) -> root_message_id`
-  - `telegram_waiting(chat_id, root_message_id, account_handle) -> {waiting_since_ms, last_seen_message_id, expires_at_ms}`
+  - `telegram_waiting(chat_id, root_message_id, bot_account_key) -> {waiting_since_ms, last_seen_message_id, expires_at_ms}`
   - `telegram_task_card(chat_id, root_message_id) -> {original_text, status_json, updated_at_ms}`
+  - 关键冻结（避免后续返工）：
+    - `account_handle` 在本单语义中指“稳定 bot 句柄”（建议使用 `chan_account_key` / `telegram:<chan_user_id>`），不得使用可变的 `@username` 作为主键。
+    - 必须定义唯一性/索引/清理策略（RootMap/Waiting/TaskCard 都是 hot path 或长期增长源）。
+  - 建议 DDL（示例；实现时可按现有 gateway sqlite 框架调整）：
+    ```sql
+    -- RootMap: (chat_id, message_id) -> root_message_id
+    CREATE TABLE IF NOT EXISTS telegram_message_root_map (
+      chat_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      root_message_id TEXT NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (chat_id, message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tg_root_map_chat_root
+      ON telegram_message_root_map(chat_id, root_message_id);
+
+    -- Waiting: one waiter per (chat, root, bot)
+    CREATE TABLE IF NOT EXISTS telegram_waiting (
+      chat_id TEXT NOT NULL,
+      root_message_id TEXT NOT NULL,
+      bot_account_key TEXT NOT NULL,
+      waiting_since_ms INTEGER NOT NULL,
+      last_seen_message_id TEXT,
+      expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (chat_id, root_message_id, bot_account_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tg_waiting_chat_root
+      ON telegram_waiting(chat_id, root_message_id);
+    CREATE INDEX IF NOT EXISTS idx_tg_waiting_expires
+      ON telegram_waiting(expires_at_ms);
+
+    -- TaskCard: minimal per-root anchor
+    CREATE TABLE IF NOT EXISTS telegram_task_card (
+      chat_id TEXT NOT NULL,
+      root_message_id TEXT NOT NULL,
+      original_text TEXT NOT NULL,
+      status_json TEXT NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (chat_id, root_message_id)
+    );
+    ```
 - 可观测字段（/context + logs）：
   - `resolved_root_message_id`
   - `wakeup_reason`：`mentioned|reply_to_bot|waiter`
@@ -202,12 +284,12 @@
 
 ## 测试计划（Test Plan）【不可省略】
 ### Unit
-- [ ] Root 追溯：`resolve_root()`（含“Reply 到非 root”链路）单测：`crates/<TBD>/...`
-- [ ] 静默协议拦截：PASS/WAIT 严格匹配单测（含“带空格/带前后缀不匹配”）：`crates/<TBD>/...`
-- [ ] WaitingTable：写入/命中/过期清理单测：`crates/<TBD>/...`
+- [ ] Root 追溯：`resolve_root()`（含“Reply 到非 root”链路）单测：`crates/gateway/src/chat.rs`（建议抽出纯函数/模块以便单测）
+- [ ] 静默协议拦截：PASS/WAIT 严格匹配单测（含“带空格/带前后缀不匹配”）：`crates/gateway/src/chat.rs`
+- [ ] WaitingTable：写入/命中/过期清理单测（含 TTL=7d）：`crates/gateway/src/chat.rs` 或 `crates/gateway/src/*`（新增 DAO）
 
 ### Integration
-- [ ] Telegram 群聊模拟：未点名消息 ingest-only；命中 WAITING 时触发 run（无需真实 Telegram，使用插件/事件 sink mock）：`crates/<TBD>/...`
+- [ ] Telegram 群聊模拟：未点名消息 ingest-only；命中 WAITING 时触发 run（无需真实 Telegram，使用插件/事件 sink mock）：`crates/gateway/src/chat.rs`（参考既有 mirror/relay integration-style tests）
 
 ### 自动化缺口（如有，必须写手工验收）
 - 缺口原因：若无法在 CI 中模拟 Telegram 更新的 reply 链结构，需要手工验证。
@@ -223,11 +305,12 @@
 - 上线观测：新增日志关键词 `telegram_waiter_wakeup` / `telegram_root_resolve`，可在 gateway 日志中检索。
 
 ## 实施拆分（Implementation Outline）
+- Step 0: Idempotency + singleflight 现状核对：补齐去重键（update_id/message_id）与 per-bot 合并触发语义（只跑最新）。
 - Step 1: 定义静默协议常量与拦截点（出站前）：PASS/WAIT 不进群；WAIT 写表（先不做唤醒）。
 - Step 2: 补齐入站元信息（telegramMessageId/inReplyToMessageId），并落地 MessageRootMap。
-- Step 3: WaitingTable + waiter wakeup（C 路由）：未点名但命中 WAITING 的入站消息触发 run。
+- Step 3: WaitingTable + waiter wakeup（C 路由）：未点名但命中 WAITING 的入站消息触发 run（上线启用前至少需 epoch 最小版：过期输出不得产生副作用）。
 - Step 4: TaskCard（最小版）+ 上下文注入（root 原文 + WAITING 状态）。
-- Step 5: epoch 收敛：定义触发点与作废规则；补齐测试与 /context 可观测字段。
+- Step 5: epoch 收敛：冻结“触发点 + 丢弃策略 + 是否立即重跑”；补齐测试与 /context 可观测字段。
 - 受影响文件（预估）：
   - `crates/channels/src/plugin.rs`
   - `crates/gateway/src/channel_events.rs`
@@ -236,7 +319,7 @@
   - `crates/sessions/*` 或 `crates/gateway/src/*`（新增 SQLite 表/DAO）
 
 ## 交叉引用（Cross References）
-- Design doc：`issues/problems/v4.md`
+- Design discussion（V4 群聊调度系统设计，当前权威）：`issues/discussions/design-telegram-group-multi-bot-nl-collaborative-orchestration-v4.md`
 - 相关已完成单：
   - `issues/done/issue-telegram-group-ingest-reply-decoupling.md`
   - `issues/done/issue-telegram-group-bot-to-bot-mentions-relay-via-moltis.md`
@@ -244,9 +327,15 @@
 
 ## 未决问题（Open Questions）
 - Q1：静默协议字符串是否严格采用 `<SILENCE:PASS>` / `<SILENCE:WAIT>`（推荐按 v4 固定），还是要兼容旧形态（例如 `<SILENCE>`）？
-- Q2：WAITING 过期策略：默认 TTL 多久（例如 24h）？触发后是否自动清理 WAITING？
-- Q3：TaskCard V1 只存 root 原文 + 少量状态是否足够？是否需要“期望交接 expected_handoff”？
+- Q2：WAITING 过期策略（已定）：默认 TTL=7d（可配置）；过期后视为无效且应自动清理（不得触发 waiter wakeup）。
+- Q3：TaskCard V1 是否需要“期望交接 expected_handoff”（已决定保留 D：token 识别）；仍需冻结 `handoff_tokens` 的来源、aliases 与边界规则。
 - Q4：epoch 的最小可行实现：仅阻止旧输出发群 vs 丢弃并重跑（更一致但更复杂）。
+- Q5（阻塞）：waiter wakeup 的事件源是否包含 bot 出站交付？若包含，出站路径如何定位 root 并触发等待者（并避免重复触发）？
+- Q6（阻塞）：RootMap 如何覆盖“分段输出/多条出站”的 message_id？采用“outbound 返回全量 refs / gateway 负责 chunk / 接受仅首段可追溯”的哪一种？
+- Q7（阻塞）：epoch 与现有 message_queue 的关系如何冻结？过期输出是否立即重跑？routeE 的 touch 范围与节流策略是什么？
+- Q8（建议）：C 路由的鉴权边界如何定义（谁的 Reply 可以唤醒 waiters）？
+- Q9（建议）：RootMap/TaskCard 的 retention/清理策略是什么（按时间/按 session 生命周期/按容量）？
+- Q10（建议）：是否需要把 Telegram `update_id` 透传进 handler/meta 用于去重与 edited_message 语义？edited_message 是否参与 root/epoch 的 touch？
 
 ## Close Checklist（关单清单）【不可省略】
 - [ ] 行为已按 Spec 实现（口径一致）
