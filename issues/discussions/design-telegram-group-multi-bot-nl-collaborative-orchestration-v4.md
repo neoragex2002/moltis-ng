@@ -7,6 +7,7 @@
 > - **抗竞态/时序**（epoch 版本收敛：只认最新快照，过期输出丢弃并重跑）
 
 Implementation tracking issue：`issues/issue-telegram-group-multi-bot-nl-collaborative-orchestration.md`
+现状机制梳理（@ 转写 / mirror / relay）：`issues/discussions/telegram-group-at-rewrite-mirror-relay-as-is.md`
 
 ---
 

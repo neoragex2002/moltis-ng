@@ -23,6 +23,7 @@ pub mod chat;
 pub mod chat_error;
 pub mod cron;
 pub mod env_routes;
+pub mod ids;
 #[cfg(feature = "local-llm")]
 pub mod local_llm_setup;
 pub mod logs;

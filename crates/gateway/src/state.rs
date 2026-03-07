@@ -261,7 +261,7 @@ pub struct GatewayInner {
     /// Pending channel reply targets: when a channel message triggers a chat
     /// send, we queue the reply target so the "final" response can be routed
     /// back to the originating channel.
-    pub channel_reply_queue: HashMap<String, Vec<ChannelReplyTarget>>,
+    pub channel_reply_queue: HashMap<String, HashMap<String, Vec<ChannelReplyTarget>>>,
     /// Per-session TTS runtime overrides (session_key -> override).
     pub tts_session_overrides: HashMap<String, TtsRuntimeOverride>,
     /// Per-channel-account TTS runtime overrides ((channel, account) -> override).
@@ -291,7 +291,7 @@ pub struct GatewayInner {
     pub cached_location: Option<moltis_config::GeoLocation>,
     /// Per-session buffer for channel status messages (tool use, model selection).
     /// Drained when the final response is delivered to the channel.
-    pub channel_status_log: HashMap<String, Vec<String>>,
+    pub channel_status_log: HashMap<String, HashMap<String, Vec<String>>>,
 }
 
 impl GatewayInner {
@@ -532,35 +532,64 @@ impl GatewayState {
     }
 
     /// Push a reply target for a session (used when a channel message triggers chat.send).
-    pub async fn push_channel_reply(&self, session_key: &str, target: ChannelReplyTarget) {
+    pub async fn push_channel_reply(
+        &self,
+        session_key: &str,
+        trigger_id: &str,
+        target: ChannelReplyTarget,
+    ) {
         self.inner
             .write()
             .await
             .channel_reply_queue
             .entry(session_key.to_string())
             .or_default()
+            .entry(trigger_id.to_string())
+            .or_default()
             .push(target);
     }
 
-    /// Drain all pending reply targets for a session.
-    pub async fn drain_channel_replies(&self, session_key: &str) -> Vec<ChannelReplyTarget> {
-        self.inner
-            .write()
-            .await
+    /// Drain pending reply targets for a trigger on a session.
+    pub async fn drain_channel_replies(
+        &self,
+        session_key: &str,
+        trigger_id: &str,
+    ) -> Vec<ChannelReplyTarget> {
+        let mut inner = self.inner.write().await;
+        let Some(by_trigger) = inner.channel_reply_queue.get_mut(session_key) else {
+            return Vec::new();
+        };
+        let drained = by_trigger.remove(trigger_id).unwrap_or_default();
+        if by_trigger.is_empty() {
+            inner.channel_reply_queue.remove(session_key);
+        }
+        drained
+    }
+
+    /// Get a copy of pending reply targets for a trigger without removing them.
+    pub async fn peek_channel_replies(
+        &self,
+        session_key: &str,
+        trigger_id: &str,
+    ) -> Vec<ChannelReplyTarget> {
+        let inner = self.inner.read().await;
+        inner
             .channel_reply_queue
-            .remove(session_key)
+            .get(session_key)
+            .and_then(|m| m.get(trigger_id))
+            .cloned()
             .unwrap_or_default()
     }
 
-    /// Get a copy of pending reply targets without removing them.
-    pub async fn peek_channel_replies(&self, session_key: &str) -> Vec<ChannelReplyTarget> {
-        self.inner
-            .read()
-            .await
-            .channel_reply_queue
-            .get(session_key)
-            .cloned()
-            .unwrap_or_default()
+    /// Drain *all* pending reply targets for a session across triggers.
+    ///
+    /// Use only for defensive cleanup when a trigger id is unavailable.
+    pub async fn drain_all_channel_replies(&self, session_key: &str) -> Vec<ChannelReplyTarget> {
+        let mut inner = self.inner.write().await;
+        let Some(by_trigger) = inner.channel_reply_queue.remove(session_key) else {
+            return Vec::new();
+        };
+        by_trigger.into_values().flatten().collect()
     }
 
     /// Record a run error (for send_sync to retrieve).
@@ -585,26 +614,51 @@ impl GatewayState {
     }
 
     /// Append a status line (e.g. tool use, model selection) to the channel
-    /// status log for a session. These are drained and appended as a logbook
+    /// status log for a session + trigger. These are drained and appended as a logbook
     /// when the final response is delivered.
-    pub async fn push_channel_status_log(&self, session_key: &str, message: String) {
+    pub async fn push_channel_status_log(
+        &self,
+        session_key: &str,
+        trigger_id: &str,
+        message: String,
+    ) {
         self.inner
             .write()
             .await
             .channel_status_log
             .entry(session_key.to_string())
             .or_default()
+            .entry(trigger_id.to_string())
+            .or_default()
             .push(message);
     }
 
-    /// Drain all buffered status log entries for a session.
-    pub async fn drain_channel_status_log(&self, session_key: &str) -> Vec<String> {
-        self.inner
-            .write()
-            .await
-            .channel_status_log
-            .remove(session_key)
-            .unwrap_or_default()
+    /// Drain buffered status log entries for a session + trigger.
+    pub async fn drain_channel_status_log(
+        &self,
+        session_key: &str,
+        trigger_id: &str,
+    ) -> Vec<String> {
+        let mut inner = self.inner.write().await;
+        let Some(by_trigger) = inner.channel_status_log.get_mut(session_key) else {
+            return Vec::new();
+        };
+        let drained = by_trigger.remove(trigger_id).unwrap_or_default();
+        if by_trigger.is_empty() {
+            inner.channel_status_log.remove(session_key);
+        }
+        drained
+    }
+
+    /// Drain *all* buffered status log entries for a session across triggers.
+    ///
+    /// Use only for defensive cleanup when a trigger id is unavailable.
+    pub async fn drain_all_channel_status_log(&self, session_key: &str) -> Vec<String> {
+        let mut inner = self.inner.write().await;
+        let Some(by_trigger) = inner.channel_status_log.remove(session_key) else {
+            return Vec::new();
+        };
+        by_trigger.into_values().flatten().collect()
     }
 
     /// Close a client: remove from registry and unregister from nodes.

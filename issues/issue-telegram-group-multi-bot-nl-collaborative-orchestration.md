@@ -169,6 +169,16 @@
   - 重要：为避免“WAIT 晚到/旧快照落地”的竞态，启用 waiter wakeup（C 路由）进入常用路径前，至少需要实现 **epoch 最小版**：过期输出不得产生任何副作用（不得发群、不得写 WAITING/TaskCard）。
 
 #### 开工前必须冻结的关键点（阻塞实现）
+- F0（群“建档/入群名单”配置：解决会话自动激活与 phantom sessions）：
+  - 现状：mirror/relay 为避免“幽灵群会话”，只对“已存在的 (bot, group) session”生效；但这会导致协作冷启动时出现“bot 明明在群里，却看不见/叫不动”的问题（尤其当 Telegram 平台未向该 bot 投递未点名 update 时）。
+  - 建议冻结：在系统侧引入“群入群名单/建群配置”（GroupRoster/Enrollment）作为 **权威来源**，明确“这个 chat_id 下哪些 bot 视为参与者”。
+    - 只有在名单内的 bot，才允许自动创建/激活该群 session（仅建档/绑定，不触发 LLM）。
+    - mirror/relay 的 target 集合也必须以该名单为上限（防止把本实例其它 bot 拉进来）。
+  - 例子：
+    - `chat_id=-100123` 的 roster = `{telegram:pm_bot, telegram:coder_bot, telegram:qa_bot}`。
+    - 当 `pm_bot` 首次在该群成功出站后，系统可为 `coder_bot/qa_bot` 自动建档该群 session，使后续 mirror/relay 立刻生效；而对不在 roster 内的其它 bot（即便本实例有配置）一律不建档、不镜像、不转派。
+  - 风险与约束：
+    - roster 需要由运维/Owner 在系统侧维护（一次性成本换稳定性）；若配置错（把不在群的 bot 加进去），应表现为“出站失败/无权限/无法发送”的可观测错误，而不是静默制造不可解释状态。
 - F1（waiter wakeup 的事件源必须包含 bot 出站交付）：
   - 仅靠“入站消息触发 C 路由”不够：Telegram 平台不会把 bot1 的消息投递给 bot2，因此 bot2 无法靠“入站 update”看到 bot1 的交付消息。
   - 必须冻结：在 gateway 的 Telegram 出站成功路径（已拿到 sent message_id 的主消息）中，把本次出站视为“root 线程新事件”，用于触发 `WaitingTable[chat_id, root_message_id]` 的 waiter wakeup（并同时更新 RootMap/TaskCard）。

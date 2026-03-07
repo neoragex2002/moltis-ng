@@ -128,6 +128,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             } else {
                 chan_chat_key.clone()
             };
+            let trigger_id = crate::ids::new_trigger_id();
 
             // Broadcast a "chat" event so the web UI shows the user message
             // in real-time (like typing from the UI).
@@ -159,7 +160,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             // Register the reply target so the chat "final" broadcast can
             // route the response back to the originating channel.
             state
-                .push_channel_reply(&session_id, reply_to.clone())
+                .push_channel_reply(&session_id, &trigger_id, reply_to.clone())
                 .await;
 
             // Persist channel binding so web UI messages on this session
@@ -204,6 +205,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 "channel": &meta,
                 "_sessionId": &session_id,
                 "_chanChatKey": &chan_chat_key,
+                "_triggerId": &trigger_id,
             });
             // Forward the channel's default model to chat.send() if configured.
             // If no channel model is set, check if the session already has a model.
@@ -244,7 +246,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         model.clone()
                     };
                     let msg = format!("Using {display}. Use /model to change.");
-                    state.push_channel_status_log(&session_id, msg).await;
+                    state
+                        .push_channel_status_log(&session_id, &trigger_id, msg)
+                        .await;
                 }
             } else {
                 let session_has_model = if let Some(ref sm) = state.services.session_metadata {
@@ -274,7 +278,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .and_then(|v| v.as_str())
                         .unwrap_or(id);
                     let msg = format!("Using {display}. Use /model to change.");
-                    state.push_channel_status_log(&session_id, msg).await;
+                    state
+                        .push_channel_status_log(&session_id, &trigger_id, msg)
+                        .await;
                 }
             }
 
@@ -350,8 +356,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 }
                 // Drain any pending channel delivery state (reply targets + logbook)
                 // so later replies can't get cross-wired to this failed trigger.
-                let _ = state.drain_channel_replies(&session_id).await;
-                let _ = state.drain_channel_status_log(&session_id).await;
+                let _ = state.drain_channel_replies(&session_id, &trigger_id).await;
+                let _ = state
+                    .drain_channel_status_log(&session_id, &trigger_id)
+                    .await;
             }
         } else {
             warn!("channel dispatch_to_chat: gateway not ready");
@@ -690,6 +698,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         } else {
             chan_chat_key.clone()
         };
+        let trigger_id = crate::ids::new_trigger_id();
 
         // Build multimodal content array (OpenAI format)
         let mut content_parts: Vec<serde_json::Value> = Vec::new();
@@ -754,7 +763,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
         // Register the reply target
         state
-            .push_channel_reply(&session_id, reply_to.clone())
+            .push_channel_reply(&session_id, &trigger_id, reply_to.clone())
             .await;
 
         // Persist channel binding (ensure session row exists first —
@@ -796,6 +805,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             "channel": &meta,
             "_sessionId": &session_id,
             "_chanChatKey": &chan_chat_key,
+            "_triggerId": &trigger_id,
         });
 
         // Forward the channel's default model if configured
@@ -830,7 +840,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     model.clone()
                 };
                 let msg = format!("Using {display}. Use /model to change.");
-                state.push_channel_status_log(&session_id, msg).await;
+                state
+                    .push_channel_status_log(&session_id, &trigger_id, msg)
+                    .await;
             }
         } else {
             let session_has_model = if let Some(ref sm) = state.services.session_metadata {
@@ -859,7 +871,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .and_then(|v| v.as_str())
                     .unwrap_or(id);
                 let msg = format!("Using {display}. Use /model to change.");
-                state.push_channel_status_log(&session_id, msg).await;
+                state
+                    .push_channel_status_log(&session_id, &trigger_id, msg)
+                    .await;
             }
         }
 
@@ -904,8 +918,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
             }
             // Drain any pending channel delivery state (reply targets + logbook)
             // so later replies can't get cross-wired to this failed trigger.
-            let _ = state.drain_channel_replies(&session_id).await;
-            let _ = state.drain_channel_status_log(&session_id).await;
+            let _ = state.drain_channel_replies(&session_id, &trigger_id).await;
+            let _ = state
+                .drain_channel_status_log(&session_id, &trigger_id)
+                .await;
         }
     }
 
@@ -1774,14 +1790,76 @@ mod tests {
         }
     }
 
+    struct ErrChatServiceWithLog {
+        state: Arc<crate::state::GatewayState>,
+    }
+
+    #[async_trait]
+    impl crate::services::ChatService for ErrChatServiceWithLog {
+        async fn send(&self, params: serde_json::Value) -> crate::services::ServiceResult {
+            let session_key = params
+                .get("_sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("main");
+            let trigger_id = params
+                .get("_triggerId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            self.state
+                .push_channel_status_log(session_key, trigger_id, "tool status".to_string())
+                .await;
+            Err("boom".into())
+        }
+
+        async fn abort(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn cancel_queued(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "cleared": 0 }))
+        }
+
+        async fn history(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+
+        async fn inject(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn clear(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        async fn compact(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Err("not implemented".into())
+        }
+
+        async fn context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn raw_prompt(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn full_context(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+    }
+
     #[tokio::test]
     async fn dispatch_to_chat_immediate_failure_drains_reply_targets_and_logbook() {
         let rec = Arc::new(RecordingOutbound::default());
         let outbound: Arc<dyn ChannelOutbound> = rec.clone();
 
-        let services = crate::services::GatewayServices::noop()
-            .with_chat(Arc::new(ErrChatService))
-            .with_channel_outbound(outbound);
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
         let state = Arc::new(crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
@@ -1791,10 +1869,10 @@ mod tests {
             services,
         ));
 
-        // Pre-seed a log line to ensure it's drained on failure.
-        let chan_chat_key = "telegram:acct:123";
         state
-            .push_channel_status_log(chan_chat_key, "tool status".to_string())
+            .set_chat(Arc::new(ErrChatServiceWithLog {
+                state: Arc::clone(&state),
+            }))
             .await;
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
@@ -1822,10 +1900,11 @@ mod tests {
         )
         .await;
 
-        assert!(state.peek_channel_replies(chan_chat_key).await.is_empty());
+        let chan_chat_key = "telegram:acct:123";
+        assert!(state.drain_all_channel_replies(chan_chat_key).await.is_empty());
         assert!(
             state
-                .drain_channel_status_log(chan_chat_key)
+                .drain_all_channel_status_log(chan_chat_key)
                 .await
                 .is_empty()
         );
