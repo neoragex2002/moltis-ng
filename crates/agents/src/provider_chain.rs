@@ -423,6 +423,7 @@ impl LlmProvider for ProviderChain {
                     }
 
                     warn!(
+                        run_id = ?ctx.run_id,
                         provider = entry.provider.id(),
                         error = %e,
                         kind = ?kind,

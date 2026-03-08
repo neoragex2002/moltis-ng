@@ -144,10 +144,61 @@ export function chatAddErrorCard(err) {
 		if (err.stage) parts.push(`stage=${err.stage}`);
 		if (err.kind) parts.push(`kind=${err.kind}`);
 		if (err.action) parts.push(`action=${err.action}`);
+		if (typeof err.retryable === "boolean") parts.push(`retryable=${err.retryable}`);
+		var timeoutSecs = err.timeoutSecs || err.timeout_secs || err.details?.timeout_secs;
+		if (typeof timeoutSecs === "number" && timeoutSecs > 0) parts.push(`timeout=${timeoutSecs}s`);
 		meta.textContent = parts.join(" · ");
 		meta.style.marginTop = "4px";
 		meta.style.opacity = "0.55";
 		body.appendChild(meta);
+	}
+
+	if (err.runId) {
+		var rid = document.createElement("div");
+		rid.className = "error-detail";
+		rid.textContent = `run=${err.runId}`;
+		rid.style.marginTop = "4px";
+		rid.style.opacity = "0.6";
+		body.appendChild(rid);
+	}
+
+	if (err.runId || err.sessionId) {
+		var btnRow = document.createElement("div");
+		btnRow.className = "error-detail";
+		btnRow.style.marginTop = "6px";
+
+		var copyBtn = document.createElement("button");
+		copyBtn.className = "provider-btn provider-btn-secondary provider-btn-sm";
+		copyBtn.textContent = "Copy diagnostics";
+		if (navigator?.clipboard?.writeText) {
+			copyBtn.addEventListener("click", () => {
+				var diag = {
+					runId: err.runId,
+					sessionId: err.sessionId,
+					stage: err.stage,
+					kind: err.kind,
+					action: err.action,
+					retryable: typeof err.retryable === "boolean" ? err.retryable : undefined,
+					timeoutSecs: err.timeoutSecs || err.timeout_secs || err.details?.timeout_secs,
+					provider: err.provider,
+					model: err.model,
+				};
+				for (var k of Object.keys(diag)) {
+					if (diag[k] === undefined || diag[k] === null || diag[k] === "") delete diag[k];
+				}
+				navigator.clipboard.writeText(JSON.stringify(diag)).then(() => {
+					copyBtn.textContent = "Copied!";
+					setTimeout(() => {
+						copyBtn.textContent = "Copy diagnostics";
+					}, 1500);
+				});
+			});
+		} else {
+			copyBtn.disabled = true;
+			copyBtn.title = "Clipboard not available";
+		}
+		btnRow.appendChild(copyBtn);
+		body.appendChild(btnRow);
 	}
 
 	if (err.message && err.message.debug) {

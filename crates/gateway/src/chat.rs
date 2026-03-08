@@ -561,6 +561,7 @@ async fn run_single_probe(
     let probe = [ChatMessage::user("ping")];
     let llm_context = moltis_agents::model::LlmRequestContext {
         session_id: Some(format!("probe:{provider_name}:{model_id}")),
+        run_id: None,
     };
     let completion = tokio::time::timeout(
         std::time::Duration::from_secs(20),
@@ -1648,6 +1649,7 @@ impl ModelService for LiveModelService {
         let probe = vec![ChatMessage::user("ping")];
         let llm_context = moltis_agents::model::LlmRequestContext {
             session_id: Some(format!("models.test:{model_id}")),
+            run_id: None,
         };
         let mut stream = provider.stream_with_tools_with_context(&llm_context, probe, vec![]);
 
@@ -2878,6 +2880,10 @@ impl ChatService for LiveChatService {
                                 Arc::clone(&state_for_drain),
                                 ReplyMedium::Text,
                                 Vec::new(),
+                                Some(ChannelDeliveryDiag {
+                                    run_id: Some(run_id_clone.clone()),
+                                    trigger_id: Some(tid.to_string()),
+                                }),
                             )
                             .await;
                         }
@@ -3564,6 +3570,7 @@ impl ChatService for LiveChatService {
         let supports_tools = provider.supports_tools();
         let llm_context = moltis_agents::model::LlmRequestContext {
             session_id: Some(session_key.clone()),
+            run_id: None,
         };
         let llm_debug = serde_json::json!({
             "provider": provider.name(),
@@ -4359,7 +4366,14 @@ async fn handle_run_failed_event(
     if !targets.is_empty() && !normalized.message.user.trim().is_empty() {
         match state.services.channel_outbound_arc() {
             Some(outbound) => {
-                let text = format!("\u{26A0}\u{FE0F} {}", normalized.message.user);
+                let code = match normalized.stage {
+                    FailureStage::GatewayTimeout => "gateway_timeout".to_string(),
+                    _ if matches!(normalized.kind, crate::run_failure::ErrorKind::Cancelled) => {
+                        "cancelled".to_string()
+                    },
+                    _ => format!("{}/{}", normalized.stage.as_str(), normalized.kind.as_str()),
+                };
+                let text = format!("\u{26A0}\u{FE0F} {} code={code}", normalized.message.user);
                 deliver_channel_replies_to_targets(
                     outbound,
                     targets,
@@ -4368,6 +4382,10 @@ async fn handle_run_failed_event(
                     Arc::clone(state),
                     ReplyMedium::Text,
                     Vec::new(),
+                    Some(ChannelDeliveryDiag {
+                        run_id: Some(event.run_id.clone()),
+                        trigger_id: event.trigger_id.clone(),
+                    }),
                 )
                 .await;
                 egress["sent"] = serde_json::json!(true);
@@ -4599,17 +4617,22 @@ async fn run_with_tools(
     let run_id_for_events = run_id.to_string();
     let session_key_for_events = session_key.to_string();
     let trigger_id_for_events = trigger_id.to_string();
+    let provider_for_events = provider_name.to_string();
+    let model_for_events = model_id.to_string();
     let session_store_for_events = session_store.map(Arc::clone);
     let hook_registry_for_events = hook_registry.clone();
     let (on_event, mut event_rx) = ordered_runner_event_callback();
     let event_forwarder = tokio::spawn(async move {
         // Track tool call arguments from ToolCallStart so they can be persisted in ToolCallEnd.
         let mut tool_args_map: HashMap<String, Value> = HashMap::new();
+        let mut retry_logged = false;
         while let Some(event) = event_rx.recv().await {
             let state = Arc::clone(&state_for_events);
             let run_id = run_id_for_events.clone();
             let sk = session_key_for_events.clone();
             let trigger_id = trigger_id_for_events.clone();
+            let provider = provider_for_events.clone();
+            let model = model_for_events.clone();
             let store = session_store_for_events.clone();
             let hook_registry = hook_registry_for_events.clone();
             let seq = client_seq;
@@ -4932,12 +4955,31 @@ async fn run_with_tools(
                     "toolCallsMade": tool_calls_made,
                     "seq": seq,
                 }),
-                RunnerEvent::RetryingAfterError(_) => serde_json::json!({
-                    "runId": run_id,
-                    "sessionId": sk,
-                    "state": "retrying",
-                    "seq": seq,
-                }),
+                RunnerEvent::RetryingAfterError(msg) => {
+                    let reason_preview = sanitize_reason_preview(&msg);
+                    if !retry_logged {
+                        retry_logged = true;
+                        info!(
+                            event = "llm.retrying",
+                            run_id = %run_id,
+                            session_key = %sk,
+                            trigger_id = %trigger_id,
+                            provider = %provider,
+                            model = %model,
+                            reason_preview = %reason_preview,
+                            "runner retrying after transient error"
+                        );
+                    }
+                    serde_json::json!({
+                        "runId": run_id,
+                        "sessionId": sk,
+                        "state": "retrying",
+                        "reasonPreview": reason_preview,
+                        "provider": provider,
+                        "model": model,
+                        "seq": seq,
+                    })
+                },
             };
             broadcast(&state, "chat", payload, BroadcastOpts::default()).await;
         }
@@ -4960,6 +5002,7 @@ async fn run_with_tools(
     // The browser tool uses _sandbox to determine whether to run in a container.
     let mut tool_context = serde_json::json!({
         "_sessionId": session_key,
+        "_runId": run_id,
         "_sandbox": session_is_sandboxed,
     });
     if let Some(chan_chat_key) = chan_chat_key {
@@ -5705,6 +5748,7 @@ If something is unknown, write \"Unknown\" instead of guessing.",
 
     let llm_context = moltis_agents::model::LlmRequestContext {
         session_id: Some(session_key.to_string()),
+        run_id: None,
     };
     let mut stream =
         provider.stream_with_tools_with_context(&llm_context, summary_messages, vec![]);
@@ -5902,6 +5946,7 @@ async fn run_streaming(
 
     let llm_context = moltis_agents::model::LlmRequestContext {
         session_id: Some(session_key.to_string()),
+        run_id: Some(run_id.to_string()),
     };
     // Stream-only mode still needs request context (e.g. prompt_cache_key bucketing
     // for OpenAI Responses). Pass empty tools to preserve the no-tools behavior.
@@ -6287,6 +6332,10 @@ async fn deliver_channel_replies(
         Arc::clone(state),
         desired_reply_medium,
         status_log,
+        Some(ChannelDeliveryDiag {
+            run_id: None,
+            trigger_id: Some(trigger_id.to_string()),
+        }),
     )
     .await;
 }
@@ -6315,6 +6364,50 @@ fn sha256_hex(input: &str) -> String {
     hasher.update(input.as_bytes());
     let bytes = hasher.finalize();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn sanitize_reason_preview(reason: &str) -> String {
+    let collapsed = reason
+        .replace(['\r', '\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut out = Vec::new();
+    let mut redact_next = false;
+    for word in collapsed.split_whitespace() {
+        if redact_next {
+            out.push("<redacted>");
+            redact_next = false;
+            continue;
+        }
+        let lower = word.to_ascii_lowercase();
+        if lower == "authorization:" || lower == "bearer" {
+            out.push(word);
+            redact_next = true;
+            continue;
+        }
+        if lower.starts_with("token:") && word.len() > "token:".len() + 6 {
+            out.push("token:<redacted>");
+            continue;
+        }
+        if word.starts_with("sk-") && word.len() > 16 {
+            out.push("<redacted>");
+            continue;
+        }
+        out.push(word);
+    }
+
+    let mut preview = out.join(" ");
+    const MAX_CHARS: usize = 200;
+    if preview.chars().count() > MAX_CHARS {
+        preview = preview
+            .chars()
+            .take(MAX_CHARS.saturating_sub(1))
+            .collect::<String>();
+        preview.push('…');
+    }
+    preview
 }
 
 fn evict_expired_telegram_relay_epoch_budget(
@@ -7387,6 +7480,12 @@ async fn maybe_mirror_telegram_group_reply(
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct ChannelDeliveryDiag {
+    run_id: Option<String>,
+    trigger_id: Option<String>,
+}
+
 async fn deliver_channel_replies_to_targets(
     outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound>,
     targets: Vec<moltis_channels::ChannelReplyTarget>,
@@ -7395,9 +7494,11 @@ async fn deliver_channel_replies_to_targets(
     state: Arc<GatewayState>,
     desired_reply_medium: ReplyMedium,
     status_log: Vec<String>,
+    diag: Option<ChannelDeliveryDiag>,
 ) {
     let session_key = session_key.to_string();
     let text = text.to_string();
+    let diag = diag.unwrap_or_default();
     let bus_accounts = Arc::new(
         state
             .services
@@ -7416,6 +7517,7 @@ async fn deliver_channel_replies_to_targets(
         let logbook_html = logbook_html.clone();
         let bus_accounts = Arc::clone(&bus_accounts);
         let inbound_relay_ctx = inbound_relay_ctx.clone();
+        let diag = diag.clone();
         tasks.push(tokio::spawn(async move {
             let tts_payload = match desired_reply_medium {
                 ReplyMedium::Voice => build_tts_payload(&state, &session_key, &target, &text).await,
@@ -7440,6 +7542,11 @@ async fn deliver_channel_replies_to_targets(
                                 .await;
                             if let Err(e) = send_res {
                                 warn!(
+                                    event = "channel_delivery.failed",
+                                    code = "telegram_send_media_failed",
+                                    op = "telegram.send_media_with_ref",
+                                    run_id = ?diag.run_id,
+                                    trigger_id = ?diag.trigger_id,
                                     chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send channel voice reply: {e}"
@@ -7468,6 +7575,11 @@ async fn deliver_channel_replies_to_targets(
                                     .await
                             {
                                 warn!(
+                                    event = "channel_delivery.failed",
+                                    code = "telegram_send_text_failed",
+                                    op = "telegram.send_text_with_suffix",
+                                    run_id = ?diag.run_id,
+                                    trigger_id = ?diag.trigger_id,
                                     chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send logbook follow-up: {e}"
@@ -7486,6 +7598,11 @@ async fn deliver_channel_replies_to_targets(
                                 .await
                             {
                                 warn!(
+                                    event = "channel_delivery.failed",
+                                    code = "telegram_send_media_failed",
+                                    op = "telegram.send_media_with_ref",
+                                    run_id = ?diag.run_id,
+                                    trigger_id = ?diag.trigger_id,
                                     chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send channel voice reply: {e}"
@@ -7523,6 +7640,11 @@ async fn deliver_channel_replies_to_targets(
                             };
                             if let Err(e) = text_result {
                                 warn!(
+                                    event = "channel_delivery.failed",
+                                    code = "telegram_send_text_failed",
+                                    op = "telegram.send_text_followup",
+                                    run_id = ?diag.run_id,
+                                    trigger_id = ?diag.trigger_id,
                                     chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send transcript follow-up: {e}"
@@ -7555,6 +7677,11 @@ async fn deliver_channel_replies_to_targets(
                             Ok(r) => r,
                             Err(e) => {
                                 warn!(
+                                    event = "channel_delivery.failed",
+                                    code = "telegram_send_text_failed",
+                                    op = "telegram.send_text_with_ref",
+                                    run_id = ?diag.run_id,
+                                    trigger_id = ?diag.trigger_id,
                                     chan_account_key = target.chan_account_key,
                                     chat_id = target.chat_id,
                                     "failed to send channel reply: {e}"
@@ -7587,6 +7714,11 @@ async fn deliver_channel_replies_to_targets(
                             .await;
                         } else {
                             warn!(
+                                event = "channel_delivery.degraded",
+                                code = "missing_message_id_ref",
+                                op = "telegram.send_text_with_ref",
+                                run_id = ?diag.run_id,
+                                trigger_id = ?diag.trigger_id,
                                 chan_account_key = target.chan_account_key,
                                 chat_id = target.chat_id,
                                 "telegram outbound reply sent but no message_id ref returned (relay disabled for this reply)"
@@ -8506,6 +8638,7 @@ mod tests {
             state,
             ReplyMedium::Text,
             Vec::new(),
+            None,
         )
         .await;
 
@@ -8657,6 +8790,7 @@ mod tests {
             Arc::clone(&state),
             ReplyMedium::Text,
             Vec::new(),
+            None,
         )
         .await;
 
@@ -8669,6 +8803,7 @@ mod tests {
             Arc::clone(&state),
             ReplyMedium::Text,
             Vec::new(),
+            None,
         )
         .await;
 
@@ -8773,6 +8908,7 @@ mod tests {
             Arc::clone(&state),
             ReplyMedium::Text,
             Vec::new(),
+            None,
         )
         .await;
 
@@ -8827,6 +8963,7 @@ mod tests {
             Arc::clone(&state),
             ReplyMedium::Text,
             Vec::new(),
+            None,
         )
         .await;
 
@@ -10544,6 +10681,78 @@ echo @bot2
         let texts = rec.texts.lock().await;
         assert_eq!(texts.len(), 1);
         assert_eq!(texts[0].3.as_deref(), Some("1"));
+        assert!(
+            texts[0].2.contains("code="),
+            "telegram error replies should include a stable diagnostic code"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_run_failed_event_gateway_timeout_includes_code() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = rec.clone();
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
+
+        let session_key = "telegram:acct:123";
+        let trigger_id = "trg_a";
+
+        state
+            .push_channel_reply(
+                session_key,
+                trigger_id,
+                moltis_channels::ChannelReplyTarget {
+                    chan_type: moltis_channels::ChannelType::Telegram,
+                    chan_account_key: "telegram:acct".to_string(),
+                    chan_user_name: None,
+                    chat_id: "123".to_string(),
+                    message_id: Some("1".to_string()),
+                },
+            )
+            .await;
+
+        handle_run_failed_event(
+            &state,
+            &model_store,
+            RunFailedEvent {
+                run_id: "run-timeout".to_string(),
+                session_key: session_key.to_string(),
+                trigger_id: Some(trigger_id.to_string()),
+                provider_name: "openai-responses".to_string(),
+                model_id: "gpt".to_string(),
+                stage_hint: FailureStage::GatewayTimeout,
+                raw_error: "gateway agent timeout".to_string(),
+                details: serde_json::json!({ "timeout_secs": 600 }),
+                seq: None,
+            },
+        )
+        .await;
+
+        let texts = rec.texts.lock().await;
+        assert_eq!(texts.len(), 1);
+        assert!(
+            texts[0].2.contains("code=gateway_timeout"),
+            "expected gateway_timeout code, got: {}",
+            texts[0].2
+        );
+    }
+
+    #[test]
+    fn sanitize_reason_preview_redacts_and_truncates() {
+        let reason = "Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz0123456789\nline2";
+        let preview = sanitize_reason_preview(reason);
+        assert!(!preview.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+        assert!(preview.contains("<redacted>"));
+        assert!(!preview.contains('\n'));
+        assert!(preview.chars().count() <= 200);
     }
 
     struct DelayedFailThenOkProvider {

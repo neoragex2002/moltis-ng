@@ -2529,6 +2529,7 @@ impl MethodRegistry {
                                 ];
                                 let llm_context = moltis_agents::model::LlmRequestContext {
                                     session_id: Some(format!("tts.generate_phrase:{context}")),
+                                    run_id: None,
                                 };
                                 let result = tokio::time::timeout(
                                     Duration::from_secs(3),

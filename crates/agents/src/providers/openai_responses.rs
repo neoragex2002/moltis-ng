@@ -1510,6 +1510,7 @@ mod tests {
         let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
         let ctx = LlmRequestContext {
             session_id: Some("main".to_string()),
+            run_id: None,
         };
 
         let body = provider.build_responses_body_with_context(
@@ -1533,6 +1534,7 @@ mod tests {
         let session_key = "a".repeat(65);
         let ctx = LlmRequestContext {
             session_id: Some(session_key.clone()),
+            run_id: None,
         };
 
         let body = provider.build_responses_body_with_context(
@@ -1642,6 +1644,7 @@ mod tests {
         let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
         let ctx = LlmRequestContext {
             session_id: Some("telegram:bot:123".to_string()),
+            run_id: None,
         };
         let dbg = provider.debug_request_overrides(Some(&ctx));
         assert_eq!(dbg["prompt_cache"]["enabled"].as_bool(), Some(true));

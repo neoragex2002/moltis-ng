@@ -509,6 +509,8 @@ function handleChatError(p, isActive, isChatPage, eventSession) {
 	removeThinking();
 	clearStaleRunningToolCards();
 	if (p.error?.title) {
+		if (p.runId && !p.error.runId) p.error.runId = p.runId;
+		if (p.sessionId && !p.error.sessionId) p.error.sessionId = p.sessionId;
 		chatAddErrorCard(p.error);
 	} else {
 		chatAddErrorMsg(p.message || "unknown");

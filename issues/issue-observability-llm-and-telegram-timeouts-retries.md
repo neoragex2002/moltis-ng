@@ -1,9 +1,9 @@
 # Issue: 增强 LLM 推理与 Telegram 通道的超时/重试/回退可观测性（gateway_timeout / outbound_send / getUpdates）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: TODO
+- Status: Ready for manual validation
 - Priority: P1
-- Updated: 2026-03-08
+- Updated: 2026-03-09
 - Owners:
 - Components: gateway / agents / telegram / channels
 - Affected providers/models: openai-responses::*（以及其它 provider）
@@ -14,10 +14,19 @@
 - Web UI error 事件载荷已带 `stage/kind/retryable/action/details/raw/egress` 等字段（由 `handle_run_failed_event` 注入）：`crates/gateway/src/chat.rs:4288`
 - Telegram long-poll：`getUpdates` 超时 30s，HTTP client 超时 45s：`crates/telegram/src/bot.rs:59`、`crates/telegram/src/bot.rs:139`
 - Telegram 出站发送：`send_message`/`edit_message_text`/分块发送/流式占位“…”：`crates/telegram/src/outbound.rs`
+- 2026-03-08：Telegram 用户回执在失败时追加稳定诊断码 `code=...`（最小不打断群聊）：`crates/gateway/src/chat.rs:4364`
+- 2026-03-08：channel delivery 失败日志补齐 `run_id/trigger_id`（可按 run 串链路排障，含 `event=channel_delivery.*` + `code=`）：`crates/gateway/src/chat.rs:7541`
+- 2026-03-08：runner retry 事件补齐 `reasonPreview` 并记录低噪声结构化日志（每 run 仅 1 条）：`crates/gateway/src/chat.rs:4950`
+- 2026-03-09：provider failover 日志补齐 `run_id`（强关联）：`crates/agents/src/provider_chain.rs:339`、`crates/agents/src/runner.rs:745`、`crates/gateway/src/chat.rs:6017`
+- 2026-03-08：Web UI error card 展示 `runId` 且支持一键复制脱敏诊断信息：`crates/gateway/src/assets/js/websocket.js:500`、`crates/gateway/src/assets/js/chat-ui.js:69`
+- 2026-03-08：Telegram polling（getUpdates）连续失败限频聚合告警 + 恢复日志：`crates/telegram/src/bot.rs:111`
+- 2026-03-08：Telegram 出站 send/edit/stream 失败补齐结构化日志（含 chunk_idx / message_id 等）：`crates/telegram/src/outbound.rs:74`
 
 **已覆盖测试（如有）**
 - gateway agent timeout 单测：`crates/gateway/src/chat.rs:11347`
 - runner retry 单测：`crates/agents/src/runner.rs:4279`、`crates/agents/src/runner.rs:4299`
+- 2026-03-08：Telegram 失败回执包含 `code=` + `gateway_timeout` 特例：`crates/gateway/src/chat.rs:10551`
+- 2026-03-08：retry `reasonPreview` 的脱敏/截断规则单测：`crates/gateway/src/chat.rs:10618`
 
 **已知差异/后续优化（非阻塞）**
 - 当前用户侧常见回执文案过于笼统（难区分是 LLM 超时、网络断连、用户 cancel、还是 Telegram 发送失败）。
@@ -31,6 +40,7 @@
 - Out of scope（本单默认不做，除非后续在本单冻结范围）：
   - 不引入“可靠投递（at-least-once）”的持久化 outbox 语义（那会显著改变系统行为并引入重复投递风险）。
   - 不重做 Telegram relay/mirror 机制本身（只补故障观测与关联信息）。
+  - **暂不修改任何 retry/重连/回退机制**（不增加重试次数、不改退避/睡眠策略、不做自动补发/重投），本单只做“看得见/可关联/可复制”的可观测性增强。
 
 ## 概念与口径（Glossary & Semantics）【概念收敛/避免歧义】
 - **agent_timeout_secs**（主称呼）：gateway 对“整次 agent run”的 wall-clock 硬超时上限（默认 600s）。
@@ -45,14 +55,16 @@
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [ ] 用户侧（Telegram/Web UI）在发生“超时/取消/网络失败/发送失败”时，能看到**更具体的失败类型**（至少包含 stage/kind 的稳定口径），而不是只有一句“Please retry”。
-- [ ] 运维/排障侧（日志）能把一次失败与以下至少 3 类 ID 关联起来：`run_id`、`trigger_id`、`session_id/chan_chat_key`（如适用还包括 `chat_id`、`telegram_message_id`）。
+- [x] 用户侧（Telegram/Web UI）在发生“超时/取消/网络失败”等**LLM 相关失败**时，能看到更具体的失败类型（至少包含稳定的 `code=` / stage/kind 口径），而不是只有一句“Please retry”。（注：Telegram 出站发送失败无法在同一 TG 群内“再回执”，因此以日志可见为主）
+- [x] 运维/排障侧（日志）能把一次失败与以下至少 3 类 ID 关联起来：`run_id`、`trigger_id`、`session_id/chan_chat_key`（如适用还包括 `chat_id`、`telegram_message_id`）。
 - [ ] 对“发生了重试/发生了 failover/发生了降级（例如流式 edit 失败）”必须有结构化日志（低噪声、可去重）。
+  - 已覆盖：runner retry（`event=llm.retrying` + `reasonPreview`）、Telegram stream edit 失败（`event=telegram.outbound.degraded`）
+  - 待补齐：provider failover 仍缺少带 `run_id` 的强关联日志（中期项）
 
 ### 非功能目标（Non-functional）
 - 日志低噪声：只在失败/重试/降级时打关键日志；成功路径避免刷屏。
 - 安全与隐私：不得打印 token、完整正文；必要字段仅记录长度/哈希/ID。
-- 兼容性：不改变现有对话语义与投递语义（除非明确在本单冻结并给出回滚策略）。
+- 兼容性：不改变现有对话语义与投递语义；**不改变现有 retry/重连/回退行为**（本单只改“观测/展示/回执文案”）。
 
 ## 问题陈述（Problem Statement）
 ### 现象（Symptoms）
@@ -130,8 +142,44 @@
      - `crates/gateway/src/chat.rs:7390`（`deliver_channel_replies_to_targets(...)` 内的错误分支）
 
 5) **Telegram long-poll（getUpdates）降噪 + 强信号**
-   - 连续失败时指数退避（带 jitter）+ 聚合日志（例如每 60s 打一条 `consecutive_failures`），并在恢复时打一条“恢复成功”日志。
+   - 仅做“聚合日志 + 恢复日志”，不改变当前的 sleep/重连节奏（避免行为变化）。
+   - 例如：每 60s 打一条 `consecutive_failures` 摘要；恢复时打一条“恢复成功”日志。
    - 实施点（建议）：`crates/telegram/src/bot.rs:98`
+
+#### 推荐产物长相（Examples，冻结后可直接验收）
+> 说明：下面是“我希望最终打印出来长什么样”。按这个形态，我自己能在 30 秒内定位问题发生的链路段，并给出下一步动作。
+
+1) **Telegram 群内（给普通用户看的最短信息）**
+   - 目标：一眼区分“LLM 超时/上游网络/Telegram 发送失败”，不需要看日志。
+   - 示例（默认只带 `code`，不带 run 短号）：
+     - `⚠️ 推理超时（600秒）。code=gateway_timeout`
+     - `⚠️ 上游网络失败，请稍后重试。code=provider_request/network`
+     - `⚠️ 电报发送失败，请稍后重试。code=channel_delivery/telegram_send_failed`
+   - 示例（仅 debug/operator 模式才追加 run 短号，避免群里噪声）：
+     - `⚠️ 上游网络失败，请稍后重试。code=provider_request/network run=24f17fff`
+
+2) **Web UI error card（给操作者/开发者看的“可复制诊断信息”）**
+   - 目标：在 UI 上明确看到 `run_id` 与关键字段，并能一键复制脱敏摘要。
+   - 建议 UI 展示字段：
+     - `run=<run_id>`（可复制）
+     - `stage/kind/action/retryable`（已有 stage/kind/action，需要补 retryable）
+     - `timeout_secs`（如有）
+   - “Copy diagnostics” 建议复制的 JSON（脱敏，字段冻结）：
+```json
+{"runId":"24f17fff-a7c9-4a0f-9db8-416a667399aa","sessionId":"session:...","stage":"gateway_timeout","kind":"cancelled","action":"cancelled","retryable":true,"timeoutSecs":600,"provider":"openai-responses","model":"openai-responses::gpt-5.2"}
+```
+
+3) **日志（给排障的结构化主线，按 run_id 串时间线）**
+   - 目标：一条 run 的关键事件都能用 `run_id` 关联，不靠时间戳猜。
+   - 示例（run 失败主线，已有但需补齐/对齐字段）：
+     - `event=run.failure run_id=... session_key=... trigger_id=... stage=... kind=... action=... egress_sent=...`
+   - 示例（runner 重试，需补 `reason_preview`）：
+     - `event=llm.retrying run_id=... provider=... model=... reason_preview="HTTP 429 Too Many Requests…"`
+   - 示例（Telegram 出站失败，需补 `op/chunk_idx/...`，不打印正文）：
+     - `event=telegram.outbound.failed op=send_message chan_account_key=... chat_id=... reply_to=... chunk_idx=... chunk_count=... text_len=... error_class=network`
+   - 示例（getUpdates 聚合告警 + 恢复）：
+     - `event=telegram.polling.degraded chan_account_key=... consecutive_failures=... backoff_secs=...`
+     - `event=telegram.polling.recovered chan_account_key=... downtime_secs=... failures=...`
 
 #### 诊断码（code）口径冻结（建议）
 > 目的：让 Telegram 群里看到错误时，不用看日志就能先判断“是哪一段坏了”。
@@ -161,6 +209,19 @@
   - 现状：runner 会输出 tokens，但不输出“provider call duration_ms”（只有 metrics 时才有 histogram）。
   - 建议：在 gateway 侧围绕 `run_with_tools/run_streaming` 的 provider 调用输出一次 `duration_ms`（低噪声，按 run_id 一条）。
 
+#### 风险点与建议（Review Notes）
+- **“Telegram 发送失败”与“是否真的发出去”并非等价**：
+  - 网络超时/连接中断类错误可能产生“结果不确定”（Telegram 可能已收到了请求但客户端未收到回包）。
+  - 建议在日志里区分 `outcome=failed|unknown`（unknown 只在 timeout/transport error 时出现），避免误判为一定未送达。
+- **run_id 在 TelegramOutbound 层不可得**：
+  - 因此“强关联”必须在 gateway 层补齐（见 Quick Wins #4）。
+- **降噪与漏报的平衡**：
+  - 建议所有新日志默认只在 failure/retry/degrade 时输出，并按 `run_id`/`chan_account_key` 做简单去重/限频。
+- **敏感信息泄露风险**：
+  - 任何 `reason_preview` 必须做脱敏与截断；禁止打印 request body、token、用户原文。
+ - **本单不改机制**：
+   - 本单只做观测性增强（UI/TG/console 能看见、且能关联 run_id），不要引入额外重试/退避/补发等行为变化；机制优化另开单或后续扩展本单范围需重新冻结。
+
 #### 行为规范（Normative Rules）
 1) **统一 failure 结构化日志**
    - 触发点：`handle_run_failed_event(...)`、channel delivery 失败（Telegram outbound send/edit/chunk）、Telegram polling loop 的连续失败（限频）。
@@ -188,16 +249,36 @@
 ## 验收标准（Acceptance Criteria）【不可省略】
 - [ ] 复现一次 `agent_timeout_secs` 超时：用户回执与日志都明确显示 “gateway_timeout + timeout_secs=…”（并可用 `run_id` 关联）。
 - [ ] 复现一次上游 provider 网络错误（非 gateway timeout）：日志显示 `provider_request|provider_stream` 且带 `provider/model`，用户回执不再混同为“cancelled”。
-- [ ] 复现一次 Telegram 出站发送失败：日志显示 `channel_delivery` + `telegram_send_failed`（或等价 reason code），并能关联到 `chan_account_key/chat_id`。
-- [ ] runner 发生 retry/failover 时有 1 条结构化日志（低噪声，不刷屏）。
+- [ ] 复现一次 Telegram 出站发送失败：日志显示 `event=channel_delivery.failed` 且带稳定 `code=`（例如 `telegram_send_text_failed` / `telegram_send_media_failed`），并能关联到 `chan_account_key/chat_id`。
+- [ ] runner 发生 retry/failover 时有 1 条结构化日志（低噪声，不刷屏）。（当前已覆盖 retry；failover 已补齐 `run_id`，待手工验证一次真实 failover）
 
 ## 测试计划（Test Plan）【不可省略】
 ### Unit
-- [ ] `run_failure`：不同 raw_error 能稳定归类到 stage/kind/action（新增网络/超时样例）。
+- [x] gateway：Telegram 失败回执追加 `code=`（含 `gateway_timeout` 特例）+ retry `reasonPreview` 脱敏/截断：`crates/gateway/src/chat.rs:10551`
+- [x] `run_failure`：不同 raw_error 能稳定归类到 stage/kind/action（新增网络/超时样例）：`crates/gateway/src/run_failure.rs:386`
 - [ ] Telegram outbound：对“chunk 中途失败/stream edit 失败”的降级路径打单测（用 mock bot 或封装层）。
+  - 说明：**暂时只能手工验收**。原因：当前 `TelegramOutbound` 直接依赖 teloxide 的 `Bot`，缺少可注入的 mock seam；为此引入抽象层会扩大改动面，计划后续重构时再补。
+  - 临时验收口径：见下方“手工验收步骤”第 5 点。
 
 ### Integration
 - [ ] 手工：断网/弱网下跑 1 次群聊回复，确认失败归类与字段齐全，且不泄露敏感信息。
+
+#### 手工验收步骤（Manual Validation Steps，建议）
+1) **验证 Telegram 用户回执带 `code=`**
+   - 在 Telegram 群里触发一次失败（例如临时断网/弱网/上游 provider 故障）。
+   - 预期：群里失败回执末尾包含 `code=...`（例如 `code=gateway_timeout`、`code=provider_request/network`）。
+2) **验证 Web UI error card 可见 `runId` + Copy diagnostics**
+   - 打开 Web UI，触发一次失败（同上）。
+   - 预期：error card 显示 `run=<runId>`；点击 “Copy diagnostics” 得到脱敏 JSON（不包含 token/正文）。
+3) **验证 runner retry 的可观测性**
+   - 触发一次 runner retry（例如上游短暂 429 / 网络抖动导致 runner 重试）。
+   - 预期：日志出现 1 条 `event=llm.retrying run_id=... reason_preview=...`（每 run 至多 1 条）；WS `state=retrying` 带 `reasonPreview`。
+4) **验证 Telegram polling 聚合告警 + 恢复**
+   - 人为制造 Telegram long-poll 失败（例如临时断网）。
+   - 预期：日志每 ~60s 打一条 `event=telegram.polling.degraded`；恢复后打一条 `event=telegram.polling.recovered`。
+5) **验证 Telegram 出站 send/edit/stream 失败日志字段齐全**
+   - 制造一次 Telegram send/edit 失败（例如撤销 bot 发言权限、或网络异常导致发送失败）。
+   - 预期：日志出现 `event=telegram.outbound.failed`/`event=telegram.outbound.degraded`，包含 `account_handle/chat_id/op` 等字段（不打印正文）。
 
 ## 发布与回滚（Rollout & Rollback）
 - 发布策略：先只做“观测性增强”（日志/回执更清晰），避免改变投递语义；若需要引入出站重试/补发，必须开 feature flag。
@@ -218,7 +299,8 @@
 - [ ] 行为已按 Spec 实现（口径一致）
 - [ ] authoritative vs estimate 边界清晰（且 UI/日志标注 method/source）
 - [ ] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
-- [ ] 文档/配置示例已同步更新（避免断链）
+  - 已记录缺口：Telegram outbound chunk/stream 降级路径暂缺单测（需重构引入 mock seam）
+- [x] 文档/配置示例已同步更新（避免断链）
 - [ ] 兼容性/迁移说明已写清（如涉及持久化/字段变更）
 - [ ] 安全隐私检查通过（敏感字段不泄露）
-- [ ] 回滚策略明确
+- [x] 回滚策略明确

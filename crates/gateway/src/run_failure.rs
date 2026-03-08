@@ -198,6 +198,15 @@ fn infer_stage(stage_hint: FailureStage, raw: &str, parsed: &Value) -> FailureSt
     if matches!(stage_hint, FailureStage::GatewayTimeout) {
         return stage_hint;
     }
+    if matches!(stage_hint, FailureStage::Runner)
+        && (lower.contains("a network error")
+            || lower.contains("error sending request for url")
+            || lower.contains("connection closed before message completed")
+            || lower.contains("timed out")
+            || lower.contains("timeout"))
+    {
+        return FailureStage::ProviderRequest;
+    }
     if let Some(kind) = detect_kind_from_parsed(parsed) {
         match kind {
             ErrorKind::Auth
@@ -235,6 +244,12 @@ fn infer_kind(stage: FailureStage, raw: &str, parsed: &Value) -> ErrorKind {
     }
     if matches!(stage, FailureStage::GatewayTimeout) {
         return ErrorKind::Cancelled;
+    }
+    if lower.contains("a network error")
+        || lower.contains("error sending request for url")
+        || lower.contains("connection closed before message completed")
+    {
+        return ErrorKind::Network;
     }
     if lower.contains("timeout") || lower.contains("timed out") {
         return ErrorKind::Network;
@@ -371,5 +386,20 @@ mod tests {
         assert_eq!(n.stage, FailureStage::GatewayTimeout);
         assert_eq!(n.kind, ErrorKind::Cancelled);
         assert!(n.retryable);
+    }
+
+    #[test]
+    fn normalize_provider_network_maps_to_provider_request_network() {
+        let n = normalize_failure(FailureInput {
+            stage_hint: FailureStage::Runner,
+            raw_error: "A network error: error sending request for url (https://api.example.com): connection closed before message completed",
+            provider_name: Some("openai-responses"),
+            model_id: Some("gpt"),
+            details: serde_json::json!({}),
+        });
+        assert_eq!(n.stage, FailureStage::ProviderRequest);
+        assert_eq!(n.kind, ErrorKind::Network);
+        assert!(n.retryable);
+        assert_eq!(n.action, ErrorAction::Retry);
     }
 }

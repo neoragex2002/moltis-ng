@@ -319,6 +319,7 @@ pub enum StreamEvent {
 #[derive(Debug, Clone, Default)]
 pub struct LlmRequestContext {
     pub session_id: Option<String>,
+    pub run_id: Option<String>,
 }
 
 /// LLM provider trait (Anthropic, OpenAI, Google, etc.).

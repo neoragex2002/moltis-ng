@@ -7,7 +7,7 @@ use {
         prelude::*,
         types::{ChatAction, ChatId, InputFile, MessageId, ParseMode, ReplyParameters},
     },
-    tracing::{debug, info},
+    tracing::{debug, info, warn},
 };
 
 use {
@@ -25,6 +25,14 @@ use crate::{
 /// Outbound message sender for Telegram.
 pub struct TelegramOutbound {
     pub(crate) accounts: AccountStateMap,
+}
+
+fn classify_request_error(e: &teloxide::RequestError) -> &'static str {
+    match e {
+        teloxide::RequestError::Api(_) => "api",
+        teloxide::RequestError::Network(_) => "network",
+        _ => "other",
+    }
 }
 
 impl TelegramOutbound {
@@ -85,7 +93,26 @@ impl TelegramOutbound {
             {
                 req = req.reply_parameters(rp.clone());
             }
-            let sent = req.await?;
+            let sent = match req.await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        event = "telegram.outbound.failed",
+                        op = "send_message",
+                        account_handle,
+                        chat_id = to,
+                        reply_to = ?reply_to,
+                        chunk_idx = i,
+                        chunk_count = chunks.len(),
+                        text_len = text.len(),
+                        silent,
+                        error_class = classify_request_error(&e),
+                        error = %e,
+                        "telegram outbound send_message failed"
+                    );
+                    return Err(e.into());
+                },
+            };
             if first_id.is_none() {
                 first_id = Some(sent.id);
             }
@@ -149,17 +176,51 @@ impl TelegramOutbound {
                     {
                         req = req.reply_parameters(rp.clone());
                     }
-                    let sent = req.await?;
+                    let sent = match req.await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(
+                                event = "telegram.outbound.failed",
+                                op = "send_message",
+                                account_handle,
+                                chat_id = to,
+                                reply_to = ?reply_to,
+                                chunk_idx = i,
+                                chunk_count = chunks.len(),
+                                text_len = text.len(),
+                                suffix_len = suffix_html.len(),
+                                error_class = classify_request_error(&e),
+                                error = %e,
+                                "telegram outbound send_message failed"
+                            );
+                            return Err(e.into());
+                        },
+                    };
                     if first_id.is_none() {
                         first_id = Some(sent.id);
                     }
 
                     // Send suffix as the final message (no reply threading).
-                    let _ = bot
+                    if let Err(e) = bot
                         .send_message(chat_id, suffix_html)
                         .parse_mode(ParseMode::Html)
                         .disable_notification(true)
-                        .await?;
+                        .await
+                    {
+                        warn!(
+                            event = "telegram.outbound.failed",
+                            op = "send_message_suffix",
+                            account_handle,
+                            chat_id = to,
+                            reply_to = ?reply_to,
+                            text_len = text.len(),
+                            suffix_len = suffix_html.len(),
+                            error_class = classify_request_error(&e),
+                            error = %e,
+                            "telegram outbound send_message failed (suffix)"
+                        );
+                        return Err(e.into());
+                    }
 
                     info!(
                         account_handle,
@@ -183,7 +244,26 @@ impl TelegramOutbound {
             {
                 req = req.reply_parameters(rp.clone());
             }
-            let sent = req.await?;
+            let sent = match req.await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        event = "telegram.outbound.failed",
+                        op = "send_message",
+                        account_handle,
+                        chat_id = to,
+                        reply_to = ?reply_to,
+                        chunk_idx = i,
+                        chunk_count = chunks.len(),
+                        text_len = text.len(),
+                        suffix_len = suffix_html.len(),
+                        error_class = classify_request_error(&e),
+                        error = %e,
+                        "telegram outbound send_message failed"
+                    );
+                    return Err(e.into());
+                },
+            };
             if first_id.is_none() {
                 first_id = Some(sent.id);
             }
@@ -741,15 +821,31 @@ impl ChannelStreamOutbound for TelegramOutbound {
         let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
 
         // Send initial placeholder
-        let placeholder = bot
+        let placeholder = match bot
             .send_message(chat_id, "…")
             .parse_mode(ParseMode::Html)
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    event = "telegram.outbound.failed",
+                    op = "send_message_placeholder",
+                    account_handle,
+                    chat_id = to,
+                    error_class = classify_request_error(&e),
+                    error = %e,
+                    "telegram outbound send_message failed (stream placeholder)"
+                );
+                return Err(e.into());
+            },
+        };
         let msg_id = placeholder.id;
 
         let mut accumulated = String::new();
         let mut last_edit = tokio::time::Instant::now();
         let throttle = std::time::Duration::from_millis(throttle_ms);
+        let mut consecutive_edit_failures: u32 = 0;
 
         while let Some(event) = stream.recv().await {
             match event {
@@ -759,10 +855,31 @@ impl ChannelStreamOutbound for TelegramOutbound {
                         let html = markdown::markdown_to_telegram_html(&accumulated);
                         // Telegram rejects edits with identical content; truncate to limit.
                         let display = markdown::truncate_utf8(&html, TELEGRAM_MAX_MESSAGE_LEN);
-                        let _ = bot
+                        let edit_res = bot
                             .edit_message_text(chat_id, msg_id, display)
                             .parse_mode(ParseMode::Html)
                             .await;
+                        match edit_res {
+                            Ok(_) => {
+                                consecutive_edit_failures = 0;
+                            },
+                            Err(e) => {
+                                consecutive_edit_failures = consecutive_edit_failures.saturating_add(1);
+                                if consecutive_edit_failures == 1 || consecutive_edit_failures % 10 == 0 {
+                                    warn!(
+                                        event = "telegram.outbound.degraded",
+                                        op = "edit_message_text",
+                                        account_handle,
+                                        chat_id = to,
+                                        message_id = msg_id.0,
+                                        consecutive_failures = consecutive_edit_failures,
+                                        error_class = classify_request_error(&e),
+                                        error = %e,
+                                        "telegram outbound edit_message_text failed (streaming)"
+                                    );
+                                }
+                            },
+                        }
                         last_edit = tokio::time::Instant::now();
                     }
                 },
@@ -783,16 +900,46 @@ impl ChannelStreamOutbound for TelegramOutbound {
             let chunks = markdown::chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
 
             // Edit the placeholder with the first chunk
-            let _ = bot
+            if let Err(e) = bot
                 .edit_message_text(chat_id, msg_id, &chunks[0])
                 .parse_mode(ParseMode::Html)
-                .await;
+                .await
+            {
+                warn!(
+                    event = "telegram.outbound.failed",
+                    op = "edit_message_text_final",
+                    account_handle,
+                    chat_id = to,
+                    message_id = msg_id.0,
+                    text_len = accumulated.len(),
+                    chunk_count = chunks.len(),
+                    error_class = classify_request_error(&e),
+                    error = %e,
+                    "telegram outbound final edit_message_text failed (streaming)"
+                );
+            }
 
             // Send remaining chunks as new messages
             for chunk in &chunks[1..] {
-                bot.send_message(chat_id, chunk)
+                if let Err(e) = bot
+                    .send_message(chat_id, chunk)
                     .parse_mode(ParseMode::Html)
-                    .await?;
+                    .await
+                {
+                    warn!(
+                        event = "telegram.outbound.failed",
+                        op = "send_message_stream_chunk",
+                        account_handle,
+                        chat_id = to,
+                        message_id = msg_id.0,
+                        chunk_count = chunks.len(),
+                        chunk_len = chunk.len(),
+                        error_class = classify_request_error(&e),
+                        error = %e,
+                        "telegram outbound send_message failed (streaming chunk)"
+                    );
+                    return Err(e.into());
+                }
             }
         }
 

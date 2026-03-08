@@ -722,6 +722,13 @@ pub async fn run_agent_loop_with_context_prefix(
         .unwrap_or("")
         .to_string();
 
+    let run_id_for_hooks = tool_context
+        .as_ref()
+        .and_then(|ctx| ctx.get("_runId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
     let chan_chat_key_for_hooks = tool_context
         .as_ref()
         .and_then(|ctx| ctx.get("_chanChatKey"))
@@ -802,6 +809,7 @@ pub async fn run_agent_loop_with_context_prefix(
 
         let llm_context = crate::model::LlmRequestContext {
             session_id: (!session_id_for_hooks.is_empty()).then_some(session_id_for_hooks.clone()),
+            run_id: (!run_id_for_hooks.is_empty()).then_some(run_id_for_hooks.clone()),
         };
 
         let mut response: CompletionResponse = match provider
@@ -1245,6 +1253,13 @@ pub async fn run_agent_loop_streaming_with_prefix(
         .unwrap_or("")
         .to_string();
 
+    let run_id_for_hooks = tool_context
+        .as_ref()
+        .and_then(|ctx| ctx.get("_runId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
     let chan_chat_key_for_hooks = tool_context
         .as_ref()
         .and_then(|ctx| ctx.get("_chanChatKey"))
@@ -1331,6 +1346,7 @@ pub async fn run_agent_loop_streaming_with_prefix(
         let iter_start = std::time::Instant::now();
         let llm_context = crate::model::LlmRequestContext {
             session_id: (!session_id_for_hooks.is_empty()).then_some(session_id_for_hooks.clone()),
+            run_id: (!run_id_for_hooks.is_empty()).then_some(run_id_for_hooks.clone()),
         };
         let mut stream = provider.stream_with_tools_with_context(
             &llm_context,

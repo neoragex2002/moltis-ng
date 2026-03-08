@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use {
     secrecy::ExposeSecret,
@@ -126,6 +126,9 @@ pub async fn start_polling(
             "starting telegram manual polling loop"
         );
         let mut offset: i32 = 0;
+        let mut consecutive_failures: u64 = 0;
+        let mut first_failure_at: Option<Instant> = None;
+        let mut last_summary_at: Option<Instant> = None;
 
         loop {
             if cancel_clone.is_cancelled() {
@@ -146,6 +149,21 @@ pub async fn start_polling(
 
             match result {
                 Ok(updates) => {
+                    if consecutive_failures > 0 {
+                        let downtime_secs = first_failure_at
+                            .map(|t| t.elapsed().as_secs())
+                            .unwrap_or(0);
+                        info!(
+                            event = "telegram.polling.recovered",
+                            account_handle = aid,
+                            failures = consecutive_failures,
+                            downtime_secs,
+                            "telegram getUpdates recovered"
+                        );
+                        consecutive_failures = 0;
+                        first_failure_at = None;
+                        last_summary_at = None;
+                    }
                     debug!(
                         account_handle = aid,
                         count = updates.len(),
@@ -248,7 +266,29 @@ pub async fn start_polling(
                         break;
                     }
 
-                    warn!(account_id = aid, error = %e, "telegram getUpdates failed");
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    if first_failure_at.is_none() {
+                        first_failure_at = Some(Instant::now());
+                    }
+                    let now = Instant::now();
+                    let should_log = last_summary_at
+                        .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(60))
+                        .unwrap_or(true);
+                    if should_log {
+                        last_summary_at = Some(now);
+                        let downtime_secs = first_failure_at
+                            .map(|t| t.elapsed().as_secs())
+                            .unwrap_or(0);
+                        warn!(
+                            event = "telegram.polling.degraded",
+                            account_handle = aid,
+                            consecutive_failures,
+                            downtime_secs,
+                            backoff_secs = 5u64,
+                            error = %e,
+                            "telegram getUpdates failed"
+                        );
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 },
             }

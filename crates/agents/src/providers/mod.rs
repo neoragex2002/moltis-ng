@@ -2752,6 +2752,7 @@ mod tests {
 
         let ctx = LlmRequestContext {
             session_id: Some("session:test".into()),
+            run_id: None,
         };
         let _ = wrapped
             .complete_with_context(&ctx, &[ChatMessage::user("ping")], &[])
@@ -2773,6 +2774,7 @@ mod tests {
 
         let ctx = LlmRequestContext {
             session_id: Some("session:test".into()),
+            run_id: None,
         };
         let mut stream =
             wrapped.stream_with_tools_with_context(&ctx, vec![ChatMessage::user("ping")], vec![]);
@@ -2796,6 +2798,7 @@ mod tests {
         });
         let ctx = LlmRequestContext {
             session_id: Some("session:test".into()),
+            run_id: None,
         };
         let dbg = wrapped.debug_request_overrides(Some(&ctx));
         assert_eq!(dbg["tag"].as_str(), Some("inner"));
