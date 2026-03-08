@@ -26,6 +26,18 @@ pub enum StreamMode {
     Off,
 }
 
+/// How Telegram *group* inbound/mirror/relay messages are formatted when written into
+/// the session transcript (LLM-visible `content`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupSessionTranscriptFormat {
+    /// Legacy behavior (self-mention stripping / whitespace normalization / mirror+relay prefixes).
+    #[default]
+    Legacy,
+    /// TG-GST v1 (Telegram Group Session Transcript v1).
+    TgGstV1,
+}
+
 /// Configuration for a single Telegram bot account.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -49,10 +61,22 @@ pub struct TelegramAccountConfig {
     /// Maximum number of relay hops for a single chain.
     ///
     /// Default: 3.
-    pub relay_hop_limit: u8,
+    pub relay_hop_limit: u32,
+
+    /// Maximum number of relay injections allowed in a single relay epoch.
+    ///
+    /// Short-term definition of epoch: `relayChainId`.
+    ///
+    /// Default: 128.
+    pub epoch_relay_budget: u32,
 
     /// Relay parsing strictness.
     pub relay_strictness: RelayStrictness,
+
+    /// Group session transcript format for LLM-visible `content`.
+    ///
+    /// Default: `legacy`.
+    pub group_session_transcript_format: GroupSessionTranscriptFormat,
 
     /// How streaming responses are delivered.
     pub stream_mode: StreamMode,
@@ -103,8 +127,10 @@ pub struct TelegramBusAccountSnapshot {
     pub account_handle: String,
     pub chan_user_name: Option<String>,
     pub relay_chain_enabled: bool,
-    pub relay_hop_limit: u8,
+    pub relay_hop_limit: u32,
+    pub epoch_relay_budget: u32,
     pub relay_strictness: RelayStrictness,
+    pub group_session_transcript_format: GroupSessionTranscriptFormat,
 }
 
 impl std::fmt::Debug for TelegramAccountConfig {
@@ -132,7 +158,9 @@ impl Default for TelegramAccountConfig {
             allowlist: Vec::new(),
             relay_chain_enabled: true,
             relay_hop_limit: 3,
+            epoch_relay_budget: 128,
             relay_strictness: RelayStrictness::default(),
+            group_session_transcript_format: GroupSessionTranscriptFormat::default(),
             stream_mode: StreamMode::default(),
             edit_throttle_ms: 300,
             model: None,
@@ -161,7 +189,12 @@ mod tests {
         assert_eq!(cfg.edit_throttle_ms, 300);
         assert_eq!(cfg.relay_chain_enabled, true);
         assert_eq!(cfg.relay_hop_limit, 3);
+        assert_eq!(cfg.epoch_relay_budget, 128);
         assert_eq!(cfg.relay_strictness, RelayStrictness::Strict);
+        assert_eq!(
+            cfg.group_session_transcript_format,
+            GroupSessionTranscriptFormat::Legacy
+        );
     }
 
     #[test]

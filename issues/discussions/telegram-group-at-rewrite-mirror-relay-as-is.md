@@ -2,6 +2,8 @@
 
 > 范围：**只描述当前代码已实现的行为（as-is）**，不讨论 V4 未来机制（WAIT/RootMap/TaskCard/epoch 等）。
 > 目标：把群聊里跟 `@xxx` 相关的“改写/转写/镜像/中继”场景讲清楚，避免误读。
+>
+> 更新（2026-03-08）：本仓库已实现可选的 **TG-GST v1** 群聊 session transcript 文本协议（更自然的 `<speaker><addr_flag>: <body>` 形式；保留换行与 `@mentions`；在启用时移除 `[@... mirror]` / `（来自 ...）` 等 legacy 前缀）。详见：`issues/issue-telegram-group-session-transcript-text-protocol-tg-gst-v1.md`。
 
 ## 0. 阅读指南：先分清“系统机制” vs “会话文本协议”
 
@@ -97,6 +99,173 @@
 
 6) **media mirror 占位**（机制 + 协议都有）
 - 目前只对“截图”出站做了 V1 占位镜像：`（发送了一张图片）`（见“场景 F”）。
+
+## X. rewrite 示例速查表
+
+> 目的：把“群聊场合下，消息到底被怎么改写/注入”的常见场景做成速查表。  
+> 口径：只描述 **as-is**（当前代码行为）；示例里“写进 session / 送 LLM 的文本”指目标 bot 真正看到的 `content`。
+
+### X.1 入站 rewrite（人 → bot）：self-mention stripping / 空白归一化
+
+1) **单点名：删除 `@本 bot`**
+
+群里原文：
+```text
+@c 请执行 X
+```
+
+bot C 写进 session / 送 LLM：
+```text
+请执行 X
+```
+
+2) **多点名：每个 bot 只删自己的那个 `@`（因此各自看到的文本不一致）**
+
+群里原文：
+```text
+@a @b @c 请执行 X
+```
+
+- bot A：
+```text
+@b @c 请执行 X
+```
+- bot B：
+```text
+@a @c 请执行 X
+```
+- bot C：
+```text
+@a @b 请执行 X
+```
+
+3) **只有一个 `@本 bot`：strip 后为空 → 不触发 LLM，走固定短回复**
+
+群里原文：
+```text
+@c
+```
+
+bot C strip 后文本为空（无附件时）：
+- 不跑 LLM
+- 直接返回固定短句（例如“我在。”）
+
+4) **空白归一化：可能压掉换行/多空格（结构化文本可读性下降）**
+
+群里原文：
+```text
+@c 你做一下：
+- A
+- B
+```
+
+bot C 写进 session / 送 LLM（示意）：
+```text
+你做一下： - A - B
+```
+
+### X.2 入站 rewrite（群聊 slash）：只认 `/cmd@this_bot`
+
+群里原文：
+```text
+/help
+```
+bot C：忽略（避免多 bot 歧义刷屏）。
+
+群里原文：
+```text
+/help@c
+```
+bot C：会处理（并会剥离命令里的 `@c` 后缀，避免把自我点名当正文噪声）。
+
+### X.3 出站注入（bot A → 其它 bot）：mirror / relay
+
+1) **mirror：把 bot A 的出站回复写进其它 bot 的 session（旁观记录，不触发推理）**
+
+群里可见（bot A 发出）：
+```text
+结论：可以按方案推进。
+```
+
+bot B 的 session 里追加：
+```text
+[@botA mirror] 结论：可以按方案推进。
+```
+
+2) **relay：bot A 文本里出现“派活式 @botB …” → 注入给 bot B 并触发推理（B 回复会 reply 到 A 那条消息下）**
+
+群里可见（bot A 发出）：
+```text
+@b 请把这个 PR 的风险点列一下。
+```
+
+bot B 被注入并看到：
+```text
+（来自 @botA）请把这个 PR 的风险点列一下。
+```
+
+3) **relay（Strict）：非行首 @ 默认不算派活，不触发 relay（但 mirror 仍可能写入旁观记录）**
+
+群里可见（bot A 发出）：
+```text
+我觉得 @b 的方案里 RootMap 这块还要补证据链。
+```
+
+默认 `relay_strictness = Strict`：
+- 不触发 relay（不叫醒 bot B）
+- 但这句话仍可能以 mirror 形式进入 bot B 的 session：
+  - `[@botA mirror] 我觉得 @b 的方案里 RootMap 这块还要补证据链。`
+
+4) **relay（Loose）：非行首 @ 会走一次 LLM 分类（directive 才触发；失败/不确定默认 reference）**
+
+群里可见（bot A 发出）：
+```text
+麻烦 @b 帮我把风险点列一下
+```
+
+`relay_strictness = Loose`：
+- 可能触发 relay（取决于分类器判定）
+
+5) **relay 扫描会跳过：代码块 / 引用行 / 行内代码（防误触发）**
+
+群里可见（bot A 发出）：
+```text
+> 示例：@b 请执行 X
+```
+或：
+```text
+你可以这样写：`@b 请执行 X`
+```
+或 fenced code：
+```text
+```sh
+echo "@b do something"
+```
+```
+
+结果：这些 `@b` 不参与 relay 触发。
+
+6) **跨行“点名 + 任务”：task_text 不要求同一行（只要后面还能抽到非空文本）**
+
+群里可见（bot A 发出）：
+```text
+@c
+
+你处理下 X
+```
+
+当前实现里，relay 抽取到的 `task_text` 仍可能是：
+```text
+你处理下 X
+```
+因此在 Strict 下也可能触发 relay（因为 `@c` 在某一行行首，且任务文本非空）。
+
+7) **media mirror 占位：媒体出站会以占位文本镜像进其它 bot 的 session**
+
+bot A 出站发图（群里可见为图片本体）后，bot B session 里追加（示意）：
+```text
+[@botA mirror] （发送了一张图片）
+```
 
 ## 2. 场景 A：群里没点名 → listen-only ingest-only（不跑 LLM）
 

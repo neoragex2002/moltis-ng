@@ -898,6 +898,53 @@ async fn build_prompt_runtime_context(
     }
 }
 
+const TG_GST_V1_SYSTEM_PROMPT_BLOCK: &str = r#"## Telegram Group Transcript (TG-GST v1)
+- Some inbound messages in this session may be formatted as: <speaker><addr_flag>: <body>
+- If <addr_flag> is " -> you", the message is explicitly addressed to you and requires your attention.
+- When replying/summarizing:
+  - Do NOT output transcript-style lines like "<speaker>: ...". Use normal prose/bullets.
+  - Do NOT start a line with "@someone" unless you intentionally want to delegate (this may trigger relay).
+  - If you must quote a line containing "@mentions", wrap it in '>' quote lines or fenced code blocks."#;
+
+async fn maybe_append_tg_gst_v1_system_prompt(
+    state: &Arc<GatewayState>,
+    session_entry: Option<&moltis_sessions::metadata::SessionEntry>,
+    system_prompt: &mut String,
+) {
+    let Some(entry) = session_entry else {
+        return;
+    };
+    let Some(binding) = entry.channel_binding.as_deref() else {
+        return;
+    };
+    let Ok(target) = serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding) else {
+        return;
+    };
+    if target.chan_type != moltis_channels::ChannelType::Telegram {
+        return;
+    }
+    let Ok(chat_i64) = target.chat_id.parse::<i64>() else {
+        return;
+    };
+    if chat_i64 >= 0 {
+        return;
+    }
+
+    let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+    let format = snapshots
+        .iter()
+        .find(|s| s.account_handle == target.chan_account_key)
+        .map(|s| s.group_session_transcript_format.clone())
+        .unwrap_or(moltis_telegram::config::GroupSessionTranscriptFormat::Legacy);
+
+    if format != moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1 {
+        return;
+    }
+
+    system_prompt.push_str("\n\n");
+    system_prompt.push_str(TG_GST_V1_SYSTEM_PROMPT_BLOCK);
+}
+
 fn effective_tool_policy(config: &moltis_config::MoltisConfig) -> ToolPolicy {
     let mut effective = ToolPolicy::default();
     if let Some(profile) = config.tools.policy.profile.as_deref()
@@ -2432,7 +2479,8 @@ impl ChatService for LiveChatService {
         for w in &canonical.warnings {
             warn!(session = %session_key, warning = %w, "prompt template warning");
         }
-        let system_prompt = canonical.system_prompt;
+        let mut system_prompt = canonical.system_prompt;
+        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
 
         let estimated_next_input_tokens =
             estimate_next_input_tokens(&system_prompt, &history, &user_content);
@@ -3076,7 +3124,8 @@ impl ChatService for LiveChatService {
         for w in &canonical.warnings {
             warn!(session = %session_key, warning = %w, "prompt template warning");
         }
-        let system_prompt = canonical.system_prompt;
+        let mut system_prompt = canonical.system_prompt;
+        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
 
         let user_content = UserContent::text(text.clone());
         let estimated_next_input_tokens =
@@ -3764,7 +3813,8 @@ impl ChatService for LiveChatService {
             warn!(session = %session_key, warning = %w, "prompt template warning");
         }
         let prompt_template_warnings = canonical.warnings.clone();
-        let system_prompt = canonical.system_prompt;
+        let mut system_prompt = canonical.system_prompt;
+        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
 
         let tools_for_api: Vec<serde_json::Value> = if stream_only || !supports_tools {
             Vec::new()
@@ -3927,7 +3977,8 @@ impl ChatService for LiveChatService {
             warn!(session = %session_key, warning = %w, "prompt template warning");
         }
         let prompt_template_warnings = canonical.warnings.clone();
-        let system_prompt = canonical.system_prompt;
+        let mut system_prompt = canonical.system_prompt;
+        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
         let tool_count = if stream_only {
             0
         } else {
@@ -4081,7 +4132,8 @@ impl ChatService for LiveChatService {
             warn!(session = %session_key, warning = %w, "prompt template warning");
         }
         let prompt_template_warnings = canonical.warnings.clone();
-        let system_prompt = canonical.system_prompt;
+        let mut system_prompt = canonical.system_prompt;
+        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
 
         let tools_for_api: Vec<serde_json::Value> = if stream_only || !native_tools {
             Vec::new()
@@ -6265,10 +6317,110 @@ fn sha256_hex(input: &str) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn evict_expired_telegram_relay_epoch_budget(
+    entries: &mut HashMap<String, crate::state::TelegramRelayEpochBudgetEntry>,
+) {
+    let ttl = std::time::Duration::from_millis(moltis_protocol::DEDUPE_TTL_MS);
+    let cutoff = Instant::now() - ttl;
+    entries.retain(|_, v| v.updated_at > cutoff);
+    if entries.len() <= moltis_protocol::DEDUPE_MAX_ENTRIES {
+        return;
+    }
+    // Best-effort: evict oldest entries beyond the cap.
+    while entries.len() > moltis_protocol::DEDUPE_MAX_ENTRIES {
+        let oldest_key = entries
+            .iter()
+            .min_by_key(|(_, v)| v.updated_at)
+            .map(|(k, _)| k.clone());
+        if let Some(key) = oldest_key {
+            entries.remove(&key);
+        } else {
+            break;
+        }
+    }
+}
+
+async fn telegram_epoch_budget_try_reserve(
+    state: &Arc<GatewayState>,
+    chain_id: &str,
+    budget: u32,
+) -> (bool, bool, u32) {
+    let mut inner = state.inner.write().await;
+    evict_expired_telegram_relay_epoch_budget(&mut inner.telegram_relay_epoch_budget);
+    let entry = inner
+        .telegram_relay_epoch_budget
+        .entry(chain_id.to_string())
+        .or_insert_with(|| crate::state::TelegramRelayEpochBudgetEntry {
+            used: 0,
+            exhausted_logged: false,
+            updated_at: Instant::now(),
+        });
+    entry.updated_at = Instant::now();
+
+    if entry.used >= budget {
+        let should_log = !entry.exhausted_logged;
+        entry.exhausted_logged = true;
+        return (false, should_log, entry.used);
+    }
+
+    entry.used = entry.used.saturating_add(1);
+    (true, false, entry.used)
+}
+
+async fn telegram_epoch_budget_check_exhausted(
+    state: &Arc<GatewayState>,
+    chain_id: &str,
+    budget: u32,
+) -> (bool, bool, u32) {
+    let mut inner = state.inner.write().await;
+    evict_expired_telegram_relay_epoch_budget(&mut inner.telegram_relay_epoch_budget);
+    let Some(entry) = inner.telegram_relay_epoch_budget.get_mut(chain_id) else {
+        return (false, false, 0);
+    };
+    entry.updated_at = Instant::now();
+
+    if entry.used < budget {
+        return (false, false, entry.used);
+    }
+
+    let should_log = !entry.exhausted_logged;
+    entry.exhausted_logged = true;
+    (true, should_log, entry.used)
+}
+
+async fn telegram_epoch_budget_refund(state: &Arc<GatewayState>, chain_id: &str) -> u32 {
+    let mut inner = state.inner.write().await;
+    if let Some(entry) = inner.telegram_relay_epoch_budget.get_mut(chain_id) {
+        entry.used = entry.used.saturating_sub(1);
+        entry.updated_at = Instant::now();
+        entry.used
+    } else {
+        0
+    }
+}
+
+async fn telegram_group_target_session_exists(
+    state: &Arc<GatewayState>,
+    target_account_id: &str,
+    chat_id: &str,
+) -> bool {
+    let Some(ref store) = state.services.session_store else {
+        return false;
+    };
+
+    let target_session_id = resolve_telegram_session_id(state, target_account_id, chat_id).await;
+
+    if let Some(ref sm) = state.services.session_metadata {
+        return sm.get(&target_session_id).await.is_some();
+    }
+
+    store.count(&target_session_id).await.unwrap_or(0) > 0
+}
+
 #[derive(Debug, Clone)]
 struct RelayInboundContext {
     chain_id: String,
-    hop: u8,
+    hop: u32,
 }
 
 async fn load_telegram_relay_inbound_context(
@@ -6300,12 +6452,12 @@ async fn load_telegram_relay_inbound_context(
         .get("relayHop")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    if hop == 0 || hop > u8::MAX as u64 {
+    if hop == 0 || hop > u32::MAX as u64 {
         return None;
     }
     Some(RelayInboundContext {
         chain_id,
-        hop: hop as u8,
+        hop: hop as u32,
     })
 }
 
@@ -6634,6 +6786,8 @@ async fn maybe_relay_telegram_group_mentions(
     source_outbound_message_id: &str,
     outbound_text: &str,
 ) {
+    const DEFAULT_EPOCH_RELAY_BUDGET: u32 = 128;
+
     let Ok(chat_i64) = chat_id.parse::<i64>() else {
         return;
     };
@@ -6654,9 +6808,27 @@ async fn maybe_relay_telegram_group_mentions(
             chan_user_name: None,
             relay_chain_enabled: true,
             relay_hop_limit: 3,
+            epoch_relay_budget: DEFAULT_EPOCH_RELAY_BUDGET,
             relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+            group_session_transcript_format:
+                moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
         });
 
+    let groups = extract_relay_groups(outbound_text, bus_accounts, source_account_id);
+    if groups.is_empty() {
+        return;
+    }
+    let has_line_start_directive_candidate = groups.iter().any(|g| {
+        g.line_start && !g.mentions.is_empty() && !only_whitespace_or_punct(&g.task_text)
+    });
+    let has_budget_candidate = match source_cfg.relay_strictness {
+        moltis_telegram::config::RelayStrictness::Strict => has_line_start_directive_candidate,
+        moltis_telegram::config::RelayStrictness::Loose => groups.iter().any(|g| {
+            !g.mentions.is_empty() && !only_whitespace_or_punct(&g.task_text)
+        }),
+    };
+
+    let inbound_hop = inbound_ctx.as_ref().map(|c| c.hop).unwrap_or(0);
     let (chain_id, next_hop) = if let Some(ctx) = inbound_ctx {
         if !source_cfg.relay_chain_enabled {
             return;
@@ -6669,12 +6841,58 @@ async fn maybe_relay_telegram_group_mentions(
     };
 
     if next_hop == 0 || next_hop > source_cfg.relay_hop_limit {
+        if has_line_start_directive_candidate {
+            let skip_key = format!(
+                "telegram.relay.skip|hop_limit|chat:{}|src:{}|out:{}",
+                chat_id, source_account_id, source_outbound_message_id
+            );
+            let is_dup = state
+                .inner
+                .write()
+                .await
+                .dedupe
+                .check_and_insert(&skip_key);
+            if !is_dup {
+                warn!(
+                    relay_skip_reason = "hop_limit_exceeded",
+                    source_account_id,
+                    chat_id,
+                    relay_chain_id = %chain_id,
+                    inbound_hop,
+                    next_hop,
+                    hop_limit = source_cfg.relay_hop_limit,
+                    source_outbound_message_id,
+                    outbound_text_len = outbound_text.len(),
+                    "telegram outbound relay skipped"
+                );
+            }
+        }
         return;
     }
 
-    let groups = extract_relay_groups(outbound_text, bus_accounts, source_account_id);
-    if groups.is_empty() {
-        return;
+    let epoch_relay_budget = if source_cfg.epoch_relay_budget == 0 {
+        DEFAULT_EPOCH_RELAY_BUDGET
+    } else {
+        source_cfg.epoch_relay_budget
+    };
+
+    if has_budget_candidate && epoch_relay_budget > 0 {
+        let (exhausted, should_log_budget, used) =
+            telegram_epoch_budget_check_exhausted(state, &chain_id, epoch_relay_budget).await;
+        if exhausted {
+            if should_log_budget {
+                warn!(
+                    relay_skip_reason = "epoch_budget_exceeded",
+                    source_account_id,
+                    chat_id,
+                    relay_chain_id = %chain_id,
+                    epoch_relay_budget,
+                    epoch_relay_used = used,
+                    "telegram outbound relay skipped"
+                );
+            }
+            return;
+        }
     }
 
     let source_handle = source_account_handle
@@ -6841,7 +7059,65 @@ Output format:
             continue;
         }
 
-        let relay_text = format!("（来自 {source_handle}）{}", d.task_text.trim());
+        let session_exists =
+            telegram_group_target_session_exists(state, &d.target_account_id, chat_id).await;
+        if !session_exists {
+            let skip_key = format!(
+                "telegram.relay.skip|target_missing|chat:{}|src:{}|dst:{}|out:{}",
+                chat_id, source_account_id, d.target_account_id, source_outbound_message_id
+            );
+            let is_dup = state
+                .inner
+                .write()
+                .await
+                .dedupe
+                .check_and_insert(&skip_key);
+            if !is_dup {
+                warn!(
+                    relay_skip_reason = "target_session_missing",
+                    source_account_id,
+                    target_account_id = %d.target_account_id,
+                    chat_id,
+                    relay_chain_id = %chain_id,
+                    "telegram outbound relay skipped"
+                );
+            }
+            continue;
+        }
+
+        if epoch_relay_budget > 0 {
+            let (reserved, should_log_budget, used) =
+                telegram_epoch_budget_try_reserve(state, &chain_id, epoch_relay_budget).await;
+            if !reserved {
+                if should_log_budget {
+                    warn!(
+                        relay_skip_reason = "epoch_budget_exceeded",
+                        source_account_id,
+                        chat_id,
+                        relay_chain_id = %chain_id,
+                        epoch_relay_budget,
+                        epoch_relay_used = used,
+                        "telegram outbound relay skipped"
+                    );
+                }
+                continue;
+            }
+        }
+
+        let target_format = bus_accounts
+            .iter()
+            .find(|a| a.account_handle == d.target_account_id)
+            .map(|a| a.group_session_transcript_format.clone())
+            .unwrap_or(moltis_telegram::config::GroupSessionTranscriptFormat::Legacy);
+
+        let relay_text = match target_format {
+            moltis_telegram::config::GroupSessionTranscriptFormat::Legacy => {
+                format!("（来自 {source_handle}）{}", d.task_text.trim())
+            },
+            moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1 => {
+                format!("{source_username}(bot) -> you: {}", d.task_text.trim())
+            },
+        };
         let channel_meta = serde_json::json!({
             "chanType": "telegram",
             "messageKind": "text",
@@ -6864,6 +7140,8 @@ Output format:
         let hop = next_hop;
         let target_account_id = d.target_account_id.clone();
         let target_handle = d.target_handle.clone();
+        let relay_chain_id = chain_id.clone();
+        let budget = epoch_relay_budget;
         tokio::spawn(async move {
             if let Err(e) = dispatch_telegram_relay(
                 &state,
@@ -6876,6 +7154,9 @@ Output format:
             )
             .await
             {
+                if budget > 0 {
+                    telegram_epoch_budget_refund(&state, &relay_chain_id).await;
+                }
                 warn!(
                     target_account_id,
                     chat_id, "telegram outbound relay: dispatch failed: {e}"
@@ -6989,7 +7270,15 @@ async fn maybe_mirror_telegram_group_reply(
     let source_username = source_bot_handle
         .strip_prefix('@')
         .unwrap_or(&source_bot_handle);
-    let mirrored_content = format!("[{source_bot_handle} mirror] {text}");
+    let snapshots = state
+        .services
+        .channel
+        .telegram_bus_accounts_snapshot()
+        .await;
+    let mut format_by_account = HashMap::<String, moltis_telegram::config::GroupSessionTranscriptFormat>::new();
+    for s in snapshots {
+        format_by_account.insert(s.account_handle, s.group_session_transcript_format);
+    }
 
     let channel_meta = serde_json::json!({
         "chanType": "telegram",
@@ -7053,8 +7342,20 @@ async fn maybe_mirror_telegram_group_reply(
         } else {
             store.count(&target_session_key).await.unwrap_or(0) as usize
         };
+        let mirrored_content = match format_by_account
+            .get(&target_account_id)
+            .cloned()
+            .unwrap_or(moltis_telegram::config::GroupSessionTranscriptFormat::Legacy)
+        {
+            moltis_telegram::config::GroupSessionTranscriptFormat::Legacy => {
+                format!("[{source_bot_handle} mirror] {text}")
+            },
+            moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1 => {
+                format!("{source_username}(bot): {text}")
+            },
+        };
         let user_msg =
-            PersistedMessage::user_with_channel(mirrored_content.clone(), channel_meta.clone());
+            PersistedMessage::user_with_channel(mirrored_content, channel_meta.clone());
         let user_val = user_msg.to_value();
         if let Err(e) = store.append(&target_session_key, &user_val).await {
             warn!(
@@ -8257,6 +8558,7 @@ mod tests {
 
     struct MirrorChannelService {
         accounts: Vec<String>,
+        snapshots: Vec<moltis_telegram::config::TelegramBusAccountSnapshot>,
     }
 
     #[async_trait]
@@ -8292,6 +8594,12 @@ mod tests {
         async fn list_telegram_accounts(&self) -> Vec<String> {
             self.accounts.clone()
         }
+
+        async fn telegram_bus_accounts_snapshot(
+            &self,
+        ) -> Vec<moltis_telegram::config::TelegramBusAccountSnapshot> {
+            self.snapshots.clone()
+        }
     }
 
     async fn seed_session(store: &SessionStore, session_key: &str) {
@@ -8317,6 +8625,7 @@ mod tests {
                 "telegram:fluffy".to_string(),
                 "telegram:alpha".to_string(),
             ],
+            snapshots: Vec::new(),
         });
 
         let state = Arc::new(crate::state::GatewayState::new(
@@ -8399,6 +8708,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn telegram_outbound_mirror_uses_tg_gst_v1_format_for_targets_opted_in() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = rec.clone();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_channel_outbound(Arc::clone(&outbound))
+            .with_session_store(Arc::clone(&store));
+
+        services.channel = Arc::new(MirrorChannelService {
+            accounts: vec!["telegram:lovely".to_string(), "telegram:fluffy".to_string()],
+            snapshots: vec![
+                moltis_telegram::config::TelegramBusAccountSnapshot {
+                    account_handle: "telegram:lovely".into(),
+                    chan_user_name: Some("lovely_apple_bot".into()),
+                    relay_chain_enabled: true,
+                    relay_hop_limit: 3,
+                    epoch_relay_budget: 128,
+                    relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                    group_session_transcript_format:
+                        moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+                },
+                moltis_telegram::config::TelegramBusAccountSnapshot {
+                    account_handle: "telegram:fluffy".into(),
+                    chan_user_name: Some("fluffy_bot".into()),
+                    relay_chain_enabled: true,
+                    relay_hop_limit: 3,
+                    epoch_relay_budget: 128,
+                    relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                    group_session_transcript_format:
+                        moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1,
+                },
+            ],
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        // Ensure the target bot has an existing (bot, group) session.
+        seed_session(store.as_ref(), "telegram:fluffy:-100").await;
+
+        let targets = vec![moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:lovely".to_string(),
+            chan_user_name: Some("@lovely_apple_bot".to_string()),
+            chat_id: "-100".to_string(),
+            message_id: Some("184".to_string()),
+        }];
+
+        deliver_channel_replies_to_targets(
+            Arc::clone(&outbound),
+            targets,
+            "telegram:lovely:-100",
+            "hello",
+            Arc::clone(&state),
+            ReplyMedium::Text,
+            Vec::new(),
+        )
+        .await;
+
+        let fluffy = store.read("telegram:fluffy:-100").await.unwrap();
+        assert_eq!(fluffy.len(), 2);
+        let content = fluffy[1]
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(content, "lovely_apple_bot(bot): hello");
+    }
+
+    #[tokio::test]
     async fn telegram_outbound_mirror_does_not_run_for_non_group_chat_ids() {
         let rec = Arc::new(RecordingOutbound::default());
         let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = rec.clone();
@@ -8412,6 +8799,7 @@ mod tests {
 
         services.channel = Arc::new(MirrorChannelService {
             accounts: vec!["telegram:lovely".to_string(), "telegram:fluffy".to_string()],
+            snapshots: Vec::new(),
         });
 
         let state = Arc::new(crate::state::GatewayState::new(
@@ -8462,6 +8850,7 @@ mod tests {
             .with_session_store(Arc::clone(&store));
         services.channel = Arc::new(MirrorChannelService {
             accounts: vec!["telegram:lovely".to_string(), "telegram:fluffy".to_string()],
+            snapshots: Vec::new(),
         });
 
         let state = Arc::new(crate::state::GatewayState::new(
@@ -8976,14 +9365,20 @@ mod tests {
                 chan_user_name: Some("bot1".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
+                epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Loose,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
+                epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -9025,6 +9420,539 @@ mod tests {
             "expected relay attribution prefix, got: {relay_text}"
         );
         assert!(sent.get("channel").is_some(), "expected channel metadata");
+    }
+
+    #[tokio::test]
+    async fn relay_tg_gst_v1_format_omits_legacy_attribution_prefix() {
+        use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        // Ensure target (bot, group) session exists.
+        seed_session(store.as_ref(), "telegram:bot2:-100").await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .set_chat(Arc::new(RelayLabelingChatService {
+                send_tx: tx,
+                internal_complete_called: Arc::clone(&called),
+                label_json: r#"{"labels":[{"id":"g0.t0","label":"directive","confidence":0.9}]}"#
+                    .to_string(),
+            }))
+            .await;
+
+        let bus_accounts = vec![
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot1".into(),
+                chan_user_name: Some("bot1".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 3,
+                epoch_relay_budget: 128,
+                relay_strictness: RelayStrictness::Loose,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot2".into(),
+                chan_user_name: Some("bot2".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 3,
+                epoch_relay_budget: 128,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1,
+            },
+        ];
+
+        maybe_relay_telegram_group_mentions(
+            &state,
+            &bus_accounts,
+            None,
+            "telegram:bot1",
+            Some("@bot1"),
+            "-100",
+            Some("184"),
+            "999",
+            "请 @bot2 帮我总结一下",
+        )
+        .await;
+
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "expected one internal_complete call"
+        );
+        let relay_text = sent.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(relay_text, "bot1(bot) -> you: 帮我总结一下");
+        assert!(
+            !relay_text.contains("来自"),
+            "tg_gst_v1 relay text must not contain legacy attribution: {relay_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_hop_limit_exceeded_skips_ambiguous_labeling_and_dispatch() {
+        use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        // Ensure target (bot, group) session exists.
+        seed_session(store.as_ref(), "telegram:bot2:-100").await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .set_chat(Arc::new(RelayLabelingChatService {
+                send_tx: tx,
+                internal_complete_called: Arc::clone(&called),
+                label_json: r#"{"labels":[{"id":"g0.t0","label":"directive","confidence":0.9}]}"#
+                    .to_string(),
+            }))
+            .await;
+
+        let bus_accounts = vec![
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot1".into(),
+                chan_user_name: Some("bot1".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 1,
+                epoch_relay_budget: 128,
+                relay_strictness: RelayStrictness::Loose,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot2".into(),
+                chan_user_name: Some("bot2".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 1,
+                epoch_relay_budget: 128,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+        ];
+
+        maybe_relay_telegram_group_mentions(
+            &state,
+            &bus_accounts,
+            Some(RelayInboundContext {
+                chain_id: "sha256:test".to_string(),
+                hop: 1,
+            }),
+            "telegram:bot1",
+            Some("@bot1"),
+            "-100",
+            Some("184"),
+            "999",
+            "请 @bot2 帮我总结一下",
+        )
+        .await;
+
+        assert_eq!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "expected no internal_complete call when hop_limit blocks relay"
+        );
+        let recv = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            recv.is_err(),
+            "expected no dispatch when hop_limit blocks relay"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_epoch_budget_blocks_after_limit() {
+        use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        seed_session(store.as_ref(), "telegram:bot2:-100").await;
+        seed_session(store.as_ref(), "telegram:bot3:-100").await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .set_chat(Arc::new(RelayLabelingChatService {
+                send_tx: tx,
+                internal_complete_called: Arc::clone(&called),
+                label_json: r#"{"labels":[]}"#.to_string(),
+            }))
+            .await;
+
+        let bus_accounts = vec![
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot1".into(),
+                chan_user_name: Some("bot1".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 100,
+                epoch_relay_budget: 1,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot2".into(),
+                chan_user_name: Some("bot2".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 100,
+                epoch_relay_budget: 1,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot3".into(),
+                chan_user_name: Some("bot3".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 100,
+                epoch_relay_budget: 1,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+        ];
+
+        let chain_id = "sha256:budget".to_string();
+        maybe_relay_telegram_group_mentions(
+            &state,
+            &bus_accounts,
+            Some(RelayInboundContext {
+                chain_id: chain_id.clone(),
+                hop: 1,
+            }),
+            "telegram:bot1",
+            Some("@bot1"),
+            "-100",
+            Some("184"),
+            "999",
+            "@bot2 做A\n@bot3 做B",
+        )
+        .await;
+
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sent.get("_chanChatKey").and_then(|v| v.as_str()),
+            Some("telegram:bot2:-100")
+        );
+        let recv2 = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(recv2.is_err(), "expected only one dispatch under budget=1");
+
+        let inner = state.inner.read().await;
+        let entry = inner
+            .telegram_relay_epoch_budget
+            .get(&chain_id)
+            .expect("budget entry");
+        assert_eq!(entry.used, 1);
+        assert!(
+            entry.exhausted_logged,
+            "expected budget exhaustion to be recorded on second directive"
+        );
+
+        // No ambiguous labeling involved in strict line-start mode.
+        assert_eq!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "expected no internal_complete calls in strict mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_budget_skips_missing_target_without_consuming() {
+        use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        // Only bot2 has an existing group session; bot3 is missing.
+        seed_session(store.as_ref(), "telegram:bot2:-100").await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .set_chat(Arc::new(RelayLabelingChatService {
+                send_tx: tx,
+                internal_complete_called: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                label_json: r#"{"labels":[]}"#.to_string(),
+            }))
+            .await;
+
+        let bus_accounts = vec![
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot1".into(),
+                chan_user_name: Some("bot1".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 100,
+                epoch_relay_budget: 1,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot2".into(),
+                chan_user_name: Some("bot2".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 100,
+                epoch_relay_budget: 1,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot3".into(),
+                chan_user_name: Some("bot3".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 100,
+                epoch_relay_budget: 1,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+        ];
+
+        let chain_id = "sha256:budget2".to_string();
+        maybe_relay_telegram_group_mentions(
+            &state,
+            &bus_accounts,
+            Some(RelayInboundContext {
+                chain_id: chain_id.clone(),
+                hop: 1,
+            }),
+            "telegram:bot1",
+            Some("@bot1"),
+            "-100",
+            Some("184"),
+            "999",
+            "@bot3 做B\n@bot2 做A",
+        )
+        .await;
+
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sent.get("_chanChatKey").and_then(|v| v.as_str()),
+            Some("telegram:bot2:-100")
+        );
+
+        let inner = state.inner.read().await;
+        let entry = inner
+            .telegram_relay_epoch_budget
+            .get(&chain_id)
+            .expect("budget entry");
+        assert_eq!(entry.used, 1);
+        assert!(
+            !entry.exhausted_logged,
+            "expected no exhaustion when only one dispatch occurs"
+        );
+    }
+
+    struct ErrorSendChatService {
+        send_called: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::services::ChatService for ErrorSendChatService {
+        async fn send(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            self.send_called
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("boom".into())
+        }
+
+        async fn internal_complete(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({
+                "text": r#"{"labels":[]}"#,
+                "inputTokens": 0,
+                "outputTokens": 0,
+            }))
+        }
+
+        async fn abort(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+        async fn cancel_queued(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "cleared": 0 }))
+        }
+        async fn history(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+        async fn inject(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+        async fn clear(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        async fn compact(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        async fn context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+        async fn raw_prompt(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+        async fn full_context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_budget_refunds_on_dispatch_failure() {
+        use moltis_telegram::config::{RelayStrictness, TelegramBusAccountSnapshot};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        seed_session(store.as_ref(), "telegram:bot2:-100").await;
+
+        let send_called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .set_chat(Arc::new(ErrorSendChatService {
+                send_called: Arc::clone(&send_called),
+            }))
+            .await;
+
+        let bus_accounts = vec![
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot1".into(),
+                chan_user_name: Some("bot1".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 100,
+                epoch_relay_budget: 1,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+            TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot2".into(),
+                chan_user_name: Some("bot2".into()),
+                relay_chain_enabled: true,
+                relay_hop_limit: 100,
+                epoch_relay_budget: 1,
+                relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            },
+        ];
+
+        let chain_id = "sha256:refund".to_string();
+        maybe_relay_telegram_group_mentions(
+            &state,
+            &bus_accounts,
+            Some(RelayInboundContext {
+                chain_id: chain_id.clone(),
+                hop: 1,
+            }),
+            "telegram:bot1",
+            Some("@bot1"),
+            "-100",
+            Some("184"),
+            "999",
+            "@bot2 做A",
+        )
+        .await;
+
+        let ok = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if send_called.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(ok.is_ok(), "expected dispatch attempt");
+
+        let ok = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let inner = state.inner.read().await;
+                let used = inner
+                    .telegram_relay_epoch_budget
+                    .get(&chain_id)
+                    .map(|e| e.used)
+                    .unwrap_or(0);
+                if used == 0 {
+                    break;
+                }
+                drop(inner);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(ok.is_ok(), "expected budget refund after dispatch failure");
     }
 
     #[tokio::test]
@@ -9076,14 +10004,20 @@ mod tests {
                 chan_user_name: Some("bot1".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
+                epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
+                epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -9121,7 +10055,10 @@ mod tests {
             chan_user_name: Some("bot2".into()),
             relay_chain_enabled: true,
             relay_hop_limit: 3,
+            epoch_relay_budget: 128,
             relay_strictness: RelayStrictness::Strict,
+            group_session_transcript_format:
+                moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
         }];
 
         let text = r#"
@@ -9154,14 +10091,20 @@ echo @bot2
                 chan_user_name: Some("bot1".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
+                epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
+                epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -11652,7 +12595,10 @@ echo @bot2
                 chan_user_name: Some("lovely_apple_bot".into()),
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
+                epoch_relay_budget: 128,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             }],
         });
 
@@ -11674,6 +12620,60 @@ echo @bot2
             Some("TG @lovely_apple_bot · dm:123")
         );
         assert!(entry.channel_binding.is_some());
+    }
+
+    #[tokio::test]
+    async fn tg_gst_v1_system_prompt_block_appends_for_telegram_group_sessions() {
+        let metadata = sqlite_metadata().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_session_metadata(Arc::clone(&metadata))
+            .with_session_store(Arc::clone(&store));
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
+                account_handle: "telegram:845".into(),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                relay_chain_enabled: false,
+                relay_hop_limit: 0,
+                epoch_relay_budget: 128,
+                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1,
+            }],
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let session_id = "telegram:845:-100";
+        metadata.upsert(session_id, Some("ok".into())).await.unwrap();
+        let binding = moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:845".to_string(),
+            chan_user_name: Some("@lovely_apple_bot".to_string()),
+            chat_id: "-100".to_string(),
+            message_id: None,
+        };
+        let binding_json = serde_json::to_string(&binding).unwrap();
+        metadata
+            .set_channel_binding(session_id, Some(binding_json))
+            .await;
+
+        let entry = metadata.get(session_id).await.expect("session row");
+        let mut system_prompt = "base".to_string();
+        maybe_append_tg_gst_v1_system_prompt(&state, Some(&entry), &mut system_prompt).await;
+        assert!(
+            system_prompt.contains("TG-GST v1"),
+            "expected tg_gst_v1 prompt block to be appended"
+        );
     }
 
     #[tokio::test]

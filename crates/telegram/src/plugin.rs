@@ -92,7 +92,9 @@ impl TelegramPlugin {
                 chan_user_name: s.bot_username.clone(),
                 relay_chain_enabled: s.config.relay_chain_enabled,
                 relay_hop_limit: s.config.relay_hop_limit,
+                epoch_relay_budget: s.config.epoch_relay_budget,
                 relay_strictness: s.config.relay_strictness.clone(),
+                group_session_transcript_format: s.config.group_session_transcript_format.clone(),
             })
             .collect()
     }

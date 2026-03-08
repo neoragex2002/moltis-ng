@@ -1980,7 +1980,10 @@ mod tests {
                 chan_user_name: Some("lovely_apple_bot".into()),
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
+                epoch_relay_budget: 128,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             }],
         });
 
@@ -2046,7 +2049,10 @@ mod tests {
                 chan_user_name: Some("lovely_apple_bot".into()),
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
+                epoch_relay_budget: 128,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             }],
         });
 
@@ -2109,7 +2115,10 @@ mod tests {
                 chan_user_name: None,
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
+                epoch_relay_budget: 128,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             }],
         });
 

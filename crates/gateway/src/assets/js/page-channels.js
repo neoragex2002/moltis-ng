@@ -340,6 +340,7 @@ function AddChannelModal() {
 				token: token,
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
 				mention_mode: form.querySelector("[data-field=mentionMode]").value,
+				group_session_transcript_format: form.querySelector("[data-field=groupTranscriptFormat]").value,
 				allowlist: allowlistItems.value,
 				relay_strictness: form.querySelector("[data-field=relayStrictness]").value,
 				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
@@ -421,6 +422,11 @@ function AddChannelModal() {
 	        <option value="mention">Must @mention bot</option>
 	        <option value="always">Always respond</option>
 	      </select>
+      <label class="text-xs text-[var(--muted)]">Group Session Transcript</label>
+      <select data-field="groupTranscriptFormat" style=${selectStyle}>
+        <option value="legacy">Legacy</option>
+        <option value="tg_gst_v1">TG-GST v1</option>
+      </select>
       <label class="text-xs text-[var(--muted)]">Group Relay Strictness</label>
       <select data-field="relayStrictness" style=${selectStyle}>
         <option value="strict">Strict (avoid false triggers)</option>
@@ -432,7 +438,7 @@ function AddChannelModal() {
         Allow bot-to-bot chained delegations
       </label>
       <label class="text-xs text-[var(--muted)]">Relay Hop Limit</label>
-      <input data-field="relayHopLimit" type="number" min="1" max="10" value="3" style=${inputStyle} />
+      <input data-field="relayHopLimit" type="number" min="1" max="65536" value="3" style=${inputStyle} />
 	      <label class="text-xs text-[var(--muted)]">Default Model</label>
 	      <${ModelSelect} models=${modelsSig.value} value=${addModel.value}
 	        onChange=${(v) => {
@@ -476,6 +482,7 @@ function EditChannelModal() {
 				token: cfg.token || "",
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
 				mention_mode: form.querySelector("[data-field=mentionMode]").value,
+				group_session_transcript_format: form.querySelector("[data-field=groupTranscriptFormat]").value,
 				allowlist: allowlistItems.value,
 				relay_strictness: form.querySelector("[data-field=relayStrictness]").value,
 				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
@@ -543,6 +550,11 @@ function EditChannelModal() {
 	        <option value="mention">Must @mention bot</option>
 	        <option value="always">Always respond</option>
 	      </select>
+      <label class="text-xs text-[var(--muted)]">Group Session Transcript</label>
+      <select data-field="groupTranscriptFormat" style=${selectStyle} value=${cfg.group_session_transcript_format || "legacy"}>
+        <option value="legacy">Legacy</option>
+        <option value="tg_gst_v1">TG-GST v1</option>
+      </select>
       <label class="text-xs text-[var(--muted)]">Group Relay Strictness</label>
       <select data-field="relayStrictness" style=${selectStyle} value=${cfg.relay_strictness || "strict"}>
         <option value="strict">Strict (avoid false triggers)</option>
@@ -554,7 +566,7 @@ function EditChannelModal() {
         Allow bot-to-bot chained delegations
       </label>
       <label class="text-xs text-[var(--muted)]">Relay Hop Limit</label>
-      <input data-field="relayHopLimit" type="number" min="1" max="10" value=${cfg.relay_hop_limit || 3} style="font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;" />
+      <input data-field="relayHopLimit" type="number" min="1" max="65536" value=${cfg.relay_hop_limit || 3} style="font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;" />
 	      <label class="text-xs text-[var(--muted)]">Default Model</label>
 	      <${ModelSelect} models=${modelsSig.value} value=${editModel.value}
 	        onChange=${(v) => {
