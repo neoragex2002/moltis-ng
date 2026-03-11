@@ -6,6 +6,7 @@ use {
     serde::{Deserialize, Serialize},
     tokio::sync::RwLock,
     tracing::{debug, info, warn},
+    walkdir::WalkDir,
 };
 
 use crate::exec::{ExecOpts, ExecResult};
@@ -337,14 +338,73 @@ fn copy_file_or_empty(src: &std::path::Path, dst: &std::path::Path) -> anyhow::R
     Ok(())
 }
 
-fn prepare_public_data_view(base_data_dir: &str, sandbox_key: &str) -> anyhow::Result<std::path::PathBuf> {
+fn remove_public_entry(path: &std::path::Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path)?,
+        Ok(_) => std::fs::remove_file(path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+fn copy_public_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+
+    for entry in WalkDir::new(src).follow_links(false) {
+        let entry = entry?;
+        let rel = entry
+            .path()
+            .strip_prefix(src)
+            .context("walkdir entry escaped source root")?;
+        let target = dst.join(rel);
+
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target)?;
+            continue;
+        }
+
+        if entry.file_type().is_file() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(entry.path(), &target)?;
+            continue;
+        }
+
+        if entry.file_type().is_symlink() {
+            warn!(
+                path = %entry.path().display(),
+                reason_code = "sandbox_public_data_symlink_skipped",
+                "skipping symlink while preparing sandbox public data view"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn prepare_public_data_view(
+    base_data_dir: &str,
+    sandbox_key: &str,
+) -> anyhow::Result<std::path::PathBuf> {
     let view_dir = public_data_view_dir(base_data_dir, sandbox_key);
     std::fs::create_dir_all(&view_dir)?;
 
-    // Only expose public workspace files to sandboxed exec.
+    // Only expose public workspace files and discoverable skill definitions to
+    // sandboxed exec.
     let base = std::path::PathBuf::from(base_data_dir);
     copy_file_or_empty(&base.join("USER.md"), &view_dir.join("USER.md"))?;
     copy_file_or_empty(&base.join("PEOPLE.md"), &view_dir.join("PEOPLE.md"))?;
+    remove_public_entry(&view_dir.join("skills"))?;
+    remove_public_entry(&view_dir.join(".moltis/skills"))?;
+    copy_public_dir_recursive(&base.join("skills"), &view_dir.join("skills"))?;
+    copy_public_dir_recursive(
+        &base.join(".moltis/skills"),
+        &view_dir.join(".moltis/skills"),
+    )?;
 
     Ok(view_dir)
 }
@@ -1048,8 +1108,9 @@ impl DockerSandbox {
             })?;
         let expected_mount_source_normalized = match expected_mount_type {
             DataMountType::Bind => {
-                let view_dir =
-                    public_data_view_dir(expected_mount_source, &id.key).display().to_string();
+                let view_dir = public_data_view_dir(expected_mount_source, &id.key)
+                    .display()
+                    .to_string();
                 Self::normalize_bind_mount_source_for_compare(&view_dir)
             },
             DataMountType::Volume => expected_mount_source.to_string(),
@@ -2930,21 +2991,45 @@ mod tests {
             .unwrap();
         assert!(args.contains(&"-e".to_string()));
         assert!(args.contains(&format!("MOLTIS_DATA_DIR={SANDBOX_GUEST_DATA_DIR}")));
-        assert!(
-            args.iter()
-                .any(|a| a.contains(&format!(".sandbox_views/{}:{SANDBOX_GUEST_DATA_DIR}:ro", id.key)))
-        );
+        assert!(args.iter().any(|a| a.contains(&format!(
+            ".sandbox_views/{}:{SANDBOX_GUEST_DATA_DIR}:ro",
+            id.key
+        ))));
     }
 
     #[test]
-    fn test_prepare_public_data_view_only_copies_public_files() {
+    fn test_prepare_public_data_view_copies_public_files_and_skills() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("USER.md"), "user-public\n").unwrap();
         std::fs::write(dir.path().join("PEOPLE.md"), "people-public\n").unwrap();
         std::fs::create_dir_all(dir.path().join("people/default")).unwrap();
+        std::fs::create_dir_all(dir.path().join("skills/personal-skill/agents")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".moltis/skills/project-skill/references"))
+            .unwrap();
         std::fs::write(
             dir.path().join("people/default/IDENTITY.md"),
             "---\nname: default\n---\nsecret\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("skills/personal-skill/SKILL.md"),
+            "# Personal Skill\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("skills/personal-skill/agents/openai.yaml"),
+            "model: gpt\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".moltis/skills/project-skill/SKILL.md"),
+            "# Project Skill\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path()
+                .join(".moltis/skills/project-skill/references/notes.md"),
+            "project notes\n",
         )
         .unwrap();
 
@@ -2955,13 +3040,78 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         names.sort();
-        assert_eq!(names, vec!["PEOPLE.md".to_string(), "USER.md".to_string()]);
+        assert_eq!(
+            names,
+            vec![
+                ".moltis".to_string(),
+                "PEOPLE.md".to_string(),
+                "USER.md".to_string(),
+                "skills".to_string()
+            ]
+        );
 
         let user = std::fs::read_to_string(view_dir.join("USER.md")).unwrap();
         let people = std::fs::read_to_string(view_dir.join("PEOPLE.md")).unwrap();
         assert_eq!(user, "user-public\n");
         assert_eq!(people, "people-public\n");
         assert!(!view_dir.join("people").exists());
+        assert_eq!(
+            std::fs::read_to_string(view_dir.join("skills/personal-skill/SKILL.md")).unwrap(),
+            "# Personal Skill\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(view_dir.join("skills/personal-skill/agents/openai.yaml"))
+                .unwrap(),
+            "model: gpt\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(view_dir.join(".moltis/skills/project-skill/SKILL.md"))
+                .unwrap(),
+            "# Project Skill\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                view_dir.join(".moltis/skills/project-skill/references/notes.md")
+            )
+            .unwrap(),
+            "project notes\n"
+        );
+    }
+
+    #[test]
+    fn test_prepare_public_data_view_refresh_prunes_removed_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("USER.md"), "user-public\n").unwrap();
+        std::fs::write(dir.path().join("PEOPLE.md"), "people-public\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("skills/personal-skill")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".moltis/skills/project-skill")).unwrap();
+        std::fs::write(
+            dir.path().join("skills/personal-skill/SKILL.md"),
+            "# Personal Skill\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".moltis/skills/project-skill/SKILL.md"),
+            "# Project Skill\n",
+        )
+        .unwrap();
+
+        let view_dir = prepare_public_data_view(&dir.path().display().to_string(), "main").unwrap();
+        assert!(view_dir.join("skills/personal-skill/SKILL.md").exists());
+        assert!(
+            view_dir
+                .join(".moltis/skills/project-skill/SKILL.md")
+                .exists()
+        );
+
+        std::fs::remove_dir_all(dir.path().join("skills")).unwrap();
+        std::fs::remove_dir_all(dir.path().join(".moltis/skills")).unwrap();
+
+        let refreshed =
+            prepare_public_data_view(&dir.path().display().to_string(), "main").unwrap();
+        assert_eq!(refreshed, view_dir);
+        assert!(!view_dir.join("skills").exists());
+        assert!(!view_dir.join(".moltis/skills").exists());
     }
 
     #[test]
