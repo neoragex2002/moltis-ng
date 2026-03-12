@@ -1,4 +1,4 @@
 interface:
   display_name: "Telegram Group Coordination"
   short_description: "Coordinate PM-employee bot group workflows"
-  default_prompt: "Use $telegram-group-coordination to coordinate multi-bot Telegram group work with strict line-start mentions and handoff rules."
+  default_prompt: "Use $telegram-group-coordination to coordinate multi-bot Telegram group work with line-start mentions as the primary handoff rule and reply-based follow-up wake-ups where supported."
