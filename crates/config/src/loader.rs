@@ -396,7 +396,9 @@ pub fn sync_people_md_from_identities() -> anyhow::Result<()> {
     let root_dir = people_dir();
     if let Ok(rd) = std::fs::read_dir(&root_dir) {
         for entry in rd.flatten() {
-            let Ok(ft) = entry.file_type() else { continue };
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             if !ft.is_dir() {
                 continue;
             }
@@ -447,7 +449,12 @@ pub fn sync_people_md_from_identities() -> anyhow::Result<()> {
         let emoji_key = serde_yaml::Value::String("emoji".to_string());
         let creature_key = serde_yaml::Value::String("creature".to_string());
 
-        match identity.emoji.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        match identity
+            .emoji
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(emoji) => {
                 entry.insert(emoji_key, serde_yaml::Value::String(emoji.to_string()));
             },
@@ -462,7 +469,10 @@ pub fn sync_people_md_from_identities() -> anyhow::Result<()> {
             .filter(|s| !s.is_empty())
         {
             Some(creature) => {
-                entry.insert(creature_key, serde_yaml::Value::String(creature.to_string()));
+                entry.insert(
+                    creature_key,
+                    serde_yaml::Value::String(creature.to_string()),
+                );
             },
             None => {
                 entry.remove(&creature_key);
@@ -535,9 +545,9 @@ pub fn is_valid_person_name(name: &str) -> bool {
     if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
         return false;
     }
-    bytes.iter().all(|b| {
-        b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-'
-    })
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-')
 }
 
 fn person_dir(person_name: &str) -> Option<PathBuf> {
@@ -868,10 +878,7 @@ fn update_markdown_yaml_frontmatter(
                 new_inner_lines.extend(preserved);
             }
 
-            let new_inner = new_inner_lines
-                .join("\n")
-                .trim_matches('\n')
-                .to_string();
+            let new_inner = new_inner_lines.join("\n").trim_matches('\n').to_string();
 
             if new_inner.trim().is_empty() {
                 // No frontmatter remains; remove only the frontmatter block.
@@ -1937,13 +1944,13 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
         let after = std::fs::read_to_string(&people_path).unwrap();
         let after_split = split_yaml_frontmatter(&after).unwrap();
-        assert_eq!(after_split.body, before_body, "PEOPLE.md body must be preserved");
+        assert_eq!(
+            after_split.body, before_body,
+            "PEOPLE.md body must be preserved"
+        );
 
         let yaml = serde_yaml::from_str::<serde_yaml::Value>(after_split.inner).unwrap();
-        let people = yaml
-            .get("people")
-            .and_then(|v| v.as_sequence())
-            .unwrap();
+        let people = yaml.get("people").and_then(|v| v.as_sequence()).unwrap();
         let entry = people[0].as_mapping().unwrap();
         assert_eq!(
             entry
@@ -1999,15 +2006,13 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
         let after = std::fs::read_to_string(&people_path).unwrap();
         let split = split_yaml_frontmatter(&after).unwrap();
         let yaml = serde_yaml::from_str::<serde_yaml::Value>(split.inner).unwrap();
-        let entry = yaml
-            .get("people")
-            .and_then(|v| v.as_sequence())
-            .unwrap()[0]
+        let entry = yaml.get("people").and_then(|v| v.as_sequence()).unwrap()[0]
             .as_mapping()
             .unwrap();
 
         assert!(
-            entry.get(&serde_yaml::Value::String("emoji".to_string()))
+            entry
+                .get(&serde_yaml::Value::String("emoji".to_string()))
                 .is_none(),
             "emoji should be removed when not present in IDENTITY.md"
         );

@@ -3,8 +3,8 @@
 // FFI wrappers for llama-cpp-2 require unsafe Send/Sync impls when local-llm feature is enabled.
 #![cfg_attr(feature = "local-llm", allow(unsafe_code))]
 
-pub mod auth_profiles;
 mod as_sent_summary;
+pub mod auth_profiles;
 pub mod model;
 pub mod multimodal;
 pub mod prompt;

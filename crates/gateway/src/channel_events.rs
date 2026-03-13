@@ -1846,10 +1846,7 @@ mod tests {
             Ok(serde_json::json!({}))
         }
 
-        async fn full_context(
-            &self,
-            _params: serde_json::Value,
-        ) -> crate::services::ServiceResult {
+        async fn full_context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
             Ok(serde_json::json!([]))
         }
     }
@@ -1901,7 +1898,12 @@ mod tests {
         .await;
 
         let chan_chat_key = "telegram:acct:123";
-        assert!(state.drain_all_channel_replies(chan_chat_key).await.is_empty());
+        assert!(
+            state
+                .drain_all_channel_replies(chan_chat_key)
+                .await
+                .is_empty()
+        );
         assert!(
             state
                 .drain_all_channel_status_log(chan_chat_key)

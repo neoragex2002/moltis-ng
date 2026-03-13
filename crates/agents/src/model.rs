@@ -185,11 +185,7 @@ impl ChatMessage {
 pub fn values_to_chat_messages(values: &[serde_json::Value]) -> Vec<ChatMessage> {
     let mut messages = Vec::with_capacity(values.len());
     for (i, val) in values.iter().enumerate() {
-        if val
-            .get("moltis_internal_kind")
-            .and_then(|v| v.as_str())
-            == Some("ui_error_notice")
-        {
+        if val.get("moltis_internal_kind").and_then(|v| v.as_str()) == Some("ui_error_notice") {
             continue;
         }
         let Some(role) = val["role"].as_str() else {

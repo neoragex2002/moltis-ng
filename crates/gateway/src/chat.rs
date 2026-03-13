@@ -123,6 +123,30 @@ fn to_prompt_reply_medium(m: ReplyMedium) -> PromptReplyMedium {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TelegramOutboundFailureMeta {
+    outbound_op: &'static str,
+    outcome_kind: &'static str,
+    delivery_state: &'static str,
+}
+
+fn telegram_outbound_failure_meta(err: &anyhow::Error) -> TelegramOutboundFailureMeta {
+    err.downcast_ref::<moltis_telegram::outbound::TelegramOutboundError>()
+        .map(|err| TelegramOutboundFailureMeta {
+            outbound_op: err.op.as_str(),
+            outcome_kind: err.outcome_kind.as_str(),
+            delivery_state: err
+                .delivery_state
+                .map(|state| state.as_str())
+                .unwrap_or("none"),
+        })
+        .unwrap_or(TelegramOutboundFailureMeta {
+            outbound_op: "unknown",
+            outcome_kind: "unknown",
+            delivery_state: "none",
+        })
+}
+
 #[derive(Debug, Deserialize)]
 struct InputChannelMeta {
     #[serde(default)]
@@ -7574,10 +7598,14 @@ async fn deliver_channel_replies_to_targets(
                                     )
                                     .await
                             {
+                                let outbound_meta = telegram_outbound_failure_meta(&e);
                                 warn!(
                                     event = "channel_delivery.failed",
                                     code = "telegram_send_text_failed",
                                     op = "telegram.send_text_with_suffix",
+                                    telegram_outbound_op = outbound_meta.outbound_op,
+                                    outcome_kind = outbound_meta.outcome_kind,
+                                    delivery_state = outbound_meta.delivery_state,
                                     run_id = ?diag.run_id,
                                     trigger_id = ?diag.trigger_id,
                                     chan_account_key = target.chan_account_key,
@@ -7639,10 +7667,14 @@ async fn deliver_channel_replies_to_targets(
                                     .await
                             };
                             if let Err(e) = text_result {
+                                let outbound_meta = telegram_outbound_failure_meta(&e);
                                 warn!(
                                     event = "channel_delivery.failed",
                                     code = "telegram_send_text_failed",
                                     op = "telegram.send_text_followup",
+                                    telegram_outbound_op = outbound_meta.outbound_op,
+                                    outcome_kind = outbound_meta.outcome_kind,
+                                    delivery_state = outbound_meta.delivery_state,
                                     run_id = ?diag.run_id,
                                     trigger_id = ?diag.trigger_id,
                                     chan_account_key = target.chan_account_key,
@@ -7676,10 +7708,14 @@ async fn deliver_channel_replies_to_targets(
                         let sent_ref = match result {
                             Ok(r) => r,
                             Err(e) => {
+                                let outbound_meta = telegram_outbound_failure_meta(&e);
                                 warn!(
                                     event = "channel_delivery.failed",
                                     code = "telegram_send_text_failed",
                                     op = "telegram.send_text_with_ref",
+                                    telegram_outbound_op = outbound_meta.outbound_op,
+                                    outcome_kind = outbound_meta.outcome_kind,
+                                    delivery_state = outbound_meta.delivery_state,
                                     run_id = ?diag.run_id,
                                     trigger_id = ?diag.trigger_id,
                                     chan_account_key = target.chan_account_key,
@@ -8151,6 +8187,7 @@ mod tests {
         super::*,
         anyhow::Result,
         moltis_agents::{model::LlmProvider, tool_registry::AgentTool},
+        crate::logs::{LogBroadcastLayer, LogBuffer, LogFilter},
         moltis_common::{
             hooks::{HookAction, HookEvent, HookHandler, HookPayload, HookRegistry},
             types::ReplyPayload,
@@ -8165,7 +8202,27 @@ mod tests {
             time::{Duration, Instant},
         },
         tokio_stream::Stream,
+        tracing_subscriber::prelude::*,
     };
+
+    #[test]
+    fn telegram_outbound_failure_meta_extracts_structured_fields() {
+        let err = anyhow::Error::new(
+            moltis_telegram::outbound::TelegramOutboundError::new_without_source(
+                moltis_telegram::outbound::TelegramOutboundOp::SendMessage,
+                moltis_telegram::outbound::OutboundOutcomeKind::NonRetryableFailure,
+                moltis_telegram::outbound::OutboundErrorClass::Api,
+                Some(moltis_telegram::outbound::OutboundDeliveryState::PartialSent),
+                3,
+                3,
+            ),
+        );
+
+        let meta = telegram_outbound_failure_meta(&err);
+        assert_eq!(meta.outbound_op, "send_message");
+        assert_eq!(meta.outcome_kind, "non_retryable_failure");
+        assert_eq!(meta.delivery_state, "partial_sent");
+    }
 
     async fn sqlite_metadata() -> Arc<moltis_sessions::metadata::SqliteSessionMetadata> {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -8605,6 +8662,71 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RetryingSuccessOutbound {
+        gateway_calls: AtomicUsize,
+        transport_attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl moltis_channels::plugin::ChannelOutbound for RetryingSuccessOutbound {
+        async fn send_text(
+            &self,
+            _chan_account_key: &str,
+            _to: &str,
+            _text: &str,
+            _reply_to: Option<&str>,
+        ) -> Result<()> {
+            self.gateway_calls.fetch_add(1, Ordering::SeqCst);
+            let attempt = self.transport_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            warn!(
+                event = "telegram.outbound.retrying",
+                op = "send_message",
+                attempt,
+                max_attempts = 2,
+                error_class = "network",
+                outcome_kind = "unknown_outcome",
+                "simulated internal telegram retry before success"
+            );
+            self.transport_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_text_with_ref(
+            &self,
+            _chan_account_key: &str,
+            _to: &str,
+            _text: &str,
+            _reply_to: Option<&str>,
+        ) -> Result<Option<moltis_channels::plugin::SentMessageRef>> {
+            self.gateway_calls.fetch_add(1, Ordering::SeqCst);
+            let attempt = self.transport_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            warn!(
+                event = "telegram.outbound.retrying",
+                op = "send_message",
+                attempt,
+                max_attempts = 2,
+                error_class = "network",
+                outcome_kind = "unknown_outcome",
+                "simulated internal telegram retry before success"
+            );
+            self.transport_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(moltis_channels::plugin::SentMessageRef {
+                message_id: "42".to_string(),
+            }))
+        }
+
+        async fn send_media(
+            &self,
+            _chan_account_key: &str,
+            _to: &str,
+            _payload: &ReplyPayload,
+            _reply_to: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn deliver_channel_replies_waits_for_outbound_sends() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -8647,6 +8769,75 @@ mod tests {
             "delivery should wait for outbound send completion"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deliver_channel_replies_does_not_log_failure_when_outbound_retries_internally_then_succeeds() {
+        let outbound = Arc::new(RetryingSuccessOutbound::default());
+        let outbound_dyn: Arc<dyn moltis_channels::plugin::ChannelOutbound> = outbound.clone();
+        let targets = vec![moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:acct".to_string(),
+            chan_user_name: None,
+            chat_id: "123".to_string(),
+            message_id: Some("77".to_string()),
+        }];
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop(),
+        );
+        let buffer = LogBuffer::new(128);
+        let subscriber = tracing_subscriber::registry().with(LogBroadcastLayer::new(buffer.clone()));
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        deliver_channel_replies_to_targets(
+            outbound_dyn,
+            targets,
+            "session:test",
+            "hello",
+            state,
+            ReplyMedium::Text,
+            Vec::new(),
+            Some(ChannelDeliveryDiag {
+                run_id: Some("run-1".to_string()),
+                trigger_id: Some("trigger-1".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(outbound.gateway_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(outbound.transport_attempts.load(Ordering::SeqCst), 2);
+
+        let entries = buffer.list(
+            &LogFilter {
+                level: None,
+                target: None,
+                search: None,
+            },
+            32,
+        );
+
+        assert!(
+            entries.iter().any(|entry| {
+                entry.fields.get("event").and_then(|value| value.as_str())
+                    == Some("telegram.outbound.retrying")
+            }),
+            "test setup should simulate an internal telegram retry event"
+        );
+        assert!(
+            entries.iter().all(|entry| {
+                entry
+                    .fields
+                    .get("event")
+                    .and_then(|value| value.as_str())
+                    != Some("channel_delivery.failed")
+            }),
+            "successful internal retry should not emit channel_delivery.failed"
+        );
     }
 
     #[derive(Default)]

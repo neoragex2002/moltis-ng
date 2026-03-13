@@ -54,6 +54,9 @@ mod tests {
         assert!(id.starts_with("trg_"));
         let ulid = id.trim_start_matches("trg_");
         assert_eq!(ulid.len(), 26);
-        assert!(ulid.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+        assert!(
+            ulid.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        );
     }
 }

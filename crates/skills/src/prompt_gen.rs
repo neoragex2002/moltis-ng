@@ -23,7 +23,8 @@ pub fn generate_skills_prompt(skills: &[SkillMetadata]) -> String {
         .collect();
     // Stable ordering is required for prompt stability (diff/cache/debug).
     // Sort by (name, source, path).
-    sorted.sort_by(|a, b| (a.0.as_str(), a.1, a.2.as_str()).cmp(&(b.0.as_str(), b.1, b.2.as_str())));
+    sorted
+        .sort_by(|a, b| (a.0.as_str(), a.1, a.2.as_str()).cmp(&(b.0.as_str(), b.1, b.2.as_str())));
 
     let mut out = String::from("## 可用技能\n\n<available_skills>\n");
     for (_, _, _, skill) in sorted {

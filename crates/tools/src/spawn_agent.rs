@@ -6,9 +6,7 @@ use {anyhow::Result, async_trait::async_trait, tracing::info};
 
 use moltis_agents::{
     model::{LlmProvider, UserContent},
-    prompt::{
-        PromptReplyMedium, build_canonical_system_prompt_v1,
-    },
+    prompt::{PromptReplyMedium, build_canonical_system_prompt_v1},
     providers::ProviderRegistry,
     runner::{RunnerEvent, run_agent_loop_with_context},
     tool_registry::{AgentTool, ToolRegistry},

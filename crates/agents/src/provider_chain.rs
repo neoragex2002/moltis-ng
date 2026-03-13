@@ -241,7 +241,9 @@ impl LlmProvider for ProviderChain {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> Option<serde_json::Value> {
-        self.primary().provider.debug_as_sent_summary(messages, tools)
+        self.primary()
+            .provider
+            .debug_as_sent_summary(messages, tools)
     }
 
     async fn complete(

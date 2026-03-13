@@ -80,7 +80,11 @@ pub(crate) fn user_update(params: &serde_json::Value) -> anyhow::Result<serde_js
 
     if let Some(v) = patch.get("name") {
         let name = v.as_str().unwrap_or("").trim().to_string();
-        profile.name = if name.is_empty() { None } else { Some(name) };
+        profile.name = if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        };
     }
 
     if let Some(v) = patch.get("timezone") {

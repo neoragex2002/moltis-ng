@@ -767,7 +767,8 @@ pub async fn handle_message_direct(
                     message_kind: message_kind(&msg),
                     model: config.model.clone(),
                 };
-                sink.ingest_only(&transcript, reply_target.clone(), meta).await;
+                sink.ingest_only(&transcript, reply_target.clone(), meta)
+                    .await;
 
                 let outbound = {
                     let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
@@ -2627,7 +2628,11 @@ fn strip_self_mention_from_message(
 }
 
 fn tg_gst_v1_format_line(speaker: &str, addressed: bool, body: &str) -> String {
-    let addr_flag = if addressed { " -> you" } else { "" };
+    let addr_flag = if addressed {
+        " -> you"
+    } else {
+        ""
+    };
     format!("{speaker}{addr_flag}: {body}")
 }
 
@@ -3536,7 +3541,8 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
-                group_session_transcript_format: crate::config::GroupSessionTranscriptFormat::TgGstV1,
+                group_session_transcript_format:
+                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(
@@ -3670,7 +3676,8 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
-                group_session_transcript_format: crate::config::GroupSessionTranscriptFormat::TgGstV1,
+                group_session_transcript_format:
+                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(
@@ -3738,7 +3745,8 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
-                group_session_transcript_format: crate::config::GroupSessionTranscriptFormat::TgGstV1,
+                group_session_transcript_format:
+                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(
@@ -3806,7 +3814,10 @@ mod tests {
             .expect("handle message");
 
         let last2 = sink.last_dispatch_text.lock().unwrap().clone();
-        assert_eq!(last2.as_deref(), Some("alice -> you: @test_bot\n\n你处理下X"));
+        assert_eq!(
+            last2.as_deref(),
+            Some("alice -> you: @test_bot\n\n你处理下X")
+        );
     }
 
     #[tokio::test]
@@ -3852,7 +3863,8 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
-                group_session_transcript_format: crate::config::GroupSessionTranscriptFormat::TgGstV1,
+                group_session_transcript_format:
+                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(
@@ -3940,7 +3952,8 @@ mod tests {
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
                 mention_mode: moltis_channels::gating::MentionMode::Always,
-                group_session_transcript_format: crate::config::GroupSessionTranscriptFormat::TgGstV1,
+                group_session_transcript_format:
+                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(

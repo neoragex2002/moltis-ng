@@ -3037,9 +3037,8 @@ pub async fn start_gateway(
                         moltis_metrics::gauge!(moltis_metrics::session::ACTIVE).set(session_count);
 
                         let prometheus_text = handle.render();
-                        let snapshot = moltis_metrics::MetricsSnapshot::from_prometheus_text(
-                            &prometheus_text,
-                        );
+                        let snapshot =
+                            moltis_metrics::MetricsSnapshot::from_prometheus_text(&prometheus_text);
                         // Convert per-provider metrics to history format.
                         let by_provider = snapshot
                             .categories
@@ -3118,7 +3117,8 @@ pub async fn start_gateway(
                                 let cutoff = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
-                                    .as_millis() as u64
+                                    .as_millis()
+                                    as u64
                                     - (7 * 24 * 60 * 60 * 1000);
                                 match store.cleanup_before(cutoff).await {
                                     Ok(deleted) if deleted > 0 => {

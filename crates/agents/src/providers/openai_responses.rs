@@ -14,11 +14,11 @@ use moltis_config::schema::{
     PromptCacheBucketHashConfig, ReasoningEffort, TextVerbosity, WebSearchContextSize,
 };
 
+use crate::as_sent_summary::{DEFAULT_MAX_LIST_ITEMS, sha256_hex, text_preview_value};
 use crate::model::{
     ChatMessage, CompletionResponse, ContentPart, LlmProvider, LlmRequestContext, StreamEvent,
     ToolCall, Usage, UserContent,
 };
-use crate::as_sent_summary::{sha256_hex, text_preview_value, DEFAULT_MAX_LIST_ITEMS};
 
 use super::openai_compat::to_responses_api_tools;
 
@@ -1145,7 +1145,9 @@ impl LlmProvider for OpenAiResponsesProvider {
                 },
             }
 
-            if matches!(msg, ChatMessage::User { .. }) && input_types_preview.len() < DEFAULT_MAX_LIST_ITEMS {
+            if matches!(msg, ChatMessage::User { .. })
+                && input_types_preview.len() < DEFAULT_MAX_LIST_ITEMS
+            {
                 input_types_preview.push("message:user");
             }
         }

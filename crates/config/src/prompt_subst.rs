@@ -27,7 +27,10 @@ const ESC_LBRACE: &str = "<<MOLTIS_LBRACE>>";
 const ESC_RBRACE: &str = "<<MOLTIS_RBRACE>>";
 
 fn is_valid_var_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn unescape_braces(mut s: String) -> String {

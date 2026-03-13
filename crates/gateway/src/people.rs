@@ -188,7 +188,9 @@ pub(crate) fn people_get() -> anyhow::Result<serde_json::Value> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let telegram_display_name = entry
-            .get(&serde_yaml::Value::String("telegram_display_name".to_string()))
+            .get(&serde_yaml::Value::String(
+                "telegram_display_name".to_string(),
+            ))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
@@ -224,7 +226,10 @@ pub(crate) fn people_update_entry(params: &serde_json::Value) -> anyhow::Result<
         anyhow::bail!("invalid name");
     }
 
-    let patch = params.get("patch").cloned().unwrap_or(serde_json::json!({}));
+    let patch = params
+        .get("patch")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     if !patch.is_object() {
         anyhow::bail!("patch must be an object");
     }
@@ -267,7 +272,12 @@ pub(crate) fn people_update_entry(params: &serde_json::Value) -> anyhow::Result<
         apply_string_patch(entry, &patch, "displayName", "display_name");
         apply_string_patch(entry, &patch, "telegramUserId", "telegram_user_id");
         apply_string_patch(entry, &patch, "telegramUserName", "telegram_user_name");
-        apply_string_patch(entry, &patch, "telegramDisplayName", "telegram_display_name");
+        apply_string_patch(
+            entry,
+            &patch,
+            "telegramDisplayName",
+            "telegram_display_name",
+        );
         break;
     }
 
@@ -276,7 +286,10 @@ pub(crate) fn people_update_entry(params: &serde_json::Value) -> anyhow::Result<
     }
 
     if body_param.is_some() {
-        doc.body = body_param.and_then(|v| v.as_str()).unwrap_or("").to_string();
+        doc.body = body_param
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
     }
 
     save_people_md(&doc)?;
@@ -328,9 +341,7 @@ mod tests {
         let Some((prefix, inner, body)) = split_yaml_frontmatter(&raw) else {
             panic!("expected frontmatter");
         };
-        let new_raw = format!(
-            "{prefix}---\n{inner}\n---\n{body}\nKEEP THIS BODY LINE\n"
-        );
+        let new_raw = format!("{prefix}---\n{inner}\n---\n{body}\nKEEP THIS BODY LINE\n");
         std::fs::write(&path, new_raw).unwrap();
 
         let updated = people_update_entry(&serde_json::json!({
@@ -338,11 +349,13 @@ mod tests {
             "patch": { "displayName": "默认2" }
         }))
         .unwrap();
-        assert!(updated["people"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p["name"] == "default" && p["displayName"] == "默认2"));
+        assert!(
+            updated["people"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["name"] == "default" && p["displayName"] == "默认2")
+        );
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("KEEP THIS BODY LINE"));
@@ -362,7 +375,10 @@ mod tests {
             "body": "\n# PEOPLE.md\n\nNew body.\n"
         }))
         .unwrap();
-        assert_eq!(updated["body"].as_str().unwrap(), "\n# PEOPLE.md\n\nNew body.\n");
+        assert_eq!(
+            updated["body"].as_str().unwrap(),
+            "\n# PEOPLE.md\n\nNew body.\n"
+        );
 
         let after = std::fs::read_to_string(moltis_config::people_path()).unwrap();
         assert!(after.contains("\n# PEOPLE.md\n\nNew body.\n"));

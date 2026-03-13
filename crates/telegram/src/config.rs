@@ -84,6 +84,15 @@ pub struct TelegramAccountConfig {
     /// Minimum interval between edit-in-place updates (ms).
     pub edit_throttle_ms: u64,
 
+    /// Maximum number of outbound attempts for retryable Telegram text delivery.
+    pub outbound_max_attempts: u32,
+
+    /// Base retry backoff for retryable Telegram text delivery (ms).
+    pub outbound_retry_base_delay_ms: u64,
+
+    /// Maximum retry backoff for retryable Telegram text delivery (ms).
+    pub outbound_retry_max_delay_ms: u64,
+
     /// Default model ID for this bot's sessions (e.g. "claude-sonnet-4-5-20250929").
     /// When set, channel messages use this model instead of the first registered provider.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,6 +172,9 @@ impl Default for TelegramAccountConfig {
             group_session_transcript_format: GroupSessionTranscriptFormat::default(),
             stream_mode: StreamMode::default(),
             edit_throttle_ms: 300,
+            outbound_max_attempts: 3,
+            outbound_retry_base_delay_ms: 500,
+            outbound_retry_max_delay_ms: 5000,
             model: None,
             model_provider: None,
             otp_self_approval: true,
@@ -187,6 +199,9 @@ mod tests {
         assert_eq!(cfg.mention_mode, MentionMode::Mention);
         assert_eq!(cfg.stream_mode, StreamMode::EditInPlace);
         assert_eq!(cfg.edit_throttle_ms, 300);
+        assert_eq!(cfg.outbound_max_attempts, 3);
+        assert_eq!(cfg.outbound_retry_base_delay_ms, 500);
+        assert_eq!(cfg.outbound_retry_max_delay_ms, 5000);
         assert_eq!(cfg.relay_chain_enabled, true);
         assert_eq!(cfg.relay_hop_limit, 3);
         assert_eq!(cfg.epoch_relay_budget, 128);
@@ -212,6 +227,9 @@ mod tests {
         assert_eq!(cfg.allowlist, vec!["user1", "user2"]);
         // defaults for unspecified fields
         assert_eq!(cfg.mention_mode, MentionMode::Mention);
+        assert_eq!(cfg.outbound_max_attempts, 3);
+        assert_eq!(cfg.outbound_retry_base_delay_ms, 500);
+        assert_eq!(cfg.outbound_retry_max_delay_ms, 5000);
     }
 
     #[test]

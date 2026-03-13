@@ -1,9 +1,9 @@
+use std::collections::BTreeMap;
 use {
     crate::tool_registry::ToolRegistry,
     moltis_config::{AgentIdentity, DEFAULT_SOUL, UserProfile},
     moltis_skills::types::SkillMetadata,
 };
-use std::collections::BTreeMap;
 
 // Legacy prompt builders (pre-v1 canonical Type4 assembly).
 //
@@ -292,7 +292,9 @@ fn build_template_vars_v1(
             .iter()
             .any(|s| s["name"].as_str() == Some("memory_search"));
 
-    let skills_md = ensure_md_paragraph(moltis_skills::prompt_gen::generate_skills_prompt(project_skills));
+    let skills_md = ensure_md_paragraph(moltis_skills::prompt_gen::generate_skills_prompt(
+        project_skills,
+    ));
 
     let native_tools_index_md = if native_tool_calling {
         render_native_tools_index_md(&tool_schemas)
@@ -325,7 +327,10 @@ fn build_template_vars_v1(
         .unwrap_or_default();
 
     let mut vars = BTreeMap::new();
-    vars.insert("host_os".to_string(), map_host_os_zh(runtime.and_then(|rt| rt.host.os.as_deref())));
+    vars.insert(
+        "host_os".to_string(),
+        map_host_os_zh(runtime.and_then(|rt| rt.host.os.as_deref())),
+    );
     vars.insert("session_id".to_string(), session_id.to_string());
     vars.insert(
         "reply_medium".to_string(),
@@ -339,12 +344,18 @@ fn build_template_vars_v1(
         "sandbox_reuse_policy".to_string(),
         map_sandbox_reuse_policy_zh(runtime),
     );
-    vars.insert("system_data_dir_path".to_string(), system_data_dir_path.to_string());
+    vars.insert(
+        "system_data_dir_path".to_string(),
+        system_data_dir_path.to_string(),
+    );
     vars.insert(
         "agent_data_dir_path".to_string(),
         agent_data_dir_path.to_string(),
     );
-    vars.insert("data_dir_access".to_string(), map_data_dir_access_zh(runtime));
+    vars.insert(
+        "data_dir_access".to_string(),
+        map_data_dir_access_zh(runtime),
+    );
     vars.insert("network_policy".to_string(), map_network_policy_zh(runtime));
     vars.insert(
         "host_privilege_policy".to_string(),
@@ -407,7 +418,11 @@ pub fn build_canonical_system_prompt_v1(
             .join("people")
             .join(persona_id_effective)
             .canonicalize()
-            .unwrap_or_else(|_| moltis_config::data_dir().join("people").join(persona_id_effective))
+            .unwrap_or_else(|_| {
+                moltis_config::data_dir()
+                    .join("people")
+                    .join(persona_id_effective)
+            })
             .display()
             .to_string()
     };
@@ -441,8 +456,7 @@ pub fn build_canonical_system_prompt_v1(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let referenced_vars =
-        moltis_config::prompt_subst::extract_strict_vars(&type4_template_raw);
+    let referenced_vars = moltis_config::prompt_subst::extract_strict_vars(&type4_template_raw);
 
     // Hard-required vars for non-native tool calling.
     let tool_schemas = if stream_only {
@@ -466,7 +480,9 @@ pub fn build_canonical_system_prompt_v1(
     // Soft-required vars (warn only).
     for soft in ["skills_md", "long_term_memory_md", "voice_reply_suffix_md"] {
         if !referenced_vars.contains(soft) {
-            warnings.push(format!("PROMPT_TEMPLATE_MISSING_SOFT_VAR: missing `{{{{{soft}}}}}`"));
+            warnings.push(format!(
+                "PROMPT_TEMPLATE_MISSING_SOFT_VAR: missing `{{{{{soft}}}}}`"
+            ));
         }
     }
 
@@ -539,17 +555,24 @@ pub fn build_openai_responses_developer_prompts(
     persona.push_str("\n\n");
 
     persona.push_str("## 3. 主操作者 (Owner, Who is your owner?)\n");
-    persona.push_str(&format!("关于 Owner 的信息，详见 {SANDBOX_DATA_DIR}/USER.md。\n\n"));
+    persona.push_str(&format!(
+        "关于 Owner 的信息，详见 {SANDBOX_DATA_DIR}/USER.md。\n\n"
+    ));
     persona.push_str("规则：\n");
-    persona.push_str("- 当你被问到“我是谁 / 主操作者是谁 / 主操作者资料 / 与主操作者相关身份信息”等问题时：\n");
+    persona.push_str(
+        "- 当你被问到“我是谁 / 主操作者是谁 / 主操作者资料 / 与主操作者相关身份信息”等问题时：\n",
+    );
     persona.push_str(&format!(
         "    1. 必须先读取 {SANDBOX_DATA_DIR}/USER.md\n    2. 再基于该文件内容回答\n    3. 不得凭空猜测\n    4. 不得擅自修改其中信息；如需更新字段，先征得用户同意并通过 UI/RPC 更新字段（正文只读）\n\n"
     ));
 
     persona.push_str("## 4. 人物清单 (People, Who are the people you know?)\n\n");
-    persona.push_str(&format!("关于你认识的熟人信息，详见 {SANDBOX_DATA_DIR}/PEOPLE.md。\n\n"));
+    persona.push_str(&format!(
+        "关于你认识的熟人信息，详见 {SANDBOX_DATA_DIR}/PEOPLE.md。\n\n"
+    ));
     persona.push_str("规则：\n");
-    persona.push_str("- 当你被问到“你认识哪些人 / 有哪些账号或 bots / 有哪些代理或角色”等问题时：\n");
+    persona
+        .push_str("- 当你被问到“你认识哪些人 / 有哪些账号或 bots / 有哪些代理或角色”等问题时：\n");
     persona.push_str(&format!(
         "    1. 必须先读取 {SANDBOX_DATA_DIR}/PEOPLE.md\n    2. 再基于该文件内容回答\n    3. 不得靠记忆或猜测其中名单\n    4. PEOPLE.md 是公共通信录：字段可由用户在 UI 中维护；其中 emoji/creature 由系统从 people/<name>/IDENTITY.md 自动对齐；正文为手工说明（UI 只读）\n\n"
     ));
@@ -603,7 +626,9 @@ pub fn build_openai_responses_developer_prompts(
             runtime_snapshot.push_str(&format!("- channel_account_id: {channel_account_id}\n"));
         }
         if let Some(channel_account_handle) = host.channel_account_handle.as_deref() {
-            runtime_snapshot.push_str(&format!("- channel_account_handle: {channel_account_handle}\n"));
+            runtime_snapshot.push_str(&format!(
+                "- channel_account_handle: {channel_account_handle}\n"
+            ));
         }
         if let Some(channel_chat_id) = host.channel_chat_id.as_deref() {
             runtime_snapshot.push_str(&format!("- channel_chat_id: {channel_chat_id}\n"));
@@ -645,7 +670,9 @@ pub fn build_openai_responses_developer_prompts(
             runtime_snapshot.push_str("- exec_sandboxed: false\n");
         }
         if let Some(sudo_non_interactive) = runtime.host.sudo_non_interactive {
-            runtime_snapshot.push_str(&format!("- host_sudo_non_interactive: {sudo_non_interactive}\n"));
+            runtime_snapshot.push_str(&format!(
+                "- host_sudo_non_interactive: {sudo_non_interactive}\n"
+            ));
         }
         if let Some(sudo_status) = runtime.host.sudo_status.as_deref() {
             runtime_snapshot.push_str(&format!("- host_sudo_status: {sudo_status}\n"));
@@ -1776,9 +1803,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("PROMPT_TEMPLATE_MISSING_REQUIRED_VAR"));
+        assert!(
+            err.to_string()
+                .contains("PROMPT_TEMPLATE_MISSING_REQUIRED_VAR")
+        );
     }
 
     #[test]
@@ -1819,9 +1847,7 @@ mod tests {
             Some("identity"),
             Some("soul"),
             Some("agents"),
-            Some(
-                "{{non_native_tools_catalog_md}}\n{{non_native_tools_calling_guide_md}}\n",
-            ),
+            Some("{{non_native_tools_catalog_md}}\n{{non_native_tools_calling_guide_md}}\n"),
             PromptReplyMedium::Text,
             None,
             "main",
@@ -1906,9 +1932,11 @@ mod tests {
         )
         .expect("canonical prompt should build");
 
-        assert!(canonical
-            .warnings
-            .iter()
-            .any(|w| w.contains("PROMPT_TEMPLATE_MISSING_SOFT_VAR")));
+        assert!(
+            canonical
+                .warnings
+                .iter()
+                .any(|w| w.contains("PROMPT_TEMPLATE_MISSING_SOFT_VAR"))
+        );
     }
 }

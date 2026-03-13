@@ -175,7 +175,9 @@ fn reset_identity() -> Result<()> {
     moltis_config::save_soul(None)?;
 
     let _ = std::fs::remove_file(moltis_config::data_dir().join(".onboarded"));
-    println!("Workspace identity and user profile cleared. Onboarding will be required on next load.");
+    println!(
+        "Workspace identity and user profile cleared. Onboarding will be required on next load."
+    );
     Ok(())
 }
 

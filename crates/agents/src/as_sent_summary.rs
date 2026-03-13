@@ -41,4 +41,3 @@ pub fn text_preview_value_with_limit(input: &str, max_bytes: usize) -> Value {
         "preview": preview,
     })
 }
-

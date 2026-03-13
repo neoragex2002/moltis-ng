@@ -4,12 +4,12 @@ use {async_trait::async_trait, futures::StreamExt, secrecy::ExposeSecret, tokio_
 
 use tracing::{debug, trace, warn};
 
+use crate::as_sent_summary::{
+    DEFAULT_MAX_LIST_ITEMS, sha256_hex, text_preview_value, text_preview_value_with_limit,
+};
 use crate::model::{
     ChatMessage, CompletionResponse, ContentPart, LlmProvider, StreamEvent, ToolCall, Usage,
     UserContent,
-};
-use crate::as_sent_summary::{
-    sha256_hex, text_preview_value, text_preview_value_with_limit, DEFAULT_MAX_LIST_ITEMS,
 };
 
 pub struct AnthropicProvider {
@@ -224,7 +224,10 @@ impl LlmProvider for AnthropicProvider {
         let mut messages_preview: Vec<serde_json::Value> = Vec::new();
         let mut has_multimodal_images = false;
 
-        for msg in messages.iter().filter(|m| !matches!(m, ChatMessage::System { .. })) {
+        for msg in messages
+            .iter()
+            .filter(|m| !matches!(m, ChatMessage::System { .. }))
+        {
             if roles_preview.len() >= DEFAULT_MAX_LIST_ITEMS {
                 break;
             }
@@ -254,7 +257,10 @@ impl LlmProvider for AnthropicProvider {
                         }));
                     },
                 },
-                ChatMessage::Assistant { content, tool_calls } => {
+                ChatMessage::Assistant {
+                    content,
+                    tool_calls,
+                } => {
                     roles_preview.push("assistant");
                     let text = content.as_deref().unwrap_or("");
                     messages_preview.push(serde_json::json!({

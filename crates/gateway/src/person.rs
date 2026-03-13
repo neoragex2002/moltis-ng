@@ -170,7 +170,9 @@ pub(crate) fn person_list() -> anyhow::Result<serde_json::Value> {
     let root = moltis_config::people_dir();
     if let Ok(rd) = std::fs::read_dir(&root) {
         for entry in rd.flatten() {
-            let Ok(ft) = entry.file_type() else { continue };
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             if !ft.is_dir() {
                 continue;
             }
@@ -310,7 +312,10 @@ pub(crate) fn person_save(params: &serde_json::Value) -> anyhow::Result<serde_js
         }
 
         if params.get("identityBody").is_some() {
-            let next_body = params.get("identityBody").and_then(|v| v.as_str()).unwrap_or("");
+            let next_body = params
+                .get("identityBody")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             doc.body = next_body.to_string();
         }
 
@@ -319,7 +324,11 @@ pub(crate) fn person_save(params: &serde_json::Value) -> anyhow::Result<serde_js
     }
 
     // SOUL/TOOLS/AGENTS markdown
-    for (key, path) in [("soul", soul_path), ("tools", tools_path), ("agents", agents_path)] {
+    for (key, path) in [
+        ("soul", soul_path),
+        ("tools", tools_path),
+        ("agents", agents_path),
+    ] {
         if params.get(key).is_some() {
             let next = params.get(key).and_then(|v| v.as_str()).unwrap_or("");
             atomic_write_if_changed(&path, next)?;
@@ -410,7 +419,12 @@ mod tests {
 
         assert_eq!(out["identity"]["name"], "research");
         assert_eq!(out["identity"]["vibe"], "Calm");
-        assert!(out["identity"]["body"].as_str().unwrap().contains("Keep body."));
+        assert!(
+            out["identity"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("Keep body.")
+        );
 
         let after = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
         assert!(after.contains("name: research"));
@@ -458,7 +472,10 @@ mod tests {
         assert_eq!(out["agents"], "old agents");
 
         let identity_after = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
-        assert_eq!(identity_after, identity_before, "IDENTITY.md must not change");
+        assert_eq!(
+            identity_after, identity_before,
+            "IDENTITY.md must not change"
+        );
 
         let people_after = std::fs::read_to_string(&people_path).unwrap();
         assert_eq!(people_after, people_before, "PEOPLE.md must not change");
@@ -492,14 +509,16 @@ mod tests {
         let identity_before = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
         let people_before = std::fs::read_to_string(&people_path).unwrap();
 
-        let out =
-            person_save(&serde_json::json!({ "name": "ops", "tools": "new tools" })).unwrap();
+        let out = person_save(&serde_json::json!({ "name": "ops", "tools": "new tools" })).unwrap();
         assert_eq!(out["soul"], "old soul");
         assert_eq!(out["tools"], "new tools");
         assert_eq!(out["agents"], "old agents");
 
         let identity_after = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
-        assert_eq!(identity_after, identity_before, "IDENTITY.md must not change");
+        assert_eq!(
+            identity_after, identity_before,
+            "IDENTITY.md must not change"
+        );
 
         let people_after = std::fs::read_to_string(&people_path).unwrap();
         assert_eq!(people_after, people_before, "PEOPLE.md must not change");
@@ -540,7 +559,10 @@ mod tests {
         assert_eq!(out["agents"], "new agents");
 
         let identity_after = std::fs::read_to_string(dir.join("IDENTITY.md")).unwrap();
-        assert_eq!(identity_after, identity_before, "IDENTITY.md must not change");
+        assert_eq!(
+            identity_after, identity_before,
+            "IDENTITY.md must not change"
+        );
 
         let people_after = std::fs::read_to_string(&people_path).unwrap();
         assert_eq!(people_after, people_before, "PEOPLE.md must not change");

@@ -150,9 +150,8 @@ pub async fn start_polling(
             match result {
                 Ok(updates) => {
                     if consecutive_failures > 0 {
-                        let downtime_secs = first_failure_at
-                            .map(|t| t.elapsed().as_secs())
-                            .unwrap_or(0);
+                        let downtime_secs =
+                            first_failure_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
                         info!(
                             event = "telegram.polling.recovered",
                             account_handle = aid,
@@ -276,9 +275,8 @@ pub async fn start_polling(
                         .unwrap_or(true);
                     if should_log {
                         last_summary_at = Some(now);
-                        let downtime_secs = first_failure_at
-                            .map(|t| t.elapsed().as_secs())
-                            .unwrap_or(0);
+                        let downtime_secs =
+                            first_failure_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
                         warn!(
                             event = "telegram.polling.degraded",
                             account_handle = aid,
