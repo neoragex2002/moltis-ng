@@ -9,6 +9,50 @@ use moltis_channels::{ChannelEventSink, message_log::MessageLog};
 
 use crate::{config::TelegramAccountConfig, otp::OtpState, outbound::TelegramOutbound};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollingState {
+    Running,
+    Stopping,
+    Exited,
+}
+
+impl PollingState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PollingRuntimeState {
+    pub polling_state: PollingState,
+    pub polling_started_at: std::time::Instant,
+    pub last_poll_ok_at: Option<std::time::Instant>,
+    pub last_update_finished_at: Option<std::time::Instant>,
+    pub last_retryable_failure_at: Option<std::time::Instant>,
+    pub last_retryable_failure_reason_code: Option<&'static str>,
+    pub last_poll_exit_reason_code: Option<&'static str>,
+    pub stale_threshold_secs: u64,
+}
+
+impl PollingRuntimeState {
+    pub fn new(stale_threshold_secs: u64) -> Self {
+        Self {
+            polling_state: PollingState::Running,
+            polling_started_at: std::time::Instant::now(),
+            last_poll_ok_at: None,
+            last_update_finished_at: None,
+            last_retryable_failure_at: None,
+            last_retryable_failure_reason_code: None,
+            last_poll_exit_reason_code: None,
+            stale_threshold_secs,
+        }
+    }
+}
+
 /// Shared account state map.
 pub type AccountStateMap = Arc<RwLock<HashMap<String, AccountState>>>;
 
@@ -24,6 +68,7 @@ pub struct AccountState {
     pub cancel: CancellationToken,
     pub message_log: Option<Arc<dyn MessageLog>>,
     pub event_sink: Option<Arc<dyn ChannelEventSink>>,
+    pub polling: Arc<Mutex<PollingRuntimeState>>,
     /// In-memory OTP challenges for self-approval (std::sync::Mutex because
     /// all OTP operations are synchronous HashMap lookups, never held across
     /// `.await` points).

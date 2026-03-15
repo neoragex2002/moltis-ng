@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use {
     anyhow::{Result, anyhow},
@@ -21,6 +21,12 @@ use crate::{
     session::extract_preview_from_value,
     state::GatewayState,
 };
+
+#[cfg(not(test))]
+const TELEGRAM_TYPING_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+#[cfg(test)]
+const TELEGRAM_TYPING_KEEPALIVE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(10);
 
 fn format_context_v1_payload(payload: serde_json::Value) -> String {
     serde_json::json!({
@@ -75,6 +81,185 @@ async fn ensure_channel_session_id(
         )
         .await;
     new_id
+}
+
+async fn run_with_telegram_typing_loop<T>(
+    outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound>,
+    chan_account_key: String,
+    chat_id: String,
+    op: &'static str,
+    operation: impl Future<Output = T>,
+) -> T {
+    async fn send_typing_once(
+        outbound: &Arc<dyn moltis_channels::plugin::ChannelOutbound>,
+        chan_account_key: &str,
+        chat_id: &str,
+        op: &'static str,
+        typing_failed: &mut bool,
+    ) {
+        match outbound.send_typing(chan_account_key, chat_id).await {
+            Ok(()) => {
+                if *typing_failed {
+                    info!(
+                        event = "telegram.typing.recovered",
+                        op, chan_account_key, chat_id, "typing indicator recovered"
+                    );
+                    *typing_failed = false;
+                }
+            },
+            Err(error) => {
+                if !*typing_failed {
+                    warn!(
+                        event = "telegram.typing.failed",
+                        op,
+                        chan_account_key,
+                        chat_id,
+                        reason_code = "send_typing_failed",
+                        error = %error,
+                        "typing indicator failed"
+                    );
+                    *typing_failed = true;
+                } else {
+                    debug!(
+                        event = "telegram.typing.failed",
+                        op,
+                        chan_account_key,
+                        chat_id,
+                        reason_code = "send_typing_failed",
+                        "typing indicator still failing"
+                    );
+                }
+            },
+        }
+    }
+
+    let operation = operation;
+    let typing_loop = async {
+        let mut typing_failed = false;
+        send_typing_once(
+            &outbound,
+            &chan_account_key,
+            &chat_id,
+            op,
+            &mut typing_failed,
+        )
+        .await;
+
+        let mut keepalive = tokio::time::interval_at(
+            tokio::time::Instant::now() + TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
+            TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
+        );
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            keepalive.tick().await;
+            send_typing_once(
+                &outbound,
+                &chan_account_key,
+                &chat_id,
+                op,
+                &mut typing_failed,
+            )
+            .await;
+        }
+    };
+
+    tokio::pin!(operation);
+    tokio::pin!(typing_loop);
+
+    tokio::select! {
+        result = &mut operation => result,
+        _ = &mut typing_loop => unreachable!("telegram typing loop must stay pending until the operation completes"),
+    }
+}
+
+fn spawn_telegram_typing_loop_until(
+    outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound>,
+    chan_account_key: String,
+    chat_id: String,
+    op: &'static str,
+    completion: impl Future<Output = ()> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        async fn send_typing_once(
+            outbound: &Arc<dyn moltis_channels::plugin::ChannelOutbound>,
+            chan_account_key: &str,
+            chat_id: &str,
+            op: &'static str,
+            typing_failed: &mut bool,
+        ) {
+            match outbound.send_typing(chan_account_key, chat_id).await {
+                Ok(()) => {
+                    if *typing_failed {
+                        info!(
+                            event = "telegram.typing.recovered",
+                            op, chan_account_key, chat_id, "typing indicator recovered"
+                        );
+                        *typing_failed = false;
+                    }
+                },
+                Err(error) => {
+                    if !*typing_failed {
+                        warn!(
+                            event = "telegram.typing.failed",
+                            op,
+                            chan_account_key,
+                            chat_id,
+                            reason_code = "send_typing_failed",
+                            error = %error,
+                            "typing indicator failed"
+                        );
+                        *typing_failed = true;
+                    } else {
+                        debug!(
+                            event = "telegram.typing.failed",
+                            op,
+                            chan_account_key,
+                            chat_id,
+                            reason_code = "send_typing_failed",
+                            "typing indicator still failing"
+                        );
+                    }
+                },
+            }
+        }
+
+        let mut typing_failed = false;
+        tokio::pin!(completion);
+
+        tokio::select! {
+            _ = &mut completion => return,
+            _ = send_typing_once(
+                &outbound,
+                &chan_account_key,
+                &chat_id,
+                op,
+                &mut typing_failed,
+            ) => {}
+        }
+
+        let mut keepalive = tokio::time::interval_at(
+            tokio::time::Instant::now() + TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
+            TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
+        );
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = &mut completion => break,
+                _ = keepalive.tick() => {
+                    send_typing_once(
+                        &outbound,
+                        &chan_account_key,
+                        &chat_id,
+                        op,
+                        &mut typing_failed,
+                    )
+                    .await;
+                },
+            }
+        }
+    });
 }
 
 /// Broadcasts channel events over the gateway WebSocket.
@@ -284,78 +469,90 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 }
             }
 
-            // Send a repeating "typing" indicator every 4s until chat.send()
-            // completes. Telegram's typing status expires after ~5s.
-            let send_result = if let Some(outbound) = state.services.channel_outbound_arc() {
-                let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+            if let Some(outbound) = state.services.channel_outbound_arc() {
+                let feedback_outbound = Arc::clone(&outbound);
                 let chan_account_key = reply_to.chan_account_key.clone();
                 let chat_id = reply_to.chat_id.clone();
-                tokio::spawn(async move {
-                    debug!(
-                        chan_account_key = chan_account_key,
-                        chat_id = chat_id,
-                        "starting typing indicator loop"
-                    );
-                    loop {
-                        if let Err(e) = outbound.send_typing(&chan_account_key, &chat_id).await {
-                            debug!(
-                                chan_account_key = chan_account_key,
-                                chat_id = chat_id,
-                                "typing indicator failed: {e}"
-                            );
-                        } else {
-                            debug!(
-                                chan_account_key = chan_account_key,
-                                chat_id = chat_id,
-                                "typing indicator sent"
-                            );
+                let reply_to_message_id = reply_to.message_id.clone();
+                let failure_feedback_outbound = Arc::clone(&feedback_outbound);
+                let failure_chan_account_key = chan_account_key.clone();
+                let failure_chat_id = chat_id.clone();
+                let failure_session_id = session_id.clone();
+                let failure_trigger_id = trigger_id.clone();
+                let send_result = run_with_telegram_typing_loop(
+                    outbound,
+                    chan_account_key.clone(),
+                    chat_id.clone(),
+                    "dispatch_to_chat_start",
+                    async move {
+                        let send_result = chat.send(params).await;
+                        if let Err(e) = &send_result {
+                            error!("channel dispatch_to_chat failed: {e}");
+                            let error_msg =
+                                "⚠️ Something went wrong. Please try again.".to_string();
+                            if let Err(send_err) = failure_feedback_outbound
+                                .send_text(
+                                    &failure_chan_account_key,
+                                    &failure_chat_id,
+                                    &error_msg,
+                                    reply_to_message_id.as_deref(),
+                                )
+                                .await
+                            {
+                                warn!("failed to send error back to channel: {send_err}");
+                            }
+                            let _ = state
+                                .drain_channel_replies(&failure_session_id, &failure_trigger_id)
+                                .await;
+                            let _ = state
+                                .drain_channel_status_log(&failure_session_id, &failure_trigger_id)
+                                .await;
                         }
-                        tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {
-                                debug!(
-                                    chan_account_key = chan_account_key,
-                                    chat_id = chat_id,
-                                    "typing loop: 4s elapsed, sending again"
-                                );
-                            },
-                            _ = &mut done_rx => {
-                                debug!(
-                                    chan_account_key = chan_account_key,
-                                    chat_id = chat_id,
-                                    "typing loop: chat completed, stopping"
-                                );
-                                break;
-                            },
-                        }
-                    }
-                });
-                let result = chat.send(params).await;
-                let _ = done_tx.send(());
-                result
-            } else {
-                chat.send(params).await
-            };
+                        send_result
+                    },
+                )
+                .await;
 
-            if let Err(e) = send_result {
-                error!("channel dispatch_to_chat failed: {e}");
-                // Send the error back to the originating channel so the user
-                // knows something went wrong.
-                if let Some(outbound) = state.services.channel_outbound_arc() {
-                    let error_msg = format!("⚠️ {e}");
-                    if let Err(send_err) = outbound
-                        .send_text(
-                            &reply_to.chan_account_key,
-                            &reply_to.chat_id,
-                            &error_msg,
-                            reply_to.message_id.as_deref(),
-                        )
-                        .await
-                    {
-                        warn!("failed to send error back to channel: {send_err}");
-                    }
+                match send_result {
+                    Ok(result) => {
+                        if let Some(run_id) = result.get("runId").and_then(|v| v.as_str()) {
+                            let run_id = run_id.to_string();
+                            let typing_chat = state.chat().await;
+                            spawn_telegram_typing_loop_until(
+                                feedback_outbound,
+                                chan_account_key,
+                                chat_id,
+                                "dispatch_to_chat_run",
+                                async move {
+                                    if let Err(error) =
+                                        typing_chat.wait_run_completion(&run_id).await
+                                    {
+                                        warn!(
+                                            event = "telegram.typing.wait_failed",
+                                            op = "dispatch_to_chat_run",
+                                            run_id = run_id.as_str(),
+                                            reason_code = "wait_run_completion_failed",
+                                            error,
+                                            "failed waiting for chat run completion"
+                                        );
+                                    }
+                                },
+                            );
+                        } else if result.get("queued").and_then(|v| v.as_bool()) == Some(true) {
+                            info!(
+                                event = "telegram.typing.skipped",
+                                op = "dispatch_to_chat_run",
+                                session_id,
+                                trigger_id,
+                                reason_code = "queued_without_run_id",
+                                "telegram typing lifecycle not extended because chat send queued without run id"
+                            );
+                        }
+                    },
+                    Err(_e) => {},
                 }
-                // Drain any pending channel delivery state (reply targets + logbook)
-                // so later replies can't get cross-wired to this failed trigger.
+            } else if let Err(e) = chat.send(params).await {
+                error!("channel dispatch_to_chat failed: {e}");
                 let _ = state.drain_channel_replies(&session_id, &trigger_id).await;
                 let _ = state
                     .drain_channel_status_log(&session_id, &trigger_id)
@@ -681,9 +878,49 @@ impl ChannelEventSink for GatewayChannelEventSink {
         reply_to: ChannelReplyTarget,
         meta: ChannelMessageMeta,
     ) {
-        if attachments.is_empty() {
-            // No attachments, use the regular dispatch
-            self.dispatch_to_chat(text, reply_to, meta).await;
+        let attachment_count = attachments.len();
+        let has_non_image_attachment = attachments
+            .iter()
+            .any(|attachment| !attachment.media_type.starts_with("image/"));
+        let image_attachments: Vec<ChannelAttachment> = attachments
+            .into_iter()
+            .filter(|a| a.media_type.starts_with("image/"))
+            .collect();
+        if has_non_image_attachment || image_attachments.is_empty() {
+            warn!(
+                event = "channel.attachment.rejected",
+                chan_type = ?reply_to.chan_type,
+                chan_account_key = %reply_to.chan_account_key,
+                chat_id = %reply_to.chat_id,
+                attachment_count,
+                reason_code = "non_image_attachment",
+                "dispatch_to_chat_with_attachments rejected non-image attachments"
+            );
+            let Some(state) = self.state.get() else {
+                warn!("channel dispatch_to_chat_with_attachments: gateway not ready");
+                return;
+            };
+            if let Some(outbound) = state.services.channel_outbound_arc() {
+                let error_msg = "⚠️ This attachment type isn't supported yet.".to_string();
+                if let Err(_send_err) = outbound
+                    .send_text(
+                        &reply_to.chan_account_key,
+                        &reply_to.chat_id,
+                        &error_msg,
+                        reply_to.message_id.as_deref(),
+                    )
+                    .await
+                {
+                    warn!(
+                        event = "channel.user_feedback.failed",
+                        chan_type = ?reply_to.chan_type,
+                        chan_account_key = %reply_to.chan_account_key,
+                        chat_id = %reply_to.chat_id,
+                        reason_code = "send_text_failed",
+                        "failed to send unsupported attachment feedback"
+                    );
+                }
+            }
             return;
         }
 
@@ -712,7 +949,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         }
 
         // Add image parts
-        for attachment in &attachments {
+        for attachment in &image_attachments {
             let base64_data = base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
                 &attachment.data,
@@ -729,7 +966,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         debug!(
             chan_chat_key = %chan_chat_key,
             text_len = text.len(),
-            attachment_count = attachments.len(),
+            attachment_count = image_attachments.len(),
             "dispatching multimodal message to chat"
         );
 
@@ -877,47 +1114,87 @@ impl ChannelEventSink for GatewayChannelEventSink {
             }
         }
 
-        // Send typing indicator and dispatch to chat
-        let send_result = if let Some(outbound) = state.services.channel_outbound_arc() {
-            let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+        if let Some(outbound) = state.services.channel_outbound_arc() {
+            let feedback_outbound = Arc::clone(&outbound);
             let chan_account_key = reply_to.chan_account_key.clone();
             let chat_id = reply_to.chat_id.clone();
-            tokio::spawn(async move {
-                loop {
-                    if let Err(e) = outbound.send_typing(&chan_account_key, &chat_id).await {
-                        debug!(chan_account_key, chat_id, "typing indicator failed: {e}");
+            let reply_to_message_id = reply_to.message_id.clone();
+            let failure_feedback_outbound = Arc::clone(&feedback_outbound);
+            let failure_chan_account_key = chan_account_key.clone();
+            let failure_chat_id = chat_id.clone();
+            let failure_session_id = session_id.clone();
+            let failure_trigger_id = trigger_id.clone();
+            let send_result = run_with_telegram_typing_loop(
+                outbound,
+                chan_account_key.clone(),
+                chat_id.clone(),
+                "dispatch_to_chat_with_attachments_start",
+                async move {
+                    let send_result = chat.send(params).await;
+                    if let Err(e) = &send_result {
+                        error!("channel dispatch_to_chat_with_attachments failed: {e}");
+                        let error_msg = "⚠️ Something went wrong. Please try again.".to_string();
+                        if let Err(send_err) = failure_feedback_outbound
+                            .send_text(
+                                &failure_chan_account_key,
+                                &failure_chat_id,
+                                &error_msg,
+                                reply_to_message_id.as_deref(),
+                            )
+                            .await
+                        {
+                            warn!("failed to send error back to channel: {send_err}");
+                        }
+                        let _ = state
+                            .drain_channel_replies(&failure_session_id, &failure_trigger_id)
+                            .await;
+                        let _ = state
+                            .drain_channel_status_log(&failure_session_id, &failure_trigger_id)
+                            .await;
                     }
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {},
-                        _ = &mut done_rx => break,
-                    }
-                }
-            });
-            let result = chat.send(params).await;
-            let _ = done_tx.send(());
-            result
-        } else {
-            chat.send(params).await
-        };
+                    send_result
+                },
+            )
+            .await;
 
-        if let Err(e) = send_result {
-            error!("channel dispatch_to_chat_with_attachments failed: {e}");
-            if let Some(outbound) = state.services.channel_outbound_arc() {
-                let error_msg = format!("⚠️ {e}");
-                if let Err(send_err) = outbound
-                    .send_text(
-                        &reply_to.chan_account_key,
-                        &reply_to.chat_id,
-                        &error_msg,
-                        reply_to.message_id.as_deref(),
-                    )
-                    .await
-                {
-                    warn!("failed to send error back to channel: {send_err}");
-                }
+            match send_result {
+                Ok(result) => {
+                    if let Some(run_id) = result.get("runId").and_then(|v| v.as_str()) {
+                        let run_id = run_id.to_string();
+                        let typing_chat = state.chat().await;
+                        spawn_telegram_typing_loop_until(
+                            feedback_outbound,
+                            chan_account_key,
+                            chat_id,
+                            "dispatch_to_chat_with_attachments_run",
+                            async move {
+                                if let Err(error) = typing_chat.wait_run_completion(&run_id).await {
+                                    warn!(
+                                        event = "telegram.typing.wait_failed",
+                                        op = "dispatch_to_chat_with_attachments_run",
+                                        run_id = run_id.as_str(),
+                                        reason_code = "wait_run_completion_failed",
+                                        error,
+                                        "failed waiting for chat run completion"
+                                    );
+                                }
+                            },
+                        );
+                    } else if result.get("queued").and_then(|v| v.as_bool()) == Some(true) {
+                        info!(
+                            event = "telegram.typing.skipped",
+                            op = "dispatch_to_chat_with_attachments_run",
+                            session_id,
+                            trigger_id,
+                            reason_code = "queued_without_run_id",
+                            "telegram typing lifecycle not extended because chat send queued without run id"
+                        );
+                    }
+                },
+                Err(_e) => {},
             }
-            // Drain any pending channel delivery state (reply targets + logbook)
-            // so later replies can't get cross-wired to this failed trigger.
+        } else if let Err(e) = chat.send(params).await {
+            error!("channel dispatch_to_chat_with_attachments failed: {e}");
             let _ = state.drain_channel_replies(&session_id, &trigger_id).await;
             let _ = state
                 .drain_channel_status_log(&session_id, &trigger_id)
@@ -1917,6 +2194,623 @@ mod tests {
         assert_eq!(texts[0].1, "123");
         assert_eq!(texts[0].3.as_deref(), Some("1"));
         assert!(texts[0].2.starts_with("⚠️"));
+        assert!(
+            !texts[0].2.contains("boom"),
+            "error message must not include internal error details"
+        );
+    }
+
+    struct RecordingChatService {
+        last_params: tokio::sync::Mutex<Option<serde_json::Value>>,
+    }
+
+    #[async_trait]
+    impl crate::services::ChatService for RecordingChatService {
+        async fn send(&self, params: serde_json::Value) -> crate::services::ServiceResult {
+            *self.last_params.lock().await = Some(params);
+            Ok(serde_json::json!({}))
+        }
+
+        async fn abort(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn cancel_queued(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "cleared": 0 }))
+        }
+
+        async fn history(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+
+        async fn inject(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn clear(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        async fn compact(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        async fn context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn raw_prompt(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn full_context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+    }
+
+    struct AsyncRunChatService {
+        started: tokio::sync::Notify,
+        finish: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl crate::services::ChatService for AsyncRunChatService {
+        async fn send(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            self.started.notify_one();
+            Ok(serde_json::json!({ "runId": "run-1" }))
+        }
+
+        async fn wait_run_completion(&self, run_id: &str) -> crate::services::ServiceResult<()> {
+            assert_eq!(run_id, "run-1");
+            self.finish.notified().await;
+            Ok(())
+        }
+
+        async fn abort(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn cancel_queued(
+            &self,
+            _params: serde_json::Value,
+        ) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "cleared": 0 }))
+        }
+
+        async fn history(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+
+        async fn inject(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn clear(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        async fn compact(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        async fn context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn raw_prompt(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn full_context(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            Ok(serde_json::json!([]))
+        }
+    }
+
+    struct DelayedErrorFeedbackOutbound {
+        typings: AtomicUsize,
+        text_calls: AtomicUsize,
+        feedback_gate: tokio::sync::Notify,
+        texts: tokio::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ChannelOutbound for DelayedErrorFeedbackOutbound {
+        async fn send_text(
+            &self,
+            _chan_account_key: &str,
+            _to: &str,
+            text: &str,
+            _reply_to: Option<&str>,
+        ) -> anyhow::Result<()> {
+            self.text_calls.fetch_add(1, Ordering::SeqCst);
+            self.texts.lock().await.push(text.to_string());
+            self.feedback_gate.notified().await;
+            Ok(())
+        }
+
+        async fn send_media(
+            &self,
+            _chan_account_key: &str,
+            _to: &str,
+            _payload: &ReplyPayload,
+            _reply_to: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> anyhow::Result<()> {
+            self.typings.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_with_attachments_rejects_non_image_media_types() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn ChannelOutbound> = rec.clone();
+        let chat = Arc::new(RecordingChatService {
+            last_params: tokio::sync::Mutex::new(None),
+        });
+
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        state.set_chat(chat.clone()).await;
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = GatewayChannelEventSink::new(Arc::clone(&cell));
+
+        sink.dispatch_to_chat_with_attachments(
+            "hi",
+            vec![ChannelAttachment {
+                media_type: "application/pdf".into(),
+                data: vec![0, 1, 2, 3],
+            }],
+            ChannelReplyTarget {
+                chan_type: ChannelType::Telegram,
+                chan_account_key: "telegram:acct".into(),
+                chan_user_name: None,
+                chat_id: "123".into(),
+                message_id: Some("1".into()),
+            },
+            ChannelMessageMeta {
+                chan_type: ChannelType::Telegram,
+                sender_name: None,
+                username: None,
+                message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                model: None,
+            },
+        )
+        .await;
+
+        assert!(
+            chat.last_params.lock().await.is_none(),
+            "non-image attachments must not be dispatched to chat"
+        );
+        let texts = rec.texts.lock().await;
+        assert_eq!(texts.len(), 1, "user should receive direct feedback");
+        assert_eq!(texts[0].0, "telegram:acct");
+        assert_eq!(texts[0].1, "123");
+        assert_eq!(texts[0].3.as_deref(), Some("1"));
+        assert!(
+            texts[0].2.contains("attachment type isn't supported"),
+            "expected unsupported attachment feedback, got {:?}",
+            texts[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_keeps_typing_for_entire_run() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn ChannelOutbound> = rec.clone();
+        let chat = Arc::new(AsyncRunChatService {
+            started: tokio::sync::Notify::new(),
+            finish: tokio::sync::Notify::new(),
+        });
+
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        state.set_chat(chat.clone()).await;
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = Arc::new(GatewayChannelEventSink::new(Arc::clone(&cell)));
+        let started = chat.started.notified();
+        let sink_task = {
+            let sink = Arc::clone(&sink);
+            tokio::spawn(async move {
+                sink.dispatch_to_chat(
+                    "hi",
+                    ChannelReplyTarget {
+                        chan_type: ChannelType::Telegram,
+                        chan_account_key: "telegram:acct".into(),
+                        chan_user_name: None,
+                        chat_id: "123".into(),
+                        message_id: Some("1".into()),
+                    },
+                    ChannelMessageMeta {
+                        chan_type: ChannelType::Telegram,
+                        sender_name: None,
+                        username: None,
+                        message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                        model: None,
+                    },
+                )
+                .await;
+            })
+        };
+
+        started.await;
+        tokio::time::timeout(std::time::Duration::from_millis(50), sink_task)
+            .await
+            .expect("dispatch_to_chat should return after scheduling background typing")
+            .unwrap();
+
+        tokio::task::yield_now().await;
+        let initial_typings = rec.typings.load(Ordering::SeqCst);
+        assert!(
+            initial_typings >= 1,
+            "typing must start before dispatch_to_chat returns"
+        );
+
+        tokio::time::sleep(
+            TELEGRAM_TYPING_KEEPALIVE_INTERVAL + std::time::Duration::from_millis(5),
+        )
+        .await;
+        assert!(rec.typings.load(Ordering::SeqCst) > initial_typings);
+
+        tokio::time::sleep(
+            TELEGRAM_TYPING_KEEPALIVE_INTERVAL + std::time::Duration::from_millis(5),
+        )
+        .await;
+        assert!(rec.typings.load(Ordering::SeqCst) >= 3);
+
+        chat.finish.notify_waiters();
+        tokio::task::yield_now().await;
+
+        let final_typings = rec.typings.load(Ordering::SeqCst);
+        tokio::time::sleep(
+            TELEGRAM_TYPING_KEEPALIVE_INTERVAL + std::time::Duration::from_millis(5),
+        )
+        .await;
+        assert_eq!(rec.typings.load(Ordering::SeqCst), final_typings);
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_failure_keeps_typing_until_error_feedback_finishes() {
+        let outbound = Arc::new(DelayedErrorFeedbackOutbound {
+            typings: AtomicUsize::new(0),
+            text_calls: AtomicUsize::new(0),
+            feedback_gate: tokio::sync::Notify::new(),
+            texts: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let outbound_trait: Arc<dyn ChannelOutbound> = outbound.clone();
+
+        let services =
+            crate::services::GatewayServices::noop().with_channel_outbound(outbound_trait);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        state.set_chat(Arc::new(ErrChatService)).await;
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = Arc::new(GatewayChannelEventSink::new(Arc::clone(&cell)));
+        let sink_task = {
+            let sink = Arc::clone(&sink);
+            tokio::spawn(async move {
+                sink.dispatch_to_chat(
+                    "hi",
+                    ChannelReplyTarget {
+                        chan_type: ChannelType::Telegram,
+                        chan_account_key: "telegram:acct".into(),
+                        chan_user_name: None,
+                        chat_id: "123".into(),
+                        message_id: Some("1".into()),
+                    },
+                    ChannelMessageMeta {
+                        chan_type: ChannelType::Telegram,
+                        sender_name: None,
+                        username: None,
+                        message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                        model: None,
+                    },
+                )
+                .await;
+            })
+        };
+
+        tokio::task::yield_now().await;
+        assert_eq!(outbound.typings.load(Ordering::SeqCst), 1);
+        assert_eq!(outbound.text_calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(
+            TELEGRAM_TYPING_KEEPALIVE_INTERVAL + std::time::Duration::from_millis(5),
+        )
+        .await;
+        assert!(
+            outbound.typings.load(Ordering::SeqCst) >= 2,
+            "typing must remain active until error feedback finishes"
+        );
+
+        outbound.feedback_gate.notify_one();
+        sink_task.await.unwrap();
+
+        let texts = outbound.texts.lock().await;
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].starts_with("⚠️"));
+    }
+
+    struct BlockingTypingOutbound {
+        send_typing_started: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl ChannelOutbound for BlockingTypingOutbound {
+        async fn send_text(
+            &self,
+            _chan_account_key: &str,
+            _to: &str,
+            _text: &str,
+            _reply_to: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn send_media(
+            &self,
+            _chan_account_key: &str,
+            _to: &str,
+            _payload: &ReplyPayload,
+            _reply_to: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> anyhow::Result<()> {
+            self.send_typing_started.notify_waiters();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_run_is_not_blocked_by_slow_typing_request() {
+        let outbound = Arc::new(BlockingTypingOutbound {
+            send_typing_started: tokio::sync::Notify::new(),
+        });
+        let outbound_trait: Arc<dyn ChannelOutbound> = outbound.clone();
+        let chat = Arc::new(AsyncRunChatService {
+            started: tokio::sync::Notify::new(),
+            finish: tokio::sync::Notify::new(),
+        });
+
+        let services =
+            crate::services::GatewayServices::noop().with_channel_outbound(outbound_trait);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        state.set_chat(chat.clone()).await;
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = Arc::new(GatewayChannelEventSink::new(Arc::clone(&cell)));
+        let started = chat.started.notified();
+        let typing_started = outbound.send_typing_started.notified();
+
+        let sink_task = {
+            let sink = Arc::clone(&sink);
+            tokio::spawn(async move {
+                sink.dispatch_to_chat(
+                    "hi",
+                    ChannelReplyTarget {
+                        chan_type: ChannelType::Telegram,
+                        chan_account_key: "telegram:acct".into(),
+                        chan_user_name: None,
+                        chat_id: "123".into(),
+                        message_id: Some("1".into()),
+                    },
+                    ChannelMessageMeta {
+                        chan_type: ChannelType::Telegram,
+                        sender_name: None,
+                        username: None,
+                        message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                        model: None,
+                    },
+                )
+                .await;
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_millis(50), typing_started)
+            .await
+            .expect("typing loop must start");
+        tokio::time::timeout(std::time::Duration::from_millis(50), started)
+            .await
+            .expect("chat send must still start while typing is blocked");
+        tokio::time::timeout(std::time::Duration::from_millis(50), sink_task)
+            .await
+            .expect("dispatch_to_chat must not wait for run completion or blocked typing send")
+            .unwrap();
+
+        chat.finish.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_with_attachments_rejects_mixed_image_and_non_image_media_types() {
+        let rec = Arc::new(RecordingOutbound::default());
+        let outbound: Arc<dyn ChannelOutbound> = rec.clone();
+        let chat = Arc::new(RecordingChatService {
+            last_params: tokio::sync::Mutex::new(None),
+        });
+
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        state.set_chat(chat.clone()).await;
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = GatewayChannelEventSink::new(Arc::clone(&cell));
+
+        sink.dispatch_to_chat_with_attachments(
+            "hi",
+            vec![
+                ChannelAttachment {
+                    media_type: "image/png".into(),
+                    data: vec![137, 80, 78, 71],
+                },
+                ChannelAttachment {
+                    media_type: "application/pdf".into(),
+                    data: vec![0, 1, 2, 3],
+                },
+            ],
+            ChannelReplyTarget {
+                chan_type: ChannelType::Telegram,
+                chan_account_key: "telegram:acct".into(),
+                chan_user_name: None,
+                chat_id: "123".into(),
+                message_id: Some("1".into()),
+            },
+            ChannelMessageMeta {
+                chan_type: ChannelType::Telegram,
+                sender_name: None,
+                username: None,
+                message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                model: None,
+            },
+        )
+        .await;
+
+        assert!(
+            chat.last_params.lock().await.is_none(),
+            "mixed attachments must not be partially dispatched to chat"
+        );
+        let texts = rec.texts.lock().await;
+        assert_eq!(texts.len(), 1, "user should receive direct feedback");
+        assert!(
+            texts[0].2.contains("attachment type isn't supported"),
+            "expected unsupported attachment feedback, got {:?}",
+            texts[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_to_chat_with_attachments_accepts_image_media_types() {
+        let chat = Arc::new(RecordingChatService {
+            last_params: tokio::sync::Mutex::new(None),
+        });
+
+        let services = crate::services::GatewayServices::noop();
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+        state.set_chat(chat.clone()).await;
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = GatewayChannelEventSink::new(Arc::clone(&cell));
+
+        sink.dispatch_to_chat_with_attachments(
+            "hi",
+            vec![ChannelAttachment {
+                media_type: "image/png".into(),
+                data: vec![137, 80, 78, 71],
+            }],
+            ChannelReplyTarget {
+                chan_type: ChannelType::Telegram,
+                chan_account_key: "telegram:acct".into(),
+                chan_user_name: None,
+                chat_id: "123".into(),
+                message_id: Some("1".into()),
+            },
+            ChannelMessageMeta {
+                chan_type: ChannelType::Telegram,
+                sender_name: None,
+                username: None,
+                message_kind: Some(moltis_channels::plugin::ChannelMessageKind::Text),
+                model: None,
+            },
+        )
+        .await;
+
+        let params = chat
+            .last_params
+            .lock()
+            .await
+            .clone()
+            .expect("captured params");
+        let content = params
+            .get("content")
+            .and_then(|v| v.as_array())
+            .expect("multimodal content must be present for images");
+        assert!(
+            content
+                .iter()
+                .any(|p| p.get("type").and_then(|v| v.as_str()) == Some("image_url")),
+            "expected an image_url part"
+        );
+        let first_image = content
+            .iter()
+            .find(|p| p.get("type").and_then(|v| v.as_str()) == Some("image_url"))
+            .unwrap();
+        let url = first_image
+            .get("image_url")
+            .and_then(|v| v.get("url"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(url.starts_with("data:image/png;base64,"));
     }
 
     struct SnapshotChannelService {

@@ -524,6 +524,13 @@ pub trait ChatService: Send + Sync {
     async fn send_sync(&self, params: Value) -> ServiceResult {
         self.send(params).await
     }
+    /// Wait until a previously started async run has fully completed.
+    ///
+    /// Default implementation is a no-op for chat services that do not expose
+    /// async run lifecycle tracking.
+    async fn wait_run_completion(&self, _run_id: &str) -> ServiceResult<()> {
+        Ok(())
+    }
     /// Internal helper for side-effect-free LLM completions (no session I/O).
     ///
     /// Intended for small classification tasks (e.g. relay mention labeling).

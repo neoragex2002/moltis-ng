@@ -23,6 +23,16 @@ use crate::{
     state::AccountStateMap,
 };
 
+#[cfg(not(test))]
+const TELEGRAM_TYPING_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+#[cfg(test)]
+const TELEGRAM_TYPING_KEEPALIVE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(10);
+#[cfg(not(test))]
+const TELEGRAM_TYPING_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+const TELEGRAM_TYPING_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Outbound message sender for Telegram.
 pub struct TelegramOutbound {
     pub(crate) accounts: AccountStateMap,
@@ -110,6 +120,30 @@ impl OutboundErrorClass {
             Self::InvalidJson => "invalid_json",
             Self::Io => "io",
             Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum TypingRequestError {
+    Request(teloxide::RequestError),
+    Timeout,
+}
+
+impl std::fmt::Display for TypingRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request(err) => write!(f, "{err}"),
+            Self::Timeout => write!(f, "telegram send_typing timed out"),
+        }
+    }
+}
+
+impl std::error::Error for TypingRequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Request(err) => Some(err),
+            Self::Timeout => None,
         }
     }
 }
@@ -223,8 +257,7 @@ enum RetryDecision {
 
 #[async_trait]
 trait TelegramTextTransport: Send + Sync {
-    async fn send_typing(&self, chat_id: ChatId)
-    -> std::result::Result<(), teloxide::RequestError>;
+    async fn send_typing(&self, chat_id: ChatId) -> std::result::Result<(), TypingRequestError>;
 
     async fn send_message_html(
         &self,
@@ -247,14 +280,8 @@ struct BotTextTransport {
 
 #[async_trait]
 impl TelegramTextTransport for BotTextTransport {
-    async fn send_typing(
-        &self,
-        chat_id: ChatId,
-    ) -> std::result::Result<(), teloxide::RequestError> {
-        self.bot
-            .send_chat_action(chat_id, ChatAction::Typing)
-            .await
-            .map(|_| ())
+    async fn send_typing(&self, chat_id: ChatId) -> std::result::Result<(), TypingRequestError> {
+        send_chat_action_typing(&self.bot, chat_id).await
     }
 
     async fn send_message_html(
@@ -305,6 +332,77 @@ fn retry_after_secs(e: &teloxide::RequestError) -> Option<u64> {
     match e {
         teloxide::RequestError::RetryAfter(secs) => Some(secs.seconds() as u64),
         _ => None,
+    }
+}
+
+pub(crate) async fn send_chat_action_typing(
+    bot: &teloxide::Bot,
+    chat_id: ChatId,
+) -> std::result::Result<(), TypingRequestError> {
+    match tokio::time::timeout(
+        TELEGRAM_TYPING_REQUEST_TIMEOUT,
+        bot.send_chat_action(chat_id, ChatAction::Typing),
+    )
+    .await
+    {
+        Ok(result) => result.map(|_| ()).map_err(TypingRequestError::Request),
+        Err(_) => Err(TypingRequestError::Timeout),
+    }
+}
+
+async fn send_typing_keepalive<T: TelegramTextTransport + ?Sized>(
+    transport: &T,
+    account_handle: &str,
+    to: &str,
+    chat_id: ChatId,
+    op: &'static str,
+    typing_failed: &mut bool,
+) {
+    match transport.send_typing(chat_id).await {
+        Ok(()) => {
+            if *typing_failed {
+                info!(
+                    event = "telegram.typing.recovered",
+                    op,
+                    account_handle,
+                    chat_id = to,
+                    "typing indicator recovered"
+                );
+                *typing_failed = false;
+            }
+        },
+        Err(error) => {
+            let (error_class, reason_code) = match &error {
+                TypingRequestError::Request(request_error) => (
+                    classify_request_error(request_error).as_str(),
+                    "send_typing_failed",
+                ),
+                TypingRequestError::Timeout => ("timeout", "send_typing_timeout"),
+            };
+            if !*typing_failed {
+                warn!(
+                    event = "telegram.typing.failed",
+                    op,
+                    account_handle,
+                    chat_id = to,
+                    reason_code,
+                    error_class,
+                    error = %error,
+                    "failed to send typing indicator"
+                );
+                *typing_failed = true;
+            } else {
+                debug!(
+                    event = "telegram.typing.failed",
+                    op,
+                    account_handle,
+                    chat_id = to,
+                    reason_code,
+                    error_class,
+                    "typing indicator still failing"
+                );
+            }
+        },
     }
 }
 
@@ -390,10 +488,24 @@ impl TelegramOutbound {
 
     fn reply_params(
         &self,
-        _account_handle: &str,
+        account_handle: &str,
+        chat_id_text: &str,
+        op: &str,
         reply_to: Option<&str>,
     ) -> Option<ReplyParameters> {
-        parse_reply_params(reply_to)
+        let (rp, invalid) = parse_reply_params_checked(reply_to);
+        if invalid {
+            warn!(
+                event = "telegram.outbound.thread_target_invalid",
+                op,
+                account_handle,
+                chat_id = chat_id_text,
+                reply_to = ?reply_to,
+                reason_code = "reply_to_invalid",
+                "invalid reply_to message id; sending without threading"
+            );
+        }
+        rp
     }
 
     async fn send_message_with_retry<T: TelegramTextTransport>(
@@ -592,12 +704,32 @@ impl TelegramOutbound {
         let bot = self.get_bot(account_handle)?;
         let retry_cfg = self.get_retry_config(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        let rp = self.reply_params(account_handle, reply_to);
+        let rp = self.reply_params(account_handle, to, "send_text", reply_to);
         let transport = BotTextTransport { bot };
 
         // Send typing indicator
         if !silent {
-            let _ = transport.send_typing(chat_id).await;
+            if let Err(e) = transport.send_typing(chat_id).await {
+                let reason_code = match &e {
+                    TypingRequestError::Request(teloxide::RequestError::Network(err))
+                        if err.is_timeout() || err.is_connect() =>
+                    {
+                        "transport_failed_before_send"
+                    },
+                    TypingRequestError::Request(teloxide::RequestError::Api(_)) => "api",
+                    TypingRequestError::Timeout => "send_typing_timeout",
+                    TypingRequestError::Request(_) => "other",
+                };
+                warn!(
+                    event = "telegram.typing.failed",
+                    op = "send_text",
+                    account_handle,
+                    chat_id = to,
+                    reason_code,
+                    error = %e,
+                    "failed to send typing indicator"
+                );
+            }
         }
 
         let html = markdown::markdown_to_telegram_html(text);
@@ -668,11 +800,31 @@ impl TelegramOutbound {
         let bot = self.get_bot(account_handle)?;
         let retry_cfg = self.get_retry_config(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        let rp = self.reply_params(account_handle, reply_to);
+        let rp = self.reply_params(account_handle, to, "send_text_with_suffix", reply_to);
         let transport = BotTextTransport { bot };
 
         // Send typing indicator
-        let _ = transport.send_typing(chat_id).await;
+        if let Err(e) = transport.send_typing(chat_id).await {
+            let reason_code = match &e {
+                TypingRequestError::Request(teloxide::RequestError::Network(err))
+                    if err.is_timeout() || err.is_connect() =>
+                {
+                    "transport_failed_before_send"
+                },
+                TypingRequestError::Request(teloxide::RequestError::Api(_)) => "api",
+                TypingRequestError::Timeout => "send_typing_timeout",
+                TypingRequestError::Request(_) => "other",
+            };
+            warn!(
+                event = "telegram.typing.failed",
+                op = "send_text_with_suffix",
+                account_handle,
+                chat_id = to,
+                reason_code,
+                error = %e,
+                "failed to send typing indicator"
+            );
+        }
 
         let html = markdown::markdown_to_telegram_html(text);
 
@@ -819,7 +971,8 @@ impl TelegramOutbound {
     ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        let rp = self.reply_params(account_handle, reply_to);
+        let rp = self.reply_params(account_handle, to, "send_media", reply_to);
+        let (caption, caption_overflow) = split_caption_for_telegram(&payload.text);
         let media_mime = payload
             .media
             .as_ref()
@@ -867,8 +1020,8 @@ impl TelegramOutbound {
                 if media.mime_type.starts_with("image/") {
                     let input = InputFile::memory(bytes.clone()).file_name(filename.clone());
                     let mut req = bot.send_photo(chat_id, input);
-                    if !payload.text.is_empty() {
-                        req = req.caption(&payload.text);
+                    if !caption.is_empty() {
+                        req = req.caption(caption);
                     }
                     if let Some(ref rp) = rp {
                         req = req.reply_parameters(rp.clone());
@@ -884,7 +1037,29 @@ impl TelegramOutbound {
                                 caption_len = payload.text.len(),
                                 "telegram outbound media sent as photo"
                             );
-                            return Ok(Some(sent.id));
+                            let sent_id = sent.id;
+                            if !caption_overflow.is_empty() {
+                                if let Err(e) = self
+                                    .send_caption_overflow(
+                                        account_handle,
+                                        to,
+                                        caption_overflow,
+                                        sent_id,
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        event = "telegram.outbound.degraded",
+                                        op = "send_media",
+                                        account_handle,
+                                        chat_id = to,
+                                        reason_code = "caption_overflow_send_failed",
+                                        error = %e,
+                                        "media sent but caption overflow follow-up failed"
+                                    );
+                                }
+                            }
+                            return Ok(Some(sent_id));
                         },
                         Err(e) => {
                             let err_str = e.to_string();
@@ -898,8 +1073,8 @@ impl TelegramOutbound {
                                 );
                                 let input = InputFile::memory(bytes).file_name(filename);
                                 let mut req = bot.send_document(chat_id, input);
-                                if !payload.text.is_empty() {
-                                    req = req.caption(&payload.text);
+                                if !caption.is_empty() {
+                                    req = req.caption(caption);
                                 }
                                 if let Some(ref rp) = rp {
                                     req = req.reply_parameters(rp.clone());
@@ -913,7 +1088,29 @@ impl TelegramOutbound {
                                     caption_len = payload.text.len(),
                                     "telegram outbound media sent as document fallback"
                                 );
-                                return Ok(Some(sent.id));
+                                let sent_id = sent.id;
+                                if !caption_overflow.is_empty() {
+                                    if let Err(e) = self
+                                        .send_caption_overflow(
+                                            account_handle,
+                                            to,
+                                            caption_overflow,
+                                            sent_id,
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            event = "telegram.outbound.degraded",
+                                            op = "send_media",
+                                            account_handle,
+                                            chat_id = to,
+                                            reason_code = "caption_overflow_send_failed",
+                                            error = %e,
+                                            "media sent but caption overflow follow-up failed"
+                                        );
+                                    }
+                                }
+                                return Ok(Some(sent_id));
                             }
                             return Err(e.into());
                         },
@@ -924,8 +1121,8 @@ impl TelegramOutbound {
                 if media.mime_type == "audio/ogg" {
                     let input = InputFile::memory(bytes).file_name("voice.ogg");
                     let mut req = bot.send_voice(chat_id, input);
-                    if !payload.text.is_empty() {
-                        req = req.caption(&payload.text);
+                    if !caption.is_empty() {
+                        req = req.caption(caption);
                     }
                     if let Some(ref rp) = rp {
                         req = req.reply_parameters(rp.clone());
@@ -939,13 +1136,30 @@ impl TelegramOutbound {
                         caption_len = payload.text.len(),
                         "telegram outbound media sent as voice"
                     );
-                    return Ok(Some(sent.id));
+                    let sent_id = sent.id;
+                    if !caption_overflow.is_empty() {
+                        if let Err(e) = self
+                            .send_caption_overflow(account_handle, to, caption_overflow, sent_id)
+                            .await
+                        {
+                            warn!(
+                                event = "telegram.outbound.degraded",
+                                op = "send_media",
+                                account_handle,
+                                chat_id = to,
+                                reason_code = "caption_overflow_send_failed",
+                                error = %e,
+                                "media sent but caption overflow follow-up failed"
+                            );
+                        }
+                    }
+                    return Ok(Some(sent_id));
                 }
                 if media.mime_type.starts_with("audio/") {
                     let input = InputFile::memory(bytes).file_name("audio.mp3");
                     let mut req = bot.send_audio(chat_id, input);
-                    if !payload.text.is_empty() {
-                        req = req.caption(&payload.text);
+                    if !caption.is_empty() {
+                        req = req.caption(caption);
                     }
                     if let Some(ref rp) = rp {
                         req = req.reply_parameters(rp.clone());
@@ -959,13 +1173,30 @@ impl TelegramOutbound {
                         caption_len = payload.text.len(),
                         "telegram outbound media sent as audio"
                     );
-                    return Ok(Some(sent.id));
+                    let sent_id = sent.id;
+                    if !caption_overflow.is_empty() {
+                        if let Err(e) = self
+                            .send_caption_overflow(account_handle, to, caption_overflow, sent_id)
+                            .await
+                        {
+                            warn!(
+                                event = "telegram.outbound.degraded",
+                                op = "send_media",
+                                account_handle,
+                                chat_id = to,
+                                reason_code = "caption_overflow_send_failed",
+                                error = %e,
+                                "media sent but caption overflow follow-up failed"
+                            );
+                        }
+                    }
+                    return Ok(Some(sent_id));
                 }
 
                 let input = InputFile::memory(bytes).file_name(filename);
                 let mut req = bot.send_document(chat_id, input);
-                if !payload.text.is_empty() {
-                    req = req.caption(&payload.text);
+                if !caption.is_empty() {
+                    req = req.caption(caption);
                 }
                 if let Some(ref rp) = rp {
                     req = req.reply_parameters(rp.clone());
@@ -979,7 +1210,24 @@ impl TelegramOutbound {
                     caption_len = payload.text.len(),
                     "telegram outbound media sent as document"
                 );
-                return Ok(Some(sent.id));
+                let sent_id = sent.id;
+                if !caption_overflow.is_empty() {
+                    if let Err(e) = self
+                        .send_caption_overflow(account_handle, to, caption_overflow, sent_id)
+                        .await
+                    {
+                        warn!(
+                            event = "telegram.outbound.degraded",
+                            op = "send_media",
+                            account_handle,
+                            chat_id = to,
+                            reason_code = "caption_overflow_send_failed",
+                            error = %e,
+                            "media sent but caption overflow follow-up failed"
+                        );
+                    }
+                }
+                return Ok(Some(sent_id));
             }
 
             // URL-based media
@@ -987,8 +1235,8 @@ impl TelegramOutbound {
             let sent = match media.mime_type.as_str() {
                 t if t.starts_with("image/") => {
                     let mut req = bot.send_photo(chat_id, input);
-                    if !payload.text.is_empty() {
-                        req = req.caption(&payload.text);
+                    if !caption.is_empty() {
+                        req = req.caption(caption);
                     }
                     if let Some(ref rp) = rp {
                         req = req.reply_parameters(rp.clone());
@@ -1006,8 +1254,8 @@ impl TelegramOutbound {
                 },
                 "audio/ogg" => {
                     let mut req = bot.send_voice(chat_id, input);
-                    if !payload.text.is_empty() {
-                        req = req.caption(&payload.text);
+                    if !caption.is_empty() {
+                        req = req.caption(caption);
                     }
                     if let Some(ref rp) = rp {
                         req = req.reply_parameters(rp.clone());
@@ -1025,8 +1273,8 @@ impl TelegramOutbound {
                 },
                 t if t.starts_with("audio/") => {
                     let mut req = bot.send_audio(chat_id, input);
-                    if !payload.text.is_empty() {
-                        req = req.caption(&payload.text);
+                    if !caption.is_empty() {
+                        req = req.caption(caption);
                     }
                     if let Some(ref rp) = rp {
                         req = req.reply_parameters(rp.clone());
@@ -1044,8 +1292,8 @@ impl TelegramOutbound {
                 },
                 _ => {
                     let mut req = bot.send_document(chat_id, input);
-                    if !payload.text.is_empty() {
-                        req = req.caption(&payload.text);
+                    if !caption.is_empty() {
+                        req = req.caption(caption);
                     }
                     if let Some(ref rp) = rp {
                         req = req.reply_parameters(rp.clone());
@@ -1062,6 +1310,22 @@ impl TelegramOutbound {
                     sent.id
                 },
             };
+            if !caption_overflow.is_empty() {
+                if let Err(e) = self
+                    .send_caption_overflow(account_handle, to, caption_overflow, sent)
+                    .await
+                {
+                    warn!(
+                        event = "telegram.outbound.degraded",
+                        op = "send_media",
+                        account_handle,
+                        chat_id = to,
+                        reason_code = "caption_overflow_send_failed",
+                        error = %e,
+                        "media sent but caption overflow follow-up failed"
+                    );
+                }
+            }
             return Ok(Some(sent));
         }
 
@@ -1086,7 +1350,7 @@ impl TelegramOutbound {
     ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        let rp = self.reply_params(account_handle, reply_to);
+        let rp = self.reply_params(account_handle, to, "send_location", reply_to);
         info!(
             account_handle,
             chat_id = to,
@@ -1127,11 +1391,47 @@ impl TelegramOutbound {
 }
 
 /// Parse a platform message ID string into Telegram `ReplyParameters`.
-/// Returns `None` if the string is not a valid i32 (Telegram message IDs are i32).
-fn parse_reply_params(reply_to: Option<&str>) -> Option<ReplyParameters> {
-    reply_to
-        .and_then(|id| id.parse::<i32>().ok())
-        .map(|id| ReplyParameters::new(MessageId(id)).allow_sending_without_reply())
+/// Returns `(params, invalid)` where `invalid=true` means caller provided a `reply_to`
+/// but it was not a valid i32 (Telegram message IDs are i32).
+fn parse_reply_params_checked(reply_to: Option<&str>) -> (Option<ReplyParameters>, bool) {
+    let Some(id) = reply_to else {
+        return (None, false);
+    };
+    match id.parse::<i32>() {
+        Ok(id) => (
+            Some(ReplyParameters::new(MessageId(id)).allow_sending_without_reply()),
+            false,
+        ),
+        Err(_) => (None, true),
+    }
+}
+
+fn split_caption_for_telegram(caption: &str) -> (&str, &str) {
+    if caption.is_empty() {
+        return ("", "");
+    }
+    let head = crate::markdown::truncate_utf8(caption, crate::markdown::TELEGRAM_CAPTION_LIMIT);
+    let tail = &caption[head.len()..];
+    (head, tail)
+}
+
+impl TelegramOutbound {
+    async fn send_caption_overflow(
+        &self,
+        account_handle: &str,
+        to: &str,
+        overflow: &str,
+        reply_to_message_id: MessageId,
+    ) -> Result<()> {
+        if overflow.trim().is_empty() {
+            return Ok(());
+        }
+        let reply_to = reply_to_message_id.0.to_string();
+        let _ = self
+            .send_text_inner(account_handle, to, overflow, Some(&reply_to), false)
+            .await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1197,7 +1497,7 @@ impl ChannelOutbound for TelegramOutbound {
     async fn send_typing(&self, account_handle: &str, to: &str) -> Result<()> {
         let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+        send_chat_action_typing(&bot, chat_id).await?;
         Ok(())
     }
 
@@ -1300,8 +1600,7 @@ impl TelegramOutbound {
     ) -> Result<()> {
         let chat_id = ChatId(to.parse::<i64>()?);
 
-        // Send typing indicator
-        let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+        send_chat_action_typing(bot, chat_id).await?;
 
         if payload.media.is_some() {
             // Use the media path — but we need account_id, which we don't have here.
@@ -1369,105 +1668,105 @@ impl TelegramOutbound {
         stream: &mut StreamReceiver,
     ) -> Result<()> {
         let chat_id = ChatId(to.parse::<i64>()?);
+        let operation = async {
+            let msg_id = self
+                .send_message_with_retry(
+                    transport,
+                    retry_cfg,
+                    account_handle,
+                    chat_id,
+                    to,
+                    TelegramOutboundOp::SendMessagePlaceholder,
+                    "…",
+                    SendMessageOptions {
+                        disable_notification: false,
+                        reply_parameters: None,
+                    },
+                    Some(OutboundDeliveryState::PlaceholderUnsent),
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                    None,
+                )
+                .await?;
 
-        // Send typing indicator
-        let _ = transport.send_typing(chat_id).await;
+            let mut accumulated = String::new();
+            let mut last_edit = tokio::time::Instant::now();
+            let throttle = std::time::Duration::from_millis(throttle_ms);
+            let mut edit_degraded = false;
 
-        // Send initial placeholder
-        let msg_id = self
-            .send_message_with_retry(
-                transport,
-                retry_cfg,
-                account_handle,
-                chat_id,
-                to,
-                TelegramOutboundOp::SendMessagePlaceholder,
-                "…",
-                SendMessageOptions {
-                    disable_notification: false,
-                    reply_parameters: None,
-                },
-                Some(OutboundDeliveryState::PlaceholderUnsent),
-                None,
-                None,
-                None,
-                None,
-                0,
-                None,
-            )
-            .await?;
-
-        let mut accumulated = String::new();
-        let mut last_edit = tokio::time::Instant::now();
-        let throttle = std::time::Duration::from_millis(throttle_ms);
-        let mut edit_degraded = false;
-
-        while let Some(event) = stream.recv().await {
-            match event {
-                StreamEvent::Delta(delta) => {
-                    accumulated.push_str(&delta);
-                    if !edit_degraded && last_edit.elapsed() >= throttle {
-                        let html = markdown::markdown_to_telegram_html(&accumulated);
-                        // Telegram rejects edits with identical content; truncate to limit.
-                        let display = markdown::truncate_utf8(&html, TELEGRAM_MAX_MESSAGE_LEN);
-                        if let Err(err) = self
-                            .edit_message_with_retry(
-                                transport,
-                                retry_cfg,
-                                account_handle,
-                                chat_id,
-                                to,
-                                TelegramOutboundOp::EditMessageText,
-                                msg_id,
-                                &display,
-                                Some(OutboundDeliveryState::PlaceholderSent),
-                                accumulated.len(),
-                                None,
-                            )
-                            .await
-                        {
-                            edit_degraded = true;
-                            warn!(
-                                event = "telegram.outbound.degraded",
-                                op = TelegramOutboundOp::EditMessageText.as_str(),
-                                account_handle,
-                                chat_id = to,
-                                message_id = msg_id.0,
-                                outcome_kind = err
-                                    .downcast_ref::<TelegramOutboundError>()
-                                    .map(|e| e.outcome_kind.as_str())
-                                    .unwrap_or("unknown"),
-                                delivery_state = err
-                                    .downcast_ref::<TelegramOutboundError>()
-                                    .and_then(|e| e.delivery_state)
-                                    .map(OutboundDeliveryState::as_str)
-                                    .unwrap_or("none"),
-                                error = %err,
-                                "telegram outbound streaming edit degraded after retries; suppressing further incremental edits"
-                            );
+            while let Some(event) = stream.recv().await {
+                match event {
+                    StreamEvent::Delta(delta) => {
+                        accumulated.push_str(&delta);
+                        if !edit_degraded && last_edit.elapsed() >= throttle {
+                            let html = markdown::markdown_to_telegram_html(&accumulated);
+                            let display = markdown::truncate_utf8(&html, TELEGRAM_MAX_MESSAGE_LEN);
+                            if let Err(err) = self
+                                .edit_message_with_retry(
+                                    transport,
+                                    retry_cfg,
+                                    account_handle,
+                                    chat_id,
+                                    to,
+                                    TelegramOutboundOp::EditMessageText,
+                                    msg_id,
+                                    &display,
+                                    Some(OutboundDeliveryState::PlaceholderSent),
+                                    accumulated.len(),
+                                    None,
+                                )
+                                .await
+                            {
+                                edit_degraded = true;
+                                warn!(
+                                    event = "telegram.outbound.degraded",
+                                    op = TelegramOutboundOp::EditMessageText.as_str(),
+                                    account_handle,
+                                    chat_id = to,
+                                    message_id = msg_id.0,
+                                    outcome_kind = err
+                                        .downcast_ref::<TelegramOutboundError>()
+                                        .map(|e| e.outcome_kind.as_str())
+                                        .unwrap_or("unknown"),
+                                    delivery_state = err
+                                        .downcast_ref::<TelegramOutboundError>()
+                                        .and_then(|e| e.delivery_state)
+                                        .map(OutboundDeliveryState::as_str)
+                                        .unwrap_or("none"),
+                                    error = %err,
+                                    "telegram outbound streaming edit degraded after retries; suppressing further incremental edits"
+                                );
+                            }
+                            last_edit = tokio::time::Instant::now();
                         }
-                        last_edit = tokio::time::Instant::now();
-                    }
-                },
-                StreamEvent::Done => {
-                    break;
-                },
-                StreamEvent::Error(e) => {
-                    debug!("stream error: {e}");
-                    accumulated.push_str(&format!("\n\n⚠ Error: {e}"));
-                    break;
-                },
+                    },
+                    StreamEvent::Done => {
+                        break;
+                    },
+                    StreamEvent::Error(_e) => {
+                        warn!(
+                            event = "telegram.stream.error",
+                            op = "send_stream",
+                            account_handle,
+                            chat_id = to,
+                            reason_code = "stream_error",
+                            "streaming response failed"
+                        );
+                        accumulated
+                            .push_str("\n\n⚠️ Something went wrong while generating the response.");
+                        break;
+                    },
+                }
             }
-        }
 
-        // Final edit with complete content
-        if !accumulated.is_empty() {
-            let html = markdown::markdown_to_telegram_html(&accumulated);
-            let chunks = markdown::chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
+            if !accumulated.is_empty() {
+                let html = markdown::markdown_to_telegram_html(&accumulated);
+                let chunks = markdown::chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
 
-            // Edit the placeholder with the first chunk
-            self
-                .edit_message_with_retry(
+                self.edit_message_with_retry(
                     transport,
                     retry_cfg,
                     account_handle,
@@ -1482,34 +1781,74 @@ impl TelegramOutbound {
                 )
                 .await?;
 
-            // Send remaining chunks as new messages
-            for (idx, chunk) in chunks[1..].iter().enumerate() {
-                let _ = self
-                    .send_message_with_retry(
-                        transport,
-                        retry_cfg,
-                        account_handle,
-                        chat_id,
-                        to,
-                        TelegramOutboundOp::SendMessageStreamChunk,
-                        chunk,
-                        SendMessageOptions {
-                            disable_notification: false,
-                            reply_parameters: None,
-                        },
-                        Some(OutboundDeliveryState::PartialSent),
-                        None,
-                        Some(idx + 1),
-                        Some(chunks.len()),
-                        Some(msg_id),
-                        accumulated.len(),
-                        None,
-                    )
-                    .await?;
+                for (idx, chunk) in chunks[1..].iter().enumerate() {
+                    let _ = self
+                        .send_message_with_retry(
+                            transport,
+                            retry_cfg,
+                            account_handle,
+                            chat_id,
+                            to,
+                            TelegramOutboundOp::SendMessageStreamChunk,
+                            chunk,
+                            SendMessageOptions {
+                                disable_notification: false,
+                                reply_parameters: None,
+                            },
+                            Some(OutboundDeliveryState::PartialSent),
+                            None,
+                            Some(idx + 1),
+                            Some(chunks.len()),
+                            Some(msg_id),
+                            accumulated.len(),
+                            None,
+                        )
+                        .await?;
+                }
             }
-        }
 
-        Ok(())
+            Ok(())
+        };
+
+        let typing_loop = async {
+            let mut typing_failed = false;
+            send_typing_keepalive(
+                transport,
+                account_handle,
+                to,
+                chat_id,
+                "send_stream",
+                &mut typing_failed,
+            )
+            .await;
+
+            let mut keepalive = tokio::time::interval_at(
+                tokio::time::Instant::now() + TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
+                TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
+            );
+            keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                keepalive.tick().await;
+                send_typing_keepalive(
+                    transport,
+                    account_handle,
+                    to,
+                    chat_id,
+                    "send_stream",
+                    &mut typing_failed,
+                )
+                .await;
+            }
+        };
+
+        tokio::pin!(operation);
+        tokio::pin!(typing_loop);
+
+        tokio::select! {
+            result = &mut operation => result,
+            _ = &mut typing_loop => unreachable!("telegram stream typing loop must stay pending until the operation completes"),
+        }
     }
 }
 
@@ -1518,10 +1857,12 @@ impl TelegramOutbound {
 mod tests {
     use {
         super::*,
+        axum::{Json, Router, body::Bytes, extract::State, routing::post},
         std::{
             collections::{HashMap, VecDeque},
             sync::{Arc, Mutex},
         },
+        teloxide::requests::Requester,
         teloxide::types::Seconds,
         tokio::sync::mpsc,
     };
@@ -1544,6 +1885,9 @@ mod tests {
         edit_results: Mutex<VecDeque<MockEditResult>>,
         send_calls: Mutex<usize>,
         edit_calls: Mutex<usize>,
+        typing_calls: Mutex<usize>,
+        last_send_text: Mutex<Option<String>>,
+        last_edit_text: Mutex<Option<String>>,
     }
 
     impl MockTextTransport {
@@ -1568,6 +1912,10 @@ mod tests {
         fn edit_calls(&self) -> usize {
             *self.edit_calls.lock().unwrap()
         }
+
+        fn typing_calls(&self) -> usize {
+            *self.typing_calls.lock().unwrap()
+        }
     }
 
     #[async_trait]
@@ -1575,7 +1923,8 @@ mod tests {
         async fn send_typing(
             &self,
             _chat_id: ChatId,
-        ) -> std::result::Result<(), teloxide::RequestError> {
+        ) -> std::result::Result<(), TypingRequestError> {
+            *self.typing_calls.lock().unwrap() += 1;
             Ok(())
         }
 
@@ -1586,6 +1935,7 @@ mod tests {
             _options: SendMessageOptions,
         ) -> std::result::Result<MessageId, teloxide::RequestError> {
             *self.send_calls.lock().unwrap() += 1;
+            *self.last_send_text.lock().unwrap() = Some(_text.to_string());
             match self.send_results.lock().unwrap().pop_front() {
                 Some(MockSendResult::Ok(id)) => Ok(id),
                 Some(MockSendResult::Err(err)) => Err(err),
@@ -1600,6 +1950,7 @@ mod tests {
             _text: &str,
         ) -> std::result::Result<(), teloxide::RequestError> {
             *self.edit_calls.lock().unwrap() += 1;
+            *self.last_edit_text.lock().unwrap() = Some(_text.to_string());
             match self.edit_results.lock().unwrap().pop_front() {
                 Some(MockEditResult::Ok) => Ok(()),
                 Some(MockEditResult::Err(err)) => Err(err),
@@ -1613,6 +1964,37 @@ mod tests {
         TelegramOutbound { accounts }
     }
 
+    fn outbound_with_bot(account_handle: &str, bot: teloxide::Bot) -> TelegramOutbound {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        };
+        {
+            let mut map = accounts.write().unwrap();
+            map.insert(
+                account_handle.to_string(),
+                crate::state::AccountState {
+                    bot,
+                    bot_user_id: None,
+                    bot_username: None,
+                    account_handle: account_handle.to_string(),
+                    config: crate::config::TelegramAccountConfig::default(),
+                    outbound: Arc::new(TelegramOutbound {
+                        accounts: Arc::clone(&accounts),
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    message_log: None,
+                    event_sink: None,
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                },
+            );
+        }
+        outbound
+    }
+
     fn retry_cfg(max_attempts: u32) -> OutboundRetryConfig {
         OutboundRetryConfig {
             max_attempts,
@@ -1621,12 +2003,126 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_reply_params_checked_reports_invalid_reply_to() {
+        let (ok, invalid_ok) = super::parse_reply_params_checked(Some("42"));
+        assert!(ok.is_some());
+        assert!(!invalid_ok);
+
+        let (none, invalid) = super::parse_reply_params_checked(Some("not-a-number"));
+        assert!(none.is_none());
+        assert!(invalid);
+    }
+
+    #[test]
+    fn split_caption_for_telegram_limits_head_and_preserves_text() {
+        let long = "a".repeat(crate::markdown::TELEGRAM_CAPTION_LIMIT + 10);
+        let (head, tail) = super::split_caption_for_telegram(&long);
+        assert!(head.len() <= crate::markdown::TELEGRAM_CAPTION_LIMIT);
+        assert_eq!(format!("{head}{tail}"), long);
+        assert!(!tail.is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_typing_propagates_send_chat_action_failure() {
+        let bot = teloxide::Bot::new("123:ABC").set_api_url("http://127.0.0.1:1/".parse().unwrap());
+        let outbound = outbound_with_bot("acct", bot);
+        let err = ChannelOutbound::send_typing(&outbound, "acct", "1")
+            .await
+            .expect_err("send_typing must propagate failures");
+        assert!(
+            err.to_string().to_lowercase().contains("error")
+                || err.to_string().to_lowercase().contains("connect")
+                || err.to_string().to_lowercase().contains("refused")
+        );
+    }
+
+    #[tokio::test]
+    async fn send_reply_propagates_send_chat_action_failure() {
+        let bot = teloxide::Bot::new("123:ABC").set_api_url("http://127.0.0.1:1/".parse().unwrap());
+        let outbound = empty_outbound();
+        let err = outbound
+            .send_reply(
+                &bot,
+                "1",
+                &ReplyPayload {
+                    text: "hello".to_string(),
+                    media: None,
+                    reply_to_message_id: None,
+                    silent: false,
+                },
+            )
+            .await
+            .expect_err("send_reply must propagate typing failures");
+        assert!(
+            err.to_string().to_lowercase().contains("error")
+                || err.to_string().to_lowercase().contains("connect")
+                || err.to_string().to_lowercase().contains("refused")
+                || err.to_string().to_lowercase().contains("timed out")
+        );
+    }
+
+    #[tokio::test]
+    async fn send_typing_times_out_quickly() {
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let app = Router::new()
+            .route("/{*path}", post(slow_typing_api))
+            .with_state(SlowTypingApi);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve slow typing api");
+        });
+
+        let bot =
+            teloxide::Bot::new("123:ABC").set_api_url(format!("http://{addr}/").parse().unwrap());
+        let outbound = outbound_with_bot("acct", bot);
+        let err = ChannelOutbound::send_typing(&outbound, "acct", "1")
+            .await
+            .expect_err("send_typing must timeout");
+        assert!(
+            err.to_string().to_lowercase().contains("timed out"),
+            "expected typing timeout error, got {err}"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
     async fn network_request_error() -> teloxide::RequestError {
         teloxide::Bot::new("123:ABC")
             .set_api_url("http://127.0.0.1:1".parse().unwrap())
             .send_message(ChatId(1), "hello")
             .await
             .unwrap_err()
+    }
+
+    #[derive(Clone, Default)]
+    struct SlowTypingApi;
+
+    async fn slow_typing_api(
+        State(_state): State<SlowTypingApi>,
+        body: Bytes,
+    ) -> Json<serde_json::Value> {
+        let raw_body = String::from_utf8_lossy(&body);
+        if raw_body.contains("\"action\":\"typing\"") {
+            tokio::time::sleep(TELEGRAM_TYPING_REQUEST_TIMEOUT * 2).await;
+        }
+        Json(serde_json::json!({
+            "ok": true,
+            "result": true
+        }))
     }
 
     fn invalid_json_error() -> teloxide::RequestError {
@@ -1763,10 +2259,9 @@ mod tests {
     #[tokio::test]
     async fn outbound_max_attempts_one_disables_retry_for_network_error() {
         let outbound = empty_outbound();
-        let transport =
-            MockTextTransport::with_send_results(vec![MockSendResult::Err(
-                network_request_error().await,
-            )]);
+        let transport = MockTextTransport::with_send_results(vec![MockSendResult::Err(
+            network_request_error().await,
+        )]);
 
         let err = outbound
             .send_message_with_retry(
@@ -1903,9 +2398,7 @@ mod tests {
     async fn telegram_outbound_stream_edit_retries_then_degrades() {
         let outbound = empty_outbound();
         let transport = MockTextTransport {
-            send_results: Mutex::new(
-                vec![MockSendResult::Ok(MessageId(11))].into(),
-            ),
+            send_results: Mutex::new(vec![MockSendResult::Ok(MessageId(11))].into()),
             edit_results: Mutex::new(
                 vec![
                     MockEditResult::Err(teloxide::RequestError::Api(
@@ -1918,8 +2411,12 @@ mod tests {
             ..Default::default()
         };
         let (tx, mut rx) = mpsc::channel(8);
-        tx.send(StreamEvent::Delta("hello".to_string())).await.unwrap();
-        tx.send(StreamEvent::Delta(" world".to_string())).await.unwrap();
+        tx.send(StreamEvent::Delta("hello".to_string()))
+            .await
+            .unwrap();
+        tx.send(StreamEvent::Delta(" world".to_string()))
+            .await
+            .unwrap();
         tx.send(StreamEvent::Done).await.unwrap();
         drop(tx);
 
@@ -1928,7 +2425,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(transport.send_calls(), 1, "no extra send_message during degraded edits");
+        assert_eq!(
+            transport.send_calls(),
+            1,
+            "no extra send_message during degraded edits"
+        );
         assert_eq!(
             transport.edit_calls(),
             2,
@@ -1937,12 +2438,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn telegram_outbound_stream_typing_stays_active_until_stream_finishes() {
+        let outbound = empty_outbound();
+        let transport = MockTextTransport {
+            send_results: Mutex::new(vec![MockSendResult::Ok(MessageId(61))].into()),
+            edit_results: Mutex::new(vec![MockEditResult::Ok].into()),
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+
+        let task = tokio::spawn(async move {
+            outbound
+                .send_stream_with_transport(
+                    &transport,
+                    retry_cfg(3),
+                    "acct",
+                    "1",
+                    u64::MAX,
+                    &mut rx,
+                )
+                .await
+                .map(|_| transport)
+        });
+
+        tokio::task::yield_now().await;
+        tx.send(StreamEvent::Delta("hello".to_string()))
+            .await
+            .unwrap();
+        tokio::time::sleep(
+            TELEGRAM_TYPING_KEEPALIVE_INTERVAL + std::time::Duration::from_millis(5),
+        )
+        .await;
+        tx.send(StreamEvent::Done).await.unwrap();
+        drop(tx);
+
+        let transport = task.await.unwrap().unwrap();
+        assert!(
+            transport.typing_calls() >= 2,
+            "typing should remain active after the first delta until the stream fully finishes"
+        );
+
+        let final_typings = transport.typing_calls();
+        tokio::time::sleep(
+            TELEGRAM_TYPING_KEEPALIVE_INTERVAL + std::time::Duration::from_millis(5),
+        )
+        .await;
+        assert_eq!(transport.typing_calls(), final_typings);
+    }
+
+    #[derive(Default)]
+    struct BlockingTypingTransport {
+        send_calls: Mutex<usize>,
+        typing_started: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl TelegramTextTransport for BlockingTypingTransport {
+        async fn send_typing(
+            &self,
+            _chat_id: ChatId,
+        ) -> std::result::Result<(), TypingRequestError> {
+            self.typing_started.notify_waiters();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+
+        async fn send_message_html(
+            &self,
+            _chat_id: ChatId,
+            _text: &str,
+            _options: SendMessageOptions,
+        ) -> std::result::Result<MessageId, teloxide::RequestError> {
+            *self.send_calls.lock().unwrap() += 1;
+            Ok(MessageId(71))
+        }
+
+        async fn edit_message_text_html(
+            &self,
+            _chat_id: ChatId,
+            _message_id: MessageId,
+            _text: &str,
+        ) -> std::result::Result<(), teloxide::RequestError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_outbound_stream_send_is_not_blocked_by_slow_typing_request() {
+        let outbound = empty_outbound();
+        let transport = Arc::new(BlockingTypingTransport::default());
+        let typing_started_transport = Arc::clone(&transport);
+        let typing_started = async move {
+            typing_started_transport.typing_started.notified().await;
+        };
+        let observed_transport = Arc::clone(&transport);
+        let (tx, mut rx) = mpsc::channel(8);
+
+        let task = tokio::spawn(async move {
+            outbound
+                .send_stream_with_transport(
+                    transport.as_ref(),
+                    retry_cfg(3),
+                    "acct",
+                    "1",
+                    u64::MAX,
+                    &mut rx,
+                )
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_millis(50), typing_started)
+            .await
+            .expect("typing keepalive must start");
+        tokio::time::timeout(std::time::Duration::from_millis(50), async {
+            loop {
+                if *observed_transport.send_calls.lock().unwrap() > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("placeholder send must not wait for typing");
+        assert_eq!(*observed_transport.send_calls.lock().unwrap(), 1);
+
+        tx.send(StreamEvent::Done).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn telegram_outbound_stream_final_edit_failure_returns_error() {
         let outbound = empty_outbound();
         let transport = MockTextTransport {
-            send_results: Mutex::new(
-                vec![MockSendResult::Ok(MessageId(21))].into(),
-            ),
+            send_results: Mutex::new(vec![MockSendResult::Ok(MessageId(21))].into()),
             edit_results: Mutex::new(
                 vec![MockEditResult::Err(teloxide::RequestError::Api(
                     teloxide::ApiError::BotBlocked,
@@ -1952,7 +2581,9 @@ mod tests {
             ..Default::default()
         };
         let (tx, mut rx) = mpsc::channel(8);
-        tx.send(StreamEvent::Delta("hello".to_string())).await.unwrap();
+        tx.send(StreamEvent::Delta("hello".to_string()))
+            .await
+            .unwrap();
         tx.send(StreamEvent::Done).await.unwrap();
         drop(tx);
 
@@ -2001,6 +2632,44 @@ mod tests {
         assert_eq!(
             outbound_err.delivery_state,
             Some(OutboundDeliveryState::PartialSent)
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_outbound_stream_error_does_not_expose_internal_error_text() {
+        let outbound = empty_outbound();
+        let transport = MockTextTransport {
+            send_results: Mutex::new(vec![MockSendResult::Ok(MessageId(51))].into()),
+            edit_results: Mutex::new(vec![MockEditResult::Ok, MockEditResult::Ok].into()),
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        tx.send(StreamEvent::Delta("hello".to_string()))
+            .await
+            .unwrap();
+        tx.send(StreamEvent::Error("boom".to_string()))
+            .await
+            .unwrap();
+        drop(tx);
+
+        outbound
+            .send_stream_with_transport(&transport, retry_cfg(3), "acct", "1", 0, &mut rx)
+            .await
+            .unwrap();
+
+        let last = transport
+            .last_edit_text
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        assert!(
+            !last.contains("boom"),
+            "telegram user-visible stream output must not include internal error text"
+        );
+        assert!(
+            last.contains("Something went wrong while generating the response"),
+            "expected sanitized failure hint in final output"
         );
     }
 }

@@ -212,26 +212,26 @@ impl ChannelStatus for TelegramPlugin {
             return Ok(snap.clone());
         }
 
-        let bot = {
+        let bot_and_polling = {
             let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
-            accounts.get(account_handle).map(|s| s.bot.clone())
+            accounts
+                .get(account_handle)
+                .map(|s| (s.bot.clone(), Arc::clone(&s.polling)))
         };
 
-        let result = match bot {
-            Some(bot) => match bot.get_me().await {
-                Ok(me) => ChannelHealthSnapshot {
-                    connected: true,
+        let result = match bot_and_polling {
+            Some((bot, polling)) => {
+                let auth_ok = bot.get_me().await.is_ok();
+                let now = std::time::Instant::now();
+                let (connected, details) = {
+                    let s = polling.lock().unwrap_or_else(|e| e.into_inner());
+                    compute_polling_probe_details(now, auth_ok, &s)
+                };
+                ChannelHealthSnapshot {
+                    connected,
                     chan_account_key: account_handle.to_string(),
-                    details: Some(format!(
-                        "Bot: @{}",
-                        me.username.as_deref().unwrap_or("unknown")
-                    )),
-                },
-                Err(e) => ChannelHealthSnapshot {
-                    connected: false,
-                    chan_account_key: account_handle.to_string(),
-                    details: Some(format!("API error: {e}")),
-                },
+                    details: Some(details),
+                }
             },
             None => ChannelHealthSnapshot {
                 connected: false,
@@ -246,6 +246,46 @@ impl ChannelStatus for TelegramPlugin {
 
         Ok(result)
     }
+}
+
+fn compute_polling_probe_details(
+    now: std::time::Instant,
+    auth_ok: bool,
+    s: &crate::state::PollingRuntimeState,
+) -> (bool, String) {
+    let stale = s
+        .last_poll_ok_at
+        .map(|last_poll| now.duration_since(last_poll).as_secs() > s.stale_threshold_secs)
+        .unwrap_or(true);
+    let last_poll_ok_secs_ago = s.last_poll_ok_at.map(|t| now.duration_since(t).as_secs());
+    let last_update_finished_secs_ago = s
+        .last_update_finished_at
+        .map(|t| now.duration_since(t).as_secs());
+    let last_retryable_failure_secs_ago = s
+        .last_retryable_failure_at
+        .map(|t| now.duration_since(t).as_secs());
+    let update_processing_blocked = match (s.last_retryable_failure_at, s.last_update_finished_at) {
+        (Some(_failed_at), None) => true,
+        (Some(failed_at), Some(finished_at)) => finished_at < failed_at,
+        (None, _) => false,
+    };
+    let connected = auth_ok
+        && s.polling_state.as_str() == "running"
+        && s.last_poll_ok_at.is_some()
+        && !stale
+        && !update_processing_blocked;
+    let details = format!(
+        "auth_ok={auth_ok} polling_state={} stale={stale} update_processing_blocked={} last_poll_ok_secs_ago={:?} last_update_finished_secs_ago={:?} last_retryable_failure_secs_ago={:?} last_retryable_failure_reason_code={:?} last_poll_exit_reason_code={:?} stale_threshold_secs={}",
+        s.polling_state.as_str(),
+        update_processing_blocked,
+        last_poll_ok_secs_ago,
+        last_update_finished_secs_ago,
+        last_retryable_failure_secs_ago,
+        s.last_retryable_failure_reason_code,
+        s.last_poll_exit_reason_code,
+        s.stale_threshold_secs
+    );
+    (connected, details)
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -276,6 +316,9 @@ mod tests {
             cancel,
             message_log: None,
             event_sink: None,
+            polling: Arc::new(std::sync::Mutex::new(
+                crate::state::PollingRuntimeState::new(90),
+            )),
             otp: std::sync::Mutex::new(OtpState::new(300)),
         }
     }
@@ -450,5 +493,66 @@ mod tests {
             state.config.token.expose_secret(),
             "test:fake_token_for_unit_tests"
         );
+    }
+
+    #[test]
+    fn probe_connected_reflects_polling_liveness_not_just_auth() {
+        let now = std::time::Instant::now();
+        let mut s = crate::state::PollingRuntimeState::new(90);
+        s.polling_state = crate::state::PollingState::Running;
+        s.polling_started_at = now - std::time::Duration::from_secs(200);
+
+        let (connected0, details0) = super::compute_polling_probe_details(now, true, &s);
+        assert!(
+            !connected0,
+            "polling with no successful poll yet must report disconnected"
+        );
+        assert!(details0.contains("stale=true"));
+
+        s.last_poll_ok_at = Some(now - std::time::Duration::from_secs(200));
+        let (connected, details) = super::compute_polling_probe_details(now, true, &s);
+        assert!(!connected, "stale polling must report disconnected");
+        assert!(details.contains("stale=true"));
+        assert!(details.contains("update_processing_blocked=false"));
+
+        s.last_poll_ok_at = Some(now);
+        let (connected2, details2) = super::compute_polling_probe_details(now, true, &s);
+        assert!(connected2, "fresh polling should report connected");
+        assert!(details2.contains("stale=false"));
+        assert!(details2.contains("update_processing_blocked=false"));
+
+        let (connected3, _details3) = super::compute_polling_probe_details(now, false, &s);
+        assert!(
+            !connected3,
+            "auth_ok=false must report disconnected even if polling is fresh"
+        );
+    }
+
+    #[test]
+    fn probe_disconnects_when_retryable_failure_is_newer_than_last_completed_update() {
+        let now = std::time::Instant::now();
+        let mut s = crate::state::PollingRuntimeState::new(90);
+        s.polling_state = crate::state::PollingState::Running;
+        s.last_poll_ok_at = Some(now);
+        s.last_update_finished_at = Some(now - std::time::Duration::from_secs(30));
+        s.last_retryable_failure_at = Some(now - std::time::Duration::from_secs(5));
+        s.last_retryable_failure_reason_code = Some("get_file_failed");
+
+        let (connected, details) = super::compute_polling_probe_details(now, true, &s);
+        assert!(
+            !connected,
+            "fresh polls must still report disconnected while a retry barrier is blocking updates"
+        );
+        assert!(details.contains("update_processing_blocked=true"));
+        assert!(details.contains("last_retryable_failure_reason_code=Some(\"get_file_failed\")"));
+
+        s.last_update_finished_at = Some(now);
+        let (connected_after_recovery, details_after_recovery) =
+            super::compute_polling_probe_details(now, true, &s);
+        assert!(
+            connected_after_recovery,
+            "completed update progress after the retryable failure should restore connectivity"
+        );
+        assert!(details_after_recovery.contains("update_processing_blocked=false"));
     }
 }

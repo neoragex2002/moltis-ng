@@ -13,7 +13,7 @@ use {
     serde_json::Value,
     sha2::{Digest, Sha256},
     tokio::{
-        sync::{OnceCell, OwnedSemaphorePermit, RwLock, Semaphore, mpsc},
+        sync::{OnceCell, OwnedSemaphorePermit, RwLock, Semaphore, mpsc, watch},
         task::AbortHandle,
     },
     tokio_stream::StreamExt,
@@ -28,8 +28,8 @@ use {
         model::{StreamEvent, values_to_chat_messages},
         multimodal::parse_data_uri,
         prompt::{
-            PromptHostRuntimeContext, PromptRuntimeContext, PromptSandboxRuntimeContext,
-            PromptReplyMedium, build_canonical_system_prompt_v1,
+            PromptHostRuntimeContext, PromptReplyMedium, PromptRuntimeContext,
+            PromptSandboxRuntimeContext, build_canonical_system_prompt_v1,
         },
         providers::{ProviderRegistry, raw_model_id},
         runner::{RunnerEvent, run_agent_loop_streaming},
@@ -81,8 +81,15 @@ fn to_user_content(mc: &MessageContent) -> UserContent {
                             })
                         },
                         None => {
+                            let url = &image_url.url;
+                            let (is_data_uri, data_uri_header) = url
+                                .split_once(',')
+                                .map(|(h, _)| (h.starts_with("data:"), Some(h)))
+                                .unwrap_or((false, None));
                             warn!(
-                                url_prefix = &image_url.url[..image_url.url.len().min(80)],
+                                url_len = url.len(),
+                                is_data_uri,
+                                data_uri_header,
                                 "to_user_content: failed to parse data URI, dropping image"
                             );
                             None
@@ -276,7 +283,10 @@ fn is_openai_responses_provider(provider_name: &str) -> bool {
     normalize_provider_key(provider_name) == "openai-responses"
 }
 
-fn as_sent_preamble_for_provider(provider_name: &str, system_prompt: &str) -> Vec<serde_json::Value> {
+fn as_sent_preamble_for_provider(
+    provider_name: &str,
+    system_prompt: &str,
+) -> Vec<serde_json::Value> {
     if is_openai_responses_provider(provider_name) {
         vec![serde_json::json!({
             "index": 1,
@@ -955,7 +965,11 @@ async fn maybe_append_tg_gst_v1_system_prompt(
         return;
     }
 
-    let snapshots = state.services.channel.telegram_bus_accounts_snapshot().await;
+    let snapshots = state
+        .services
+        .channel
+        .telegram_bus_accounts_snapshot()
+        .await;
     let format = snapshots
         .iter()
         .find(|s| s.account_handle == target.chan_account_key)
@@ -1733,6 +1747,7 @@ pub struct LiveChatService {
     model_store: Arc<RwLock<DisabledModelsStore>>,
     state: Arc<GatewayState>,
     active_runs: Arc<RwLock<HashMap<String, AbortHandle>>>,
+    run_completion_notifiers: Arc<RwLock<HashMap<String, watch::Sender<bool>>>>,
     tool_registry: Arc<RwLock<ToolRegistry>>,
     session_store: Arc<SessionStore>,
     session_metadata: Arc<SqliteSessionMetadata>,
@@ -1749,6 +1764,25 @@ pub struct LiveChatService {
     failover_config: moltis_config::schema::FailoverConfig,
 }
 
+const RUN_COMPLETION_NOTIFIER_TTL: Duration = Duration::from_secs(60);
+
+async fn mark_run_completed(
+    run_completion_notifiers: &Arc<RwLock<HashMap<String, watch::Sender<bool>>>>,
+    run_id: &str,
+) {
+    let completion_sender = { run_completion_notifiers.read().await.get(run_id).cloned() };
+    if let Some(sender) = completion_sender {
+        let _ = sender.send(true);
+    }
+
+    let cleanup_run_id = run_id.to_string();
+    let cleanup_notifiers = Arc::clone(run_completion_notifiers);
+    tokio::spawn(async move {
+        tokio::time::sleep(RUN_COMPLETION_NOTIFIER_TTL).await;
+        cleanup_notifiers.write().await.remove(&cleanup_run_id);
+    });
+}
+
 impl LiveChatService {
     pub fn new(
         providers: Arc<RwLock<ProviderRegistry>>,
@@ -1762,6 +1796,7 @@ impl LiveChatService {
             model_store,
             state,
             active_runs: Arc::new(RwLock::new(HashMap::new())),
+            run_completion_notifiers: Arc::new(RwLock::new(HashMap::new())),
             tool_registry: Arc::new(RwLock::new(ToolRegistry::new())),
             session_store,
             session_metadata,
@@ -1792,6 +1827,28 @@ impl LiveChatService {
     pub fn with_hooks_arc(mut self, registry: Arc<moltis_common::hooks::HookRegistry>) -> Self {
         self.hook_registry = Some(registry);
         self
+    }
+
+    async fn wait_for_run_completion_internal(&self, run_id: &str) -> ServiceResult<()> {
+        let Some(mut completion_rx) = ({
+            self.run_completion_notifiers
+                .read()
+                .await
+                .get(run_id)
+                .map(watch::Sender::subscribe)
+        }) else {
+            return Ok(());
+        };
+
+        if *completion_rx.borrow() {
+            return Ok(());
+        }
+
+        completion_rx
+            .changed()
+            .await
+            .map_err(|_| format!("run completion waiter dropped for {run_id}"))?;
+        Ok(())
     }
 
     fn has_tools_sync(&self) -> bool {
@@ -2506,7 +2563,12 @@ impl ChatService for LiveChatService {
             warn!(session = %session_key, warning = %w, "prompt template warning");
         }
         let mut system_prompt = canonical.system_prompt;
-        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
+        maybe_append_tg_gst_v1_system_prompt(
+            &self.state,
+            session_entry.as_ref(),
+            &mut system_prompt,
+        )
+        .await;
 
         let estimated_next_input_tokens =
             estimate_next_input_tokens(&system_prompt, &history, &user_content);
@@ -2518,11 +2580,7 @@ impl ChatService for LiveChatService {
         if estimated_keep_window_input_tokens >= budget.input_hard_cap {
             // Recovery mode: keep window itself doesn't fit — do not call the model.
             // Still persist the user message so the session remains usable.
-            if let Err(e) = self
-                .session_store
-                .append(&session_key, &user_val)
-                .await
-            {
+            if let Err(e) = self.session_store.append(&session_key, &user_val).await {
                 warn!("failed to persist user message: {e}");
             }
             // Best-effort: update preview + metadata counts so the session stays visible in UI.
@@ -2676,11 +2734,7 @@ impl ChatService for LiveChatService {
 
         // Persist the user message now that we know it won't be queued.
         // (Queued messages skip this; they are persisted when replayed.)
-        if let Err(e) = self
-            .session_store
-            .append(&session_key, &user_val)
-            .await
-        {
+        if let Err(e) = self.session_store.append(&session_key, &user_val).await {
             warn!("failed to persist user message: {e}");
         }
 
@@ -2701,6 +2755,12 @@ impl ChatService for LiveChatService {
         let message_queue = Arc::clone(&self.message_queue);
         let state_for_drain = Arc::clone(&self.state);
         let consecutive_failures = Arc::clone(&self.consecutive_failures);
+        let run_completion_notifiers = Arc::clone(&self.run_completion_notifiers);
+        let (run_completion_tx, _) = watch::channel(false);
+        self.run_completion_notifiers
+            .write()
+            .await
+            .insert(run_id.clone(), run_completion_tx);
 
         let handle = tokio::spawn(async move {
             let permit = permit; // hold permit until agent run completes
@@ -2881,7 +2941,8 @@ impl ChatService for LiveChatService {
                         "⚠️ 我这边连续出错，已暂停处理后续请求；请稍后重试或重新 @我。";
                     let outbound = state_for_drain.services.channel_outbound_arc();
                     for msg in queued {
-                        let Some(tid) = msg.params.get("_triggerId").and_then(|v| v.as_str()) else {
+                        let Some(tid) = msg.params.get("_triggerId").and_then(|v| v.as_str())
+                        else {
                             continue;
                         };
                         // Drain any buffered status lines for this trigger so they don't leak into
@@ -2912,6 +2973,7 @@ impl ChatService for LiveChatService {
                             .await;
                         }
                     }
+                    mark_run_completed(&run_completion_notifiers, &run_id_clone).await;
                     return;
                 }
                 let queue_mode = moltis_config::discover_and_load().chat.message_queue_mode;
@@ -2920,6 +2982,7 @@ impl ChatService for LiveChatService {
                     MessageQueueMode::Followup => {
                         let mut iter = queued.into_iter();
                         let Some(first) = iter.next() else {
+                            mark_run_completed(&run_completion_notifiers, &run_id_clone).await;
                             return;
                         };
                         // Put remaining messages back so the replayed run's
@@ -2953,6 +3016,7 @@ impl ChatService for LiveChatService {
                             );
                             // Use the last queued message as the base params, override text.
                             let Some(last) = queued.last() else {
+                                mark_run_completed(&run_completion_notifiers, &run_id_clone).await;
                                 return;
                             };
                             let merged_from: Vec<String> = queued
@@ -3014,6 +3078,8 @@ impl ChatService for LiveChatService {
                     },
                 }
             }
+
+            mark_run_completed(&run_completion_notifiers, &run_id_clone).await;
         });
 
         self.active_runs
@@ -3076,11 +3142,7 @@ impl ChatService for LiveChatService {
                 serde_json::Value::String(trigger_id.clone()),
             );
         }
-        if let Err(e) = self
-            .session_store
-            .append(&session_key, &user_val)
-            .await
-        {
+        if let Err(e) = self.session_store.append(&session_key, &user_val).await {
             warn!("send_sync: failed to persist user message: {e}");
         }
 
@@ -3155,7 +3217,12 @@ impl ChatService for LiveChatService {
             warn!(session = %session_key, warning = %w, "prompt template warning");
         }
         let mut system_prompt = canonical.system_prompt;
-        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
+        maybe_append_tg_gst_v1_system_prompt(
+            &self.state,
+            session_entry.as_ref(),
+            &mut system_prompt,
+        )
+        .await;
 
         let user_content = UserContent::text(text.clone());
         let estimated_next_input_tokens =
@@ -3167,10 +3234,7 @@ impl ChatService for LiveChatService {
         if estimated_keep_window_input_tokens >= budget.input_hard_cap {
             let msg = "keep_window_overflow: last 4 user rounds plus current message exceed input limit; shorten/split your message or start a new session";
             let error_entry = ui_error_notice_message(&format!("[error] {msg}"));
-            let _ = self
-                .session_store
-                .append(&session_key, &error_entry)
-                .await;
+            let _ = self.session_store.append(&session_key, &error_entry).await;
             return Err(msg.to_string());
         }
 
@@ -3332,10 +3396,7 @@ impl ChatService for LiveChatService {
 
                 // Persist the error in the session so it's visible in session history.
                 let error_entry = ui_error_notice_message(&format!("[error] {error_msg}"));
-                let _ = self
-                    .session_store
-                    .append(&session_key, &error_entry)
-                    .await;
+                let _ = self.session_store.append(&session_key, &error_entry).await;
                 // Update metadata so the session shows in the UI.
                 if let Ok(count) = self.session_store.count(&session_key).await {
                     self.session_metadata.touch(&session_key, count).await;
@@ -3344,6 +3405,10 @@ impl ChatService for LiveChatService {
                 Err(error_msg)
             },
         }
+    }
+
+    async fn wait_run_completion(&self, run_id: &str) -> ServiceResult<()> {
+        self.wait_for_run_completion_internal(run_id).await
     }
 
     async fn internal_complete(&self, params: Value) -> ServiceResult {
@@ -3407,6 +3472,7 @@ impl ChatService for LiveChatService {
         if let Some(handle) = self.active_runs.write().await.remove(run_id) {
             handle.abort();
         }
+        mark_run_completed(&self.run_completion_notifiers, run_id).await;
         Ok(serde_json::json!({}))
     }
 
@@ -3806,10 +3872,7 @@ impl ChatService for LiveChatService {
         )
         .await;
         let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
-        let persona_id_effective = persona_id
-            .as_deref()
-            .unwrap_or("default")
-            .to_string();
+        let persona_id_effective = persona_id.as_deref().unwrap_or("default").to_string();
         let persona = load_prompt_persona_with_id(persona_id.as_deref());
 
         let filtered_registry = if stream_only {
@@ -3845,7 +3908,12 @@ impl ChatService for LiveChatService {
         }
         let prompt_template_warnings = canonical.warnings.clone();
         let mut system_prompt = canonical.system_prompt;
-        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
+        maybe_append_tg_gst_v1_system_prompt(
+            &self.state,
+            session_entry.as_ref(),
+            &mut system_prompt,
+        )
+        .await;
 
         let tools_for_api: Vec<serde_json::Value> = if stream_only || !supports_tools {
             Vec::new()
@@ -3862,7 +3930,10 @@ impl ChatService for LiveChatService {
         let as_sent = provider.debug_as_sent_summary(&msgs_for_as_sent, &tools_for_api);
 
         let as_sent_preamble = if is_openai_responses_provider(provider.name()) {
-            Some(as_sent_preamble_for_provider(provider.name(), &system_prompt))
+            Some(as_sent_preamble_for_provider(
+                provider.name(),
+                &system_prompt,
+            ))
         } else {
             None
         };
@@ -3950,10 +4021,7 @@ impl ChatService for LiveChatService {
             .await;
 
         let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
-        let persona_id_effective = persona_id
-            .as_deref()
-            .unwrap_or("default")
-            .to_string();
+        let persona_id_effective = persona_id.as_deref().unwrap_or("default").to_string();
         let persona = load_prompt_persona_with_id(persona_id.as_deref());
 
         // Discover skills.
@@ -4009,7 +4077,12 @@ impl ChatService for LiveChatService {
         }
         let prompt_template_warnings = canonical.warnings.clone();
         let mut system_prompt = canonical.system_prompt;
-        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
+        maybe_append_tg_gst_v1_system_prompt(
+            &self.state,
+            session_entry.as_ref(),
+            &mut system_prompt,
+        )
+        .await;
         let tool_count = if stream_only {
             0
         } else {
@@ -4025,7 +4098,10 @@ impl ChatService for LiveChatService {
         let as_sent = provider.debug_as_sent_summary(&msgs_for_as_sent, &tools_for_api);
 
         let as_sent_preamble = if is_openai_responses_provider(provider.name()) {
-            Some(as_sent_preamble_for_provider(provider.name(), &system_prompt))
+            Some(as_sent_preamble_for_provider(
+                provider.name(),
+                &system_prompt,
+            ))
         } else {
             None
         };
@@ -4095,10 +4171,7 @@ impl ChatService for LiveChatService {
         }
 
         let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
-        let persona_id_effective = persona_id
-            .as_deref()
-            .unwrap_or("default")
-            .to_string();
+        let persona_id_effective = persona_id.as_deref().unwrap_or("default").to_string();
         let persona = load_prompt_persona_with_id(persona_id.as_deref());
 
         // Resolve project context.
@@ -4164,7 +4237,12 @@ impl ChatService for LiveChatService {
         }
         let prompt_template_warnings = canonical.warnings.clone();
         let mut system_prompt = canonical.system_prompt;
-        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt).await;
+        maybe_append_tg_gst_v1_system_prompt(
+            &self.state,
+            session_entry.as_ref(),
+            &mut system_prompt,
+        )
+        .await;
 
         let tools_for_api: Vec<serde_json::Value> = if stream_only || !native_tools {
             Vec::new()
@@ -4177,36 +4255,41 @@ impl ChatService for LiveChatService {
         let as_sent = provider.debug_as_sent_summary(&msgs_for_as_sent, &tools_for_api);
 
         let as_sent_preamble = if is_openai_responses_provider(provider.name()) {
-            Some(as_sent_preamble_for_provider(provider.name(), &system_prompt))
+            Some(as_sent_preamble_for_provider(
+                provider.name(),
+                &system_prompt,
+            ))
         } else {
             None
         };
 
-        let (openai_messages, system_prompt_chars) = if is_openai_responses_provider(provider.name())
-        {
-            let mut msgs: Vec<Value> = Vec::new();
-            msgs.push(serde_json::json!({"role": "developer", "content": system_prompt.clone()}));
+        let (openai_messages, system_prompt_chars) =
+            if is_openai_responses_provider(provider.name()) {
+                let mut msgs: Vec<Value> = Vec::new();
+                msgs.push(
+                    serde_json::json!({"role": "developer", "content": system_prompt.clone()}),
+                );
 
-            for msg in values_to_chat_messages(&history_with_tools) {
-                let mut val = msg.to_openai_value();
-                if val.get("role").and_then(|r| r.as_str()) == Some("system") {
-                    val["role"] = serde_json::Value::String("developer".to_string());
+                for msg in values_to_chat_messages(&history_with_tools) {
+                    let mut val = msg.to_openai_value();
+                    if val.get("role").and_then(|r| r.as_str()) == Some("system") {
+                        val["role"] = serde_json::Value::String("developer".to_string());
+                    }
+                    msgs.push(val);
                 }
-                msgs.push(val);
-            }
 
-            (msgs, system_prompt.len())
-        } else {
-            // Build the full messages array: system prompt + conversation history.
-            let mut messages = Vec::with_capacity(1 + history_with_tools.len());
-            messages.push(ChatMessage::system(system_prompt.clone()));
-            messages.extend(values_to_chat_messages(&history_with_tools));
+                (msgs, system_prompt.len())
+            } else {
+                // Build the full messages array: system prompt + conversation history.
+                let mut messages = Vec::with_capacity(1 + history_with_tools.len());
+                messages.push(ChatMessage::system(system_prompt.clone()));
+                messages.extend(values_to_chat_messages(&history_with_tools));
 
-            (
-                messages.iter().map(|m| m.to_openai_value()).collect(),
-                system_prompt.len(),
-            )
-        };
+                (
+                    messages.iter().map(|m| m.to_openai_value()).collect(),
+                    system_prompt.len(),
+                )
+            };
 
         let message_count = openai_messages.len();
         let total_chars: usize = openai_messages
@@ -6168,8 +6251,14 @@ async fn run_streaming(
                 } else {
                     // Silent responses must still clear pending channel delivery state
                     // (reply targets + logbook) to avoid later reply "cross-wiring".
-                    deliver_channel_replies(state, session_key, trigger_id, "", desired_reply_medium)
-                        .await;
+                    deliver_channel_replies(
+                        state,
+                        session_key,
+                        trigger_id,
+                        "",
+                        desired_reply_medium,
+                    )
+                    .await;
                 }
 
                 // Dispatch MessageSent + AgentEnd hooks (read-only).
@@ -6935,14 +7024,14 @@ async fn maybe_relay_telegram_group_mentions(
     if groups.is_empty() {
         return;
     }
-    let has_line_start_directive_candidate = groups.iter().any(|g| {
-        g.line_start && !g.mentions.is_empty() && !only_whitespace_or_punct(&g.task_text)
-    });
+    let has_line_start_directive_candidate = groups
+        .iter()
+        .any(|g| g.line_start && !g.mentions.is_empty() && !only_whitespace_or_punct(&g.task_text));
     let has_budget_candidate = match source_cfg.relay_strictness {
         moltis_telegram::config::RelayStrictness::Strict => has_line_start_directive_candidate,
-        moltis_telegram::config::RelayStrictness::Loose => groups.iter().any(|g| {
-            !g.mentions.is_empty() && !only_whitespace_or_punct(&g.task_text)
-        }),
+        moltis_telegram::config::RelayStrictness::Loose => groups
+            .iter()
+            .any(|g| !g.mentions.is_empty() && !only_whitespace_or_punct(&g.task_text)),
     };
 
     let inbound_hop = inbound_ctx.as_ref().map(|c| c.hop).unwrap_or(0);
@@ -6963,12 +7052,7 @@ async fn maybe_relay_telegram_group_mentions(
                 "telegram.relay.skip|hop_limit|chat:{}|src:{}|out:{}",
                 chat_id, source_account_id, source_outbound_message_id
             );
-            let is_dup = state
-                .inner
-                .write()
-                .await
-                .dedupe
-                .check_and_insert(&skip_key);
+            let is_dup = state.inner.write().await.dedupe.check_and_insert(&skip_key);
             if !is_dup {
                 warn!(
                     relay_skip_reason = "hop_limit_exceeded",
@@ -7183,12 +7267,7 @@ Output format:
                 "telegram.relay.skip|target_missing|chat:{}|src:{}|dst:{}|out:{}",
                 chat_id, source_account_id, d.target_account_id, source_outbound_message_id
             );
-            let is_dup = state
-                .inner
-                .write()
-                .await
-                .dedupe
-                .check_and_insert(&skip_key);
+            let is_dup = state.inner.write().await.dedupe.check_and_insert(&skip_key);
             if !is_dup {
                 warn!(
                     relay_skip_reason = "target_session_missing",
@@ -7392,7 +7471,8 @@ async fn maybe_mirror_telegram_group_reply(
         .channel
         .telegram_bus_accounts_snapshot()
         .await;
-    let mut format_by_account = HashMap::<String, moltis_telegram::config::GroupSessionTranscriptFormat>::new();
+    let mut format_by_account =
+        HashMap::<String, moltis_telegram::config::GroupSessionTranscriptFormat>::new();
     for s in snapshots {
         format_by_account.insert(s.account_handle, s.group_session_transcript_format);
     }
@@ -7471,8 +7551,7 @@ async fn maybe_mirror_telegram_group_reply(
                 format!("{source_username}(bot): {text}")
             },
         };
-        let user_msg =
-            PersistedMessage::user_with_channel(mirrored_content, channel_meta.clone());
+        let user_msg = PersistedMessage::user_with_channel(mirrored_content, channel_meta.clone());
         let user_val = user_msg.to_value();
         if let Err(e) = store.append(&target_session_key, &user_val).await {
             warn!(
@@ -8064,7 +8143,7 @@ async fn send_screenshot_to_channels(
             match target.chan_type {
                 moltis_channels::ChannelType::Telegram => {
                     let reply_to = target.message_id.as_deref();
-                    if let Err(e) = outbound
+                    if let Err(_e) = outbound
                         .send_media(
                             &target.chan_account_key,
                             &target.chat_id,
@@ -8074,12 +8153,15 @@ async fn send_screenshot_to_channels(
                         .await
                     {
                         warn!(
-                            chan_account_key = target.chan_account_key,
-                            chat_id = target.chat_id,
-                            "failed to send screenshot to channel: {e}"
+                            event = "telegram.outbound.media_failed",
+                            chan_account_key = %target.chan_account_key,
+                            chat_id = %target.chat_id,
+                            reason_code = "send_media_failed",
+                            "failed to send screenshot to channel"
                         );
                         // Notify the user of the error
-                        let error_msg = format!("⚠️ Failed to send screenshot: {e}");
+                        let error_msg =
+                            "⚠️ Failed to send screenshot. Please try again.".to_string();
                         let _ = outbound
                             .send_text(
                                 &target.chan_account_key,
@@ -8185,9 +8267,9 @@ async fn send_location_to_channels(
 mod tests {
     use {
         super::*,
+        crate::logs::{LogBroadcastLayer, LogBuffer, LogFilter},
         anyhow::Result,
         moltis_agents::{model::LlmProvider, tool_registry::AgentTool},
-        crate::logs::{LogBroadcastLayer, LogBuffer, LogFilter},
         moltis_common::{
             hooks::{HookAction, HookEvent, HookHandler, HookPayload, HookRegistry},
             types::ReplyPayload,
@@ -8772,7 +8854,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn deliver_channel_replies_does_not_log_failure_when_outbound_retries_internally_then_succeeds() {
+    async fn deliver_channel_replies_does_not_log_failure_when_outbound_retries_internally_then_succeeds()
+     {
         let outbound = Arc::new(RetryingSuccessOutbound::default());
         let outbound_dyn: Arc<dyn moltis_channels::plugin::ChannelOutbound> = outbound.clone();
         let targets = vec![moltis_channels::ChannelReplyTarget {
@@ -8791,7 +8874,8 @@ mod tests {
             crate::services::GatewayServices::noop(),
         );
         let buffer = LogBuffer::new(128);
-        let subscriber = tracing_subscriber::registry().with(LogBroadcastLayer::new(buffer.clone()));
+        let subscriber =
+            tracing_subscriber::registry().with(LogBroadcastLayer::new(buffer.clone()));
         let dispatch = tracing::Dispatch::new(subscriber);
         let _guard = tracing::dispatcher::set_default(&dispatch);
         deliver_channel_replies_to_targets(
@@ -8830,10 +8914,7 @@ mod tests {
         );
         assert!(
             entries.iter().all(|entry| {
-                entry
-                    .fields
-                    .get("event")
-                    .and_then(|value| value.as_str())
+                entry.fields.get("event").and_then(|value| value.as_str())
                     != Some("channel_delivery.failed")
             }),
             "successful internal retry should not emit channel_delivery.failed"
@@ -9211,8 +9292,13 @@ mod tests {
         seed_session(store.as_ref(), "telegram:fluffy:-100").await;
 
         // Send a dummy data URI screenshot.
-        send_screenshot_to_channels(&state, session_key, &trigger_id, "data:image/png;base64,AAAA")
-            .await;
+        send_screenshot_to_channels(
+            &state,
+            session_key,
+            &trigger_id,
+            "data:image/png;base64,AAAA",
+        )
+        .await;
 
         let fluffy = store.read("telegram:fluffy:-100").await.unwrap();
         assert_eq!(fluffy.len(), 2);
@@ -9236,9 +9322,8 @@ mod tests {
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
         let metadata = sqlite_metadata().await;
 
-        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(
-            &store,
-        ));
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
         let state = Arc::new(crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
@@ -9285,7 +9370,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ctx["personaIdEffective"], "default");
-        let preamble = ctx["asSentPreamble"].as_array().expect("asSentPreamble array");
+        let preamble = ctx["asSentPreamble"]
+            .as_array()
+            .expect("asSentPreamble array");
         assert_eq!(preamble.len(), 1);
         assert_eq!(preamble[0]["role"], "developer");
         assert!(
@@ -9301,7 +9388,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(raw["personaIdEffective"], "default");
-        let preamble = raw["asSentPreamble"].as_array().expect("asSentPreamble array");
+        let preamble = raw["asSentPreamble"]
+            .as_array()
+            .expect("asSentPreamble array");
         assert_eq!(preamble.len(), 1);
 
         // chat.full_context
@@ -9312,7 +9401,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(full["personaIdEffective"], "default");
-        let preamble = full["asSentPreamble"].as_array().expect("asSentPreamble array");
+        let preamble = full["asSentPreamble"]
+            .as_array()
+            .expect("asSentPreamble array");
         assert_eq!(preamble.len(), 1);
         let messages = full["messages"].as_array().expect("messages array");
         assert!(
@@ -9332,9 +9423,8 @@ mod tests {
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
         let metadata = sqlite_metadata().await;
 
-        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(
-            &store,
-        ));
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
         let state = Arc::new(crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
@@ -9407,9 +9497,8 @@ mod tests {
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
         let metadata = sqlite_metadata().await;
 
-        let services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(
-            &store,
-        ));
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
         let state = Arc::new(crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
@@ -9459,10 +9548,12 @@ mod tests {
             .unwrap();
         let as_sent = ctx["asSent"].as_object().expect("asSent object");
         assert_eq!(as_sent["kind"], "local_llm_prompt_v1");
-        assert!(as_sent["prompt"]["preview"]
-            .as_str()
-            .unwrap_or("")
-            .contains("<|im_start|>system"));
+        assert!(
+            as_sent["prompt"]["preview"]
+                .as_str()
+                .unwrap_or("")
+                .contains("<|im_start|>system")
+        );
 
         // chat.raw_prompt
         let raw = chat
@@ -9530,9 +9621,8 @@ mod tests {
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
         let metadata = sqlite_metadata().await;
 
-        let mut services = crate::services::GatewayServices::noop().with_session_store(Arc::clone(
-            &store,
-        ));
+        let mut services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
         services.channel = Arc::new(PersonaChannelService {
             persona_id: "my_persona".to_string(),
         });
@@ -10566,11 +10656,18 @@ echo @bot2
         .await;
 
         assert!(out.is_none());
-        assert!(state.peek_channel_replies(session_key, &trigger_id).await.is_empty());
-        assert!(state
-            .drain_channel_status_log(session_key, &trigger_id)
-            .await
-            .is_empty());
+        assert!(
+            state
+                .peek_channel_replies(session_key, &trigger_id)
+                .await
+                .is_empty()
+        );
+        assert!(
+            state
+                .drain_channel_status_log(session_key, &trigger_id)
+                .await
+                .is_empty()
+        );
 
         let texts = rec.texts.lock().await;
         assert_eq!(texts.len(), 1);
@@ -10641,11 +10738,18 @@ echo @bot2
         .await;
 
         assert!(out.is_some());
-        assert!(state.peek_channel_replies(session_key, &trigger_id).await.is_empty());
-        assert!(state
-            .drain_channel_status_log(session_key, &trigger_id)
-            .await
-            .is_empty());
+        assert!(
+            state
+                .peek_channel_replies(session_key, &trigger_id)
+                .await
+                .is_empty()
+        );
+        assert!(
+            state
+                .drain_channel_status_log(session_key, &trigger_id)
+                .await
+                .is_empty()
+        );
         assert!(rec.texts.lock().await.is_empty());
     }
 
@@ -10729,7 +10833,12 @@ echo @bot2
         )
         .await;
 
-        assert!(state.peek_channel_replies(session_key, &trigger_id).await.is_empty());
+        assert!(
+            state
+                .peek_channel_replies(session_key, &trigger_id)
+                .await
+                .is_empty()
+        );
 
         // Only the first failure should send a reply (at most once).
         let texts = rec.texts.lock().await;
@@ -10783,12 +10892,17 @@ echo @bot2
 
         deliver_channel_replies(&state, session_key, trigger_a, "hello", ReplyMedium::Text).await;
 
-        assert!(state
-            .peek_channel_replies(session_key, trigger_a)
-            .await
-            .is_empty());
+        assert!(
+            state
+                .peek_channel_replies(session_key, trigger_a)
+                .await
+                .is_empty()
+        );
         assert_eq!(
-            state.peek_channel_replies(session_key, trigger_b).await.len(),
+            state
+                .peek_channel_replies(session_key, trigger_b)
+                .await
+                .len(),
             1
         );
 
@@ -10860,12 +10974,17 @@ echo @bot2
         )
         .await;
 
-        assert!(state
-            .peek_channel_replies(session_key, trigger_a)
-            .await
-            .is_empty());
+        assert!(
+            state
+                .peek_channel_replies(session_key, trigger_a)
+                .await
+                .is_empty()
+        );
         assert_eq!(
-            state.peek_channel_replies(session_key, trigger_b).await.len(),
+            state
+                .peek_channel_replies(session_key, trigger_b)
+                .await
+                .len(),
             1
         );
 
@@ -10950,6 +11069,11 @@ echo @bot2
         called: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    struct WaitCompletionProvider {
+        started: Arc<tokio::sync::Notify>,
+        finish: Arc<tokio::sync::Notify>,
+    }
+
     #[async_trait]
     impl LlmProvider for DelayedFailThenOkProvider {
         fn name(&self) -> &str {
@@ -10987,13 +11111,10 @@ echo @bot2
         ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
             let n = self.called.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
-                Box::pin(
-                    tokio_stream::iter(std::iter::once(()))
-                        .then(|_| async {
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            StreamEvent::Error("boom".to_string())
-                        }),
-                )
+                Box::pin(tokio_stream::iter(std::iter::once(())).then(|_| async {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    StreamEvent::Error("boom".to_string())
+                }))
             } else {
                 Box::pin(tokio_stream::iter(vec![
                     StreamEvent::Delta("ok2".to_string()),
@@ -11005,6 +11126,60 @@ echo @bot2
                     }),
                 ]))
             }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for WaitCompletionProvider {
+        fn name(&self) -> &str {
+            "wait-completion"
+        }
+
+        fn id(&self) -> &str {
+            "wait-completion-model"
+        }
+
+        fn supports_tools(&self) -> bool {
+            false
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> anyhow::Result<moltis_agents::model::CompletionResponse> {
+            anyhow::bail!("not implemented for test")
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            panic!("run_streaming must not call provider.stream() directly")
+        }
+
+        fn stream_with_tools_with_context(
+            &self,
+            _ctx: &moltis_agents::model::LlmRequestContext,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            let started = Arc::clone(&self.started);
+            let finish = Arc::clone(&self.finish);
+            Box::pin(tokio_stream::iter(std::iter::once(())).then(move |_| {
+                let started = Arc::clone(&started);
+                let finish = Arc::clone(&finish);
+                async move {
+                    started.notify_waiters();
+                    finish.notified().await;
+                    StreamEvent::Done(moltis_agents::model::Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    })
+                }
+            }))
         }
     }
 
@@ -11032,9 +11207,10 @@ echo @bot2
         ));
 
         let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(DelayedFailThenOkProvider {
-            called: Arc::clone(&called),
-        });
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(DelayedFailThenOkProvider {
+                called: Arc::clone(&called),
+            });
         let mut reg = ProviderRegistry::empty();
         reg.register(
             moltis_agents::providers::ModelInfo {
@@ -11121,13 +11297,93 @@ echo @bot2
 
         let texts = rec.texts.lock().await;
         assert_eq!(texts.len(), 2);
-        let mut reply_tos: Vec<&str> = texts
-            .iter()
-            .filter_map(|t| t.3.as_deref())
-            .collect();
+        let mut reply_tos: Vec<&str> = texts.iter().filter_map(|t| t.3.as_deref()).collect();
         reply_tos.sort();
         assert_eq!(reply_tos, vec!["1", "2"]);
         assert!(called.load(Ordering::SeqCst) >= 2, "expected replay to run");
+    }
+
+    #[tokio::test]
+    async fn wait_run_completion_tracks_background_send_runs() {
+        let _guard = crate::test_support::TestDirsGuard::new();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(WaitCompletionProvider {
+                started: Arc::clone(&started),
+                finish: Arc::clone(&finish),
+            });
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_agents::providers::ModelInfo {
+                id: "wait-completion-model".to_string(),
+                provider: "wait-completion".to_string(),
+                display_name: "wait-completion".to_string(),
+                created_at: None,
+            },
+            Arc::clone(&provider),
+        );
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::clone(&state),
+            Arc::clone(&store),
+            metadata,
+        );
+
+        let result = chat
+            .send(serde_json::json!({
+                "text": "hello",
+                "_sessionId": "main",
+                "model": "wait-completion-model",
+            }))
+            .await
+            .expect("send should start background run");
+        let run_id = result
+            .get("runId")
+            .and_then(|value| value.as_str())
+            .expect("runId must be returned")
+            .to_string();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("background run must start");
+
+        let early_wait = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            chat.wait_run_completion(&run_id),
+        )
+        .await;
+        assert!(
+            early_wait.is_err(),
+            "wait_run_completion must stay pending while the run is still active"
+        );
+
+        finish.notify_waiters();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            chat.wait_run_completion(&run_id),
+        )
+        .await
+        .expect("run completion wait should finish")
+        .expect("wait_run_completion should succeed");
     }
 
     #[tokio::test]
@@ -13054,7 +13310,10 @@ echo @bot2
         ));
 
         let session_id = "telegram:845:-100";
-        metadata.upsert(session_id, Some("ok".into())).await.unwrap();
+        metadata
+            .upsert(session_id, Some("ok".into()))
+            .await
+            .unwrap();
         let binding = moltis_channels::ChannelReplyTarget {
             chan_type: moltis_channels::ChannelType::Telegram,
             chan_account_key: "telegram:845".to_string(),
@@ -13082,8 +13341,8 @@ echo @bot2
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
         let metadata = sqlite_metadata().await;
 
-        let services = crate::services::GatewayServices::noop()
-            .with_session_store(Arc::clone(&store));
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
         let state = Arc::new(crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
@@ -13147,8 +13406,8 @@ echo @bot2
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
         let metadata = sqlite_metadata().await;
 
-        let services = crate::services::GatewayServices::noop()
-            .with_session_store(Arc::clone(&store));
+        let services =
+            crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
         let state = Arc::new(crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,

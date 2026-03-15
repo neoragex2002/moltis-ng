@@ -4875,6 +4875,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "futures",
  "moltis-auto-reply",
  "moltis-channels",
  "moltis-common",

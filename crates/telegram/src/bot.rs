@@ -17,8 +17,31 @@ use crate::{
     config::TelegramAccountConfig,
     handlers,
     outbound::TelegramOutbound,
-    state::{AccountState, AccountStateMap},
+    state::{AccountState, AccountStateMap, PollingRuntimeState, PollingState},
 };
+
+const INBOUND_MAX_ATTEMPTS: u8 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryAction {
+    StopBatch { attempt: u8 },
+    Quarantine { attempt: u8 },
+}
+
+fn record_retry_attempt(
+    attempts_by_update_id: &mut std::collections::HashMap<u32, u8>,
+    update_id: u32,
+) -> RetryAction {
+    let attempt = attempts_by_update_id
+        .entry(update_id)
+        .and_modify(|n| *n = n.saturating_add(1))
+        .or_insert(1);
+    if *attempt >= INBOUND_MAX_ATTEMPTS {
+        RetryAction::Quarantine { attempt: *attempt }
+    } else {
+        RetryAction::StopBatch { attempt: *attempt }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramBotIdentity {
@@ -99,6 +122,7 @@ pub async fn start_polling(
     });
 
     let otp_cooldown = config.otp_cooldown_secs;
+    let polling = Arc::new(std::sync::Mutex::new(PollingRuntimeState::new(90)));
     let state = AccountState {
         bot: bot.clone(),
         bot_user_id,
@@ -109,6 +133,7 @@ pub async fn start_polling(
         cancel: cancel.clone(),
         message_log,
         event_sink,
+        polling: Arc::clone(&polling),
         otp: std::sync::Mutex::new(crate::otp::OtpState::new(otp_cooldown)),
     };
 
@@ -120,19 +145,33 @@ pub async fn start_polling(
     let cancel_clone = cancel.clone();
     let aid = account_handle.clone();
     let poll_accounts = Arc::clone(&accounts);
+    let poll_state = Arc::clone(&polling);
     tokio::spawn(async move {
         info!(
             account_handle = aid,
             "starting telegram manual polling loop"
         );
+        {
+            let mut s = poll_state.lock().unwrap_or_else(|e| e.into_inner());
+            s.polling_state = PollingState::Running;
+            s.polling_started_at = std::time::Instant::now();
+            s.last_poll_exit_reason_code = None;
+        }
         let mut offset: i32 = 0;
         let mut consecutive_failures: u64 = 0;
         let mut first_failure_at: Option<Instant> = None;
         let mut last_summary_at: Option<Instant> = None;
+        let mut attempts_by_update_id: std::collections::HashMap<u32, u8> =
+            std::collections::HashMap::new();
 
         loop {
             if cancel_clone.is_cancelled() {
                 info!(account_handle = aid, "telegram polling stopped");
+                {
+                    let mut s = poll_state.lock().unwrap_or_else(|e| e.into_inner());
+                    s.polling_state = PollingState::Stopping;
+                    s.last_poll_exit_reason_code = Some("cancelled");
+                }
                 break;
             }
 
@@ -149,6 +188,10 @@ pub async fn start_polling(
 
             match result {
                 Ok(updates) => {
+                    {
+                        let mut s = poll_state.lock().unwrap_or_else(|e| e.into_inner());
+                        s.last_poll_ok_at = Some(std::time::Instant::now());
+                    }
                     if consecutive_failures > 0 {
                         let downtime_secs =
                             first_failure_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
@@ -169,23 +212,24 @@ pub async fn start_polling(
                         "got telegram updates"
                     );
                     for update in updates {
-                        offset = update.id.as_offset();
-                        match update.kind {
+                        let update_id = update.id.0;
+                        let outcome = match update.kind {
                             UpdateKind::Message(msg) => {
                                 debug!(
                                     account_handle = aid,
                                     chat_id = msg.chat.id.0,
                                     "received telegram message"
                                 );
-                                if let Err(e) =
-                                    handlers::handle_message_direct(msg, &bot, &aid, &poll_accounts)
-                                        .await
+                                match handlers::handle_message_direct(
+                                    msg,
+                                    &bot,
+                                    &aid,
+                                    &poll_accounts,
+                                )
+                                .await
                                 {
-                                    error!(
-                                        account_handle = aid,
-                                        error = %e,
-                                        "error handling telegram message"
-                                    );
+                                    Ok(()) => Ok(()),
+                                    Err(e) => Err(e),
                                 }
                             },
                             UpdateKind::EditedMessage(msg) => {
@@ -194,15 +238,11 @@ pub async fn start_polling(
                                     chat_id = msg.chat.id.0,
                                     "received telegram edited message"
                                 );
-                                if let Err(e) =
-                                    handlers::handle_edited_location(msg, &aid, &poll_accounts)
-                                        .await
+                                match handlers::handle_edited_location(msg, &aid, &poll_accounts)
+                                    .await
                                 {
-                                    error!(
-                                        account_handle = aid,
-                                        error = %e,
-                                        "error handling telegram edited message"
-                                    );
+                                    Ok(()) => Ok(()),
+                                    Err(e) => Err(e),
                                 }
                             },
                             UpdateKind::CallbackQuery(query) => {
@@ -211,7 +251,7 @@ pub async fn start_polling(
                                     callback_data = ?query.data,
                                     "received telegram callback query"
                                 );
-                                if let Err(e) = handlers::handle_callback_query(
+                                match handlers::handle_callback_query(
                                     query,
                                     &bot,
                                     &aid,
@@ -219,18 +259,106 @@ pub async fn start_polling(
                                 )
                                 .await
                                 {
-                                    error!(
-                                        account_handle = aid,
-                                        error = %e,
-                                        "error handling telegram callback query"
-                                    );
+                                    Ok(()) => Ok(()),
+                                    Err(e) => Err(e),
                                 }
                             },
                             other => {
-                                debug!(
+                                info!(
+                                    event = "telegram.update.ignored",
                                     account_handle = aid,
-                                    "ignoring non-message update: {other:?}"
+                                    update_id,
+                                    reason_code = "unsupported_kind",
+                                    kind = ?other,
+                                    "telegram update ignored (unsupported kind)"
                                 );
+                                Ok(())
+                            },
+                        };
+
+                        let is_retryable = outcome
+                            .as_ref()
+                            .err()
+                            .and_then(|e| e.downcast_ref::<handlers::RetryableUpdateError>())
+                            .map(|e| e.reason_code);
+                        match (outcome, is_retryable) {
+                            (Ok(()), _) => {
+                                attempts_by_update_id.remove(&update_id);
+                                offset = update.id.as_offset();
+                                let mut s = poll_state.lock().unwrap_or_else(|e| e.into_inner());
+                                let now = std::time::Instant::now();
+                                s.last_update_finished_at = Some(now);
+                                s.last_retryable_failure_at = None;
+                                s.last_retryable_failure_reason_code = None;
+                            },
+                            (Err(_e), Some(reason_code)) => {
+                                match record_retry_attempt(&mut attempts_by_update_id, update_id) {
+                                    RetryAction::Quarantine { attempt } => {
+                                        warn!(
+                                            event = "telegram.update.quarantined",
+                                            account_handle = aid,
+                                            update_id,
+                                            reason_code = "quarantined_after_retries",
+                                            last_failure_reason_code = reason_code,
+                                            attempts = attempt,
+                                            "telegram update quarantine after retry budget exhausted"
+                                        );
+                                        attempts_by_update_id.remove(&update_id);
+                                        offset = update.id.as_offset();
+                                        let mut s =
+                                            poll_state.lock().unwrap_or_else(|e| e.into_inner());
+                                        let now = std::time::Instant::now();
+                                        s.last_update_finished_at = Some(now);
+                                        s.last_retryable_failure_at = None;
+                                        s.last_retryable_failure_reason_code = None;
+                                    },
+                                    RetryAction::StopBatch { attempt } => {
+                                        warn!(
+                                            event = "telegram.update.retryable_failed",
+                                            account_handle = aid,
+                                            update_id,
+                                            reason_code,
+                                            attempts = attempt,
+                                            max_attempts = INBOUND_MAX_ATTEMPTS,
+                                            "telegram update failed before retry barrier; stopping batch and retrying later"
+                                        );
+                                        {
+                                            let mut s = poll_state
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            s.last_retryable_failure_at =
+                                                Some(std::time::Instant::now());
+                                            s.last_retryable_failure_reason_code =
+                                                Some(reason_code);
+                                        }
+                                        let backoff_ms = match attempt {
+                                            1 => 200,
+                                            2 => 500,
+                                            _ => 1000,
+                                        };
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            backoff_ms,
+                                        ))
+                                        .await;
+                                        break;
+                                    },
+                                }
+                            },
+                            (Err(_e), None) => {
+                                error!(
+                                    event = "telegram.update.handler_failed",
+                                    account_handle = aid,
+                                    update_id,
+                                    reason_code = "handler_failed",
+                                    "error handling telegram update"
+                                );
+                                attempts_by_update_id.remove(&update_id);
+                                offset = update.id.as_offset();
+                                let mut s = poll_state.lock().unwrap_or_else(|e| e.into_inner());
+                                let now = std::time::Instant::now();
+                                s.last_update_finished_at = Some(now);
+                                s.last_retryable_failure_at = None;
+                                s.last_retryable_failure_reason_code = None;
                             },
                         }
                     }
@@ -245,6 +373,11 @@ pub async fn start_polling(
                             account_id = aid,
                             "telegram bot disabled: another instance is already running with this token"
                         );
+                        {
+                            let mut s = poll_state.lock().unwrap_or_else(|e| e.into_inner());
+                            s.polling_state = PollingState::Exited;
+                            s.last_poll_exit_reason_code = Some("disabled_token_conflict");
+                        }
 
                         // Request the gateway to disable this channel.
                         let event_sink = {
@@ -277,13 +410,21 @@ pub async fn start_polling(
                         last_summary_at = Some(now);
                         let downtime_secs =
                             first_failure_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                        let reason_code = match &e {
+                            RequestError::Network(_) => "network",
+                            RequestError::InvalidJson { .. } => "invalid_json",
+                            RequestError::RetryAfter(_) => "retry_after",
+                            RequestError::Api(_) => "api",
+                            RequestError::Io(_) => "io",
+                            _ => "other",
+                        };
                         warn!(
                             event = "telegram.polling.degraded",
                             account_handle = aid,
                             consecutive_failures,
                             downtime_secs,
                             backoff_secs = 5u64,
-                            error = %e,
+                            reason_code,
                             "telegram getUpdates failed"
                         );
                     }
@@ -291,7 +432,45 @@ pub async fn start_polling(
                 },
             }
         }
+
+        {
+            let mut s = poll_state.lock().unwrap_or_else(|e| e.into_inner());
+            if s.polling_state != PollingState::Exited {
+                s.polling_state = PollingState::Exited;
+                if s.last_poll_exit_reason_code.is_none() {
+                    s.last_poll_exit_reason_code = Some("exited");
+                }
+            }
+        }
     });
 
     Ok(cancel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_retry_attempt_stops_then_quarantines_on_budget() {
+        let mut attempts: std::collections::HashMap<u32, u8> = std::collections::HashMap::new();
+
+        assert_eq!(
+            record_retry_attempt(&mut attempts, 1),
+            RetryAction::StopBatch { attempt: 1 }
+        );
+        assert_eq!(
+            record_retry_attempt(&mut attempts, 1),
+            RetryAction::StopBatch { attempt: 2 }
+        );
+        assert_eq!(
+            record_retry_attempt(&mut attempts, 1),
+            RetryAction::Quarantine { attempt: 3 }
+        );
+        assert_eq!(
+            attempts.get(&1).copied(),
+            Some(3),
+            "caller owns removal after quarantine"
+        );
+    }
 }

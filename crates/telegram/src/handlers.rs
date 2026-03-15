@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use {
     teloxide::{
@@ -26,8 +26,161 @@ use moltis_metrics::{counter, histogram, telegram as tg_metrics};
 use crate::{
     access::{self, AccessDenied},
     otp::{OtpInitResult, OtpVerifyResult},
+    outbound::{TypingRequestError, send_chat_action_typing},
     state::AccountStateMap,
 };
+
+#[cfg(not(test))]
+const TELEGRAM_TYPING_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+#[cfg(test)]
+const TELEGRAM_TYPING_KEEPALIVE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(10);
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetryableUpdateError {
+    pub reason_code: &'static str,
+}
+
+impl std::fmt::Display for RetryableUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "retryable update failure ({})", self.reason_code)
+    }
+}
+
+impl std::error::Error for RetryableUpdateError {}
+
+fn user_facing_error_message() -> &'static str {
+    "⚠️ Something went wrong. Please try again."
+}
+
+fn user_facing_unsupported_attachment_message() -> &'static str {
+    "⚠️ This attachment type isn’t supported yet. Please send text, a photo, a voice message, or a location."
+}
+
+fn parse_chat_id(chat_id: &str) -> anyhow::Result<ChatId> {
+    let id = chat_id
+        .parse::<i64>()
+        .map_err(|_| anyhow::anyhow!("invalid chat_id"))?;
+    Ok(ChatId(id))
+}
+
+async fn run_with_telegram_typing<T>(
+    bot: teloxide::Bot,
+    account_handle: &str,
+    chat_id: &str,
+    op: &'static str,
+    operation: impl Future<Output = T>,
+) -> T {
+    async fn send_typing_once(
+        bot: &teloxide::Bot,
+        account_handle: &str,
+        chat_id: &str,
+        op: &'static str,
+        typing_failed: &mut bool,
+    ) {
+        let parsed_chat_id = match parse_chat_id(chat_id) {
+            Ok(chat_id) => chat_id,
+            Err(_) => {
+                if !*typing_failed {
+                    warn!(
+                        event = "telegram.typing.failed",
+                        op,
+                        account_handle,
+                        chat_id,
+                        reason_code = "invalid_chat_id",
+                        "failed to start typing indicator"
+                    );
+                    *typing_failed = true;
+                }
+                return;
+            },
+        };
+
+        match send_chat_action_typing(bot, parsed_chat_id).await {
+            Ok(()) => {
+                if *typing_failed {
+                    info!(
+                        event = "telegram.typing.recovered",
+                        op, account_handle, chat_id, "typing indicator recovered"
+                    );
+                    *typing_failed = false;
+                }
+            },
+            Err(error) => {
+                let (reason_code, error_class) = match &error {
+                    TypingRequestError::Request(teloxide::RequestError::Api(_)) => {
+                        ("send_typing_failed", "api")
+                    },
+                    TypingRequestError::Request(teloxide::RequestError::Network(err))
+                        if err.is_timeout() || err.is_connect() =>
+                    {
+                        ("transport_failed_before_send", "network")
+                    },
+                    TypingRequestError::Request(request_error) => {
+                        let error_class = match request_error {
+                            teloxide::RequestError::RetryAfter(_) => "retry_after",
+                            teloxide::RequestError::InvalidJson { .. } => "invalid_json",
+                            teloxide::RequestError::Io(_) => "io",
+                            teloxide::RequestError::Network(_) => "network",
+                            teloxide::RequestError::Api(_) => "api",
+                            _ => "other",
+                        };
+                        ("send_typing_failed", error_class)
+                    },
+                    TypingRequestError::Timeout => ("send_typing_timeout", "timeout"),
+                };
+                if !*typing_failed {
+                    warn!(
+                        event = "telegram.typing.failed",
+                        op,
+                        account_handle,
+                        chat_id,
+                        reason_code,
+                        error_class,
+                        error = %error,
+                        "failed to send typing indicator"
+                    );
+                    *typing_failed = true;
+                } else {
+                    debug!(
+                        event = "telegram.typing.failed",
+                        op,
+                        account_handle,
+                        chat_id,
+                        reason_code,
+                        error_class,
+                        "typing indicator still failing"
+                    );
+                }
+            },
+        }
+    }
+
+    let operation = operation;
+    let typing_loop = async {
+        let mut typing_failed = false;
+        send_typing_once(&bot, account_handle, chat_id, op, &mut typing_failed).await;
+
+        let mut keepalive = tokio::time::interval_at(
+            tokio::time::Instant::now() + TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
+            TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
+        );
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            keepalive.tick().await;
+            send_typing_once(&bot, account_handle, chat_id, op, &mut typing_failed).await;
+        }
+    };
+
+    tokio::pin!(operation);
+    tokio::pin!(typing_loop);
+
+    tokio::select! {
+        result = &mut operation => result,
+        _ = &mut typing_loop => unreachable!("telegram command typing loop must stay pending until the operation completes"),
+    }
+}
 
 /// Shared context injected into teloxide's dispatcher.
 #[derive(Clone)]
@@ -304,13 +457,42 @@ pub async fn handle_message_direct(
 
     debug!(account_handle, "handler: access granted");
 
+    if let Some(kind) = unsupported_media_kind(&msg) {
+        let reply_to = msg.id.0.to_string();
+        info!(
+            event = "telegram.attachment.unsupported",
+            account_handle,
+            chat_id = msg.chat.id.0,
+            kind,
+            has_caption = text.as_ref().is_some_and(|t| !t.trim().is_empty()),
+            "telegram inbound unsupported attachment"
+        );
+        if let Err(_send_err) = outbound
+            .send_text(
+                account_handle,
+                &msg.chat.id.0.to_string(),
+                user_facing_unsupported_attachment_message(),
+                Some(&reply_to),
+            )
+            .await
+        {
+            warn!(
+                event = "telegram.user_feedback.failed",
+                account_handle,
+                reason_code = "send_text_failed",
+                "failed to send unsupported attachment feedback"
+            );
+        }
+        return Ok(());
+    }
+
     // Check for voice/audio messages and transcribe them
     let (mut body, attachments) = if let Some(voice_file) = extract_voice_file(&msg) {
         // If STT is not configured, reply with guidance and do not dispatch to the LLM.
         if let Some(ref sink) = event_sink
             && !sink.voice_stt_available().await
         {
-            if let Err(e) = outbound
+            if let Err(_e) = outbound
                 .send_text(
                     account_handle,
                     &msg.chat.id.0.to_string(),
@@ -319,14 +501,19 @@ pub async fn handle_message_direct(
                 )
                 .await
             {
-                warn!(account_handle, "failed to send STT setup hint: {e}");
+                warn!(
+                    event = "telegram.user_feedback.failed",
+                    account_handle,
+                    reason_code = "send_text_failed",
+                    "failed to send STT setup hint"
+                );
             }
             return Ok(());
         }
 
         // Try to transcribe the voice message
         if let Some(ref sink) = event_sink {
-            match download_telegram_file(bot, &voice_file.file_id).await {
+            match download_telegram_file(bot, &voice_file.file_id, 20 * 1024 * 1024).await {
                 Ok(audio_data) => {
                     debug!(
                         account_handle,
@@ -351,25 +538,63 @@ pub async fn handle_message_direct(
                             };
                             (body, Vec::new())
                         },
-                        Err(e) => {
-                            warn!(account_handle, error = %e, "voice transcription failed");
-                            // Fall back to caption or indicate transcription failed
-                            (
-                                text.clone().unwrap_or_else(|| {
-                                    "[Voice message - transcription unavailable]".to_string()
-                                }),
-                                Vec::new(),
-                            )
+                        Err(_e) => {
+                            warn!(
+                                event = "telegram.stt.failed",
+                                account_handle,
+                                reason_code = "stt_failed",
+                                "voice transcription failed"
+                            );
+                            if let Err(_send_err) = outbound
+                                .send_text(
+                                    account_handle,
+                                    &msg.chat.id.0.to_string(),
+                                    "⚠️ I couldn't transcribe that voice message. Please try again or send text.",
+                                    None,
+                                )
+                                .await
+                            {
+                                warn!(
+                                    event = "telegram.user_feedback.failed",
+                                    account_handle,
+                                    reason_code = "send_text_failed",
+                                    "failed to send STT failure feedback"
+                                );
+                            }
+                            return Ok(());
                         },
                     }
                 },
                 Err(e) => {
-                    warn!(account_handle, error = %e, "failed to download voice file");
-                    (
-                        text.clone()
-                            .unwrap_or_else(|| "[Voice message - download failed]".to_string()),
-                        Vec::new(),
-                    )
+                    warn!(
+                        event = "telegram.download.failed",
+                        account_handle,
+                        reason_code = e.reason_code,
+                        "failed to download voice file"
+                    );
+                    if e.retryable {
+                        return Err(RetryableUpdateError {
+                            reason_code: e.reason_code,
+                        }
+                        .into());
+                    }
+                    if let Err(_send_err) = outbound
+                        .send_text(
+                            account_handle,
+                            &msg.chat.id.0.to_string(),
+                            "⚠️ I couldn't download that voice message. Please try again.",
+                            None,
+                        )
+                        .await
+                    {
+                        warn!(
+                            event = "telegram.user_feedback.failed",
+                            account_handle,
+                            reason_code = "send_text_failed",
+                            "failed to send download failure feedback"
+                        );
+                    }
+                    return Ok(());
                 },
             }
         } else {
@@ -382,7 +607,7 @@ pub async fn handle_message_direct(
         }
     } else if let Some(photo_file) = extract_photo_file(&msg) {
         // Handle photo messages - download and send as multimodal content
-        match download_telegram_file(bot, &photo_file.file_id).await {
+        match download_telegram_file(bot, &photo_file.file_id, 25 * 1024 * 1024).await {
             Ok(image_data) => {
                 debug!(
                     account_handle,
@@ -424,12 +649,35 @@ pub async fn handle_message_direct(
                 (caption, vec![attachment])
             },
             Err(e) => {
-                warn!(account_handle, error = %e, "failed to download photo");
-                (
-                    text.clone()
-                        .unwrap_or_else(|| "[Photo - download failed]".to_string()),
-                    Vec::new(),
-                )
+                warn!(
+                    event = "telegram.download.failed",
+                    account_handle,
+                    reason_code = e.reason_code,
+                    "failed to download photo"
+                );
+                if e.retryable {
+                    return Err(RetryableUpdateError {
+                        reason_code: e.reason_code,
+                    }
+                    .into());
+                }
+                if let Err(_send_err) = outbound
+                    .send_text(
+                        account_handle,
+                        &msg.chat.id.0.to_string(),
+                        "⚠️ I couldn't download that photo. Please try again.",
+                        None,
+                    )
+                    .await
+                {
+                    warn!(
+                        event = "telegram.user_feedback.failed",
+                        account_handle,
+                        reason_code = "send_text_failed",
+                        "failed to send photo download failure feedback"
+                    );
+                }
+                return Ok(());
             },
         }
     } else if let Some(loc_info) = extract_location(&msg) {
@@ -463,7 +711,7 @@ pub async fn handle_message_direct(
 
         if resolved {
             // Pending tool request was resolved — the LLM will respond via the tool flow.
-            if let Err(e) = outbound
+            if let Err(_e) = outbound
                 .send_text_silent(
                     account_handle,
                     &msg.chat.id.0.to_string(),
@@ -472,7 +720,12 @@ pub async fn handle_message_direct(
                 )
                 .await
             {
-                warn!(account_handle, "failed to send location confirmation: {e}");
+                warn!(
+                    event = "telegram.user_feedback.failed",
+                    account_handle,
+                    reason_code = "send_text_failed",
+                    "failed to send location confirmation"
+                );
             }
             return Ok(());
         }
@@ -480,7 +733,7 @@ pub async fn handle_message_direct(
         if loc_info.is_live {
             // Live location share — acknowledge silently, subsequent updates arrive
             // as EditedMessage and are handled by handle_edited_location().
-            if let Err(e) = outbound
+            if let Err(_e) = outbound
                 .send_text_silent(
                     account_handle,
                     &msg.chat.id.0.to_string(),
@@ -489,7 +742,12 @@ pub async fn handle_message_direct(
                 )
                 .await
             {
-                warn!(account_handle, "failed to send live location ack: {e}");
+                warn!(
+                    event = "telegram.user_feedback.failed",
+                    account_handle,
+                    reason_code = "send_text_failed",
+                    "failed to send live location ack"
+                );
             }
             return Ok(());
         }
@@ -507,12 +765,52 @@ pub async fn handle_message_direct(
         (text.unwrap_or_default(), Vec::new())
     };
 
+    let has_content = !body.is_empty() || !attachments.is_empty();
+    if has_content && event_sink.is_none() {
+        info!(
+            event = "telegram.inbound.ignored",
+            account_handle,
+            chat_id = msg.chat.id.0,
+            message_id = msg.id.0,
+            reason_code = "event_sink_missing",
+            "telegram inbound ignored (event sink missing)"
+        );
+        if chat_type == ChatType::Dm {
+            let reply_to = msg.id.0.to_string();
+            if let Err(_e) = outbound
+                .send_text(
+                    account_handle,
+                    &msg.chat.id.0.to_string(),
+                    user_facing_error_message(),
+                    Some(&reply_to),
+                )
+                .await
+            {
+                warn!(
+                    event = "telegram.user_feedback.failed",
+                    account_handle,
+                    reason_code = "send_text_failed",
+                    "failed to send event sink missing feedback"
+                );
+            }
+        }
+        return Ok(());
+    }
+    if !has_content {
+        info!(
+            event = "telegram.inbound.ignored",
+            account_handle,
+            chat_id = msg.chat.id.0,
+            message_id = msg.id.0,
+            reason_code = "empty_content",
+            "telegram inbound ignored (empty content)"
+        );
+        return Ok(());
+    }
+
     // Dispatch to the chat session (per-channel session key derived by the sink).
     // The reply target tells the gateway where to send the LLM response back.
-    let has_content = !body.is_empty() || !attachments.is_empty();
-    if let Some(ref sink) = event_sink
-        && has_content
-    {
+    if let Some(ref sink) = event_sink {
         let reply_target = ChannelReplyTarget {
             chan_type: ChannelType::Telegram,
             chan_account_key: account_handle.to_string(),
@@ -553,12 +851,43 @@ pub async fn handle_message_direct(
             if chat_type != ChatType::Dm {
                 match (&addressed_norm, &bot_username_norm) {
                     (Some(target), Some(me)) if target == me => {},
-                    (Some(_), _) => return Ok(()),
-                    (None, _) => return Ok(()),
+                    (Some(_target), _) => {
+                        info!(
+                            event = "telegram.command.ignored",
+                            account_handle,
+                            chat_id = msg.chat.id.0,
+                            message_id = msg.id.0,
+                            reason_code = "addressed_to_other_bot",
+                            command = cmd_name_raw,
+                            "telegram command ignored (addressed to another bot)"
+                        );
+                        return Ok(());
+                    },
+                    (None, _) => {
+                        info!(
+                            event = "telegram.command.ignored",
+                            account_handle,
+                            chat_id = msg.chat.id.0,
+                            message_id = msg.id.0,
+                            reason_code = "unaddressed_in_group",
+                            command = cmd_name_raw,
+                            "telegram command ignored (unaddressed in group)"
+                        );
+                        return Ok(());
+                    },
                 }
             } else if let (Some(target), Some(me)) = (&addressed_norm, &bot_username_norm) {
                 // DM: if the user explicitly addressed another bot, ignore.
                 if target != me {
+                    info!(
+                        event = "telegram.command.ignored",
+                        account_handle,
+                        chat_id = msg.chat.id.0,
+                        message_id = msg.id.0,
+                        reason_code = "addressed_to_other_bot",
+                        command = cmd_name_raw,
+                        "telegram command ignored (addressed to another bot)"
+                    );
                     return Ok(());
                 }
             }
@@ -576,138 +905,323 @@ pub async fn handle_message_direct(
             ) {
                 // For /context, send a formatted card with inline keyboard.
                 if cmd_name == "context" {
-                    let context_result =
-                        sink.dispatch_command("context", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
                         accts.get(account_handle).map(|s| s.bot.clone())
                     };
                     if let Some(bot) = bot {
-                        match context_result {
-                            Ok(text) => {
-                                send_context_card(
-                                    &bot,
-                                    &reply_target.chat_id,
-                                    &text,
-                                    &config,
-                                    chat_type,
-                                )
-                                .await;
+                        let chat_id = reply_target.chat_id.clone();
+                        let config = config.clone();
+                        let reply_target = reply_target.clone();
+                        run_with_telegram_typing(
+                            bot.clone(),
+                            account_handle,
+                            &chat_id,
+                            "slash_command_context",
+                            async move {
+                                let context_result =
+                                    sink.dispatch_command("context", reply_target.clone()).await;
+                                match context_result {
+                                    Ok(text) => {
+                                        if let Err(_e) = send_context_card(
+                                            &bot,
+                                            &reply_target.chat_id,
+                                            &text,
+                                            &config,
+                                            chat_type,
+                                        )
+                                        .await
+                                        {
+                                            warn!(
+                                                event = "telegram.helper_send.failed",
+                                                account_handle,
+                                                reason_code = "send_context_card_failed",
+                                                "failed to send context card"
+                                            );
+                                        }
+                                    },
+                                    Err(_e) => {
+                                        warn!(
+                                            event = "telegram.command.failed",
+                                            account_handle,
+                                            reason_code = "dispatch_command_failed",
+                                            "context command failed"
+                                        );
+                                        if let Err(_e) = outbound
+                                            .send_text_silent(
+                                                account_handle,
+                                                &reply_target.chat_id,
+                                                user_facing_error_message(),
+                                                reply_target.message_id.as_deref(),
+                                            )
+                                            .await
+                                        {
+                                            warn!(
+                                                event = "telegram.user_feedback.failed",
+                                                account_handle,
+                                                reason_code = "send_text_failed",
+                                                "failed to send context command failure feedback"
+                                            );
+                                        }
+                                    },
+                                }
                             },
-                            Err(e) => {
-                                let _ = bot
-                                    .send_message(
-                                        ChatId(reply_target.chat_id.parse().unwrap_or(0)),
-                                        format!("Error: {e}"),
-                                    )
-                                    .await;
-                            },
-                        }
+                        )
+                        .await;
                     }
                     return Ok(());
                 }
 
                 // For /model without args, send an inline keyboard to pick a model.
                 if cmd_name == "model" && args.is_empty() {
-                    let list_result = sink.dispatch_command("model", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
                         accts.get(account_handle).map(|s| s.bot.clone())
                     };
                     if let Some(bot) = bot {
-                        match list_result {
-                            Ok(text) => {
-                                send_model_keyboard(&bot, &reply_target.chat_id, &text).await;
+                        let chat_id = reply_target.chat_id.clone();
+                        let reply_target = reply_target.clone();
+                        run_with_telegram_typing(
+                            bot.clone(),
+                            account_handle,
+                            &chat_id,
+                            "slash_command_model",
+                            async move {
+                                let list_result =
+                                    sink.dispatch_command("model", reply_target.clone()).await;
+                                match list_result {
+                                    Ok(text) => {
+                                        if let Err(_e) =
+                                            send_model_keyboard(&bot, &reply_target.chat_id, &text)
+                                                .await
+                                        {
+                                            warn!(
+                                                event = "telegram.helper_send.failed",
+                                                account_handle,
+                                                reason_code = "send_model_keyboard_failed",
+                                                "failed to send model keyboard"
+                                            );
+                                        }
+                                    },
+                                    Err(_e) => {
+                                        warn!(
+                                            event = "telegram.command.failed",
+                                            account_handle,
+                                            reason_code = "dispatch_command_failed",
+                                            "model command failed"
+                                        );
+                                        if let Err(_e) = outbound
+                                            .send_text_silent(
+                                                account_handle,
+                                                &reply_target.chat_id,
+                                                user_facing_error_message(),
+                                                reply_target.message_id.as_deref(),
+                                            )
+                                            .await
+                                        {
+                                            warn!(
+                                                event = "telegram.user_feedback.failed",
+                                                account_handle,
+                                                reason_code = "send_text_failed",
+                                                "failed to send model command failure feedback"
+                                            );
+                                        }
+                                    },
+                                }
                             },
-                            Err(e) => {
-                                let _ = bot
-                                    .send_message(
-                                        ChatId(reply_target.chat_id.parse().unwrap_or(0)),
-                                        format!("Error: {e}"),
-                                    )
-                                    .await;
-                            },
-                        }
+                        )
+                        .await;
                     }
                     return Ok(());
                 }
 
                 // For /sandbox without args, send toggle + image keyboard.
                 if cmd_name == "sandbox" && args.is_empty() {
-                    let list_result = sink.dispatch_command("sandbox", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
                         accts.get(account_handle).map(|s| s.bot.clone())
                     };
                     if let Some(bot) = bot {
-                        match list_result {
-                            Ok(text) => {
-                                send_sandbox_keyboard(&bot, &reply_target.chat_id, &text).await;
+                        let chat_id = reply_target.chat_id.clone();
+                        let reply_target = reply_target.clone();
+                        run_with_telegram_typing(
+                            bot.clone(),
+                            account_handle,
+                            &chat_id,
+                            "slash_command_sandbox",
+                            async move {
+                                let list_result =
+                                    sink.dispatch_command("sandbox", reply_target.clone()).await;
+                                match list_result {
+                                    Ok(text) => {
+                                        if let Err(_e) = send_sandbox_keyboard(
+                                            &bot,
+                                            &reply_target.chat_id,
+                                            &text,
+                                        )
+                                        .await
+                                        {
+                                            warn!(
+                                                event = "telegram.helper_send.failed",
+                                                account_handle,
+                                                reason_code = "send_sandbox_keyboard_failed",
+                                                "failed to send sandbox keyboard"
+                                            );
+                                        }
+                                    },
+                                    Err(_e) => {
+                                        warn!(
+                                            event = "telegram.command.failed",
+                                            account_handle,
+                                            reason_code = "dispatch_command_failed",
+                                            "sandbox command failed"
+                                        );
+                                        if let Err(_e) = outbound
+                                            .send_text_silent(
+                                                account_handle,
+                                                &reply_target.chat_id,
+                                                user_facing_error_message(),
+                                                reply_target.message_id.as_deref(),
+                                            )
+                                            .await
+                                        {
+                                            warn!(
+                                                event = "telegram.user_feedback.failed",
+                                                account_handle,
+                                                reason_code = "send_text_failed",
+                                                "failed to send sandbox command failure feedback"
+                                            );
+                                        }
+                                    },
+                                }
                             },
-                            Err(e) => {
-                                let _ = bot
-                                    .send_message(
-                                        ChatId(reply_target.chat_id.parse().unwrap_or(0)),
-                                        format!("Error: {e}"),
-                                    )
-                                    .await;
-                            },
-                        }
+                        )
+                        .await;
                     }
                     return Ok(());
                 }
 
                 // For /sessions without args, send an inline keyboard instead of plain text.
                 if cmd_name == "sessions" && args.is_empty() {
-                    let list_result = sink
-                        .dispatch_command("sessions", reply_target.clone())
-                        .await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
                         accts.get(account_handle).map(|s| s.bot.clone())
                     };
                     if let Some(bot) = bot {
-                        match list_result {
-                            Ok(text) => {
-                                send_sessions_keyboard(&bot, &reply_target.chat_id, &text).await;
-                            },
-                            Err(e) => {
-                                let _ = bot
-                                    .send_message(
-                                        ChatId(reply_target.chat_id.parse().unwrap_or(0)),
-                                        format!("Error: {e}"),
-                                    )
+                        let chat_id = reply_target.chat_id.clone();
+                        let reply_target = reply_target.clone();
+                        run_with_telegram_typing(
+                            bot.clone(),
+                            account_handle,
+                            &chat_id,
+                            "slash_command_sessions",
+                            async move {
+                                let list_result = sink
+                                    .dispatch_command("sessions", reply_target.clone())
                                     .await;
+                                match list_result {
+                                    Ok(text) => {
+                                        if let Err(_e) = send_sessions_keyboard(
+                                            &bot,
+                                            &reply_target.chat_id,
+                                            &text,
+                                        )
+                                        .await
+                                        {
+                                            warn!(
+                                                event = "telegram.helper_send.failed",
+                                                account_handle,
+                                                reason_code = "send_sessions_keyboard_failed",
+                                                "failed to send sessions keyboard"
+                                            );
+                                        }
+                                    },
+                                    Err(_e) => {
+                                        warn!(
+                                            event = "telegram.command.failed",
+                                            account_handle,
+                                            reason_code = "dispatch_command_failed",
+                                            "sessions command failed"
+                                        );
+                                        if let Err(_e) = outbound
+                                            .send_text_silent(
+                                                account_handle,
+                                                &reply_target.chat_id,
+                                                user_facing_error_message(),
+                                                reply_target.message_id.as_deref(),
+                                            )
+                                            .await
+                                        {
+                                            warn!(
+                                                event = "telegram.user_feedback.failed",
+                                                account_handle,
+                                                reason_code = "send_text_failed",
+                                                "failed to send sessions command failure feedback"
+                                            );
+                                        }
+                                    },
+                                }
                             },
-                        }
+                        )
+                        .await;
                     }
                     return Ok(());
                 }
 
-                let response = if cmd_name == "help" {
-                    "Available commands:\n/new — Start a new session\n/sessions — List and switch sessions\n/model — Switch provider/model\n/sandbox — Toggle sandbox and choose image\n/clear — Clear session history\n/compact — Compact session (summarize)\n/context — Show session context info\n/help — Show this help".to_string()
-                } else {
-                    match sink.dispatch_command(&cmd_text, reply_target.clone()).await {
-                        Ok(msg) => msg,
-                        Err(e) => format!("Error: {e}"),
-                    }
-                };
                 // Get the outbound Arc before awaiting (avoid holding RwLockReadGuard across await).
                 let outbound = {
                     let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
                     accts.get(account_handle).map(|s| Arc::clone(&s.outbound))
                 };
-                if let Some(outbound) = outbound
-                    && let Err(e) = outbound
-                        .send_text(
-                            account_handle,
-                            &reply_target.chat_id,
-                            &response,
-                            reply_target.message_id.as_deref(),
-                        )
-                        .await
-                {
-                    warn!(account_handle, "failed to send command response: {e}");
+                let bot = {
+                    let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
+                    accts.get(account_handle).map(|s| s.bot.clone())
+                };
+                if let (Some(outbound), Some(bot)) = (outbound, bot) {
+                    let chat_id = reply_target.chat_id.clone();
+                    let reply_target = reply_target.clone();
+                    run_with_telegram_typing(
+                        bot,
+                        account_handle,
+                        &chat_id,
+                        "slash_command",
+                        async move {
+                            let response = if cmd_name == "help" {
+                                "Available commands:\n/new — Start a new session\n/sessions — List and switch sessions\n/model — Switch provider/model\n/sandbox — Toggle sandbox and choose image\n/clear — Clear session history\n/compact — Compact session (summarize)\n/context — Show session context info\n/help — Show this help".to_string()
+                            } else {
+                                match sink.dispatch_command(&cmd_text, reply_target.clone()).await {
+                                    Ok(msg) => msg,
+                                    Err(_e) => {
+                                        warn!(
+                                            event = "telegram.command.failed",
+                                            account_handle,
+                                            reason_code = "dispatch_command_failed",
+                                            command = cmd_name,
+                                            "slash command dispatch_command failed"
+                                        );
+                                        user_facing_error_message().to_string()
+                                    },
+                                }
+                            };
+                            if let Err(_e) = outbound
+                                .send_text_silent(
+                                    account_handle,
+                                    &reply_target.chat_id,
+                                    &response,
+                                    reply_target.message_id.as_deref(),
+                                )
+                                .await
+                            {
+                                warn!(
+                                    event = "telegram.user_feedback.failed",
+                                    account_handle,
+                                    reason_code = "send_text_failed",
+                                    "failed to send command response"
+                                );
+                            }
+                        },
+                    )
+                    .await;
                 }
                 return Ok(());
             }
@@ -724,7 +1238,7 @@ pub async fn handle_message_direct(
                 accts.get(account_handle).map(|s| Arc::clone(&s.outbound))
             };
             if let Some(outbound) = outbound
-                && let Err(e) = outbound
+                && let Err(_e) = outbound
                     .send_text(
                         account_handle,
                         &reply_target.chat_id,
@@ -733,7 +1247,12 @@ pub async fn handle_message_direct(
                     )
                     .await
             {
-                warn!(account_handle, "failed to send command response: {e}");
+                warn!(
+                    event = "telegram.user_feedback.failed",
+                    account_handle,
+                    reason_code = "send_text_failed",
+                    "failed to send command response"
+                );
             }
             return Ok(());
         }
@@ -775,7 +1294,7 @@ pub async fn handle_message_direct(
                     accts.get(account_handle).map(|s| Arc::clone(&s.outbound))
                 };
                 if let Some(outbound) = outbound
-                    && let Err(e) = outbound
+                    && let Err(_e) = outbound
                         .send_text(
                             account_handle,
                             &reply_target.chat_id,
@@ -784,7 +1303,12 @@ pub async fn handle_message_direct(
                         )
                         .await
                 {
-                    warn!(account_handle, "failed to send presence reply: {e}");
+                    warn!(
+                        event = "telegram.user_feedback.failed",
+                        account_handle,
+                        reason_code = "send_text_failed",
+                        "failed to send presence reply"
+                    );
                 }
                 return Ok(());
             }
@@ -818,7 +1342,7 @@ pub async fn handle_message_direct(
                             accts.get(account_handle).map(|s| Arc::clone(&s.outbound))
                         };
                         if let Some(outbound) = outbound
-                            && let Err(e) = outbound
+                            && let Err(_e) = outbound
                                 .send_text(
                                     account_handle,
                                     &reply_target.chat_id,
@@ -827,7 +1351,12 @@ pub async fn handle_message_direct(
                                 )
                                 .await
                         {
-                            warn!(account_handle, "failed to send presence reply: {e}");
+                            warn!(
+                                event = "telegram.user_feedback.failed",
+                                account_handle,
+                                reason_code = "send_text_failed",
+                                "failed to send presence reply"
+                            );
                         }
                         return Ok(());
                     }
@@ -914,6 +1443,13 @@ async fn handle_otp_flow(
 
         if !is_code {
             // Silent ignore — flood protection.
+            debug!(
+                event = "telegram.otp.ignored",
+                account_handle,
+                peer_id,
+                reason_code = "non_code",
+                "otp pending: ignored non-code message"
+            );
             return;
         }
 
@@ -938,9 +1474,18 @@ async fn handle_otp_flow(
                         .await;
                 }
 
-                let _ = bot
+                if let Err(_e) = bot
                     .send_message(chat_id, "Verified! You now have access to this bot.")
-                    .await;
+                    .await
+                {
+                    warn!(
+                        event = "telegram.helper_send.failed",
+                        account_handle,
+                        peer_id,
+                        reason_code = "otp_verified_send_failed",
+                        "failed to send OTP approved message"
+                    );
+                }
 
                 // Emit resolved event.
                 if let Some(sink) = event_sink {
@@ -958,7 +1503,7 @@ async fn handle_otp_flow(
                 counter!(tg_metrics::OTP_VERIFICATIONS_TOTAL, "result" => "approved").increment(1);
             },
             OtpVerifyResult::WrongCode { attempts_left } => {
-                let _ = bot
+                if let Err(_e) = bot
                     .send_message(
                         chat_id,
                         format!(
@@ -970,16 +1515,34 @@ async fn handle_otp_flow(
                             }
                         ),
                     )
-                    .await;
+                    .await
+                {
+                    warn!(
+                        event = "telegram.helper_send.failed",
+                        account_handle,
+                        peer_id,
+                        reason_code = "otp_wrong_code_send_failed",
+                        "failed to send OTP wrong-code message"
+                    );
+                }
 
                 #[cfg(feature = "metrics")]
                 counter!(tg_metrics::OTP_VERIFICATIONS_TOTAL, "result" => "wrong_code")
                     .increment(1);
             },
             OtpVerifyResult::LockedOut => {
-                let _ = bot
+                if let Err(_e) = bot
                     .send_message(chat_id, "Too many failed attempts. Please try again later.")
-                    .await;
+                    .await
+                {
+                    warn!(
+                        event = "telegram.helper_send.failed",
+                        account_handle,
+                        peer_id,
+                        reason_code = "otp_locked_out_send_failed",
+                        "failed to send OTP locked-out message"
+                    );
+                }
 
                 if let Some(sink) = event_sink {
                     sink.emit(ChannelEvent::OtpResolved {
@@ -997,12 +1560,21 @@ async fn handle_otp_flow(
                     .increment(1);
             },
             OtpVerifyResult::Expired => {
-                let _ = bot
+                if let Err(_e) = bot
                     .send_message(
                         chat_id,
                         "Your code has expired. Send any message to get a new one.",
                     )
-                    .await;
+                    .await
+                {
+                    warn!(
+                        event = "telegram.helper_send.failed",
+                        account_handle,
+                        peer_id,
+                        reason_code = "otp_expired_send_failed",
+                        "failed to send OTP expired message"
+                    );
+                }
 
                 if let Some(sink) = event_sink {
                     sink.emit(ChannelEvent::OtpResolved {
@@ -1041,10 +1613,19 @@ async fn handle_otp_flow(
 
         match init_result {
             OtpInitResult::Created(code) => {
-                let _ = bot
+                if let Err(_e) = bot
                     .send_message(chat_id, OTP_CHALLENGE_MSG)
                     .parse_mode(ParseMode::Html)
-                    .await;
+                    .await
+                {
+                    warn!(
+                        event = "telegram.helper_send.failed",
+                        account_handle,
+                        peer_id,
+                        reason_code = "otp_challenge_send_failed",
+                        "failed to send OTP challenge message"
+                    );
+                }
 
                 // Emit OTP challenge event for the admin UI.
                 if let Some(sink) = event_sink {
@@ -1070,8 +1651,25 @@ async fn handle_otp_flow(
                 #[cfg(feature = "metrics")]
                 counter!(tg_metrics::OTP_CHALLENGES_TOTAL).increment(1);
             },
-            OtpInitResult::AlreadyPending | OtpInitResult::LockedOut => {
+            OtpInitResult::AlreadyPending => {
                 // Silent ignore.
+                debug!(
+                    event = "telegram.otp.ignored",
+                    account_handle,
+                    peer_id,
+                    reason_code = "already_pending",
+                    "otp ignored (already pending)"
+                );
+            },
+            OtpInitResult::LockedOut => {
+                // Silent ignore.
+                debug!(
+                    event = "telegram.otp.ignored",
+                    account_handle,
+                    peer_id,
+                    reason_code = "locked_out",
+                    "otp ignored (locked out)"
+                );
             },
         }
     }
@@ -1151,8 +1749,12 @@ async fn handle_message(
 ///
 /// Parses the text response from `dispatch_command("sessions")` to extract
 /// session labels, then sends an inline keyboard with one button per session.
-async fn send_sessions_keyboard(bot: &Bot, chat_id: &str, sessions_text: &str) {
-    let chat = ChatId(chat_id.parse().unwrap_or(0));
+async fn send_sessions_keyboard(
+    bot: &Bot,
+    chat_id: &str,
+    sessions_text: &str,
+) -> anyhow::Result<()> {
+    let chat = parse_chat_id(chat_id)?;
 
     // Parse numbered lines like "1. Session label (5 msgs) *"
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -1177,15 +1779,15 @@ async fn send_sessions_keyboard(bot: &Bot, chat_id: &str, sessions_text: &str) {
     }
 
     if buttons.is_empty() {
-        let _ = bot.send_message(chat, sessions_text).await;
-        return;
+        bot.send_message(chat, sessions_text).await?;
+        return Ok(());
     }
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    let _ = bot
-        .send_message(chat, "Select a session:")
+    bot.send_message(chat, "Select a session:")
         .reply_markup(keyboard)
-        .await;
+        .await?;
+    Ok(())
 }
 
 /// Send context info as a formatted HTML card with blockquote sections.
@@ -1198,17 +1800,16 @@ async fn send_context_card(
     context_text: &str,
     config: &crate::config::TelegramAccountConfig,
     chat_type: ChatType,
-) {
-    let chat = ChatId(chat_id.parse().unwrap_or(0));
+) -> anyhow::Result<()> {
+    let chat = parse_chat_id(chat_id)?;
 
     // Preferred path: context.v1 JSON contract emitted by the gateway.
     if let Some(payload) = parse_context_v1_payload(context_text) {
         let html = render_context_card_v1(&payload, config, chat_type);
-        let _ = bot
-            .send_message(chat, html)
+        bot.send_message(chat, html)
             .parse_mode(ParseMode::Html)
-            .await;
-        return;
+            .await?;
+        return Ok(());
     } else if context_text.trim_start().starts_with('{') {
         warn!(
             len = context_text.len(),
@@ -1218,10 +1819,10 @@ async fn send_context_card(
 
     let html = render_context_card_markdown_fallback(context_text);
 
-    let _ = bot
-        .send_message(chat, html)
+    bot.send_message(chat, html)
         .parse_mode(ParseMode::Html)
-        .await;
+        .await?;
+    Ok(())
 }
 
 fn render_context_card_markdown_fallback(context_text: &str) -> String {
@@ -1737,8 +2338,8 @@ allowlist: {} · mounts: {}
 ///
 /// If the response starts with `providers:`, show a provider picker first.
 /// Otherwise show the model list directly.
-async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) {
-    let chat = ChatId(chat_id.parse().unwrap_or(0));
+async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) -> anyhow::Result<()> {
+    let chat = parse_chat_id(chat_id)?;
 
     let is_provider_list = text.starts_with("providers:");
 
@@ -1777,8 +2378,8 @@ async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) {
     }
 
     if buttons.is_empty() {
-        let _ = bot.send_message(chat, "No models available.").await;
-        return;
+        bot.send_message(chat, "No models available.").await?;
+        return Ok(());
     }
 
     let heading = if is_provider_list {
@@ -1788,15 +2389,18 @@ async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) {
     };
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    let _ = bot.send_message(chat, heading).reply_markup(keyboard).await;
+    bot.send_message(chat, heading)
+        .reply_markup(keyboard)
+        .await?;
+    Ok(())
 }
 
 /// Send sandbox status with toggle button and image picker.
 ///
 /// First line is `status:on` or `status:off`. Remaining lines are numbered
 /// images, with `*` marking the current one.
-async fn send_sandbox_keyboard(bot: &Bot, chat_id: &str, text: &str) {
-    let chat = ChatId(chat_id.parse().unwrap_or(0));
+async fn send_sandbox_keyboard(bot: &Bot, chat_id: &str, text: &str) -> anyhow::Result<()> {
+    let chat = parse_chat_id(chat_id)?;
 
     let mut is_on = false;
     let mut image_buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -1844,10 +2448,10 @@ async fn send_sandbox_keyboard(bot: &Bot, chat_id: &str, text: &str) {
     buttons.extend(image_buttons);
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    let _ = bot
-        .send_message(chat, "⚙️ Sandbox settings:")
+    bot.send_message(chat, "⚙️ Sandbox settings:")
         .reply_markup(keyboard)
-        .await;
+        .await?;
+    Ok(())
 }
 
 fn escape_html_simple(s: &str) -> String {
@@ -1859,19 +2463,49 @@ fn escape_html_simple(s: &str) -> String {
 /// Handle a Telegram callback query (inline keyboard button press).
 pub async fn handle_callback_query(
     query: CallbackQuery,
-    _bot: &Bot,
+    bot: &Bot,
     account_handle: &str,
     accounts: &AccountStateMap,
 ) -> anyhow::Result<()> {
+    let callback_id = query.id.clone();
+    let mut answer_retryable_reason_code = None;
+    if let Err(e) = bot.answer_callback_query(&callback_id).await {
+        let reason_code = match &e {
+            teloxide::RequestError::Network(err) if err.is_timeout() || err.is_connect() => {
+                "transport_failed_before_send"
+            },
+            teloxide::RequestError::Api(teloxide::ApiError::InvalidQueryId) => "invalid_query_id",
+            teloxide::RequestError::Network(_) => "unknown_outcome",
+            _ => "answer_failed",
+        };
+        warn!(
+            event = "telegram.callback.answer_failed",
+            account_handle,
+            callback_id = %callback_id,
+            reason_code,
+            "failed to answer callback query"
+        );
+        if reason_code == "transport_failed_before_send" {
+            answer_retryable_reason_code = Some(reason_code);
+        }
+    }
+
+    if let Some(reason_code) = answer_retryable_reason_code {
+        return Err(RetryableUpdateError { reason_code }.into());
+    }
+
     let data = match query.data {
         Some(ref d) => d.as_str(),
-        None => return Ok(()),
-    };
-
-    // Answer the callback to dismiss the loading spinner.
-    let bot = {
-        let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
-        accts.get(account_handle).map(|s| s.bot.clone())
+        None => {
+            info!(
+                event = "telegram.callback.ignored",
+                account_handle,
+                callback_id = %callback_id,
+                reason_code = "no_data",
+                "telegram callback ignored (no data)"
+            );
+            return Ok(());
+        },
     };
 
     // Determine which command this callback is for.
@@ -1887,9 +2521,13 @@ pub async fn handle_callback_query(
         // Handled separately below — no simple cmd_text.
         None
     } else {
-        if let Some(ref bot) = bot {
-            let _ = bot.answer_callback_query(&query.id).await;
-        }
+        info!(
+            event = "telegram.callback.ignored",
+            account_handle,
+            callback_id = %callback_id,
+            reason_code = "unknown_data",
+            "telegram callback ignored (unknown data)"
+        );
         return Ok(());
     };
 
@@ -1900,6 +2538,13 @@ pub async fn handle_callback_query(
         .unwrap_or_default();
 
     if chat_id.is_empty() {
+        info!(
+            event = "telegram.callback.ignored",
+            account_handle,
+            callback_id = %callback_id,
+            reason_code = "chat_id_missing",
+            "telegram callback ignored (missing chat_id)"
+        );
         return Ok(());
     }
 
@@ -1907,7 +2552,16 @@ pub async fn handle_callback_query(
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
         let state = match accts.get(account_handle) {
             Some(s) => s,
-            None => return Ok(()),
+            None => {
+                info!(
+                    event = "telegram.callback.ignored",
+                    account_handle,
+                    callback_id = %callback_id,
+                    reason_code = "account_missing",
+                    "telegram callback ignored (account missing)"
+                );
+                return Ok(());
+            },
         };
         (
             state.event_sink.clone(),
@@ -1921,31 +2575,70 @@ pub async fn handle_callback_query(
         chan_account_key: account_handle.to_string(),
         chan_user_name: bot_handle,
         chat_id: chat_id.clone(),
-        message_id: None, // Callback queries don't have a message to reply-thread to.
+        message_id: query.message.as_ref().map(|m| m.id().0.to_string()),
     };
 
     // Provider selection → fetch models for that provider and show a new keyboard.
     if let Some(provider_name) = data.strip_prefix("model_provider:") {
-        if let Some(ref bot) = bot {
-            let _ = bot.answer_callback_query(&query.id).await;
-        }
         if let Some(ref sink) = event_sink {
             let cmd = format!("model provider:{provider_name}");
-            match sink.dispatch_command(&cmd, reply_target).await {
-                Ok(text) => {
-                    if let Some(ref b) = bot {
-                        send_model_keyboard(b, &chat_id, &text).await;
+            let typing_chat_id = chat_id.clone();
+            let followup_chat_id = chat_id.clone();
+            run_with_telegram_typing(
+                bot.clone(),
+                account_handle,
+                &typing_chat_id,
+                "callback_command_model_provider",
+                async move {
+                    match sink.dispatch_command(&cmd, reply_target).await {
+                        Ok(text) => {
+                            if let Err(_e) =
+                                send_model_keyboard(&bot, &followup_chat_id, &text).await
+                            {
+                                warn!(
+                                    event = "telegram.helper_send.failed",
+                                    account_handle,
+                                    reason_code = "send_model_keyboard_failed",
+                                    "failed to send model keyboard"
+                                );
+                            }
+                        },
+                        Err(_e) => {
+                            warn!(
+                                event = "telegram.command.failed",
+                                account_handle,
+                                reason_code = "dispatch_command_failed",
+                                "callback dispatch_command failed"
+                            );
+                            if let Err(_e) = outbound
+                                .send_text_silent(
+                                    account_handle,
+                                    &followup_chat_id,
+                                    user_facing_error_message(),
+                                    None,
+                                )
+                                .await
+                            {
+                                warn!(
+                                    event = "telegram.user_feedback.failed",
+                                    account_handle,
+                                    reason_code = "send_text_failed",
+                                    "failed to send callback dispatch_command failure feedback"
+                                );
+                            }
+                        },
                     }
                 },
-                Err(e) => {
-                    if let Err(err) = outbound
-                        .send_text(account_handle, &chat_id, &format!("Error: {e}"), None)
-                        .await
-                    {
-                        warn!(account_handle, "failed to send callback response: {err}");
-                    }
-                },
-            }
+            )
+            .await;
+        } else {
+            info!(
+                event = "telegram.callback.ignored",
+                account_handle,
+                callback_id = %callback_id,
+                reason_code = "event_sink_missing",
+                "telegram callback ignored (event_sink missing)"
+            );
         }
         return Ok(());
     }
@@ -1955,25 +2648,55 @@ pub async fn handle_callback_query(
     };
 
     if let Some(ref sink) = event_sink {
-        let response = match sink.dispatch_command(&cmd_text, reply_target).await {
-            Ok(msg) => msg,
-            Err(e) => format!("Error: {e}"),
-        };
-
-        // Answer callback query with the response text (shows as toast).
-        if let Some(ref bot) = bot {
-            let _ = bot.answer_callback_query(&query.id).text(&response).await;
-        }
-
-        // Also send as a regular message for visibility.
-        if let Err(e) = outbound
-            .send_text(account_handle, &chat_id, &response, None)
-            .await
-        {
-            warn!(account_handle, "failed to send callback response: {e}");
-        }
-    } else if let Some(ref bot) = bot {
-        let _ = bot.answer_callback_query(&query.id).await;
+        let reply_to = reply_target.message_id.clone();
+        let typing_chat_id = chat_id.clone();
+        let followup_chat_id = chat_id.clone();
+        run_with_telegram_typing(
+            bot.clone(),
+            account_handle,
+            &typing_chat_id,
+            "callback_command",
+            async move {
+                let response = match sink.dispatch_command(&cmd_text, reply_target).await {
+                    Ok(msg) => msg,
+                    Err(_e) => {
+                        warn!(
+                            event = "telegram.command.failed",
+                            account_handle,
+                            reason_code = "dispatch_command_failed",
+                            command = cmd_text,
+                            "callback dispatch_command failed"
+                        );
+                        user_facing_error_message().to_string()
+                    },
+                };
+                if let Err(_e) = outbound
+                    .send_text_silent(
+                        account_handle,
+                        &followup_chat_id,
+                        &response,
+                        reply_to.as_deref(),
+                    )
+                    .await
+                {
+                    warn!(
+                        event = "telegram.user_feedback.failed",
+                        account_handle,
+                        reason_code = "send_text_failed",
+                        "failed to send callback response"
+                    );
+                }
+            },
+        )
+        .await;
+    } else {
+        info!(
+            event = "telegram.callback.ignored",
+            account_handle,
+            callback_id = %callback_id,
+            reason_code = "event_sink_missing",
+            "telegram callback ignored (event_sink missing)"
+        );
     }
 
     Ok(())
@@ -2001,6 +2724,24 @@ fn has_media(msg: &Message) -> bool {
     match &msg.kind {
         MessageKind::Common(common) => !matches!(common.media_kind, MediaKind::Text(_)),
         _ => false,
+    }
+}
+
+fn unsupported_media_kind(msg: &Message) -> Option<&'static str> {
+    match &msg.kind {
+        MessageKind::Common(common) => match &common.media_kind {
+            MediaKind::Document(_) => Some("document"),
+            MediaKind::Video(_) => Some("video"),
+            MediaKind::VideoNote(_) => Some("video_note"),
+            MediaKind::Sticker(_) => Some("sticker"),
+            MediaKind::Animation(_) => Some("animation"),
+            MediaKind::Poll(_) => Some("poll"),
+            MediaKind::Contact(_) => Some("contact"),
+            MediaKind::Game(_) => Some("game"),
+            MediaKind::Venue(_) => Some("venue"),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -2162,26 +2903,94 @@ impl ToChannelMessageKind for MediaKind {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TelegramDownloadError {
+    reason_code: &'static str,
+    retryable: bool,
+}
+
+impl std::fmt::Display for TelegramDownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "telegram download failed ({})", self.reason_code)
+    }
+}
+
+impl std::error::Error for TelegramDownloadError {}
+
 /// Download a file from Telegram by file ID.
-async fn download_telegram_file(bot: &Bot, file_id: &str) -> anyhow::Result<Vec<u8>> {
-    // Get file info from Telegram
-    let file = bot.get_file(file_id).await?;
+///
+/// Notes:
+/// - Must inherit the bot's configured API URL / client (supports `set_api_url` tests/self-hosted).
+/// - Must not construct or log raw tokenized file URLs.
+/// - Must enforce basic timeout and size limits to avoid unbounded memory growth.
+async fn download_telegram_file(
+    bot: &Bot,
+    file_id: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, TelegramDownloadError> {
+    use futures::StreamExt as _;
+    use teloxide::net::Download as _;
 
-    // Build the download URL
-    // Telegram file URL format: https://api.telegram.org/file/bot<token>/<file_path>
-    let token = bot.token();
-    let url = format!("https://api.telegram.org/file/bot{}/{}", token, file.path);
+    let file = bot.get_file(file_id).await.map_err(|e| match &e {
+        teloxide::RequestError::Api(_) => TelegramDownloadError {
+            reason_code: "get_file_api_failed",
+            retryable: false,
+        },
+        teloxide::RequestError::Network(err) if err.is_timeout() => TelegramDownloadError {
+            reason_code: "timeout",
+            retryable: true,
+        },
+        teloxide::RequestError::Network(err) if err.is_connect() => TelegramDownloadError {
+            reason_code: "network",
+            retryable: true,
+        },
+        teloxide::RequestError::Network(_) => TelegramDownloadError {
+            reason_code: "network",
+            retryable: true,
+        },
+        _ => TelegramDownloadError {
+            reason_code: "get_file_failed",
+            retryable: false,
+        },
+    })?;
 
-    // Download using reqwest
-    let response = reqwest::get(&url).await?;
-    if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "failed to download file: HTTP {}",
-            response.status()
-        ));
+    if (file.size as usize) > max_bytes {
+        return Err(TelegramDownloadError {
+            reason_code: "file_too_large",
+            retryable: false,
+        });
     }
 
-    let data = response.bytes().await?.to_vec();
+    let mut stream = bot.download_file_stream(&file.path);
+    let mut data: Vec<u8> = Vec::new();
+    let download = async {
+        while let Some(next) = stream.next().await {
+            let chunk = next.map_err(|e| TelegramDownloadError {
+                reason_code: if e.is_timeout() {
+                    "timeout"
+                } else {
+                    "network"
+                },
+                retryable: e.is_timeout() || e.is_connect(),
+            })?;
+            if data.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(TelegramDownloadError {
+                    reason_code: "file_too_large",
+                    retryable: false,
+                });
+            }
+            data.extend_from_slice(&chunk);
+        }
+        Ok::<(), TelegramDownloadError>(())
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(45), download)
+        .await
+        .map_err(|_| TelegramDownloadError {
+            reason_code: "timeout",
+            retryable: true,
+        })??;
+
     Ok(data)
 }
 
@@ -2884,6 +3693,8 @@ mod tests {
     enum TelegramApiMethod {
         SendMessage,
         SendChatAction,
+        GetFile,
+        AnswerCallbackQuery,
         Other(String),
     }
 
@@ -2893,15 +3704,23 @@ mod tests {
             match method {
                 "SendMessage" => Self::SendMessage,
                 "SendChatAction" => Self::SendChatAction,
+                "GetFile" => Self::GetFile,
+                "AnswerCallbackQuery" => Self::AnswerCallbackQuery,
                 _ => Self::Other(method.to_string()),
             }
         }
     }
 
+    #[allow(dead_code)]
     #[derive(Debug, Clone)]
     enum CapturedTelegramRequest {
         SendMessage(SendMessageRequest),
         SendChatAction(SendChatActionRequest),
+        GetFile(GetFileRequest),
+        AnswerCallbackQuery(AnswerCallbackQueryRequest),
+        FileDownload {
+            path: String,
+        },
         Other {
             method: TelegramApiMethod,
             raw_body: String,
@@ -2922,6 +3741,20 @@ mod tests {
         action: String,
     }
 
+    #[allow(dead_code)]
+    #[derive(Debug, Clone, Deserialize)]
+    struct GetFileRequest {
+        file_id: String,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Debug, Clone, Deserialize)]
+    struct AnswerCallbackQueryRequest {
+        callback_query_id: String,
+        #[serde(default)]
+        text: Option<String>,
+    }
+
     #[derive(Debug, Serialize)]
     struct TelegramApiResponse {
         ok: bool,
@@ -2932,6 +3765,7 @@ mod tests {
     #[serde(untagged)]
     enum TelegramApiResult {
         Message(TelegramMessageResult),
+        File(TelegramFileResult),
         Bool(bool),
     }
 
@@ -2948,6 +3782,14 @@ mod tests {
         date: i64,
         chat: TelegramChat,
         text: String,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct TelegramFileResult {
+        file_id: String,
+        file_unique_id: String,
+        file_size: u32,
+        file_path: String,
     }
 
     #[derive(Clone)]
@@ -2976,6 +3818,16 @@ mod tests {
                     Err(_) => CapturedTelegramRequest::Other { method, raw_body },
                 }
             },
+            TelegramApiMethod::GetFile => match serde_json::from_slice::<GetFileRequest>(&body) {
+                Ok(req) => CapturedTelegramRequest::GetFile(req),
+                Err(_) => CapturedTelegramRequest::Other { method, raw_body },
+            },
+            TelegramApiMethod::AnswerCallbackQuery => {
+                match serde_json::from_slice::<AnswerCallbackQueryRequest>(&body) {
+                    Ok(req) => CapturedTelegramRequest::AnswerCallbackQuery(req),
+                    Err(_) => CapturedTelegramRequest::Other { method, raw_body },
+                }
+            },
             TelegramApiMethod::Other(_) => CapturedTelegramRequest::Other { method, raw_body },
         };
 
@@ -2994,13 +3846,36 @@ mod tests {
                     text: "ok".to_string(),
                 }),
             }),
-            TelegramApiMethod::SendChatAction | TelegramApiMethod::Other(_) => {
-                Json(TelegramApiResponse {
-                    ok: true,
-                    result: TelegramApiResult::Bool(true),
-                })
-            },
+            TelegramApiMethod::GetFile => Json(TelegramApiResponse {
+                ok: true,
+                result: TelegramApiResult::File(TelegramFileResult {
+                    file_id: "file-id".to_string(),
+                    file_unique_id: "file-unique".to_string(),
+                    file_size: 4,
+                    file_path: "test.bin".to_string(),
+                }),
+            }),
+            TelegramApiMethod::SendChatAction
+            | TelegramApiMethod::AnswerCallbackQuery
+            | TelegramApiMethod::Other(_) => Json(TelegramApiResponse {
+                ok: true,
+                result: TelegramApiResult::Bool(true),
+            }),
         }
+    }
+
+    async fn telegram_file_handler(
+        State(state): State<MockTelegramApi>,
+        uri: Uri,
+    ) -> axum::body::Bytes {
+        state
+            .requests
+            .lock()
+            .expect("lock requests")
+            .push(CapturedTelegramRequest::FileDownload {
+                path: uri.path().to_string(),
+            });
+        axum::body::Bytes::from_static(b"abcd")
     }
 
     #[derive(Default)]
@@ -3008,9 +3883,11 @@ mod tests {
         dispatch_calls: std::sync::atomic::AtomicUsize,
         ingest_calls: std::sync::atomic::AtomicUsize,
         command_calls: std::sync::atomic::AtomicUsize,
+        fail_command: std::sync::atomic::AtomicBool,
         last_dispatch_text: Mutex<Option<String>>,
         last_ingest_text: Mutex<Option<String>>,
         last_command: Mutex<Option<String>>,
+        command_response: Mutex<Option<String>>,
     }
 
     #[async_trait]
@@ -3052,7 +3929,15 @@ mod tests {
             }
             self.command_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(String::new())
+            if self.fail_command.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("boom")
+            }
+            Ok(self
+                .command_response
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default())
         }
 
         async fn request_disable_account(
@@ -3158,7 +4043,10 @@ mod tests {
             requests: Arc::clone(&recorded_requests),
         };
         let app = Router::new()
-            .route("/{*path}", post(telegram_api_handler))
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
             .with_state(mock_api);
 
         let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -3210,6 +4098,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -3321,6 +4212,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -3363,7 +4257,10 @@ mod tests {
             requests: Arc::clone(&recorded_requests),
         };
         let app = Router::new()
-            .route("/{*path}", post(telegram_api_handler))
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
             .with_state(mock_api);
 
         let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -3412,6 +4309,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -3490,6 +4390,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -3557,6 +4460,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -3622,6 +4528,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -3692,6 +4601,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -3761,6 +4673,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -3827,7 +4742,10 @@ mod tests {
             requests: Arc::clone(&recorded_requests),
         };
         let app = Router::new()
-            .route("/{*path}", post(telegram_api_handler))
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
             .with_state(mock_api);
 
         let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -3879,6 +4797,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -3968,6 +4889,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -4008,7 +4932,10 @@ mod tests {
             requests: Arc::clone(&recorded_requests),
         };
         let app = Router::new()
-            .route("/{*path}", post(telegram_api_handler))
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
             .with_state(mock_api);
 
         let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -4057,6 +4984,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -4105,13 +5035,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn addressed_slash_command_failure_sends_sanitized_message() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        sink.fail_command
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let account_handle = "telegram:test-account";
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "/model@test_bot"
+        }))
+        .expect("deserialize message");
+
+        handle_message_direct(msg, &bot, account_handle, &accounts)
+            .await
+            .expect("handle message");
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        let sent = requests
+            .iter()
+            .find_map(|request| match request {
+                CapturedTelegramRequest::SendMessage(body) if body.chat_id == 42 => {
+                    Some(body.text.clone())
+                },
+                _ => None,
+            })
+            .expect("expected user-facing error message");
+        assert!(
+            sent.contains("Something went wrong"),
+            "expected sanitized failure text, got {sent}"
+        );
+        assert!(!sent.contains("boom"), "internal error text must not leak");
+        assert!(
+            requests.iter().any(|request| {
+                matches!(
+                    request,
+                    CapturedTelegramRequest::SendChatAction(action)
+                        if action.chat_id == 42 && action.action == "typing"
+                )
+            }),
+            "expected typing action before slash command feedback, requests={requests:?}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| matches!(
+                    request,
+                    CapturedTelegramRequest::SendChatAction(action)
+                        if action.chat_id == 42 && action.action == "typing"
+                ))
+                .count(),
+            1,
+            "slash command feedback must have a single typing owner, requests={requests:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn addressed_slash_command_to_other_bot_in_dm_is_ignored() {
         let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
         let mock_api = MockTelegramApi {
             requests: Arc::clone(&recorded_requests),
         };
         let app = Router::new()
-            .route("/{*path}", post(telegram_api_handler))
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
             .with_state(mock_api);
 
         let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -4160,6 +5222,9 @@ mod tests {
                     cancel: CancellationToken::new(),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
                     otp: std::sync::Mutex::new(OtpState::new(300)),
                 },
             );
@@ -4553,5 +5618,1040 @@ mod tests {
             Some(UserId(bot_id)),
             Some("MyBot")
         ));
+    }
+
+    #[tokio::test]
+    async fn callback_without_data_still_answers_callback_query() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let query: CallbackQuery = serde_json::from_value(json!({
+            "id": "cb1",
+            "from": { "id": 1001, "is_bot": false, "first_name": "Alice", "username": "alice" },
+            "chat_instance": "ci",
+            "data": null
+        }))
+        .expect("deserialize callback query");
+
+        handle_callback_query(query, &bot, "telegram:test-account", &accounts)
+            .await
+            .expect("handle callback");
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        assert!(
+            requests.iter().any(|r| {
+                matches!(r, CapturedTelegramRequest::AnswerCallbackQuery(_))
+                    || matches!(
+                        r,
+                        CapturedTelegramRequest::Other {
+                            method: TelegramApiMethod::AnswerCallbackQuery,
+                            ..
+                        }
+                    )
+            }),
+            "expected answerCallbackQuery request, got {requests:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn callback_with_message_missing_account_still_answers_callback_query() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        // Intentionally empty account map: triggers account_missing branch after early answer.
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let query: CallbackQuery = serde_json::from_value(json!({
+            "id": "cb2",
+            "from": { "id": 1001, "is_bot": false, "first_name": "Alice", "username": "alice" },
+            "chat_instance": "ci",
+            "data": "sessions_switch:1",
+            "message": {
+                "message_id": 10,
+                "date": 1,
+                "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+                "text": "tap"
+            }
+        }))
+        .expect("deserialize callback query");
+
+        handle_callback_query(query, &bot, "telegram:missing-account", &accounts)
+            .await
+            .expect("handle callback");
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        assert!(
+            requests.iter().any(|r| {
+                matches!(r, CapturedTelegramRequest::AnswerCallbackQuery(_))
+                    || matches!(
+                        r,
+                        CapturedTelegramRequest::Other {
+                            method: TelegramApiMethod::AnswerCallbackQuery,
+                            ..
+                        }
+                    )
+            }),
+            "expected answerCallbackQuery request, got {requests:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn callback_with_data_answers_first_then_sends_followup_message() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        *sink.command_response.lock().unwrap() = Some("done".to_string());
+        let account_handle = "telegram:test-account";
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let query: CallbackQuery = serde_json::from_value(json!({
+            "id": "cb-followup",
+            "from": { "id": 1001, "is_bot": false, "first_name": "Alice", "username": "alice" },
+            "chat_instance": "ci",
+            "data": "sessions_switch:1",
+            "message": {
+                "message_id": 10,
+                "date": 1,
+                "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+                "text": "tap"
+            }
+        }))
+        .expect("deserialize callback query");
+
+        handle_callback_query(query, &bot, account_handle, &accounts)
+            .await
+            .expect("handle callback");
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        let answer_idx = requests
+            .iter()
+            .position(|r| matches!(r, CapturedTelegramRequest::AnswerCallbackQuery(_)))
+            .expect("expected answerCallbackQuery");
+        let send_idx = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CapturedTelegramRequest::SendMessage(body) if body.chat_id == 42 && body.text == "done"
+                )
+            })
+            .expect("expected follow-up sendMessage");
+        let typing_idx = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CapturedTelegramRequest::SendChatAction(action)
+                        if action.chat_id == 42 && action.action == "typing"
+                )
+            })
+            .expect("expected typing action before follow-up send");
+        assert!(
+            answer_idx < send_idx,
+            "callback must answer before sending follow-up, requests={requests:?}"
+        );
+        assert!(
+            answer_idx < typing_idx && typing_idx < send_idx,
+            "callback typing must remain after callback answer and before follow-up send, requests={requests:?}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| matches!(
+                    r,
+                    CapturedTelegramRequest::SendChatAction(action)
+                        if action.chat_id == 42 && action.action == "typing"
+                ))
+                .count(),
+            1,
+            "callback follow-up must have a single typing owner, requests={requests:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn callback_answer_transport_failure_is_retryable() {
+        let bot =
+            teloxide::Bot::new("test-token").set_api_url("http://127.0.0.1:1/".parse().unwrap());
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+
+        let query: CallbackQuery = serde_json::from_value(json!({
+            "id": "cb3",
+            "from": { "id": 1001, "is_bot": false, "first_name": "Alice", "username": "alice" },
+            "chat_instance": "ci",
+            "data": "sessions_switch:1"
+        }))
+        .expect("deserialize callback query");
+
+        let err = handle_callback_query(query, &bot, "telegram:test-account", &accounts)
+            .await
+            .expect_err("expected retryable failure");
+        assert!(
+            err.downcast_ref::<RetryableUpdateError>().is_some(),
+            "expected RetryableUpdateError"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_invalid_query_id_still_dispatches_followup_and_is_not_retryable() {
+        async fn invalid_query_id_handler(
+            State(state): State<MockTelegramApi>,
+            uri: Uri,
+            body: Bytes,
+        ) -> axum::response::Response {
+            let method = TelegramApiMethod::from_path(uri.path());
+            let raw_body = String::from_utf8_lossy(&body).to_string();
+            state
+                .requests
+                .lock()
+                .expect("lock requests")
+                .push(CapturedTelegramRequest::Other {
+                    method: method.clone(),
+                    raw_body,
+                });
+            match method {
+                TelegramApiMethod::AnswerCallbackQuery => (
+                    axum::http::StatusCode::OK,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error_code": 400,
+                        "description": "Bad Request: query is too old and response timeout expired or query id is invalid"
+                    })),
+                )
+                    .into_response(),
+                _ => telegram_api_handler(State(state), uri, body).await.into_response(),
+            }
+        }
+
+        use axum::response::IntoResponse as _;
+
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(invalid_query_id_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        *sink.command_response.lock().unwrap() = Some("done after invalid ack".to_string());
+        let account_handle = "telegram:test-account";
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let query: CallbackQuery = serde_json::from_value(json!({
+            "id": "cb-invalid",
+            "from": { "id": 1001, "is_bot": false, "first_name": "Alice", "username": "alice" },
+            "chat_instance": "ci",
+            "data": "sessions_switch:1",
+            "message": {
+                "message_id": 10,
+                "date": 1,
+                "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+                "text": "tap"
+            }
+        }))
+        .expect("deserialize callback query");
+
+        handle_callback_query(query, &bot, account_handle, &accounts)
+            .await
+            .expect("invalid query id should be terminal");
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        assert!(
+            requests.iter().any(|r| {
+                matches!(
+                    r,
+                    CapturedTelegramRequest::SendMessage(body)
+                        if body.chat_id == 42 && body.text == "done after invalid ack"
+                )
+            }),
+            "expected callback action to continue after invalid query id ack failure, requests={requests:?}"
+        );
+        assert_eq!(
+            sink.command_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "callback action must still dispatch even when answerCallbackQuery is terminally rejected"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn callback_command_failure_sends_sanitized_message() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        sink.fail_command
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let account_handle = "telegram:test-account";
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let query: CallbackQuery = serde_json::from_value(json!({
+            "id": "cb-fail",
+            "from": { "id": 1001, "is_bot": false, "first_name": "Alice", "username": "alice" },
+            "chat_instance": "ci",
+            "data": "sessions_switch:1",
+            "message": {
+                "message_id": 10,
+                "date": 1,
+                "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+                "text": "tap"
+            }
+        }))
+        .expect("deserialize callback query");
+
+        handle_callback_query(query, &bot, account_handle, &accounts)
+            .await
+            .expect("handle callback");
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        let sent = requests
+            .iter()
+            .find_map(|request| match request {
+                CapturedTelegramRequest::SendMessage(body) if body.chat_id == 42 => {
+                    Some(body.text.clone())
+                },
+                _ => None,
+            })
+            .expect("expected user-facing error message");
+        assert!(
+            sent.contains("Something went wrong"),
+            "expected sanitized failure text, got {sent}"
+        );
+        assert!(!sent.contains("boom"), "internal error text must not leak");
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn download_error_is_sanitized_and_does_not_include_token() {
+        let bot = teloxide::Bot::new("super-secret-token")
+            .set_api_url("http://127.0.0.1:1/".parse().unwrap());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            download_telegram_file(&bot, "file-id", 1024),
+        )
+        .await
+        .expect("download should not hang");
+
+        let err = result.expect_err("expected download failure");
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("super-secret-token"),
+            "error must not contain token: {rendered}"
+        );
+        assert!(
+            !rendered.contains("file/bot"),
+            "error must not contain tokenized telegram file URL fragments: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn photo_get_file_api_failure_sends_feedback_and_does_not_retry() {
+        async fn get_file_api_failure_handler(
+            State(state): State<MockTelegramApi>,
+            uri: Uri,
+            body: Bytes,
+        ) -> axum::response::Response {
+            let method = TelegramApiMethod::from_path(uri.path());
+            let raw_body = String::from_utf8_lossy(&body).to_string();
+            state
+                .requests
+                .lock()
+                .expect("lock requests")
+                .push(CapturedTelegramRequest::Other {
+                    method: method.clone(),
+                    raw_body,
+                });
+            match method {
+                TelegramApiMethod::GetFile => (
+                    axum::http::StatusCode::OK,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error_code": 400,
+                        "description": "Bad Request: wrong file_id or the file is temporarily unavailable"
+                    })),
+                )
+                    .into_response(),
+                _ => telegram_api_handler(State(state), uri, body).await.into_response(),
+            }
+        }
+
+        use axum::response::IntoResponse as _;
+
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(get_file_api_failure_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_handle = "telegram:test-account";
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "photo": [
+                { "file_id": "photo-file-id", "file_unique_id": "photo-unique", "width": 1, "height": 1, "file_size": 4 }
+            ],
+            "caption": "hi"
+        }))
+        .expect("deserialize photo message");
+
+        handle_message_direct(msg, &bot, account_handle, &accounts)
+            .await
+            .expect("permanent getFile failure should be terminal and send feedback");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "photo dispatch must not continue after terminal getFile failure"
+        );
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        assert!(
+            requests.iter().any(|request| {
+                if let CapturedTelegramRequest::SendMessage(body) = request {
+                    body.chat_id == 42 && body.text.contains("couldn't download that photo")
+                } else {
+                    false
+                }
+            }),
+            "expected terminal getFile failure to send user feedback, requests={requests:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[test]
+    fn helper_chat_id_parse_failure_is_error_not_chatid_zero() {
+        assert!(parse_chat_id("not-a-number").is_err());
+    }
+
+    #[tokio::test]
+    async fn unsupported_document_in_dm_sends_feedback_and_skips_dispatch() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_handle = "telegram:test-account";
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "document": {
+                "file_id": "doc-file-id",
+                "file_unique_id": "doc-unique-id",
+                "file_size": 123,
+                "file_name": "a.pdf",
+                "mime_type": "application/pdf"
+            },
+            "caption": "please read"
+        }))
+        .expect("deserialize document message");
+
+        handle_message_direct(msg, &bot, account_handle, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "unsupported document must not be dispatched to chat"
+        );
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        assert!(
+            requests.iter().any(|request| {
+                if let CapturedTelegramRequest::SendMessage(body) = request {
+                    body.chat_id == 42 && body.text.contains("isn’t supported")
+                } else {
+                    false
+                }
+            }),
+            "expected unsupported attachment feedback to be sent, requests={requests:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn event_sink_missing_in_dm_sends_user_facing_error_message() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let account_handle = "telegram:test-account";
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: None,
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "hello"
+        }))
+        .expect("deserialize message");
+
+        handle_message_direct(msg, &bot, account_handle, &accounts)
+            .await
+            .expect("handle message");
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        assert!(
+            requests.iter().any(|request| {
+                if let CapturedTelegramRequest::SendMessage(body) = request {
+                    body.chat_id == 42 && body.text.contains("Something went wrong")
+                } else {
+                    false
+                }
+            }),
+            "expected user-facing error feedback, requests={requests:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn photo_download_uses_bot_api_url_for_file_download() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_handle = "telegram:test-account";
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "photo": [
+                { "file_id": "photo-file-id", "file_unique_id": "photo-unique", "width": 1, "height": 1, "file_size": 4 }
+            ],
+            "caption": "hi"
+        }))
+        .expect("deserialize photo message");
+
+        handle_message_direct(msg, &bot, account_handle, &accounts)
+            .await
+            .expect("handle message");
+
+        let requests = recorded_requests.lock().expect("requests lock");
+        assert!(
+            requests.iter().any(|r| {
+                matches!(r, CapturedTelegramRequest::GetFile(_))
+                    || matches!(
+                        r,
+                        CapturedTelegramRequest::Other {
+                            method: TelegramApiMethod::GetFile,
+                            ..
+                        }
+                    )
+            }),
+            "expected getFile request, got {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CapturedTelegramRequest::FileDownload { .. })),
+            "expected file download GET request, got {requests:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
     }
 }
