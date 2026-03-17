@@ -25,8 +25,8 @@ use crate::{
     state::AccountStateMap,
 };
 
-/// Cache TTL for probe results (30 seconds).
-const PROBE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Cache TTL for probe results (3 seconds).
+const PROBE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Telegram channel plugin.
 pub struct TelegramPlugin {
@@ -74,6 +74,12 @@ impl TelegramPlugin {
         accounts.keys().cloned().collect()
     }
 
+    fn invalidate_probe_cache(&self, account_handle: &str) {
+        if let Ok(mut cache) = self.probe_cache.write() {
+            cache.remove(account_handle);
+        }
+    }
+
     /// Get the config for a specific account (serialized to JSON).
     pub fn account_config(&self, account_handle: &str) -> Option<serde_json::Value> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
@@ -111,6 +117,8 @@ impl TelegramPlugin {
         let mut accounts = self.accounts.write().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = accounts.get_mut(account_handle) {
             state.config = tg_config;
+            drop(accounts);
+            self.invalidate_probe_cache(account_handle);
             Ok(())
         } else {
             Err(anyhow::anyhow!("account not found: {account_handle}"))
@@ -170,21 +178,36 @@ impl ChannelPlugin for TelegramPlugin {
             self.event_sink.clone(),
         )
         .await?;
+        self.invalidate_probe_cache(account_handle);
 
         Ok(())
     }
 
     async fn stop_account(&mut self, account_handle: &str) -> Result<()> {
-        let cancel = {
+        let runtime = {
             let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
-            accounts.get(account_handle).map(|s| s.cancel.clone())
+            accounts
+                .get(account_handle)
+                .map(|s| (s.cancel.clone(), std::sync::Arc::clone(&s.supervisor)))
         };
 
-        if let Some(cancel) = cancel {
+        if let Some((cancel, supervisor)) = runtime {
             info!(account_handle, "stopping telegram account");
             cancel.cancel();
-            let mut accounts = self.accounts.write().unwrap_or_else(|e| e.into_inner());
-            accounts.remove(account_handle);
+            let join = {
+                let mut slot = supervisor.lock().unwrap_or_else(|e| e.into_inner());
+                slot.take()
+            };
+            if let Some(join) = join {
+                if let Err(err) = join.await {
+                    warn!(account_handle, "telegram supervisor join failed: {err}");
+                }
+            }
+            {
+                let mut accounts = self.accounts.write().unwrap_or_else(|e| e.into_inner());
+                accounts.remove(account_handle);
+            }
+            self.invalidate_probe_cache(account_handle);
         } else {
             warn!(account_handle, "telegram account not found");
         }
@@ -236,7 +259,10 @@ impl ChannelStatus for TelegramPlugin {
             None => ChannelHealthSnapshot {
                 connected: false,
                 chan_account_key: account_handle.to_string(),
-                details: Some("account not started".into()),
+                details: Some(
+                    "runtime_state=stopped_by_operator reason_code=account_not_started backoff_secs=0 last_poll_ok_secs_ago=None last_retryable_failure_reason_code=None blocked_by_update_retry=false"
+                        .into(),
+                ),
             },
         };
 
@@ -258,32 +284,27 @@ fn compute_polling_probe_details(
         .map(|last_poll| now.duration_since(last_poll).as_secs() > s.stale_threshold_secs)
         .unwrap_or(true);
     let last_poll_ok_secs_ago = s.last_poll_ok_at.map(|t| now.duration_since(t).as_secs());
-    let last_update_finished_secs_ago = s
-        .last_update_finished_at
-        .map(|t| now.duration_since(t).as_secs());
-    let last_retryable_failure_secs_ago = s
-        .last_retryable_failure_at
-        .map(|t| now.duration_since(t).as_secs());
     let update_processing_blocked = match (s.last_retryable_failure_at, s.last_update_finished_at) {
         (Some(_failed_at), None) => true,
         (Some(failed_at), Some(finished_at)) => finished_at < failed_at,
         (None, _) => false,
     };
+    let runtime_state = s.polling_state.as_str();
+    let reason_code = s
+        .current_reason_code
+        .or(s.last_poll_exit_reason_code)
+        .unwrap_or("none");
     let connected = auth_ok
-        && s.polling_state.as_str() == "running"
+        && runtime_state == "running"
         && s.last_poll_ok_at.is_some()
         && !stale
         && !update_processing_blocked;
     let details = format!(
-        "auth_ok={auth_ok} polling_state={} stale={stale} update_processing_blocked={} last_poll_ok_secs_ago={:?} last_update_finished_secs_ago={:?} last_retryable_failure_secs_ago={:?} last_retryable_failure_reason_code={:?} last_poll_exit_reason_code={:?} stale_threshold_secs={}",
-        s.polling_state.as_str(),
-        update_processing_blocked,
+        "runtime_state={runtime_state} reason_code={reason_code} backoff_secs={} last_poll_ok_secs_ago={:?} last_retryable_failure_reason_code={:?} blocked_by_update_retry={}",
+        s.current_backoff_secs,
         last_poll_ok_secs_ago,
-        last_update_finished_secs_ago,
-        last_retryable_failure_secs_ago,
         s.last_retryable_failure_reason_code,
-        s.last_poll_exit_reason_code,
-        s.stale_threshold_secs
+        update_processing_blocked
     );
     (connected, details)
 }
@@ -314,6 +335,7 @@ mod tests {
                 accounts: Arc::clone(accounts),
             }),
             cancel,
+            supervisor: Arc::new(std::sync::Mutex::new(None)),
             message_log: None,
             event_sink: None,
             polling: Arc::new(std::sync::Mutex::new(
@@ -501,25 +523,27 @@ mod tests {
         let mut s = crate::state::PollingRuntimeState::new(90);
         s.polling_state = crate::state::PollingState::Running;
         s.polling_started_at = now - std::time::Duration::from_secs(200);
+        s.current_reason_code = None;
+        s.current_backoff_secs = 0;
 
         let (connected0, details0) = super::compute_polling_probe_details(now, true, &s);
         assert!(
             !connected0,
             "polling with no successful poll yet must report disconnected"
         );
-        assert!(details0.contains("stale=true"));
+        assert!(details0.contains("runtime_state=running"));
+        assert!(details0.contains("reason_code=none"));
 
         s.last_poll_ok_at = Some(now - std::time::Duration::from_secs(200));
         let (connected, details) = super::compute_polling_probe_details(now, true, &s);
         assert!(!connected, "stale polling must report disconnected");
-        assert!(details.contains("stale=true"));
-        assert!(details.contains("update_processing_blocked=false"));
+        assert!(details.contains("blocked_by_update_retry=false"));
 
         s.last_poll_ok_at = Some(now);
         let (connected2, details2) = super::compute_polling_probe_details(now, true, &s);
         assert!(connected2, "fresh polling should report connected");
-        assert!(details2.contains("stale=false"));
-        assert!(details2.contains("update_processing_blocked=false"));
+        assert!(details2.contains("runtime_state=running"));
+        assert!(details2.contains("blocked_by_update_retry=false"));
 
         let (connected3, _details3) = super::compute_polling_probe_details(now, false, &s);
         assert!(
@@ -537,13 +561,14 @@ mod tests {
         s.last_update_finished_at = Some(now - std::time::Duration::from_secs(30));
         s.last_retryable_failure_at = Some(now - std::time::Duration::from_secs(5));
         s.last_retryable_failure_reason_code = Some("get_file_failed");
+        s.current_reason_code = None;
 
         let (connected, details) = super::compute_polling_probe_details(now, true, &s);
         assert!(
             !connected,
             "fresh polls must still report disconnected while a retry barrier is blocking updates"
         );
-        assert!(details.contains("update_processing_blocked=true"));
+        assert!(details.contains("blocked_by_update_retry=true"));
         assert!(details.contains("last_retryable_failure_reason_code=Some(\"get_file_failed\")"));
 
         s.last_update_finished_at = Some(now);
@@ -553,6 +578,19 @@ mod tests {
             connected_after_recovery,
             "completed update progress after the retryable failure should restore connectivity"
         );
-        assert!(details_after_recovery.contains("update_processing_blocked=false"));
+        assert!(details_after_recovery.contains("blocked_by_update_retry=false"));
+    }
+
+    #[test]
+    fn probe_details_order_starts_with_runtime_reason_and_backoff() {
+        let now = std::time::Instant::now();
+        let mut s = crate::state::PollingRuntimeState::new(90);
+        s.current_reason_code = Some("network");
+        s.current_backoff_secs = 5;
+
+        let (_connected, details) = super::compute_polling_probe_details(now, false, &s);
+        assert!(details.starts_with(
+            "runtime_state=reconnecting reason_code=network backoff_secs=5 last_poll_ok_secs_ago=None"
+        ));
     }
 }

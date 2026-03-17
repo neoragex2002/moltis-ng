@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use {
     async_trait::async_trait,
@@ -54,6 +54,72 @@ fn merge_json_in_place(base: &mut Value, patch: &Value) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramConfigPatchKind {
+    HotUpdate,
+    IdentityChange,
+}
+
+fn classify_telegram_config_patch(patch: &Value) -> Result<TelegramConfigPatchKind, String> {
+    let patch_obj = patch
+        .as_object()
+        .ok_or_else(|| "config patch must be an object".to_string())?;
+
+    let mut touches_identity = false;
+    for key in patch_obj.keys() {
+        match key.as_str() {
+            "dm_policy"
+            | "mention_mode"
+            | "allowlist"
+            | "relay_chain_enabled"
+            | "relay_hop_limit"
+            | "epoch_relay_budget"
+            | "relay_strictness"
+            | "group_session_transcript_format"
+            | "stream_mode"
+            | "edit_throttle_ms"
+            | "outbound_max_attempts"
+            | "outbound_retry_base_delay_ms"
+            | "outbound_retry_max_delay_ms"
+            | "model"
+            | "model_provider"
+            | "otp_self_approval"
+            | "otp_cooldown_secs"
+            | "persona_id" => {},
+            "token" | "chan_user_id" | "chan_user_name" | "chan_nickname" => {
+                touches_identity = true;
+            },
+            other => {
+                return Err(format!(
+                    "unsupported telegram config field in update: {other}"
+                ));
+            },
+        }
+    }
+
+    Ok(if touches_identity {
+        TelegramConfigPatchKind::IdentityChange
+    } else {
+        TelegramConfigPatchKind::HotUpdate
+    })
+}
+
+fn merge_telegram_account_keys(
+    runtime_handles: Vec<String>,
+    stored_channels: &[StoredChannel],
+) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    for handle in runtime_handles {
+        keys.insert(handle);
+    }
+    for channel in stored_channels {
+        if channel.channel_type == "telegram" {
+            keys.insert(channel.account_handle.clone());
+        }
+    }
+    keys.into_iter().collect()
+}
+
 /// Live channel service backed by `TelegramPlugin`.
 pub struct LiveChannelService {
     telegram: Arc<RwLock<TelegramPlugin>>,
@@ -81,8 +147,15 @@ impl LiveChannelService {
 #[async_trait]
 impl ChannelService for LiveChannelService {
     async fn status(&self) -> ServiceResult {
+        let stored_channels = match self.store.list().await {
+            Ok(channels) => channels,
+            Err(err) => {
+                warn!(error = %err, "failed to list stored channels for status");
+                Vec::new()
+            },
+        };
         let tg = self.telegram.read().await;
-        let chan_account_keys = tg.account_handles();
+        let chan_account_keys = merge_telegram_account_keys(tg.account_handles(), &stored_channels);
         let mut channels = Vec::new();
 
         if let Some(status) = tg.status() {
@@ -96,7 +169,15 @@ impl ChannelService for LiveChannelService {
                             "status": if snap.connected { "connected" } else { "disconnected" },
                             "details": snap.details,
                         });
-                        if let Some(cfg) = tg.account_config(chan_account_key) {
+                        if let Some(cfg) = tg.account_config(chan_account_key).or_else(|| {
+                            stored_channels
+                                .iter()
+                                .find(|channel| {
+                                    channel.channel_type == "telegram"
+                                        && channel.account_handle == *chan_account_key
+                                })
+                                .map(|channel| channel.config.clone())
+                        }) {
                             entry["config"] = cfg;
                         }
 
@@ -259,13 +340,11 @@ impl ChannelService for LiveChannelService {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("channel '{chan_account_key}' not found in store"))?;
 
-        if !patch.is_object() {
-            return Err("config patch must be an object".into());
-        }
+        let patch_kind = classify_telegram_config_patch(&patch)?;
         let mut merged = stored.config.clone();
         merge_json_in_place(&mut merged, &patch);
 
-        // Validate and normalize before stopping the bot (avoid downtime on invalid patches).
+        // Validate and normalize before touching the running bot.
         let tg_cfg: moltis_telegram::TelegramAccountConfig =
             serde_json::from_value(merged.clone()).map_err(|e| e.to_string())?;
         if tg_cfg.token.expose_secret().is_empty() {
@@ -273,20 +352,22 @@ impl ChannelService for LiveChannelService {
         }
         let merged = serde_json::to_value(tg_cfg).map_err(|e| e.to_string())?;
 
-        let mut tg = self.telegram.write().await;
-
-        // Stop then restart with new config
-        tg.stop_account(chan_account_key).await.map_err(|e| {
-            error!(error = %e, chan_account_key, "failed to stop telegram account for update");
-            e.to_string()
-        })?;
-
-        tg.start_account(chan_account_key, merged.clone())
-            .await
-            .map_err(|e| {
-                error!(error = %e, chan_account_key, "failed to restart telegram account after update");
-                e.to_string()
-            })?;
+        match patch_kind {
+            TelegramConfigPatchKind::HotUpdate => {
+                let tg = self.telegram.read().await;
+                tg.update_account_config(chan_account_key, merged.clone())
+                    .map_err(|e| {
+                        error!(error = %e, chan_account_key, "failed to hot-update telegram account");
+                        e.to_string()
+                    })?;
+            },
+            TelegramConfigPatchKind::IdentityChange => {
+                return Err(
+                    "telegram identity fields cannot be updated in place; remove and re-add the bot"
+                        .into(),
+                );
+            },
+        }
 
         let now = unix_now();
         if let Err(e) = self
@@ -493,8 +574,9 @@ impl ChannelService for LiveChannelService {
     }
 
     async fn list_telegram_accounts(&self) -> Vec<String> {
+        let stored_channels = self.store.list().await.unwrap_or_default();
         let tg = self.telegram.read().await;
-        tg.account_handles()
+        merge_telegram_account_keys(tg.account_handles(), &stored_channels)
     }
 
     async fn telegram_bus_accounts_snapshot(
@@ -579,5 +661,55 @@ mod tests {
         assert_eq!(base["a"], serde_json::json!({ "y": 2 }));
         assert_eq!(base["b"], "nope");
         assert_eq!(base["c"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn classify_telegram_config_patch_detects_identity_changes() {
+        assert_eq!(
+            classify_telegram_config_patch(&serde_json::json!({"allowlist": ["alice"]})).unwrap(),
+            TelegramConfigPatchKind::HotUpdate
+        );
+        assert_eq!(
+            classify_telegram_config_patch(&serde_json::json!({"token": "123:ABC"})).unwrap(),
+            TelegramConfigPatchKind::IdentityChange
+        );
+        assert_eq!(
+            classify_telegram_config_patch(&serde_json::json!({"chan_user_name": "new_name"}))
+                .unwrap(),
+            TelegramConfigPatchKind::IdentityChange
+        );
+        assert!(classify_telegram_config_patch(&serde_json::json!({"unexpected": true})).is_err());
+    }
+
+    #[test]
+    fn merge_telegram_account_keys_unions_runtime_and_store() {
+        let merged = merge_telegram_account_keys(
+            vec!["telegram:1".into(), "telegram:3".into()],
+            &[
+                StoredChannel {
+                    account_handle: "telegram:2".into(),
+                    channel_type: "telegram".into(),
+                    config: serde_json::json!({}),
+                    created_at: 0,
+                    updated_at: 0,
+                },
+                StoredChannel {
+                    account_handle: "other:1".into(),
+                    channel_type: "discord".into(),
+                    config: serde_json::json!({}),
+                    created_at: 0,
+                    updated_at: 0,
+                },
+            ],
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                "telegram:1".to_string(),
+                "telegram:2".to_string(),
+                "telegram:3".to_string()
+            ]
+        );
     }
 }

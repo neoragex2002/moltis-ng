@@ -4096,6 +4096,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4210,6 +4211,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4307,6 +4309,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4388,6 +4391,7 @@ mod tests {
                     config: cfg,
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4458,6 +4462,7 @@ mod tests {
                     config: cfg,
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4526,6 +4531,7 @@ mod tests {
                     config: cfg,
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4599,6 +4605,7 @@ mod tests {
                     config: cfg,
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4671,6 +4678,7 @@ mod tests {
                     config: cfg,
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4795,6 +4803,7 @@ mod tests {
                     config: cfg,
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4887,6 +4896,7 @@ mod tests {
                     config: cfg,
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -4982,6 +4992,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -5093,6 +5104,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -5220,6 +5232,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -5818,6 +5831,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -6005,6 +6019,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -6113,6 +6128,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -6271,6 +6287,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -6386,6 +6403,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(
@@ -6499,6 +6517,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: None,
                     polling: Arc::new(std::sync::Mutex::new(
@@ -6599,6 +6618,7 @@ mod tests {
                     },
                     outbound: Arc::clone(&outbound),
                     cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
                     polling: Arc::new(std::sync::Mutex::new(

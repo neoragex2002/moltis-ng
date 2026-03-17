@@ -1983,6 +1983,7 @@ mod tests {
                         accounts: Arc::clone(&accounts),
                     }),
                     cancel: tokio_util::sync::CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: None,
                     polling: Arc::new(std::sync::Mutex::new(
@@ -1993,6 +1994,41 @@ mod tests {
             );
         }
         outbound
+    }
+
+    fn outbound_with_bot_and_accounts(
+        account_handle: &str,
+        bot: teloxide::Bot,
+    ) -> (TelegramOutbound, AccountStateMap) {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        };
+        {
+            let mut map = accounts.write().unwrap();
+            map.insert(
+                account_handle.to_string(),
+                crate::state::AccountState {
+                    bot,
+                    bot_user_id: None,
+                    bot_username: None,
+                    account_handle: account_handle.to_string(),
+                    config: crate::config::TelegramAccountConfig::default(),
+                    outbound: Arc::new(TelegramOutbound {
+                        accounts: Arc::clone(&accounts),
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: None,
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                },
+            );
+        }
+        (outbound, accounts)
     }
 
     fn retry_cfg(max_attempts: u32) -> OutboundRetryConfig {
@@ -2035,6 +2071,29 @@ mod tests {
                 || err.to_string().to_lowercase().contains("connect")
                 || err.to_string().to_lowercase().contains("refused")
         );
+    }
+
+    #[tokio::test]
+    async fn send_typing_failure_does_not_change_account_runtime_state() {
+        let bot = teloxide::Bot::new("123:ABC").set_api_url("http://127.0.0.1:1/".parse().unwrap());
+        let (outbound, accounts) = outbound_with_bot_and_accounts("acct", bot);
+        {
+            let map = accounts.read().unwrap();
+            let state = map.get("acct").unwrap();
+            let mut polling = state.polling.lock().unwrap();
+            polling.polling_state = crate::state::PollingState::Running;
+            polling.current_reason_code = None;
+        }
+
+        let _err = ChannelOutbound::send_typing(&outbound, "acct", "1")
+            .await
+            .expect_err("send_typing must fail against the mock-unreachable API url");
+
+        let map = accounts.read().unwrap();
+        let state = map.get("acct").unwrap();
+        let polling = state.polling.lock().unwrap();
+        assert_eq!(polling.polling_state, crate::state::PollingState::Running);
+        assert_eq!(polling.current_reason_code, None);
     }
 
     #[tokio::test]

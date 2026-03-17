@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use moltis_channels::{ChannelEventSink, message_log::MessageLog};
@@ -12,16 +13,16 @@ use crate::{config::TelegramAccountConfig, otp::OtpState, outbound::TelegramOutb
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollingState {
     Running,
-    Stopping,
-    Exited,
+    Reconnecting,
+    StoppedByOperator,
 }
 
 impl PollingState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
-            Self::Stopping => "stopping",
-            Self::Exited => "exited",
+            Self::Reconnecting => "reconnecting",
+            Self::StoppedByOperator => "stopped_by_operator",
         }
     }
 }
@@ -35,19 +36,25 @@ pub struct PollingRuntimeState {
     pub last_retryable_failure_at: Option<std::time::Instant>,
     pub last_retryable_failure_reason_code: Option<&'static str>,
     pub last_poll_exit_reason_code: Option<&'static str>,
+    pub current_reason_code: Option<&'static str>,
+    pub current_backoff_secs: u64,
+    pub next_update_offset: i32,
     pub stale_threshold_secs: u64,
 }
 
 impl PollingRuntimeState {
     pub fn new(stale_threshold_secs: u64) -> Self {
         Self {
-            polling_state: PollingState::Running,
+            polling_state: PollingState::Reconnecting,
             polling_started_at: std::time::Instant::now(),
             last_poll_ok_at: None,
             last_update_finished_at: None,
             last_retryable_failure_at: None,
             last_retryable_failure_reason_code: None,
             last_poll_exit_reason_code: None,
+            current_reason_code: Some("startup"),
+            current_backoff_secs: 0,
+            next_update_offset: 0,
             stale_threshold_secs,
         }
     }
@@ -66,6 +73,7 @@ pub struct AccountState {
     pub config: TelegramAccountConfig,
     pub outbound: Arc<TelegramOutbound>,
     pub cancel: CancellationToken,
+    pub supervisor: Arc<Mutex<Option<JoinHandle<()>>>>,
     pub message_log: Option<Arc<dyn MessageLog>>,
     pub event_sink: Option<Arc<dyn ChannelEventSink>>,
     pub polling: Arc<Mutex<PollingRuntimeState>>,

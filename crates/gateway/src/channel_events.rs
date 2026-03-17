@@ -702,7 +702,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             channel_type,
             account_handle,
             reason,
-            "stopping local polling: detected bot already running on another instance"
+            "disabling local channel account"
         );
 
         if let Some(state) = self.state.get() {
