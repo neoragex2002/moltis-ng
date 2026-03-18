@@ -35,6 +35,7 @@ use {
         runner::{RunnerEvent, run_agent_loop_streaming},
         tool_registry::ToolRegistry,
     },
+    moltis_common::text::{truncate_utf8, truncate_utf8_with_suffix},
     moltis_sessions::{
         ContentBlock, MessageContent, PersistedMessage, metadata::SqliteSessionMetadata,
         store::SessionStore,
@@ -4846,7 +4847,7 @@ async fn run_with_tools(
                             {
                                 let truncated = format!(
                                     "{}\n\n... [truncated — {} bytes total]",
-                                    &s[..10_000],
+                                    truncate_utf8(s, 10_000),
                                     s.len()
                                 );
                                 capped[*field] = serde_json::Value::String(truncated);
@@ -4946,7 +4947,7 @@ async fn run_with_tools(
                                 {
                                     let truncated = format!(
                                         "{}\n\n... [truncated — {} bytes total]",
-                                        &s[..10_000],
+                                        truncate_utf8(s, 10_000),
                                         s.len()
                                     );
                                     r[*field] = serde_json::Value::String(truncated);
@@ -6344,11 +6345,7 @@ async fn send_chat_push_notification(state: &Arc<GatewayState>, session_id: &str
     );
 
     // Create a short summary of the response (first 100 chars)
-    let summary = if text.len() > 100 {
-        format!("{}…", &text[..100])
-    } else {
-        text.to_string()
-    };
+    let summary = truncate_utf8_with_suffix(text, 100, "…");
 
     // Build the notification
     let title = "Message received";
@@ -8051,11 +8048,7 @@ fn format_tool_status_message(tool_name: &str, arguments: &serde_json::Value) ->
             let command = arguments.get("command").and_then(|v| v.as_str());
             if let Some(cmd) = command {
                 // Show first ~50 chars of command
-                let display_cmd = if cmd.len() > 50 {
-                    format!("{}...", &cmd[..50])
-                } else {
-                    cmd.to_string()
-                };
+                let display_cmd = truncate_utf8_with_suffix(cmd, 50, "...");
                 format!("💻 Running: `{}`", display_cmd)
             } else {
                 "💻 Executing command...".to_string()
@@ -8072,11 +8065,7 @@ fn format_tool_status_message(tool_name: &str, arguments: &serde_json::Value) ->
         "web_search" => {
             let query = arguments.get("query").and_then(|v| v.as_str());
             if let Some(q) = query {
-                let display_q = if q.len() > 40 {
-                    format!("{}...", &q[..40])
-                } else {
-                    q.to_string()
-                };
+                let display_q = truncate_utf8_with_suffix(q, 40, "...");
                 format!("🔍 Searching: {}", display_q)
             } else {
                 "🔍 Searching...".to_string()
@@ -8097,11 +8086,7 @@ fn truncate_url(url: &str) -> String {
         .unwrap_or(url);
 
     // Take first 50 chars max
-    if without_scheme.len() > 50 {
-        format!("{}...", &without_scheme[..50])
-    } else {
-        without_scheme.to_string()
-    }
+    truncate_utf8_with_suffix(without_scheme, 50, "...")
 }
 
 /// Send a screenshot to all pending channel targets for a session.
@@ -13051,6 +13036,28 @@ echo @bot2
         let html = format_logbook_html(&entries);
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn format_tool_status_message_truncates_utf8_safely() {
+        let message = format_tool_status_message(
+            "exec",
+            &serde_json::json!({
+                "command": "你好世界你好世界你好世界你好世界你好世界你好世界"
+            }),
+        );
+
+        assert!(message.starts_with("💻 Running: `"));
+        assert!(message.contains("..."));
+        assert!(!message.contains('�'));
+    }
+
+    #[test]
+    fn truncate_url_preserves_utf8_boundaries() {
+        let truncated =
+            truncate_url("https://example.com/你好世界你好世界你好世界你好世界你好世界");
+        assert!(truncated.ends_with("..."));
+        assert!(!truncated.contains('�'));
     }
 
     #[test]

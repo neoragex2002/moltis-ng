@@ -8,6 +8,7 @@ use std::{
 use {
     anyhow::{Result, bail},
     async_trait::async_trait,
+    moltis_common::text::truncate_utf8,
     tracing::debug,
     url::Url,
 };
@@ -157,7 +158,7 @@ impl WebFetchTool {
 
             let truncated = content.len() > max_chars;
             let content = if truncated {
-                truncate_at_char_boundary(&content, max_chars)
+                truncate_utf8(&content, max_chars).to_string()
             } else {
                 content
             };
@@ -270,94 +271,68 @@ fn extract_content(
 /// crate — good enough for most pages.
 fn html_to_text(html: &str) -> String {
     let mut result = String::with_capacity(html.len() / 2);
-    let mut in_tag = false;
     let mut in_script = false;
     let mut in_style = false;
     let mut last_was_space = false;
 
-    let html_lower = html.to_lowercase();
-    let bytes = html.as_bytes();
-    let lower_bytes = html_lower.as_bytes();
+    let mut chars = html.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '<' {
+            let rest = &html[idx..];
+            if let Some(tag_end_rel) = rest.find('>') {
+                let tag_end = idx + tag_end_rel + 1;
+                let tag = &html[idx..tag_end];
+                let tag_lower = tag.to_ascii_lowercase();
 
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            // Check for script/style open/close tags.
-            if i + 7 < lower_bytes.len() && &lower_bytes[i..i + 7] == b"<script" {
-                in_script = true;
-            }
-            if i + 9 < lower_bytes.len() && &lower_bytes[i..i + 9] == b"</script>" {
-                in_script = false;
-            }
-            if i + 6 < lower_bytes.len() && &lower_bytes[i..i + 6] == b"<style" {
-                in_style = true;
-            }
-            if i + 8 < lower_bytes.len() && &lower_bytes[i..i + 8] == b"</style>" {
-                in_style = false;
-            }
+                if tag_lower.starts_with("<script") {
+                    in_script = true;
+                } else if tag_lower.starts_with("</script") {
+                    in_script = false;
+                } else if tag_lower.starts_with("<style") {
+                    in_style = true;
+                } else if tag_lower.starts_with("</style") {
+                    in_style = false;
+                }
 
-            // Block-level tags → newline.
-            if !in_script && !in_style {
-                let tag_start = &html_lower[i..];
-                if tag_start.starts_with("<br")
-                    || tag_start.starts_with("<p")
-                    || tag_start.starts_with("</p")
-                    || tag_start.starts_with("<div")
-                    || tag_start.starts_with("</div")
-                    || tag_start.starts_with("<h")
-                    || tag_start.starts_with("</h")
-                    || tag_start.starts_with("<li")
-                {
+                if !in_script && !in_style && is_block_level_tag(&tag_lower) {
                     if !result.ends_with('\n') {
                         result.push('\n');
                     }
                     last_was_space = true;
                 }
-            }
 
-            in_tag = true;
-            i += 1;
-            continue;
-        }
-
-        if bytes[i] == b'>' {
-            in_tag = false;
-            i += 1;
-            continue;
-        }
-
-        if in_tag || in_script || in_style {
-            i += 1;
-            continue;
-        }
-
-        // Decode HTML entities.
-        if bytes[i] == b'&' {
-            let rest = &html[i..];
-            if let Some(semi) = rest.find(';') {
-                let entity = &rest[..semi + 1];
-                let decoded = match entity {
-                    "&amp;" => "&",
-                    "&lt;" => "<",
-                    "&gt;" => ">",
-                    "&quot;" => "\"",
-                    "&apos;" | "&#39;" => "'",
-                    "&nbsp;" | "&#160;" => " ",
-                    _ => {
-                        // Skip unknown entities.
-                        i += 1;
-                        continue;
-                    },
-                };
-                result.push_str(decoded);
-                last_was_space = decoded == " ";
-                i += entity.len();
+                while let Some((next_idx, _)) = chars.peek() {
+                    if *next_idx < tag_end {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
                 continue;
             }
         }
 
-        let ch = bytes[i] as char;
-        if ch.is_ascii_whitespace() {
+        if in_script || in_style {
+            continue;
+        }
+
+        if ch == '&' {
+            if let Some((decoded, entity_len)) = decode_basic_html_entity(&html[idx..]) {
+                let entity_end = idx + entity_len;
+                result.push_str(decoded);
+                last_was_space = decoded == " ";
+                while let Some((next_idx, _)) = chars.peek() {
+                    if *next_idx < entity_end {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+
+        if ch.is_whitespace() {
             if !last_was_space {
                 result.push(' ');
                 last_was_space = true;
@@ -366,22 +341,35 @@ fn html_to_text(html: &str) -> String {
             result.push(ch);
             last_was_space = false;
         }
-        i += 1;
     }
 
     result.trim().to_string()
 }
 
-/// Truncate a string at a char boundary, not mid-UTF-8.
-fn truncate_at_char_boundary(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.into();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
+fn is_block_level_tag(tag_lower: &str) -> bool {
+    tag_lower.starts_with("<br")
+        || tag_lower.starts_with("<p")
+        || tag_lower.starts_with("</p")
+        || tag_lower.starts_with("<div")
+        || tag_lower.starts_with("</div")
+        || tag_lower.starts_with("<h")
+        || tag_lower.starts_with("</h")
+        || tag_lower.starts_with("<li")
+}
+
+fn decode_basic_html_entity(text: &str) -> Option<(&'static str, usize)> {
+    let semi = text.find(';')?;
+    let entity = &text[..semi + 1];
+    let decoded = match entity {
+        "&amp;" => "&",
+        "&lt;" => "<",
+        "&gt;" => ">",
+        "&quot;" => "\"",
+        "&apos;" | "&#39;" => "'",
+        "&nbsp;" | "&#160;" => " ",
+        _ => return None,
+    };
+    Some((decoded, entity.len()))
 }
 
 #[async_trait]
@@ -574,6 +562,24 @@ mod tests {
     }
 
     #[test]
+    fn test_html_to_text_unicode_is_safe() {
+        let html = "<div>你好😀</div><p>世界&amp;朋友</p><script>坏()</script>";
+        let text = html_to_text(html);
+        assert!(text.contains("你好😀"));
+        assert!(text.contains("世界&朋友"));
+        assert!(!text.contains("坏()"));
+        assert!(!text.contains('�'));
+    }
+
+    #[test]
+    fn test_html_to_text_keeps_unknown_entity_text() {
+        let html = "<p>AT&amp;T &madeup; done;</p>";
+        let text = html_to_text(html);
+        assert!(text.contains("AT&T"));
+        assert!(text.contains("&madeup;"));
+    }
+
+    #[test]
     fn test_extract_content_json() {
         let body = r#"{"key": "value"}"#;
         let (content, mode) = extract_content(body, "application/json", "text", true);
@@ -592,14 +598,14 @@ mod tests {
     #[test]
     fn test_truncation() {
         let long = "a".repeat(100);
-        let truncated = truncate_at_char_boundary(&long, 50);
+        let truncated = truncate_utf8(&long, 50).to_string();
         assert_eq!(truncated.len(), 50);
     }
 
     #[test]
     fn test_truncation_utf8_boundary() {
         let s = "héllo wörld";
-        let truncated = truncate_at_char_boundary(s, 3);
+        let truncated = truncate_utf8(s, 3).to_string();
         // Should not panic and should be valid UTF-8.
         assert!(truncated.len() <= 3);
         assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());

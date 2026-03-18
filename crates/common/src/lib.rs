@@ -3,6 +3,7 @@
 pub mod error;
 pub mod hooks;
 pub mod identity;
+pub mod text;
 pub mod types;
 
 pub use error::MoltisError;

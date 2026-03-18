@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: ssh-host '<remote command>'" >&2
+  exit 2
+fi
+
+exec ssh \
+  -F /mnt/host/ssh/config \
+  -i /mnt/host/ssh/id_ed25519 \
+  -o UserKnownHostsFile=/mnt/host/ssh/known_hosts \
+  z87x \
+  "$@"

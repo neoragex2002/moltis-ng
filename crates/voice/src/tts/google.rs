@@ -44,6 +44,21 @@ impl GoogleTts {
             client: Client::new(),
         }
     }
+
+    fn language_prefix(&self) -> Option<&str> {
+        let prefix = self
+            .language_code
+            .trim()
+            .split(['-', '_'])
+            .find(|part| !part.is_empty())
+            .unwrap_or("");
+
+        if prefix.is_empty() {
+            None
+        } else {
+            Some(prefix)
+        }
+    }
 }
 
 #[async_trait]
@@ -91,9 +106,8 @@ impl TtsProvider for GoogleTts {
             .unwrap_or_default()
             .into_iter()
             .filter(|v| {
-                v.language_codes
-                    .iter()
-                    .any(|lc| lc.starts_with(&self.language_code[..2]))
+                self.language_prefix()
+                    .is_some_and(|prefix| v.language_codes.iter().any(|lc| lc.starts_with(prefix)))
             })
             .map(|v| Voice {
                 id: v.name.clone(),
@@ -267,5 +281,21 @@ mod tests {
         assert_eq!(tts.id(), "google");
         assert_eq!(tts.name(), "Google Cloud TTS");
         assert!(tts.supports_ssml());
+    }
+
+    #[test]
+    fn test_language_prefix_handles_empty_and_complex_codes() {
+        let mut config = GoogleTtsConfig::default();
+        config.language_code = Some("zh-Hans-CN".into());
+        let tts = GoogleTts::new(&config);
+        assert_eq!(tts.language_prefix(), Some("zh"));
+
+        config.language_code = Some(" zh_Hans_CN ".into());
+        let tts = GoogleTts::new(&config);
+        assert_eq!(tts.language_prefix(), Some("zh"));
+
+        config.language_code = Some(String::new());
+        let tts = GoogleTts::new(&config);
+        assert_eq!(tts.language_prefix(), None);
     }
 }

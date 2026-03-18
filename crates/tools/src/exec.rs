@@ -6,6 +6,7 @@ use std::time::Instant;
 use {
     anyhow::{Result, bail},
     async_trait::async_trait,
+    moltis_common::text::truncate_utf8_with_suffix,
     serde::{Deserialize, Serialize},
     tokio::process::Command,
     tracing::{debug, info, warn},
@@ -42,6 +43,30 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+}
+
+impl ExecResult {
+    pub(crate) fn from_process_output(
+        output: std::process::Output,
+        max_output_bytes: usize,
+    ) -> Self {
+        let stdout = truncate_utf8_with_suffix(
+            &String::from_utf8_lossy(&output.stdout),
+            max_output_bytes,
+            "\n... [output truncated]",
+        );
+        let stderr = truncate_utf8_with_suffix(
+            &String::from_utf8_lossy(&output.stderr),
+            max_output_bytes,
+            "\n... [output truncated]",
+        );
+
+        Self {
+            stdout,
+            stderr,
+            exit_code: output.status.code().unwrap_or(-1),
+        }
+    }
 }
 
 /// Options controlling exec behavior.
@@ -106,32 +131,15 @@ pub async fn exec_command(command: &str, opts: &ExecOpts) -> Result<ExecResult> 
 
     match result {
         Ok(Ok(output)) => {
-            let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-            // Truncate if exceeding limit.
-            if stdout.len() > opts.max_output_bytes {
-                stdout.truncate(opts.max_output_bytes);
-                stdout.push_str("\n... [output truncated]");
-            }
-            if stderr.len() > opts.max_output_bytes {
-                stderr.truncate(opts.max_output_bytes);
-                stderr.push_str("\n... [output truncated]");
-            }
-
-            let exit_code = output.status.code().unwrap_or(-1);
+            let result = ExecResult::from_process_output(output, opts.max_output_bytes);
             debug!(
-                exit_code,
-                stdout_len = stdout.len(),
-                stderr_len = stderr.len(),
+                exit_code = result.exit_code,
+                stdout_len = result.stdout.len(),
+                stderr_len = result.stderr.len(),
                 "exec done"
             );
 
-            Ok(ExecResult {
-                stdout,
-                stderr,
-                exit_code,
-            })
+            Ok(result)
         },
         Ok(Err(e)) => bail!("failed to run command: {e}"),
         Err(_) => {
@@ -585,6 +593,19 @@ mod tests {
         };
         let result = exec_command("sleep 10", &opts).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_exec_result_truncates_utf8_safely() {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf '你好世界'")
+            .output()
+            .unwrap();
+
+        let result = ExecResult::from_process_output(output, 5);
+        assert_eq!(result.stdout, "你\n... [output truncated]");
+        assert!(result.stderr.is_empty());
     }
 
     #[tokio::test]

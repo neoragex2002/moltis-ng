@@ -5,6 +5,7 @@ use std::{path::PathBuf, sync::Arc};
 use {
     anyhow::Result,
     async_trait::async_trait,
+    moltis_common::text::truncate_utf8_with_suffix,
     tracing::{debug, info, warn},
 };
 
@@ -115,11 +116,7 @@ impl HookHandler for SessionMemoryHook {
                 .unwrap_or("unknown");
             let text = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
             // Truncate very long messages to keep the memory file manageable.
-            let truncated = if text.len() > 2000 {
-                format!("{}...\n\n_(truncated)_", &text[..2000])
-            } else {
-                text.to_string()
-            };
+            let truncated = truncate_utf8_with_suffix(text, 2000, "...\n\n_(truncated)_");
             content.push_str(&format!("## {role}\n\n{truncated}\n\n"));
         }
 
@@ -260,5 +257,35 @@ mod tests {
         assert!(content.contains("_(truncated)_"));
         // Should not contain the full 5000 chars
         assert!(content.len() < 4000);
+    }
+
+    #[tokio::test]
+    async fn truncates_long_unicode_messages_without_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_store = Arc::new(SessionStore::new(sessions_dir));
+
+        let long_text = "你好😀".repeat(800);
+        let _ = session_store
+            .append(
+                "unicode-test",
+                &serde_json::json!({"role": "user", "content": long_text}),
+            )
+            .await;
+
+        let hook = SessionMemoryHook::new(tmp.path().to_path_buf(), session_store);
+        let payload = HookPayload::Command {
+            session_id: "unicode-test".into(),
+            action: "reset".into(),
+            sender_id: None,
+        };
+        hook.handle(HookEvent::Command, &payload).await.unwrap();
+
+        let memory_dir = tmp.path().join("memory");
+        let files: Vec<_> = std::fs::read_dir(&memory_dir).unwrap().flatten().collect();
+        let content = std::fs::read_to_string(files[0].path()).unwrap();
+        assert!(content.contains("_(truncated)_"));
+        assert!(!content.contains('�'));
     }
 }

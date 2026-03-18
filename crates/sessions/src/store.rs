@@ -25,6 +25,52 @@ pub struct SessionStore {
     pub base_dir: PathBuf,
 }
 
+fn case_insensitive_match_bounds(content: &str, query_lower: &str) -> Option<(usize, usize)> {
+    if query_lower.is_empty() {
+        return Some((0, 0));
+    }
+
+    let mut folded = String::with_capacity(content.len());
+    let mut mapping = Vec::with_capacity(content.chars().count());
+
+    for (start, ch) in content.char_indices() {
+        let end = start + ch.len_utf8();
+        for lowered in ch.to_lowercase() {
+            let folded_start = folded.len();
+            folded.push(lowered);
+            mapping.push((folded_start, start, end));
+        }
+    }
+
+    let match_start = folded.find(query_lower)?;
+    let match_end = match_start + query_lower.len();
+    let start_idx = mapping.partition_point(|(folded_start, _, _)| *folded_start < match_start);
+    let end_idx = mapping.partition_point(|(folded_start, _, _)| *folded_start < match_end);
+
+    let original_start = mapping.get(start_idx).map(|(_, start, _)| *start)?;
+    let original_end = if end_idx == 0 {
+        0
+    } else if end_idx >= mapping.len() {
+        content.len()
+    } else {
+        mapping[end_idx - 1].2
+    };
+
+    Some((original_start, original_end))
+}
+
+fn build_search_snippet(content: &str, match_start: usize, match_end: usize) -> String {
+    let mut boundaries: Vec<usize> = content.char_indices().map(|(idx, _)| idx).collect();
+    boundaries.push(content.len());
+
+    let match_start_char = boundaries.partition_point(|idx| *idx < match_start);
+    let match_end_char = boundaries.partition_point(|idx| *idx < match_end);
+    let snippet_start_char = match_start_char.saturating_sub(40);
+    let snippet_end_char = (match_end_char + 60).min(boundaries.len() - 1);
+
+    content[boundaries[snippet_start_char]..boundaries[snippet_end_char]].to_string()
+}
+
 impl SessionStore {
     pub fn new(base_dir: PathBuf) -> Self {
         Self { base_dir }
@@ -284,19 +330,16 @@ impl SessionStore {
                         continue;
                     };
                     let content = val.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    if content.to_lowercase().contains(&query) {
+                    if let Some((match_start, match_end)) =
+                        case_insensitive_match_bounds(content, &query)
+                    {
                         let role = val
                             .get("role")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string();
 
-                        // Build a snippet: find the match position and extract context.
-                        let lower = content.to_lowercase();
-                        let pos = lower.find(&query).unwrap_or(0);
-                        let start = pos.saturating_sub(40);
-                        let end = (pos + query.len() + 60).min(content.len());
-                        let snippet = content[start..end].to_string();
+                        let snippet = build_search_snippet(content, match_start, match_end);
 
                         results.push(SearchResult {
                             session_key: session_key.clone(),
@@ -481,6 +524,22 @@ mod tests {
         let results = store.search("hello world", 10).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_key, "s1");
+    }
+
+    #[tokio::test]
+    async fn test_search_unicode_snippet_uses_safe_boundaries() {
+        let (store, _dir) = temp_store();
+        let content = format!("{}İstanbul{}😀尾巴", "你".repeat(50), "界".repeat(50));
+
+        store
+            .append("s1", &json!({"role": "user", "content": content}))
+            .await
+            .unwrap();
+
+        let results = store.search("İSTANBUL", 10).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].snippet.contains("İstanbul"));
+        assert!(!results[0].snippet.contains('�'));
     }
 
     #[tokio::test]

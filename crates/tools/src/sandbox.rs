@@ -1475,25 +1475,10 @@ WORKDIR /home/sandbox\n"
         let result = tokio::time::timeout(opts.timeout, child.wait_with_output()).await;
 
         match result {
-            Ok(Ok(output)) => {
-                let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-                if stdout.len() > opts.max_output_bytes {
-                    stdout.truncate(opts.max_output_bytes);
-                    stdout.push_str("\n... [output truncated]");
-                }
-                if stderr.len() > opts.max_output_bytes {
-                    stderr.truncate(opts.max_output_bytes);
-                    stderr.push_str("\n... [output truncated]");
-                }
-
-                Ok(ExecResult {
-                    stdout,
-                    stderr,
-                    exit_code: output.status.code().unwrap_or(-1),
-                })
-            },
+            Ok(Ok(output)) => Ok(ExecResult::from_process_output(
+                output,
+                opts.max_output_bytes,
+            )),
             Ok(Err(e)) => anyhow::bail!("docker exec failed: {e}"),
             Err(_) => anyhow::bail!("docker exec timed out after {}s", opts.timeout.as_secs()),
         }
@@ -1648,25 +1633,10 @@ impl Sandbox for CgroupSandbox {
         let result = tokio::time::timeout(opts.timeout, child.wait_with_output()).await;
 
         match result {
-            Ok(Ok(output)) => {
-                let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-                if stdout.len() > opts.max_output_bytes {
-                    stdout.truncate(opts.max_output_bytes);
-                    stdout.push_str("\n... [output truncated]");
-                }
-                if stderr.len() > opts.max_output_bytes {
-                    stderr.truncate(opts.max_output_bytes);
-                    stderr.push_str("\n... [output truncated]");
-                }
-
-                Ok(ExecResult {
-                    stdout,
-                    stderr,
-                    exit_code: output.status.code().unwrap_or(-1),
-                })
-            },
+            Ok(Ok(output)) => Ok(ExecResult::from_process_output(
+                output,
+                opts.max_output_bytes,
+            )),
             Ok(Err(e)) => anyhow::bail!("systemd-run exec failed: {e}"),
             Err(_) => anyhow::bail!(
                 "systemd-run exec timed out after {}s",
@@ -2079,31 +2049,16 @@ impl Sandbox for AppleContainerSandbox {
 
         match result {
             Ok(Ok(output)) => {
-                let exit_code = output.status.code().unwrap_or(-1);
-                let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-                if stdout.len() > opts.max_output_bytes {
-                    stdout.truncate(opts.max_output_bytes);
-                    stdout.push_str("\n... [output truncated]");
-                }
-                if stderr.len() > opts.max_output_bytes {
-                    stderr.truncate(opts.max_output_bytes);
-                    stderr.push_str("\n... [output truncated]");
-                }
+                let result = ExecResult::from_process_output(output, opts.max_output_bytes);
 
                 debug!(
                     name,
-                    exit_code,
-                    stdout_len = stdout.len(),
-                    stderr_len = stderr.len(),
+                    exit_code = result.exit_code,
+                    stdout_len = result.stdout.len(),
+                    stderr_len = result.stderr.len(),
                     "apple container exec complete"
                 );
-                Ok(ExecResult {
-                    stdout,
-                    stderr,
-                    exit_code,
-                })
+                Ok(result)
             },
             Ok(Err(e)) => {
                 warn!(name, %e, "apple container exec spawn failed");
@@ -2780,6 +2735,19 @@ mod tests {
         assert_eq!(WorkspaceMount::None.to_string(), "none");
         assert_eq!(WorkspaceMount::Ro.to_string(), "ro");
         assert_eq!(WorkspaceMount::Rw.to_string(), "rw");
+    }
+
+    #[test]
+    fn test_sandbox_exec_result_truncates_utf8_safely() {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf '你好世界'")
+            .output()
+            .unwrap();
+
+        let result = ExecResult::from_process_output(output, 5);
+        assert_eq!(result.stdout, "你\n... [output truncated]");
+        assert!(result.stderr.is_empty());
     }
 
     #[test]

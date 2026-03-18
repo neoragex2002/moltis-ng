@@ -14,6 +14,7 @@ use {
             page::CaptureScreenshotFormat,
         },
     },
+    moltis_common::text::truncate_utf8_with_suffix,
     tokio::time::{Duration, timeout},
     tracing::{debug, info, warn},
 };
@@ -841,11 +842,7 @@ fn validate_url(url: &str) -> Result<(), BrowserError> {
 
 /// Truncate a URL for error messages (to avoid huge garbage URLs in logs).
 fn truncate_url(url: &str) -> String {
-    if url.len() > 100 {
-        format!("{}...", &url[..100])
-    } else {
-        url.to_string()
-    }
+    truncate_utf8_with_suffix(url, 100, "...")
 }
 
 #[cfg(test)]
@@ -904,6 +901,14 @@ mod tests {
     fn test_validate_url_malformed() {
         assert!(validate_url("not a url").is_err());
         assert!(validate_url("://missing.scheme").is_err());
+    }
+
+    #[test]
+    fn test_truncate_url_preserves_utf8_boundaries() {
+        let url = &format!("https://example.com/{}", "你好世界".repeat(20));
+        let truncated = truncate_url(url);
+        assert!(truncated.ends_with("..."));
+        assert!(!truncated.contains('�'));
     }
 
     #[tokio::test]
