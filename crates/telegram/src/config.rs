@@ -4,6 +4,36 @@ use {
     serde::{Deserialize, Serialize},
 };
 
+/// How `dm` messages are bucketed into logical sessions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DmScope {
+    /// All DM messages for the same agent share one bucket.
+    #[default]
+    Main,
+    /// Bucket by logical peer.
+    PerPeer,
+    /// Bucket by logical peer + channel.
+    PerChannel,
+    /// Bucket by logical peer + account.
+    PerAccount,
+}
+
+/// How `group` messages are bucketed into logical sessions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupScope {
+    /// Bucket by shared group peer.
+    #[default]
+    Group,
+    /// Bucket by shared group peer + sender.
+    PerSender,
+    /// Bucket by shared group peer + branch.
+    PerBranch,
+    /// Bucket by shared group peer + branch + sender.
+    PerBranchSender,
+}
+
 /// How strict the group relay parser should be when interpreting bot@bot mentions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -54,6 +84,12 @@ pub struct TelegramAccountConfig {
 
     /// User/peer allowlist for DMs.
     pub allowlist: Vec<String>,
+
+    /// Session bucketing mode for DM conversations.
+    pub dm_scope: DmScope,
+
+    /// Session bucketing mode for group conversations.
+    pub group_scope: GroupScope,
 
     /// Whether group relay can trigger chained bot-to-bot delegations.
     pub relay_chain_enabled: bool,
@@ -135,6 +171,8 @@ pub struct TelegramAccountConfig {
 pub struct TelegramBusAccountSnapshot {
     pub account_handle: String,
     pub chan_user_name: Option<String>,
+    pub dm_scope: DmScope,
+    pub group_scope: GroupScope,
     pub relay_chain_enabled: bool,
     pub relay_hop_limit: u32,
     pub epoch_relay_budget: u32,
@@ -165,6 +203,8 @@ impl Default for TelegramAccountConfig {
             dm_policy: DmPolicy::default(),
             mention_mode: MentionMode::default(),
             allowlist: Vec::new(),
+            dm_scope: DmScope::default(),
+            group_scope: GroupScope::default(),
             relay_chain_enabled: true,
             relay_hop_limit: 3,
             epoch_relay_budget: 128,
@@ -197,6 +237,8 @@ mod tests {
         let cfg = TelegramAccountConfig::default();
         assert_eq!(cfg.dm_policy, DmPolicy::Open);
         assert_eq!(cfg.mention_mode, MentionMode::Mention);
+        assert_eq!(cfg.dm_scope, DmScope::Main);
+        assert_eq!(cfg.group_scope, GroupScope::Group);
         assert_eq!(cfg.stream_mode, StreamMode::EditInPlace);
         assert_eq!(cfg.edit_throttle_ms, 300);
         assert_eq!(cfg.outbound_max_attempts, 3);

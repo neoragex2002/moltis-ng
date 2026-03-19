@@ -1,4 +1,8 @@
-use std::{future::Future, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    future::Future,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use {
     teloxide::{
@@ -25,6 +29,10 @@ use moltis_metrics::{counter, histogram, telegram as tg_metrics};
 
 use crate::{
     access::{self, AccessDenied},
+    adapter::{
+        TgContent, TgInbound, TgInboundKind, TgInboundMode, TgPrivateSource, resolve_dm_bucket_key,
+        resolve_group_bucket_key, resolve_tg_route,
+    },
     otp::{OtpInitResult, OtpVerifyResult},
     outbound::{TypingRequestError, send_chat_action_typing},
     state::AccountStateMap,
@@ -35,6 +43,94 @@ const TELEGRAM_TYPING_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Durat
 #[cfg(test)]
 const TELEGRAM_TYPING_KEEPALIVE_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(10);
+
+const CALLBACK_BUCKET_BINDING_LIMIT: usize = 4096;
+
+#[derive(Default)]
+struct CallbackBucketBindings {
+    by_message: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+fn callback_bucket_bindings() -> &'static Mutex<CallbackBucketBindings> {
+    static STORE: OnceLock<Mutex<CallbackBucketBindings>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(CallbackBucketBindings::default()))
+}
+
+fn callback_bucket_binding_key(account_handle: &str, chat_id: &str, message_id: i32) -> String {
+    format!("{account_handle}:{chat_id}:{message_id}")
+}
+
+fn remember_callback_bucket_binding(target: &ChannelReplyTarget, message_id: i32) {
+    let Some(bucket_key) = target.bucket_key.as_deref() else {
+        return;
+    };
+
+    let key = callback_bucket_binding_key(&target.chan_account_key, &target.chat_id, message_id);
+    let mut bindings = callback_bucket_bindings()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if !bindings.by_message.contains_key(&key) {
+        bindings.order.push_back(key.clone());
+    }
+    bindings.by_message.insert(key, bucket_key.to_string());
+
+    while bindings.order.len() > CALLBACK_BUCKET_BINDING_LIMIT {
+        if let Some(oldest_key) = bindings.order.pop_front() {
+            bindings.by_message.remove(&oldest_key);
+        }
+    }
+}
+
+fn lookup_callback_bucket_binding(
+    account_handle: &str,
+    chat_id: &str,
+    message_id: i32,
+) -> Option<String> {
+    callback_bucket_bindings()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .by_message
+        .get(&callback_bucket_binding_key(
+            account_handle,
+            chat_id,
+            message_id,
+        ))
+        .cloned()
+}
+
+fn callback_sender_hint_from_target(target: &ChannelReplyTarget) -> Option<String> {
+    target
+        .bucket_key
+        .as_deref()
+        .and_then(|bucket_key| bucket_key.rsplit_once(":sender:"))
+        .and_then(|(_, sender)| {
+            sender
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ch == '-')
+                .then(|| sender.to_string())
+        })
+}
+
+fn with_callback_sender_hint(base: String, target: &ChannelReplyTarget) -> String {
+    match callback_sender_hint_from_target(target) {
+        Some(sender) => format!("{base}|s={sender}"),
+        None => base,
+    }
+}
+
+fn split_callback_sender_hint(data: &str) -> (&str, Option<&str>) {
+    if let Some((base, sender_hint)) = data.rsplit_once("|s=")
+        && !sender_hint.is_empty()
+        && sender_hint
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '-')
+    {
+        return (base, Some(sender_hint));
+    }
+
+    (data, None)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RetryableUpdateError {
@@ -96,7 +192,7 @@ async fn run_with_telegram_typing<T>(
             },
         };
 
-        match send_chat_action_typing(bot, parsed_chat_id).await {
+        match send_chat_action_typing(bot, parsed_chat_id, None).await {
             Ok(()) => {
                 if *typing_failed {
                     info!(
@@ -156,11 +252,19 @@ async fn run_with_telegram_typing<T>(
         }
     }
 
-    let operation = operation;
-    let typing_loop = async {
-        let mut typing_failed = false;
-        send_typing_once(&bot, account_handle, chat_id, op, &mut typing_failed).await;
+    let mut initial_typing_failed = false;
+    send_typing_once(
+        &bot,
+        account_handle,
+        chat_id,
+        op,
+        &mut initial_typing_failed,
+    )
+    .await;
 
+    let operation = operation;
+    let typing_loop = async move {
+        let mut typing_failed = initial_typing_failed;
         let mut keepalive = tokio::time::interval_at(
             tokio::time::Instant::now() + TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
             TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
@@ -427,13 +531,21 @@ pub async fn handle_message_direct(
                 }
             }
             if !body.trim().is_empty() {
-                let reply_target = ChannelReplyTarget {
-                    chan_type: ChannelType::Telegram,
-                    chan_account_key: account_handle.to_string(),
-                    chan_user_name: bot_handle.clone(),
-                    chat_id: msg.chat.id.0.to_string(),
-                    message_id: Some(msg.id.0.to_string()),
-                };
+                let inbound = build_tg_inbound(
+                    &config,
+                    account_handle,
+                    &chat_type,
+                    TgInboundMode::RecordOnly,
+                    &body,
+                    false,
+                    false,
+                    &msg,
+                    false,
+                    &peer_id,
+                );
+                let route = resolve_tg_route(&config, &inbound);
+                let reply_target =
+                    build_channel_reply_target(account_handle, bot_handle.clone(), &msg, &route);
                 let meta = ChannelMessageMeta {
                     chan_type: ChannelType::Telegram,
                     sender_name: sender_name.clone(),
@@ -445,6 +557,7 @@ pub async fn handle_message_direct(
                     account_handle,
                     chat_id = %reply_target.chat_id,
                     message_id = ?reply_target.message_id,
+                    bucket_key = %route.bucket_key,
                     body_len = body.len(),
                     "telegram inbound ingested (listen-only)"
                 );
@@ -686,13 +799,21 @@ pub async fn handle_message_direct(
 
         // Handle location sharing: update stored location and resolve any pending tool request.
         let resolved = if let Some(ref sink) = event_sink {
-            let reply_target = ChannelReplyTarget {
-                chan_type: ChannelType::Telegram,
-                chan_account_key: account_handle.to_string(),
-                chan_user_name: bot_handle.clone(),
-                chat_id: msg.chat.id.0.to_string(),
-                message_id: Some(msg.id.0.to_string()),
-            };
+            let inbound = build_tg_inbound(
+                &config,
+                account_handle,
+                &chat_type,
+                TgInboundMode::Dispatch,
+                "",
+                false,
+                true,
+                &msg,
+                bot_mentioned,
+                &peer_id,
+            );
+            let route = resolve_tg_route(&config, &inbound);
+            let reply_target =
+                build_channel_reply_target(account_handle, bot_handle.clone(), &msg, &route);
             sink.update_location(&reply_target, lat, lon).await
         } else {
             false
@@ -811,18 +932,37 @@ pub async fn handle_message_direct(
     // Dispatch to the chat session (per-channel session key derived by the sink).
     // The reply target tells the gateway where to send the LLM response back.
     if let Some(ref sink) = event_sink {
-        let reply_target = ChannelReplyTarget {
-            chan_type: ChannelType::Telegram,
-            chan_account_key: account_handle.to_string(),
-            chan_user_name: bot_handle.clone(),
-            chat_id: msg.chat.id.0.to_string(),
-            message_id: Some(msg.id.0.to_string()),
+        let mode = match chat_type {
+            ChatType::Group
+                if !bot_mentioned
+                    && config.mention_mode != moltis_channels::gating::MentionMode::Always =>
+            {
+                TgInboundMode::RecordOnly
+            },
+            _ => TgInboundMode::Dispatch,
         };
+        let inbound = build_tg_inbound(
+            &config,
+            account_handle,
+            &chat_type,
+            mode,
+            &body,
+            !attachments.is_empty(),
+            false,
+            &msg,
+            bot_mentioned,
+            &peer_id,
+        );
+        let route = resolve_tg_route(&config, &inbound);
+        let reply_target =
+            build_channel_reply_target(account_handle, bot_handle.clone(), &msg, &route);
 
         info!(
             account_handle,
             chat_id = %reply_target.chat_id,
             message_id = ?reply_target.message_id,
+            bucket_key = %route.bucket_key,
+            addressed = route.addressed,
             body_len = body.len(),
             attachment_count = attachments.len(),
             message_kind = ?inbound_kind,
@@ -992,8 +1132,7 @@ pub async fn handle_message_direct(
                                 match list_result {
                                     Ok(text) => {
                                         if let Err(_e) =
-                                            send_model_keyboard(&bot, &reply_target.chat_id, &text)
-                                                .await
+                                            send_model_keyboard(&bot, &reply_target, &text).await
                                         {
                                             warn!(
                                                 event = "telegram.helper_send.failed",
@@ -1054,12 +1193,8 @@ pub async fn handle_message_direct(
                                     sink.dispatch_command("sandbox", reply_target.clone()).await;
                                 match list_result {
                                     Ok(text) => {
-                                        if let Err(_e) = send_sandbox_keyboard(
-                                            &bot,
-                                            &reply_target.chat_id,
-                                            &text,
-                                        )
-                                        .await
+                                        if let Err(_e) =
+                                            send_sandbox_keyboard(&bot, &reply_target, &text).await
                                         {
                                             warn!(
                                                 event = "telegram.helper_send.failed",
@@ -1121,12 +1256,8 @@ pub async fn handle_message_direct(
                                     .await;
                                 match list_result {
                                     Ok(text) => {
-                                        if let Err(_e) = send_sessions_keyboard(
-                                            &bot,
-                                            &reply_target.chat_id,
-                                            &text,
-                                        )
-                                        .await
+                                        if let Err(_e) =
+                                            send_sessions_keyboard(&bot, &reply_target, &text).await
                                         {
                                             warn!(
                                                 event = "telegram.helper_send.failed",
@@ -1708,7 +1839,7 @@ pub async fn handle_edited_location(
         "telegram live location update received"
     );
 
-    let (event_sink, bot_handle) = {
+    let (event_sink, bot_handle, config) = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
         let handle = accts
             .get(account_handle)
@@ -1716,16 +1847,45 @@ pub async fn handle_edited_location(
         (
             accts.get(account_handle).and_then(|s| s.event_sink.clone()),
             handle,
+            accts.get(account_handle).map(|s| s.config.clone()),
         )
     };
 
     if let Some(ref sink) = event_sink {
+        let (chat_type, _) = classify_chat(&msg);
+        let dm_peer_id = tg_sender_for_message(&msg).unwrap_or_default();
+        let sender = tg_sender_for_message(&msg);
+        let thread_id = message_thread_id_text(&msg);
+        let peer = tg_peer_for_message(&chat_type, &msg, &dm_peer_id);
+        if let Some(config) = config.as_ref() {
+            log_follow_up_route_degrade(
+                config,
+                account_handle,
+                &msg.chat.id.0.to_string(),
+                Some(msg.id.0),
+                &chat_type,
+                sender.as_deref(),
+                thread_id.as_deref(),
+                "edited_location",
+            );
+        }
         let reply_target = ChannelReplyTarget {
             chan_type: ChannelType::Telegram,
             chan_account_key: account_handle.to_string(),
             chan_user_name: bot_handle,
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
+            thread_id: thread_id.clone(),
+            bucket_key: config.as_ref().map(|config| {
+                tg_bucket_key_for_route(
+                    config,
+                    account_handle,
+                    &chat_type,
+                    &peer,
+                    sender.as_deref(),
+                    thread_id.as_deref(),
+                )
+            }),
         };
         sink.update_location(&reply_target, lat, lon).await;
     }
@@ -1751,10 +1911,10 @@ async fn handle_message(
 /// session labels, then sends an inline keyboard with one button per session.
 async fn send_sessions_keyboard(
     bot: &Bot,
-    chat_id: &str,
+    reply_target: &ChannelReplyTarget,
     sessions_text: &str,
 ) -> anyhow::Result<()> {
-    let chat = parse_chat_id(chat_id)?;
+    let chat = parse_chat_id(&reply_target.chat_id)?;
 
     // Parse numbered lines like "1. Session label (5 msgs) *"
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -1773,7 +1933,7 @@ async fn send_sessions_keyboard(
             };
             buttons.push(vec![InlineKeyboardButton::callback(
                 display,
-                format!("sessions_switch:{n}"),
+                with_callback_sender_hint(format!("sessions_switch:{n}"), reply_target),
             )]);
         }
     }
@@ -1784,9 +1944,11 @@ async fn send_sessions_keyboard(
     }
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    bot.send_message(chat, "Select a session:")
+    let sent = bot
+        .send_message(chat, "Select a session:")
         .reply_markup(keyboard)
         .await?;
+    remember_callback_bucket_binding(reply_target, sent.id.0);
     Ok(())
 }
 
@@ -2338,8 +2500,12 @@ allowlist: {} · mounts: {}
 ///
 /// If the response starts with `providers:`, show a provider picker first.
 /// Otherwise show the model list directly.
-async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) -> anyhow::Result<()> {
-    let chat = parse_chat_id(chat_id)?;
+async fn send_model_keyboard(
+    bot: &Bot,
+    reply_target: &ChannelReplyTarget,
+    text: &str,
+) -> anyhow::Result<()> {
+    let chat = parse_chat_id(&reply_target.chat_id)?;
 
     let is_provider_list = text.starts_with("providers:");
 
@@ -2366,12 +2532,15 @@ async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) -> anyhow::Re
                 let provider_name = clean.rfind(" (").map(|i| &clean[..i]).unwrap_or(clean);
                 buttons.push(vec![InlineKeyboardButton::callback(
                     display,
-                    format!("model_provider:{provider_name}"),
+                    with_callback_sender_hint(
+                        format!("model_provider:{provider_name}"),
+                        reply_target,
+                    ),
                 )]);
             } else {
                 buttons.push(vec![InlineKeyboardButton::callback(
                     display,
-                    format!("model_switch:{n}"),
+                    with_callback_sender_hint(format!("model_switch:{n}"), reply_target),
                 )]);
             }
         }
@@ -2389,9 +2558,11 @@ async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) -> anyhow::Re
     };
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    bot.send_message(chat, heading)
+    let sent = bot
+        .send_message(chat, heading)
         .reply_markup(keyboard)
         .await?;
+    remember_callback_bucket_binding(reply_target, sent.id.0);
     Ok(())
 }
 
@@ -2399,8 +2570,12 @@ async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) -> anyhow::Re
 ///
 /// First line is `status:on` or `status:off`. Remaining lines are numbered
 /// images, with `*` marking the current one.
-async fn send_sandbox_keyboard(bot: &Bot, chat_id: &str, text: &str) -> anyhow::Result<()> {
-    let chat = parse_chat_id(chat_id)?;
+async fn send_sandbox_keyboard(
+    bot: &Bot,
+    reply_target: &ChannelReplyTarget,
+    text: &str,
+) -> anyhow::Result<()> {
+    let chat = parse_chat_id(&reply_target.chat_id)?;
 
     let mut is_on = false;
     let mut image_buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -2424,7 +2599,7 @@ async fn send_sandbox_keyboard(bot: &Bot, chat_id: &str, text: &str) -> anyhow::
             };
             image_buttons.push(vec![InlineKeyboardButton::callback(
                 display,
-                format!("sandbox_image:{n}"),
+                with_callback_sender_hint(format!("sandbox_image:{n}"), reply_target),
             )]);
         }
     }
@@ -2436,21 +2611,23 @@ async fn send_sandbox_keyboard(bot: &Bot, chat_id: &str, text: &str) -> anyhow::
         "⚫ Sandbox OFF — tap to enable"
     };
     let toggle_action = if is_on {
-        "sandbox_toggle:off"
+        with_callback_sender_hint("sandbox_toggle:off".to_string(), reply_target)
     } else {
-        "sandbox_toggle:on"
+        with_callback_sender_hint("sandbox_toggle:on".to_string(), reply_target)
     };
 
     let mut buttons = vec![vec![InlineKeyboardButton::callback(
         toggle_label.to_string(),
-        toggle_action.to_string(),
+        toggle_action,
     )]];
     buttons.extend(image_buttons);
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    bot.send_message(chat, "⚙️ Sandbox settings:")
+    let sent = bot
+        .send_message(chat, "⚙️ Sandbox settings:")
         .reply_markup(keyboard)
         .await?;
+    remember_callback_bucket_binding(reply_target, sent.id.0);
     Ok(())
 }
 
@@ -2494,7 +2671,7 @@ pub async fn handle_callback_query(
         return Err(RetryableUpdateError { reason_code }.into());
     }
 
-    let data = match query.data {
+    let raw_data = match query.data {
         Some(ref d) => d.as_str(),
         None => {
             info!(
@@ -2507,6 +2684,7 @@ pub async fn handle_callback_query(
             return Ok(());
         },
     };
+    let (data, sender_override) = split_callback_sender_hint(raw_data);
 
     // Determine which command this callback is for.
     let cmd_text = if let Some(n_str) = data.strip_prefix("sessions_switch:") {
@@ -2548,7 +2726,7 @@ pub async fn handle_callback_query(
         return Ok(());
     }
 
-    let (event_sink, outbound, bot_handle) = {
+    let (event_sink, outbound, bot_handle, config) = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
         let state = match accts.get(account_handle) {
             Some(s) => s,
@@ -2567,6 +2745,7 @@ pub async fn handle_callback_query(
             state.event_sink.clone(),
             Arc::clone(&state.outbound),
             state.bot_username.as_deref().map(|u| format!("@{u}")),
+            state.config.clone(),
         )
     };
 
@@ -2576,6 +2755,12 @@ pub async fn handle_callback_query(
         chan_user_name: bot_handle,
         chat_id: chat_id.clone(),
         message_id: query.message.as_ref().map(|m| m.id().0.to_string()),
+        thread_id: query.message.as_ref().and_then(|message| {
+            message
+                .regular_message()
+                .and_then(|message| message.thread_id.map(|thread_id| thread_id.to_string()))
+        }),
+        bucket_key: resolve_callback_bucket_key(&config, account_handle, &query, sender_override),
     };
 
     // Provider selection → fetch models for that provider and show a new keyboard.
@@ -2584,6 +2769,7 @@ pub async fn handle_callback_query(
             let cmd = format!("model provider:{provider_name}");
             let typing_chat_id = chat_id.clone();
             let followup_chat_id = chat_id.clone();
+            let followup_target = reply_target.clone();
             run_with_telegram_typing(
                 bot.clone(),
                 account_handle,
@@ -2593,7 +2779,7 @@ pub async fn handle_callback_query(
                     match sink.dispatch_command(&cmd, reply_target).await {
                         Ok(text) => {
                             if let Err(_e) =
-                                send_model_keyboard(&bot, &followup_chat_id, &text).await
+                                send_model_keyboard(&bot, &followup_target, &text).await
                             {
                                 warn!(
                                     event = "telegram.helper_send.failed",
@@ -3005,6 +3191,277 @@ fn classify_chat(msg: &Message) -> (ChatType, Option<String>) {
                 _ => (ChatType::Group, Some(group_id)),
             }
         },
+    }
+}
+
+fn message_thread_id_text(msg: &Message) -> Option<String> {
+    msg.thread_id.map(|thread_id| thread_id.to_string())
+}
+
+fn tg_bucket_key_for_route(
+    config: &crate::config::TelegramAccountConfig,
+    account_handle: &str,
+    chat_type: &ChatType,
+    peer: &str,
+    sender: Option<&str>,
+    thread_id: Option<&str>,
+) -> String {
+    match chat_type {
+        ChatType::Dm => resolve_dm_bucket_key(&config.dm_scope, account_handle, peer),
+        ChatType::Group | ChatType::Channel => {
+            resolve_group_bucket_key(&config.group_scope, account_handle, peer, sender, thread_id)
+        },
+    }
+}
+
+fn log_follow_up_route_degrade(
+    config: &crate::config::TelegramAccountConfig,
+    account_handle: &str,
+    chat_id: &str,
+    message_id: Option<i32>,
+    chat_type: &ChatType,
+    sender: Option<&str>,
+    thread_id: Option<&str>,
+    source: &'static str,
+) {
+    use crate::config::GroupScope;
+
+    if !matches!(chat_type, ChatType::Group | ChatType::Channel) {
+        return;
+    }
+
+    let needs_sender = matches!(
+        config.group_scope,
+        GroupScope::PerSender | GroupScope::PerBranchSender
+    );
+    let needs_branch = matches!(
+        config.group_scope,
+        GroupScope::PerBranch | GroupScope::PerBranchSender
+    );
+
+    if needs_sender && sender.is_none() {
+        info!(
+            event = "telegram.route.degraded",
+            source,
+            account_handle,
+            chat_id,
+            message_id,
+            reason_code = "sender_missing",
+            "telegram follow-up route degraded because sender was missing"
+        );
+    }
+
+    if needs_branch && thread_id.is_none() {
+        info!(
+            event = "telegram.route.degraded",
+            source,
+            account_handle,
+            chat_id,
+            message_id,
+            reason_code = "branch_missing",
+            "telegram follow-up route degraded because branch was missing"
+        );
+    }
+}
+
+fn tg_peer_for_message(chat_type: &ChatType, msg: &Message, dm_peer_id: &str) -> String {
+    match chat_type {
+        ChatType::Dm => dm_peer_id.to_string(),
+        ChatType::Group | ChatType::Channel => msg.chat.id.0.to_string(),
+    }
+}
+
+fn tg_sender_for_message(msg: &Message) -> Option<String> {
+    msg.from.as_ref().map(|user| user.id.0.to_string())
+}
+
+#[cfg(test)]
+fn tg_bucket_key_for_callback_query(
+    config: &crate::config::TelegramAccountConfig,
+    account_handle: &str,
+    query: &CallbackQuery,
+) -> Option<String> {
+    let message = query.message.as_ref()?;
+    let chat = message.chat();
+    let (chat_type, peer) = match &chat.kind {
+        teloxide::types::ChatKind::Private(_) => (ChatType::Dm, query.from.id.0.to_string()),
+        teloxide::types::ChatKind::Public(_) => (ChatType::Group, chat.id.0.to_string()),
+    };
+    let thread_id = message
+        .regular_message()
+        .and_then(|message| message.thread_id.map(|thread_id| thread_id.to_string()));
+    let sender = query.from.id.0.to_string();
+    Some(tg_bucket_key_for_route(
+        config,
+        account_handle,
+        &chat_type,
+        &peer,
+        Some(sender.as_str()),
+        thread_id.as_deref(),
+    ))
+}
+
+fn resolve_callback_bucket_key(
+    config: &crate::config::TelegramAccountConfig,
+    account_handle: &str,
+    query: &CallbackQuery,
+    sender_override: Option<&str>,
+) -> Option<String> {
+    use crate::config::GroupScope;
+
+    let message = query.message.as_ref()?;
+    let chat = message.chat();
+    let chat_id = chat.id.0.to_string();
+    let message_id = message.id().0;
+    let clicker_sender = query.from.id.0.to_string();
+
+    if let Some(bucket_key) = lookup_callback_bucket_binding(account_handle, &chat_id, message_id) {
+        return Some(bucket_key);
+    }
+
+    if matches!(chat.kind, teloxide::types::ChatKind::Public(_))
+        && !matches!(config.group_scope, GroupScope::Group)
+        && sender_override.is_none()
+    {
+        warn!(
+            event = "telegram.callback.bucket_binding.missing",
+            account_handle,
+            chat_id,
+            message_id,
+            reason_code = "callback_bucket_binding_missing",
+            "telegram callback bucket binding missing; falling back to route-derived bucket"
+        );
+    }
+
+    let (chat_type, sender, thread_id) = match &chat.kind {
+        teloxide::types::ChatKind::Private(_) => {
+            (ChatType::Dm, Some(query.from.id.0.to_string()), None)
+        },
+        teloxide::types::ChatKind::Public(_) => (
+            ChatType::Group,
+            Some(
+                sender_override
+                    .unwrap_or(clicker_sender.as_str())
+                    .to_string(),
+            ),
+            message
+                .regular_message()
+                .and_then(|message| message.thread_id.map(|thread_id| thread_id.to_string())),
+        ),
+    };
+    log_follow_up_route_degrade(
+        config,
+        account_handle,
+        &chat_id,
+        Some(message_id),
+        &chat_type,
+        sender.as_deref(),
+        thread_id.as_deref(),
+        "callback_query",
+    );
+
+    let sender = sender.as_deref().unwrap_or_default();
+    Some(tg_bucket_key_for_route(
+        config,
+        account_handle,
+        &chat_type,
+        &chat_id,
+        Some(sender),
+        thread_id.as_deref(),
+    ))
+}
+
+fn build_tg_inbound(
+    config: &crate::config::TelegramAccountConfig,
+    account_handle: &str,
+    chat_type: &ChatType,
+    mode: TgInboundMode,
+    body: &str,
+    has_attachments: bool,
+    has_location: bool,
+    msg: &Message,
+    addressed: bool,
+    dm_peer_id: &str,
+) -> TgInbound {
+    let kind = match chat_type {
+        ChatType::Dm => TgInboundKind::Dm,
+        ChatType::Group | ChatType::Channel => TgInboundKind::Group,
+    };
+    let inbound = TgInbound {
+        kind,
+        mode,
+        body: TgContent {
+            text: body.to_string(),
+            has_attachments,
+            has_location,
+        },
+        private_source: TgPrivateSource {
+            account_handle: account_handle.to_string(),
+            chat_id: msg.chat.id.0.to_string(),
+            message_id: Some(msg.id.0.to_string()),
+            thread_id: message_thread_id_text(msg),
+            peer: tg_peer_for_message(chat_type, msg, dm_peer_id),
+            sender: tg_sender_for_message(msg),
+            addressed,
+        },
+    };
+    log_route_degrade(config, &inbound);
+    inbound
+}
+
+fn build_channel_reply_target(
+    account_handle: &str,
+    bot_handle: Option<String>,
+    msg: &Message,
+    route: &crate::adapter::TgRoute,
+) -> ChannelReplyTarget {
+    ChannelReplyTarget {
+        chan_type: ChannelType::Telegram,
+        chan_account_key: account_handle.to_string(),
+        chan_user_name: bot_handle,
+        chat_id: msg.chat.id.0.to_string(),
+        message_id: Some(msg.id.0.to_string()),
+        thread_id: message_thread_id_text(msg),
+        bucket_key: Some(route.bucket_key.clone()),
+    }
+}
+
+fn log_route_degrade(config: &crate::config::TelegramAccountConfig, inbound: &TgInbound) {
+    use crate::config::GroupScope;
+
+    if inbound.kind != TgInboundKind::Group {
+        return;
+    }
+
+    let needs_sender = matches!(
+        config.group_scope,
+        GroupScope::PerSender | GroupScope::PerBranchSender
+    );
+    let needs_branch = matches!(
+        config.group_scope,
+        GroupScope::PerBranch | GroupScope::PerBranchSender
+    );
+
+    if needs_sender && inbound.private_source.sender.is_none() {
+        info!(
+            event = "telegram.route.degraded",
+            account_handle = inbound.private_source.account_handle,
+            chat_id = inbound.private_source.chat_id,
+            message_id = ?inbound.private_source.message_id,
+            reason_code = "sender_missing",
+            "telegram route degraded because sender was missing"
+        );
+    }
+
+    if needs_branch && inbound.private_source.thread_id.is_none() {
+        info!(
+            event = "telegram.route.degraded",
+            account_handle = inbound.private_source.account_handle,
+            chat_id = inbound.private_source.chat_id,
+            message_id = ?inbound.private_source.message_id,
+            reason_code = "branch_missing",
+            "telegram route degraded because branch was missing"
+        );
     }
 }
 
@@ -3884,9 +4341,12 @@ mod tests {
         ingest_calls: std::sync::atomic::AtomicUsize,
         command_calls: std::sync::atomic::AtomicUsize,
         fail_command: std::sync::atomic::AtomicBool,
+        resolve_location: std::sync::atomic::AtomicBool,
         last_dispatch_text: Mutex<Option<String>>,
         last_ingest_text: Mutex<Option<String>>,
         last_command: Mutex<Option<String>>,
+        last_command_reply_target: Mutex<Option<ChannelReplyTarget>>,
+        last_location_reply_target: Mutex<Option<ChannelReplyTarget>>,
         command_response: Mutex<Option<String>>,
     }
 
@@ -3921,11 +4381,15 @@ mod tests {
         async fn dispatch_command(
             &self,
             command: &str,
-            _reply_to: ChannelReplyTarget,
+            reply_to: ChannelReplyTarget,
         ) -> anyhow::Result<String> {
             {
                 let mut last = self.last_command.lock().unwrap();
                 *last = Some(command.to_string());
+            }
+            {
+                let mut last = self.last_command_reply_target.lock().unwrap();
+                *last = Some(reply_to);
             }
             self.command_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3956,6 +4420,18 @@ mod tests {
 
         async fn voice_stt_available(&self) -> bool {
             false
+        }
+
+        async fn update_location(
+            &self,
+            reply_to: &ChannelReplyTarget,
+            _latitude: f64,
+            _longitude: f64,
+        ) -> bool {
+            let mut last = self.last_location_reply_target.lock().unwrap();
+            *last = Some(reply_to.clone());
+            self.resolve_location
+                .load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -5320,6 +5796,144 @@ mod tests {
         assert!(extract_location(&msg).is_none());
     }
 
+    #[tokio::test]
+    async fn send_sessions_keyboard_records_bucket_binding_for_sent_message() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+        let reply_target = ChannelReplyTarget {
+            chan_type: ChannelType::Telegram,
+            chan_account_key: "telegram:test-account".to_string(),
+            chan_user_name: Some("@test_bot".to_string()),
+            chat_id: "-100999".to_string(),
+            message_id: Some("10".to_string()),
+            thread_id: None,
+            bucket_key: Some(
+                "group:account:telegram:test-account:peer:-100999:sender:2002".to_string(),
+            ),
+        };
+
+        send_sessions_keyboard(&bot, &reply_target, "1. Session A *\n2. Session B")
+            .await
+            .expect("send sessions keyboard");
+
+        assert_eq!(
+            lookup_callback_bucket_binding("telegram:test-account", "-100999", 1).as_deref(),
+            reply_target.bucket_key.as_deref(),
+            "keyboard send must remember the originating bucket for later callback routing"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn edited_live_location_preserves_bucket_key_for_group_scope() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_handle = "telegram:test-account";
+        let expected_bucket_key = crate::adapter::resolve_group_bucket_key(
+            &crate::config::GroupScope::PerSender,
+            account_handle,
+            "-100999",
+            Some("1001"),
+            None,
+        );
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: teloxide::Bot::new("test-token"),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        group_scope: crate::config::GroupScope::PerSender,
+                        ..Default::default()
+                    },
+                    outbound,
+                    cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 22,
+            "date": 1,
+            "chat": { "id": -100999, "type": "supergroup", "title": "Team" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "location": {
+                "latitude": 48.8566,
+                "longitude": 2.3522,
+                "live_period": 300
+            }
+        }))
+        .expect("deserialize edited location message");
+
+        handle_edited_location(msg, account_handle, &accounts)
+            .await
+            .expect("handle edited location");
+
+        let target = sink
+            .last_location_reply_target
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("expected update_location target");
+        assert_eq!(target.chat_id, "-100999");
+        assert_eq!(
+            target.bucket_key.as_deref(),
+            Some(expected_bucket_key.as_str())
+        );
+    }
+
     #[test]
     fn location_messages_are_marked_with_location_message_kind() {
         let msg: Message = serde_json::from_value(json!({
@@ -5903,6 +6517,255 @@ mod tests {
                 .count(),
             1,
             "callback follow-up must have a single typing owner, requests={requests:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn callback_query_preserves_bucket_key_for_group_scope() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        *sink.command_response.lock().unwrap() = Some("done".to_string());
+        let account_handle = "telegram:test-account";
+        let expected_bucket_key = crate::adapter::resolve_group_bucket_key(
+            &crate::config::GroupScope::PerSender,
+            account_handle,
+            "-100999",
+            Some("2002"),
+            None,
+        );
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        group_scope: crate::config::GroupScope::PerSender,
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let query: CallbackQuery = serde_json::from_value(json!({
+            "id": "cb-bucket",
+            "from": { "id": 1001, "is_bot": false, "first_name": "Alice", "username": "alice" },
+            "chat_instance": "ci",
+            "data": "sessions_switch:1",
+            "message": {
+                "message_id": 10,
+                "date": 1,
+                "chat": { "id": -100999, "type": "supergroup", "title": "Team" },
+                "text": "tap"
+            }
+        }))
+        .expect("deserialize callback query");
+        let fallback_bucket_key = tg_bucket_key_for_callback_query(
+            &TelegramAccountConfig {
+                token: Secret::new("test-token".to_string()),
+                group_scope: crate::config::GroupScope::PerSender,
+                ..Default::default()
+            },
+            account_handle,
+            &query,
+        )
+        .expect("fallback bucket");
+        assert_ne!(
+            fallback_bucket_key, expected_bucket_key,
+            "stored callback binding must differ from clicker-derived fallback to prove preservation"
+        );
+
+        remember_callback_bucket_binding(
+            &ChannelReplyTarget {
+                chan_type: ChannelType::Telegram,
+                chan_account_key: account_handle.to_string(),
+                chan_user_name: Some("@test_bot".to_string()),
+                chat_id: "-100999".to_string(),
+                message_id: Some("10".to_string()),
+                thread_id: None,
+                bucket_key: Some(expected_bucket_key.clone()),
+            },
+            10,
+        );
+
+        handle_callback_query(query, &bot, account_handle, &accounts)
+            .await
+            .expect("handle callback");
+
+        let target = sink
+            .last_command_reply_target
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("expected callback dispatch target");
+        assert_eq!(target.chat_id, "-100999");
+        assert_eq!(
+            target.bucket_key.as_deref(),
+            Some(expected_bucket_key.as_str())
+        );
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn callback_query_sender_hint_preserves_bucket_key_without_runtime_binding() {
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(telegram_api_handler).get(telegram_file_handler),
+            )
+            .with_state(mock_api);
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping: cannot bind test listener: {e}");
+                return;
+            },
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = teloxide::Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        *sink.command_response.lock().unwrap() = Some("done".to_string());
+        let account_handle = "telegram:test-account";
+        let expected_bucket_key = crate::adapter::resolve_group_bucket_key(
+            &crate::config::GroupScope::PerSender,
+            account_handle,
+            "-100999",
+            Some("2002"),
+            None,
+        );
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: TelegramAccountConfig {
+                        token: Secret::new("test-token".to_string()),
+                        group_scope: crate::config::GroupScope::PerSender,
+                        ..Default::default()
+                    },
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let query: CallbackQuery = serde_json::from_value(json!({
+            "id": "cb-sender-hint",
+            "from": { "id": 1001, "is_bot": false, "first_name": "Alice", "username": "alice" },
+            "chat_instance": "ci",
+            "data": "sessions_switch:1|s=2002",
+            "message": {
+                "message_id": 11,
+                "date": 1,
+                "chat": { "id": -100999, "type": "supergroup", "title": "Team" },
+                "text": "tap"
+            }
+        }))
+        .expect("deserialize callback query");
+
+        handle_callback_query(query, &bot, account_handle, &accounts)
+            .await
+            .expect("handle callback");
+
+        let target = sink
+            .last_command_reply_target
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("expected callback dispatch target");
+        assert_eq!(target.chat_id, "-100999");
+        assert_eq!(
+            target.bucket_key.as_deref(),
+            Some(expected_bucket_key.as_str())
         );
 
         let _ = shutdown_tx.send(());

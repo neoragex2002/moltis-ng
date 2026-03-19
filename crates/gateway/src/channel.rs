@@ -71,6 +71,8 @@ fn classify_telegram_config_patch(patch: &Value) -> Result<TelegramConfigPatchKi
             "dm_policy"
             | "mention_mode"
             | "allowlist"
+            | "dm_scope"
+            | "group_scope"
             | "relay_chain_enabled"
             | "relay_hop_limit"
             | "epoch_relay_budget"

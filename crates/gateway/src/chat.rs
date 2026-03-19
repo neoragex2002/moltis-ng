@@ -2357,19 +2357,13 @@ impl ChatService for LiveChatService {
             && let Ok(target) =
                 serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
         {
-            // Only echo to channel if this is the active session for this chat.
-            let is_active = self
-                .session_metadata
-                .get_active_session_id(
-                    target.chan_type.as_str(),
-                    &target.chan_account_key,
-                    &target.chat_id,
-                )
-                .await
-                .map(|k| k == session_key)
-                .unwrap_or(true);
-
-            if is_active {
+            if session_matches_channel_binding(
+                self.session_metadata.as_ref(),
+                &session_key,
+                &target,
+            )
+            .await
+            {
                 // Push reply target so deliver_channel_replies sends the LLM response.
                 self.state
                     .push_channel_reply(&session_key, &trigger_id, target.clone())
@@ -6606,12 +6600,21 @@ async fn telegram_group_target_session_exists(
     state: &Arc<GatewayState>,
     target_account_id: &str,
     chat_id: &str,
+    thread_id: Option<&str>,
+    sender_account_key: Option<&str>,
 ) -> bool {
     let Some(ref store) = state.services.session_store else {
         return false;
     };
 
-    let target_session_id = resolve_telegram_session_id(state, target_account_id, chat_id).await;
+    let target_session_id = resolve_telegram_session_id(
+        state,
+        target_account_id,
+        chat_id,
+        thread_id,
+        sender_account_key,
+    )
+    .await;
 
     if let Some(ref sm) = state.services.session_metadata {
         return sm.get(&target_session_id).await.is_some();
@@ -6928,6 +6931,8 @@ async fn dispatch_telegram_relay(
     target_account_id: &str,
     target_handle: Option<String>,
     chat_id: &str,
+    thread_id: Option<&str>,
+    source_sender_account_key: Option<&str>,
     reply_to_message_id: &str,
     relay_text: &str,
     channel_meta: serde_json::Value,
@@ -6940,9 +6945,24 @@ async fn dispatch_telegram_relay(
         .strip_prefix("telegram:")
         .unwrap_or(target_account_id);
     let target_chan_chat_key =
-        moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, None);
+        moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, thread_id);
 
-    let target_session_id = resolve_telegram_session_id(state, target_account_id, chat_id).await;
+    let target_bucket_key = telegram_group_bucket_key_for_account(
+        state,
+        target_account_id,
+        chat_id,
+        thread_id,
+        source_sender_account_key,
+    )
+    .await;
+    let target_session_id = resolve_telegram_session_id(
+        state,
+        target_account_id,
+        chat_id,
+        thread_id,
+        source_sender_account_key,
+    )
+    .await;
     let session_exists = if let Some(ref sm) = state.services.session_metadata {
         sm.get(&target_session_id).await.is_some()
     } else {
@@ -6952,7 +6972,15 @@ async fn dispatch_telegram_relay(
         return Err("target session does not exist for this group".into());
     }
 
-    ensure_channel_bound_session(state, &target_session_id, target_account_id, chat_id).await;
+    ensure_channel_bound_session(
+        state,
+        &target_session_id,
+        target_account_id,
+        chat_id,
+        thread_id,
+        target_bucket_key.as_deref(),
+    )
+    .await;
 
     let reply_target = moltis_channels::ChannelReplyTarget {
         chan_type: moltis_channels::ChannelType::Telegram,
@@ -6960,6 +6988,8 @@ async fn dispatch_telegram_relay(
         chan_user_name: target_handle,
         chat_id: chat_id.to_string(),
         message_id: Some(reply_to_message_id.to_string()),
+        thread_id: thread_id.map(str::to_string),
+        bucket_key: target_bucket_key,
     };
     let trigger_id = crate::ids::new_trigger_id();
     state
@@ -6985,6 +7015,7 @@ async fn maybe_relay_telegram_group_mentions(
     source_account_id: &str,
     source_account_handle: Option<&str>,
     chat_id: &str,
+    thread_id: Option<&str>,
     inbound_trigger_message_id: Option<&str>,
     source_outbound_message_id: &str,
     outbound_text: &str,
@@ -7009,6 +7040,8 @@ async fn maybe_relay_telegram_group_mentions(
         .unwrap_or(moltis_telegram::config::TelegramBusAccountSnapshot {
             account_handle: source_account_id.to_string(),
             chan_user_name: None,
+            dm_scope: moltis_telegram::config::DmScope::Main,
+            group_scope: moltis_telegram::config::GroupScope::Group,
             relay_chain_enabled: true,
             relay_hop_limit: 3,
             epoch_relay_budget: DEFAULT_EPOCH_RELAY_BUDGET,
@@ -7257,8 +7290,14 @@ Output format:
             continue;
         }
 
-        let session_exists =
-            telegram_group_target_session_exists(state, &d.target_account_id, chat_id).await;
+        let session_exists = telegram_group_target_session_exists(
+            state,
+            &d.target_account_id,
+            chat_id,
+            thread_id,
+            Some(source_account_id),
+        )
+        .await;
         if !session_exists {
             let skip_key = format!(
                 "telegram.relay.skip|target_missing|chat:{}|src:{}|dst:{}|out:{}",
@@ -7335,12 +7374,15 @@ Output format:
         let target_handle = d.target_handle.clone();
         let relay_chain_id = chain_id.clone();
         let budget = epoch_relay_budget;
+        let relay_thread_id = thread_id.map(str::to_string);
         tokio::spawn(async move {
             if let Err(e) = dispatch_telegram_relay(
                 &state,
                 &target_account_id,
                 target_handle,
                 &chat_id,
+                relay_thread_id.as_deref(),
+                Some(&source_account_id),
                 &reply_to_id,
                 &relay_text,
                 channel_meta,
@@ -7372,6 +7414,8 @@ async fn ensure_channel_bound_session(
     session_id: &str,
     chan_account_key: &str,
     chat_id: &str,
+    thread_id: Option<&str>,
+    bucket_key: Option<&str>,
 ) {
     let Some(ref session_meta) = state.services.session_metadata else {
         return;
@@ -7383,6 +7427,8 @@ async fn ensure_channel_bound_session(
         chan_user_name: None,
         chat_id: chat_id.to_string(),
         message_id: None,
+        thread_id: thread_id.map(str::to_string),
+        bucket_key: bucket_key.map(str::to_string),
     };
 
     let Ok(binding_json) = serde_json::to_string(&binding) else {
@@ -7390,8 +7436,17 @@ async fn ensure_channel_bound_session(
     };
 
     let entry = session_meta.get(session_id).await;
-    let has_binding = entry.as_ref().is_some_and(|e| e.channel_binding.is_some());
-    if !has_binding {
+    let stored_binding = entry.as_ref().and_then(|e| e.channel_binding.as_deref());
+    let needs_binding_update = stored_binding != Some(binding_json.as_str());
+    if let Some(bucket_key) = bucket_key {
+        session_meta
+            .set_bucket_session_id("telegram", bucket_key, session_id)
+            .await;
+    }
+    session_meta
+        .set_active_session_id("telegram", chan_account_key, chat_id, session_id)
+        .await;
+    if entry.is_none() {
         let snapshots = state
             .services
             .channel
@@ -7405,17 +7460,85 @@ async fn ensure_channel_bound_session(
             chat_id,
         );
         let _ = session_meta.upsert(session_id, Some(label)).await;
+    }
+
+    if needs_binding_update {
         session_meta
             .set_channel_binding(session_id, Some(binding_json))
             .await;
     }
 }
 
+async fn session_matches_channel_binding(
+    metadata: &SqliteSessionMetadata,
+    session_id: &str,
+    target: &moltis_channels::ChannelReplyTarget,
+) -> bool {
+    if let Some(bucket_key) = target.bucket_key.as_deref()
+        && let Some(bound_session_id) = metadata
+            .get_bucket_session_id(target.chan_type.as_str(), bucket_key)
+            .await
+    {
+        return bound_session_id == session_id;
+    }
+
+    metadata
+        .get_active_session_id(
+            target.chan_type.as_str(),
+            &target.chan_account_key,
+            &target.chat_id,
+        )
+        .await
+        .map(|bound_session_id| bound_session_id == session_id)
+        .unwrap_or(true)
+}
+
+async fn telegram_group_bucket_key_for_account(
+    state: &Arc<GatewayState>,
+    chan_account_key: &str,
+    chat_id: &str,
+    thread_id: Option<&str>,
+    sender_account_key: Option<&str>,
+) -> Option<String> {
+    let snapshots = state
+        .services
+        .channel
+        .telegram_bus_accounts_snapshot()
+        .await;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.account_handle == chan_account_key)?;
+    let sender = sender_account_key.map(|value| value.strip_prefix("telegram:").unwrap_or(value));
+    Some(moltis_telegram::adapter::resolve_group_bucket_key(
+        &snapshot.group_scope,
+        &snapshot.account_handle,
+        chat_id,
+        sender,
+        thread_id,
+    ))
+}
+
 async fn resolve_telegram_session_id(
     state: &Arc<GatewayState>,
     chan_account_key: &str,
     chat_id: &str,
+    thread_id: Option<&str>,
+    sender_account_key: Option<&str>,
 ) -> String {
+    if let Some(ref sm) = state.services.session_metadata
+        && let Some(bucket_key) = telegram_group_bucket_key_for_account(
+            state,
+            chan_account_key,
+            chat_id,
+            thread_id,
+            sender_account_key,
+        )
+        .await
+        && let Some(key) = sm.get_bucket_session_id("telegram", &bucket_key).await
+    {
+        return key;
+    }
+
     if let Some(ref sm) = state.services.session_metadata
         && let Some(key) = sm
             .get_active_session_id("telegram", chan_account_key, chat_id)
@@ -7426,7 +7549,7 @@ async fn resolve_telegram_session_id(
     let chan_user_id = chan_account_key
         .strip_prefix("telegram:")
         .unwrap_or(chan_account_key);
-    moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, None)
+    moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, thread_id)
 }
 
 async fn maybe_mirror_telegram_group_reply(
@@ -7434,6 +7557,7 @@ async fn maybe_mirror_telegram_group_reply(
     source_account_id: &str,
     source_account_handle: Option<&str>,
     chat_id: &str,
+    thread_id: Option<&str>,
     inbound_trigger_message_id: Option<&str>,
     text: &str,
 ) {
@@ -7497,8 +7621,22 @@ async fn maybe_mirror_telegram_group_reply(
             continue;
         }
 
-        let target_session_key =
-            resolve_telegram_session_id(state, &target_account_id, chat_id).await;
+        let target_bucket_key = telegram_group_bucket_key_for_account(
+            state,
+            &target_account_id,
+            chat_id,
+            thread_id,
+            Some(source_account_id),
+        )
+        .await;
+        let target_session_key = resolve_telegram_session_id(
+            state,
+            &target_account_id,
+            chat_id,
+            thread_id,
+            Some(source_account_id),
+        )
+        .await;
 
         // Only mirror into sessions that already exist for this (bot, group) pair.
         // This prevents accidental creation of "phantom" group sessions for bots
@@ -7512,7 +7650,15 @@ async fn maybe_mirror_telegram_group_reply(
             continue;
         }
 
-        ensure_channel_bound_session(state, &target_session_key, &target_account_id, chat_id).await;
+        ensure_channel_bound_session(
+            state,
+            &target_session_key,
+            &target_account_id,
+            chat_id,
+            thread_id,
+            target_bucket_key.as_deref(),
+        )
+        .await;
 
         if let Ok(found) = store
             .tail_contains_channel_field_value(
@@ -7633,12 +7779,7 @@ async fn deliver_channel_replies_to_targets(
                         if transcript.len() <= moltis_telegram::markdown::TELEGRAM_CAPTION_LIMIT {
                             payload.text = transcript;
                             let send_res = outbound
-                                .send_media_with_ref(
-                                    &target.chan_account_key,
-                                    &target.chat_id,
-                                    &payload,
-                                    reply_to,
-                                )
+                                .send_media_to_target_with_ref(&target, &payload)
                                 .await;
                             if let Err(e) = send_res {
                                 warn!(
@@ -7657,6 +7798,7 @@ async fn deliver_channel_replies_to_targets(
                                     &target.chan_account_key,
                                     target.chan_user_name.as_deref(),
                                     &target.chat_id,
+                                    target.thread_id.as_deref(),
                                     reply_to,
                                     &payload.text,
                                 )
@@ -7665,13 +7807,7 @@ async fn deliver_channel_replies_to_targets(
                             // Send logbook as a follow-up if present.
                             if !logbook_html.is_empty()
                                 && let Err(e) = outbound
-                                    .send_text_with_suffix(
-                                        &target.chan_account_key,
-                                        &target.chat_id,
-                                        "",
-                                        &logbook_html,
-                                        None,
-                                    )
+                                    .send_text_with_suffix_to_target(&target, "", &logbook_html)
                                     .await
                             {
                                 let outbound_meta = telegram_outbound_failure_meta(&e);
@@ -7693,12 +7829,7 @@ async fn deliver_channel_replies_to_targets(
                             // Transcript too long for a caption — send voice
                             // without caption, then the full text as a follow-up.
                             if let Err(e) = outbound
-                                .send_media_with_ref(
-                                    &target.chan_account_key,
-                                    &target.chat_id,
-                                    &payload,
-                                    reply_to,
-                                )
+                                .send_media_to_target_with_ref(&target, &payload)
                                 .await
                             {
                                 warn!(
@@ -7717,6 +7848,7 @@ async fn deliver_channel_replies_to_targets(
                                     &target.chan_account_key,
                                     target.chan_user_name.as_deref(),
                                     &target.chat_id,
+                                    target.thread_id.as_deref(),
                                     reply_to,
                                     &transcript,
                                 )
@@ -7724,21 +7856,14 @@ async fn deliver_channel_replies_to_targets(
                             }
                             let text_result = if logbook_html.is_empty() {
                                 outbound
-                                    .send_text(
-                                        &target.chan_account_key,
-                                        &target.chat_id,
-                                        &transcript,
-                                        None,
-                                    )
+                                    .send_text_to_target(&target, &transcript)
                                     .await
                             } else {
                                 outbound
-                                    .send_text_with_suffix(
-                                        &target.chan_account_key,
-                                        &target.chat_id,
+                                    .send_text_with_suffix_to_target(
+                                        &target,
                                         &transcript,
                                         &logbook_html,
-                                        None,
                                     )
                                     .await
                             };
@@ -7763,21 +7888,14 @@ async fn deliver_channel_replies_to_targets(
                     None => {
                         let result = if logbook_html.is_empty() {
                             outbound
-                                .send_text_with_ref(
-                                    &target.chan_account_key,
-                                    &target.chat_id,
-                                    &text,
-                                    reply_to,
-                                )
+                                .send_text_to_target_with_ref(&target, &text)
                                 .await
                         } else {
                             outbound
-                                .send_text_with_suffix_with_ref(
-                                    &target.chan_account_key,
-                                    &target.chat_id,
+                                .send_text_with_suffix_to_target_with_ref(
+                                    &target,
                                     &text,
                                     &logbook_html,
-                                    reply_to,
                                 )
                                 .await
                         };
@@ -7806,6 +7924,7 @@ async fn deliver_channel_replies_to_targets(
                             &target.chan_account_key,
                             target.chan_user_name.as_deref(),
                             &target.chat_id,
+                            target.thread_id.as_deref(),
                             reply_to,
                             &text,
                         )
@@ -7819,6 +7938,7 @@ async fn deliver_channel_replies_to_targets(
                                 &target.chan_account_key,
                                 target.chan_user_name.as_deref(),
                                 &target.chat_id,
+                                target.thread_id.as_deref(),
                                 reply_to,
                                 &sent.message_id,
                                 &text,
@@ -8129,12 +8249,7 @@ async fn send_screenshot_to_channels(
                 moltis_channels::ChannelType::Telegram => {
                     let reply_to = target.message_id.as_deref();
                     if let Err(_e) = outbound
-                        .send_media(
-                            &target.chan_account_key,
-                            &target.chat_id,
-                            &payload,
-                            reply_to,
-                        )
+                        .send_media_to_target_with_ref(&target, &payload)
                         .await
                     {
                         warn!(
@@ -8148,12 +8263,7 @@ async fn send_screenshot_to_channels(
                         let error_msg =
                             "⚠️ Failed to send screenshot. Please try again.".to_string();
                         let _ = outbound
-                            .send_text(
-                                &target.chan_account_key,
-                                &target.chat_id,
-                                &error_msg,
-                                reply_to,
-                            )
+                            .send_text_to_target_with_ref(&target, &error_msg)
                             .await;
                     } else {
                         debug!(
@@ -8169,6 +8279,7 @@ async fn send_screenshot_to_channels(
                             &target.chan_account_key,
                             target.chan_user_name.as_deref(),
                             &target.chat_id,
+                            target.thread_id.as_deref(),
                             reply_to,
                             "（发送了一张图片）",
                         )
@@ -8213,15 +8324,12 @@ async fn send_location_to_channels(
         let outbound = Arc::clone(&outbound);
         let title_ref = title_owned.clone();
         tasks.push(tokio::spawn(async move {
-            let reply_to = target.message_id.as_deref();
             if let Err(e) = outbound
-                .send_location(
-                    &target.chan_account_key,
-                    &target.chat_id,
+                .send_location_to_target_with_ref(
+                    &target,
                     latitude,
                     longitude,
                     title_ref.as_deref(),
-                    reply_to,
                 )
                 .await
             {
@@ -8808,6 +8916,8 @@ mod tests {
             chan_user_name: None,
             chat_id: "123".to_string(),
             message_id: None,
+            thread_id: None,
+            bucket_key: None,
         }];
         let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
@@ -8849,6 +8959,8 @@ mod tests {
             chan_user_name: None,
             chat_id: "123".to_string(),
             message_id: Some("77".to_string()),
+            thread_id: None,
+            bucket_key: None,
         }];
         let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
@@ -9036,6 +9148,8 @@ mod tests {
             chan_user_name: Some("@lovely_apple_bot".to_string()),
             chat_id: "-100".to_string(),
             message_id: Some("184".to_string()),
+            thread_id: None,
+            bucket_key: None,
         }];
 
         // First delivery should mirror once.
@@ -9117,6 +9231,8 @@ mod tests {
                 moltis_telegram::config::TelegramBusAccountSnapshot {
                     account_handle: "telegram:lovely".into(),
                     chan_user_name: Some("lovely_apple_bot".into()),
+                    dm_scope: moltis_telegram::config::DmScope::Main,
+                    group_scope: moltis_telegram::config::GroupScope::Group,
                     relay_chain_enabled: true,
                     relay_hop_limit: 3,
                     epoch_relay_budget: 128,
@@ -9127,6 +9243,8 @@ mod tests {
                 moltis_telegram::config::TelegramBusAccountSnapshot {
                     account_handle: "telegram:fluffy".into(),
                     chan_user_name: Some("fluffy_bot".into()),
+                    dm_scope: moltis_telegram::config::DmScope::Main,
+                    group_scope: moltis_telegram::config::GroupScope::Group,
                     relay_chain_enabled: true,
                     relay_hop_limit: 3,
                     epoch_relay_budget: 128,
@@ -9155,6 +9273,8 @@ mod tests {
             chan_user_name: Some("@lovely_apple_bot".to_string()),
             chat_id: "-100".to_string(),
             message_id: Some("184".to_string()),
+            thread_id: None,
+            bucket_key: None,
         }];
 
         deliver_channel_replies_to_targets(
@@ -9210,6 +9330,8 @@ mod tests {
             chan_user_name: Some("@lovely_apple_bot".to_string()),
             chat_id: "123".to_string(), // non-group
             message_id: Some("1".to_string()),
+            thread_id: None,
+            bucket_key: None,
         }];
 
         deliver_channel_replies_to_targets(
@@ -9269,6 +9391,8 @@ mod tests {
                     chan_user_name: Some("@lovely_apple_bot".to_string()),
                     chat_id: "-100".to_string(),
                     message_id: Some("184".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -9645,6 +9769,8 @@ mod tests {
             chan_user_name: Some("@lovely_apple_bot".to_string()),
             chat_id: "123".to_string(),
             message_id: None,
+            thread_id: None,
+            bucket_key: None,
         })
         .unwrap();
         metadata.set_channel_binding("main", Some(binding)).await;
@@ -9766,6 +9892,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot1".into(),
                 chan_user_name: Some("bot1".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
@@ -9776,6 +9904,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
@@ -9792,6 +9922,7 @@ mod tests {
             "telegram:bot1",
             Some("@bot1"),
             "-100",
+            None,
             Some("184"),
             "999",
             "请 @bot2 帮我总结一下",
@@ -9861,6 +9992,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot1".into(),
                 chan_user_name: Some("bot1".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
@@ -9871,6 +10004,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
@@ -9887,6 +10022,7 @@ mod tests {
             "telegram:bot1",
             Some("@bot1"),
             "-100",
+            None,
             Some("184"),
             "999",
             "请 @bot2 帮我总结一下",
@@ -9947,6 +10083,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot1".into(),
                 chan_user_name: Some("bot1".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 1,
                 epoch_relay_budget: 128,
@@ -9957,6 +10095,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 1,
                 epoch_relay_budget: 128,
@@ -9976,6 +10116,7 @@ mod tests {
             "telegram:bot1",
             Some("@bot1"),
             "-100",
+            None,
             Some("184"),
             "999",
             "请 @bot2 帮我总结一下",
@@ -10029,6 +10170,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot1".into(),
                 chan_user_name: Some("bot1".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
@@ -10039,6 +10182,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
@@ -10049,6 +10194,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot3".into(),
                 chan_user_name: Some("bot3".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
@@ -10069,6 +10216,7 @@ mod tests {
             "telegram:bot1",
             Some("@bot1"),
             "-100",
+            None,
             Some("184"),
             "999",
             "@bot2 做A\n@bot3 做B",
@@ -10139,6 +10287,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot1".into(),
                 chan_user_name: Some("bot1".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
@@ -10149,6 +10299,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
@@ -10159,6 +10311,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot3".into(),
                 chan_user_name: Some("bot3".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
@@ -10179,6 +10333,7 @@ mod tests {
             "telegram:bot1",
             Some("@bot1"),
             "-100",
+            None,
             Some("184"),
             "999",
             "@bot3 做B\n@bot2 做A",
@@ -10292,6 +10447,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot1".into(),
                 chan_user_name: Some("bot1".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
@@ -10302,6 +10459,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
@@ -10322,6 +10481,7 @@ mod tests {
             "telegram:bot1",
             Some("@bot1"),
             "-100",
+            None,
             Some("184"),
             "999",
             "@bot2 做A",
@@ -10405,6 +10565,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot1".into(),
                 chan_user_name: Some("bot1".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
@@ -10415,6 +10577,8 @@ mod tests {
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
@@ -10456,6 +10620,8 @@ mod tests {
         let accounts = vec![TelegramBusAccountSnapshot {
             account_handle: "telegram:bot2".into(),
             chan_user_name: Some("bot2".into()),
+            dm_scope: moltis_telegram::config::DmScope::Main,
+            group_scope: moltis_telegram::config::GroupScope::Group,
             relay_chain_enabled: true,
             relay_hop_limit: 3,
             epoch_relay_budget: 128,
@@ -10492,6 +10658,8 @@ echo @bot2
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot1".into(),
                 chan_user_name: Some("bot1".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
@@ -10502,6 +10670,8 @@ echo @bot2
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
                 chan_user_name: Some("bot2".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: true,
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
@@ -10611,6 +10781,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("7".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -10693,6 +10865,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("9".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -10765,6 +10939,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("7".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -10797,6 +10973,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("8".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -10858,6 +11036,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("1".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -10871,6 +11051,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("2".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -10925,6 +11107,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("1".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -10938,6 +11122,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("2".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -11010,6 +11196,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("1".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -11231,6 +11419,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("1".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -11244,6 +11434,8 @@ echo @bot2
                     chan_user_name: None,
                     chat_id: "123".to_string(),
                     message_id: Some("2".to_string()),
+                    thread_id: None,
+                    bucket_key: None,
                 },
             )
             .await;
@@ -13256,6 +13448,8 @@ echo @bot2
             snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
                 chan_user_name: Some("lovely_apple_bot".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
@@ -13275,7 +13469,7 @@ echo @bot2
         ));
 
         let key = "telegram:845:123";
-        ensure_channel_bound_session(&state, key, "telegram:845", "123").await;
+        ensure_channel_bound_session(&state, key, "telegram:845", "123", None, None).await;
 
         let entry = metadata.get(key).await.expect("session row");
         assert_eq!(
@@ -13283,6 +13477,110 @@ echo @bot2
             Some("TG @lovely_apple_bot · dm:123")
         );
         assert!(entry.channel_binding.is_some());
+    }
+
+    #[tokio::test]
+    async fn session_matches_channel_binding_prefers_bucket_mapping_over_chat_active_session() {
+        let metadata = sqlite_metadata().await;
+        metadata
+            .set_active_session_id("telegram", "telegram:845", "-100", "session:other")
+            .await;
+        metadata
+            .set_bucket_session_id(
+                "telegram",
+                "group:account:telegram:845:peer:-100:sender:1001",
+                "session:bucket",
+            )
+            .await;
+
+        let target = moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:845".to_string(),
+            chan_user_name: Some("@lovely_apple_bot".to_string()),
+            chat_id: "-100".to_string(),
+            message_id: None,
+            thread_id: None,
+            bucket_key: Some("group:account:telegram:845:peer:-100:sender:1001".to_string()),
+        };
+
+        assert!(
+            session_matches_channel_binding(metadata.as_ref(), "session:bucket", &target).await,
+            "bucket-bound sessions must keep their own Telegram echo even when another chat-level session is active"
+        );
+        assert!(
+            !session_matches_channel_binding(metadata.as_ref(), "session:other", &target).await,
+            "chat-level active session must not steal a bucket-bound Telegram echo"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_channel_bound_session_refreshes_existing_binding_with_bucket_route() {
+        let metadata = sqlite_metadata().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_session_metadata(Arc::clone(&metadata))
+            .with_session_store(Arc::clone(&store));
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
+                account_handle: "telegram:845".into(),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::PerSender,
+                relay_chain_enabled: false,
+                relay_hop_limit: 0,
+                epoch_relay_budget: 128,
+                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            }],
+        });
+
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let key = "session:bucket";
+        let legacy_binding = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:845".to_string(),
+            chan_user_name: None,
+            chat_id: "-100".to_string(),
+            message_id: None,
+            thread_id: None,
+            bucket_key: None,
+        })
+        .unwrap();
+        let _ = metadata.upsert(key, Some("legacy".to_string())).await;
+        metadata
+            .set_channel_binding(key, Some(legacy_binding))
+            .await;
+
+        ensure_channel_bound_session(
+            &state,
+            key,
+            "telegram:845",
+            "-100",
+            Some("7"),
+            Some("group:account:telegram:845:peer:-100:thread:7:sender:1001"),
+        )
+        .await;
+
+        let entry = metadata.get(key).await.expect("session row");
+        let binding: moltis_channels::ChannelReplyTarget =
+            serde_json::from_str(entry.channel_binding.as_deref().expect("binding json"))
+                .expect("deserialize binding");
+        assert_eq!(binding.thread_id.as_deref(), Some("7"));
+        assert_eq!(
+            binding.bucket_key.as_deref(),
+            Some("group:account:telegram:845:peer:-100:thread:7:sender:1001")
+        );
     }
 
     #[tokio::test]
@@ -13298,6 +13596,8 @@ echo @bot2
             snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
                 chan_user_name: Some("lovely_apple_bot".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
@@ -13327,6 +13627,8 @@ echo @bot2
             chan_user_name: Some("@lovely_apple_bot".to_string()),
             chat_id: "-100".to_string(),
             message_id: None,
+            thread_id: None,
+            bucket_key: None,
         };
         let binding_json = serde_json::to_string(&binding).unwrap();
         metadata

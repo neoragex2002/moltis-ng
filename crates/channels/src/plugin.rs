@@ -229,6 +229,12 @@ pub struct ChannelReplyTarget {
     /// Used to thread replies (e.g. Telegram `reply_to_message_id`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// Optional topic/thread identifier for channels that support sub-thread delivery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// Optional session bucket key selected by the channel adapter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket_key: Option<String>,
 }
 
 /// Core channel plugin trait. Each messaging platform implements this.
@@ -289,6 +295,32 @@ pub trait ChannelOutbound: Send + Sync {
         Ok(None)
     }
 
+    /// Send text to a structured channel target.
+    async fn send_text_to_target(&self, target: &ChannelReplyTarget, text: &str) -> Result<()> {
+        self.send_text(
+            &target.chan_account_key,
+            &target.chat_id,
+            text,
+            target.message_id.as_deref(),
+        )
+        .await
+    }
+
+    /// Send text to a structured target and return a best-effort message ref.
+    async fn send_text_to_target_with_ref(
+        &self,
+        target: &ChannelReplyTarget,
+        text: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        self.send_text_with_ref(
+            &target.chan_account_key,
+            &target.chat_id,
+            text,
+            target.message_id.as_deref(),
+        )
+        .await
+    }
+
     async fn send_media(
         &self,
         chan_account_key: &str,
@@ -311,9 +343,44 @@ pub trait ChannelOutbound: Send + Sync {
             .await?;
         Ok(None)
     }
+
+    /// Send media to a structured target.
+    async fn send_media_to_target(
+        &self,
+        target: &ChannelReplyTarget,
+        payload: &ReplyPayload,
+    ) -> Result<()> {
+        self.send_media(
+            &target.chan_account_key,
+            &target.chat_id,
+            payload,
+            target.message_id.as_deref(),
+        )
+        .await
+    }
+
+    /// Send media to a structured target and return a best-effort message ref.
+    async fn send_media_to_target_with_ref(
+        &self,
+        target: &ChannelReplyTarget,
+        payload: &ReplyPayload,
+    ) -> Result<Option<SentMessageRef>> {
+        self.send_media_with_ref(
+            &target.chan_account_key,
+            &target.chat_id,
+            payload,
+            target.message_id.as_deref(),
+        )
+        .await
+    }
     /// Send a "typing" indicator. No-op by default.
     async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> Result<()> {
         Ok(())
+    }
+    /// Send a typing indicator to a structured target.
+    async fn send_typing_to_target(&self, target: &ChannelReplyTarget) -> Result<()> {
+        self.send_typing(&target.chan_account_key, &target.chat_id)
+            .await
     }
     /// Send a text message with a pre-formatted HTML suffix appended after the main
     /// content. Used to attach a collapsible activity logbook to channel replies.
@@ -328,6 +395,23 @@ pub trait ChannelOutbound: Send + Sync {
     ) -> Result<()> {
         let _ = suffix_html;
         self.send_text(chan_account_key, to, text, reply_to).await
+    }
+
+    /// Send text plus suffix to a structured target.
+    async fn send_text_with_suffix_to_target(
+        &self,
+        target: &ChannelReplyTarget,
+        text: &str,
+        suffix_html: &str,
+    ) -> Result<()> {
+        self.send_text_with_suffix(
+            &target.chan_account_key,
+            &target.chat_id,
+            text,
+            suffix_html,
+            target.message_id.as_deref(),
+        )
+        .await
     }
 
     /// Like `send_text_with_suffix`, but returns a best-effort sent message ref.
@@ -345,6 +429,23 @@ pub trait ChannelOutbound: Send + Sync {
         self.send_text_with_ref(chan_account_key, to, text, reply_to)
             .await
     }
+
+    /// Send text plus suffix to a structured target and return a best-effort ref.
+    async fn send_text_with_suffix_to_target_with_ref(
+        &self,
+        target: &ChannelReplyTarget,
+        text: &str,
+        suffix_html: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        self.send_text_with_suffix_with_ref(
+            &target.chan_account_key,
+            &target.chat_id,
+            text,
+            suffix_html,
+            target.message_id.as_deref(),
+        )
+        .await
+    }
     /// Send a text message without notification (silent). Falls back to send_text by default.
     async fn send_text_silent(
         &self,
@@ -354,6 +455,21 @@ pub trait ChannelOutbound: Send + Sync {
         reply_to: Option<&str>,
     ) -> Result<()> {
         self.send_text(chan_account_key, to, text, reply_to).await
+    }
+
+    /// Send silent text to a structured target.
+    async fn send_text_silent_to_target(
+        &self,
+        target: &ChannelReplyTarget,
+        text: &str,
+    ) -> Result<()> {
+        self.send_text_silent(
+            &target.chan_account_key,
+            &target.chat_id,
+            text,
+            target.message_id.as_deref(),
+        )
+        .await
     }
 
     /// Like `send_text_silent`, but returns a best-effort sent message ref.
@@ -368,6 +484,21 @@ pub trait ChannelOutbound: Send + Sync {
     ) -> Result<Option<SentMessageRef>> {
         self.send_text_with_ref(chan_account_key, to, text, reply_to)
             .await
+    }
+
+    /// Send silent text to a structured target and return a best-effort ref.
+    async fn send_text_silent_to_target_with_ref(
+        &self,
+        target: &ChannelReplyTarget,
+        text: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        self.send_text_silent_with_ref(
+            &target.chan_account_key,
+            &target.chat_id,
+            text,
+            target.message_id.as_deref(),
+        )
+        .await
     }
     /// Send a native location pin to the channel.
     ///
@@ -405,6 +536,44 @@ pub trait ChannelOutbound: Send + Sync {
         self.send_location(chan_account_key, to, latitude, longitude, title, reply_to)
             .await?;
         Ok(None)
+    }
+
+    /// Send a native location to a structured target.
+    async fn send_location_to_target(
+        &self,
+        target: &ChannelReplyTarget,
+        latitude: f64,
+        longitude: f64,
+        title: Option<&str>,
+    ) -> Result<()> {
+        self.send_location(
+            &target.chan_account_key,
+            &target.chat_id,
+            latitude,
+            longitude,
+            title,
+            target.message_id.as_deref(),
+        )
+        .await
+    }
+
+    /// Send a native location to a structured target and return a best-effort ref.
+    async fn send_location_to_target_with_ref(
+        &self,
+        target: &ChannelReplyTarget,
+        latitude: f64,
+        longitude: f64,
+        title: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        self.send_location_with_ref(
+            &target.chan_account_key,
+            &target.chat_id,
+            latitude,
+            longitude,
+            title,
+            target.message_id.as_deref(),
+        )
+        .await
     }
 }
 

@@ -320,6 +320,18 @@ impl SqliteSessionMetadata {
         .execute(pool)
         .await?;
 
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS session_buckets (
+                channel_type TEXT    NOT NULL,
+                bucket_key   TEXT    NOT NULL,
+                session_id   TEXT    NOT NULL,
+                updated_at   INTEGER NOT NULL,
+                PRIMARY KEY (channel_type, bucket_key)
+            )"#,
+        )
+        .execute(pool)
+        .await?;
+
         Ok(())
     }
 
@@ -576,6 +588,45 @@ impl SqliteSessionMetadata {
         .bind(channel_type)
         .bind(account_handle)
         .bind(chat_id)
+        .bind(session_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .ok();
+    }
+
+    pub async fn get_bucket_session_id(
+        &self,
+        channel_type: &str,
+        bucket_key: &str,
+    ) -> Option<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT session_id FROM session_buckets WHERE channel_type = ? AND bucket_key = ?",
+        )
+        .bind(channel_type)
+        .bind(bucket_key)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+    }
+
+    pub async fn set_bucket_session_id(
+        &self,
+        channel_type: &str,
+        bucket_key: &str,
+        session_id: &str,
+    ) {
+        let now = now_ms() as i64;
+        sqlx::query(
+            r#"INSERT INTO session_buckets (channel_type, bucket_key, session_id, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(channel_type, bucket_key) DO UPDATE SET
+                 session_id = excluded.session_id,
+                 updated_at = excluded.updated_at"#,
+        )
+        .bind(channel_type)
+        .bind(bucket_key)
         .bind(session_id)
         .bind(now)
         .execute(&self.pool)
@@ -995,6 +1046,42 @@ mod tests {
         // Different chat_id is independent.
         assert!(
             meta.get_active_session_id("telegram", "telegram:bot1", "456")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_bucket_session() {
+        let pool = sqlite_pool().await;
+        let meta = SqliteSessionMetadata::new(pool);
+
+        assert!(
+            meta.get_bucket_session_id("telegram", "group:peer:-1001")
+                .await
+                .is_none()
+        );
+
+        meta.set_bucket_session_id("telegram", "group:peer:-1001", "session:abc")
+            .await;
+        assert_eq!(
+            meta.get_bucket_session_id("telegram", "group:peer:-1001")
+                .await
+                .as_deref(),
+            Some("session:abc")
+        );
+
+        meta.set_bucket_session_id("telegram", "group:peer:-1001", "session:def")
+            .await;
+        assert_eq!(
+            meta.get_bucket_session_id("telegram", "group:peer:-1001")
+                .await
+                .as_deref(),
+            Some("session:def")
+        );
+
+        assert!(
+            meta.get_bucket_session_id("telegram", "group:peer:-1002")
                 .await
                 .is_none()
         );

@@ -4,9 +4,12 @@ use {
     base64::Engine,
     rand::Rng,
     teloxide::{
-        payloads::{SendLocationSetters, SendMessageSetters, SendVenueSetters},
+        payloads::{
+            SendAudioSetters, SendChatActionSetters, SendDocumentSetters, SendLocationSetters,
+            SendMessageSetters, SendPhotoSetters, SendVenueSetters, SendVoiceSetters,
+        },
         prelude::*,
-        types::{ChatAction, ChatId, InputFile, MessageId, ParseMode, ReplyParameters},
+        types::{ChatAction, ChatId, InputFile, MessageId, ParseMode, ReplyParameters, ThreadId},
     },
     tracing::{debug, info, warn},
 };
@@ -246,6 +249,7 @@ impl OutboundRetryConfig {
 struct SendMessageOptions {
     disable_notification: bool,
     reply_parameters: Option<ReplyParameters>,
+    thread_id: Option<ThreadId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,7 +261,11 @@ enum RetryDecision {
 
 #[async_trait]
 trait TelegramTextTransport: Send + Sync {
-    async fn send_typing(&self, chat_id: ChatId) -> std::result::Result<(), TypingRequestError>;
+    async fn send_typing(
+        &self,
+        chat_id: ChatId,
+        thread_id: Option<ThreadId>,
+    ) -> std::result::Result<(), TypingRequestError>;
 
     async fn send_message_html(
         &self,
@@ -280,8 +288,12 @@ struct BotTextTransport {
 
 #[async_trait]
 impl TelegramTextTransport for BotTextTransport {
-    async fn send_typing(&self, chat_id: ChatId) -> std::result::Result<(), TypingRequestError> {
-        send_chat_action_typing(&self.bot, chat_id).await
+    async fn send_typing(
+        &self,
+        chat_id: ChatId,
+        thread_id: Option<ThreadId>,
+    ) -> std::result::Result<(), TypingRequestError> {
+        send_chat_action_typing(&self.bot, chat_id, thread_id).await
     }
 
     async fn send_message_html(
@@ -296,6 +308,9 @@ impl TelegramTextTransport for BotTextTransport {
             .parse_mode(ParseMode::Html);
         if options.disable_notification {
             req = req.disable_notification(true);
+        }
+        if let Some(thread_id) = options.thread_id {
+            req = req.message_thread_id(thread_id);
         }
         if let Some(rp) = options.reply_parameters {
             req = req.reply_parameters(rp);
@@ -338,13 +353,13 @@ fn retry_after_secs(e: &teloxide::RequestError) -> Option<u64> {
 pub(crate) async fn send_chat_action_typing(
     bot: &teloxide::Bot,
     chat_id: ChatId,
+    thread_id: Option<ThreadId>,
 ) -> std::result::Result<(), TypingRequestError> {
-    match tokio::time::timeout(
-        TELEGRAM_TYPING_REQUEST_TIMEOUT,
-        bot.send_chat_action(chat_id, ChatAction::Typing),
-    )
-    .await
-    {
+    let mut req = bot.send_chat_action(chat_id, ChatAction::Typing);
+    if let Some(thread_id) = thread_id {
+        req = req.message_thread_id(thread_id);
+    }
+    match tokio::time::timeout(TELEGRAM_TYPING_REQUEST_TIMEOUT, req).await {
         Ok(result) => result.map(|_| ()).map_err(TypingRequestError::Request),
         Err(_) => Err(TypingRequestError::Timeout),
     }
@@ -355,10 +370,11 @@ async fn send_typing_keepalive<T: TelegramTextTransport + ?Sized>(
     account_handle: &str,
     to: &str,
     chat_id: ChatId,
+    thread_id: Option<ThreadId>,
     op: &'static str,
     typing_failed: &mut bool,
 ) {
-    match transport.send_typing(chat_id).await {
+    match transport.send_typing(chat_id, thread_id).await {
         Ok(()) => {
             if *typing_failed {
                 info!(
@@ -506,6 +522,33 @@ impl TelegramOutbound {
             );
         }
         rp
+    }
+
+    fn thread_id(
+        &self,
+        account_handle: &str,
+        chat_id_text: &str,
+        op: &str,
+        thread_id: Option<&str>,
+    ) -> Option<ThreadId> {
+        let Some(thread_id) = thread_id else {
+            return None;
+        };
+        match thread_id.parse::<i32>() {
+            Ok(thread_id) => Some(ThreadId(MessageId(thread_id))),
+            Err(_) => {
+                warn!(
+                    event = "telegram.outbound.thread_target_invalid",
+                    op,
+                    account_handle,
+                    chat_id = chat_id_text,
+                    thread_id = ?thread_id,
+                    reason_code = "thread_id_invalid",
+                    "invalid thread id; sending without topic targeting"
+                );
+                None
+            },
+        }
     }
 
     async fn send_message_with_retry<T: TelegramTextTransport>(
@@ -699,17 +742,19 @@ impl TelegramOutbound {
         to: &str,
         text: &str,
         reply_to: Option<&str>,
+        thread_id: Option<&str>,
         silent: bool,
     ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_handle)?;
         let retry_cfg = self.get_retry_config(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_handle, to, "send_text", reply_to);
+        let thread_id = self.thread_id(account_handle, to, "send_text", thread_id);
         let transport = BotTextTransport { bot };
 
         // Send typing indicator
         if !silent {
-            if let Err(e) = transport.send_typing(chat_id).await {
+            if let Err(e) = transport.send_typing(chat_id, thread_id).await {
                 let reason_code = match &e {
                     TypingRequestError::Request(teloxide::RequestError::Network(err))
                         if err.is_timeout() || err.is_connect() =>
@@ -758,6 +803,7 @@ impl TelegramOutbound {
                     SendMessageOptions {
                         disable_notification: silent,
                         reply_parameters: (i == 0).then(|| rp.clone()).flatten(),
+                        thread_id,
                     },
                     Some(if i == 0 {
                         OutboundDeliveryState::FirstChunkUnsent
@@ -796,15 +842,17 @@ impl TelegramOutbound {
         text: &str,
         suffix_html: &str,
         reply_to: Option<&str>,
+        thread_id: Option<&str>,
     ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_handle)?;
         let retry_cfg = self.get_retry_config(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_handle, to, "send_text_with_suffix", reply_to);
+        let thread_id = self.thread_id(account_handle, to, "send_text_with_suffix", thread_id);
         let transport = BotTextTransport { bot };
 
         // Send typing indicator
-        if let Err(e) = transport.send_typing(chat_id).await {
+        if let Err(e) = transport.send_typing(chat_id, thread_id).await {
             let reason_code = match &e {
                 TypingRequestError::Request(teloxide::RequestError::Network(err))
                     if err.is_timeout() || err.is_connect() =>
@@ -863,6 +911,7 @@ impl TelegramOutbound {
                             SendMessageOptions {
                                 disable_notification: false,
                                 reply_parameters: (i == 0).then(|| rp.clone()).flatten(),
+                                thread_id,
                             },
                             Some(if i == 0 {
                                 OutboundDeliveryState::FirstChunkUnsent
@@ -894,6 +943,7 @@ impl TelegramOutbound {
                             SendMessageOptions {
                                 disable_notification: true,
                                 reply_parameters: None,
+                                thread_id: None,
                             },
                             Some(OutboundDeliveryState::PartialSent),
                             reply_to,
@@ -931,6 +981,7 @@ impl TelegramOutbound {
                     SendMessageOptions {
                         disable_notification: false,
                         reply_parameters: (i == 0).then(|| rp.clone()).flatten(),
+                        thread_id,
                     },
                     Some(if i == 0 {
                         OutboundDeliveryState::FirstChunkUnsent
@@ -968,10 +1019,12 @@ impl TelegramOutbound {
         to: &str,
         payload: &ReplyPayload,
         reply_to: Option<&str>,
+        thread_id: Option<&str>,
     ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_handle, to, "send_media", reply_to);
+        let parsed_thread_id = self.thread_id(account_handle, to, "send_media", thread_id);
         let (caption, caption_overflow) = split_caption_for_telegram(&payload.text);
         let media_mime = payload
             .media
@@ -1020,6 +1073,9 @@ impl TelegramOutbound {
                 if media.mime_type.starts_with("image/") {
                     let input = InputFile::memory(bytes.clone()).file_name(filename.clone());
                     let mut req = bot.send_photo(chat_id, input);
+                    if let Some(thread_id) = parsed_thread_id {
+                        req = req.message_thread_id(thread_id);
+                    }
                     if !caption.is_empty() {
                         req = req.caption(caption);
                     }
@@ -1073,6 +1129,9 @@ impl TelegramOutbound {
                                 );
                                 let input = InputFile::memory(bytes).file_name(filename);
                                 let mut req = bot.send_document(chat_id, input);
+                                if let Some(thread_id) = parsed_thread_id {
+                                    req = req.message_thread_id(thread_id);
+                                }
                                 if !caption.is_empty() {
                                     req = req.caption(caption);
                                 }
@@ -1121,6 +1180,9 @@ impl TelegramOutbound {
                 if media.mime_type == "audio/ogg" {
                     let input = InputFile::memory(bytes).file_name("voice.ogg");
                     let mut req = bot.send_voice(chat_id, input);
+                    if let Some(thread_id) = parsed_thread_id {
+                        req = req.message_thread_id(thread_id);
+                    }
                     if !caption.is_empty() {
                         req = req.caption(caption);
                     }
@@ -1158,6 +1220,9 @@ impl TelegramOutbound {
                 if media.mime_type.starts_with("audio/") {
                     let input = InputFile::memory(bytes).file_name("audio.mp3");
                     let mut req = bot.send_audio(chat_id, input);
+                    if let Some(thread_id) = parsed_thread_id {
+                        req = req.message_thread_id(thread_id);
+                    }
                     if !caption.is_empty() {
                         req = req.caption(caption);
                     }
@@ -1195,6 +1260,9 @@ impl TelegramOutbound {
 
                 let input = InputFile::memory(bytes).file_name(filename);
                 let mut req = bot.send_document(chat_id, input);
+                if let Some(thread_id) = parsed_thread_id {
+                    req = req.message_thread_id(thread_id);
+                }
                 if !caption.is_empty() {
                     req = req.caption(caption);
                 }
@@ -1235,6 +1303,9 @@ impl TelegramOutbound {
             let sent = match media.mime_type.as_str() {
                 t if t.starts_with("image/") => {
                     let mut req = bot.send_photo(chat_id, input);
+                    if let Some(thread_id) = parsed_thread_id {
+                        req = req.message_thread_id(thread_id);
+                    }
                     if !caption.is_empty() {
                         req = req.caption(caption);
                     }
@@ -1254,6 +1325,9 @@ impl TelegramOutbound {
                 },
                 "audio/ogg" => {
                     let mut req = bot.send_voice(chat_id, input);
+                    if let Some(thread_id) = parsed_thread_id {
+                        req = req.message_thread_id(thread_id);
+                    }
                     if !caption.is_empty() {
                         req = req.caption(caption);
                     }
@@ -1273,6 +1347,9 @@ impl TelegramOutbound {
                 },
                 t if t.starts_with("audio/") => {
                     let mut req = bot.send_audio(chat_id, input);
+                    if let Some(thread_id) = parsed_thread_id {
+                        req = req.message_thread_id(thread_id);
+                    }
                     if !caption.is_empty() {
                         req = req.caption(caption);
                     }
@@ -1292,6 +1369,9 @@ impl TelegramOutbound {
                 },
                 _ => {
                     let mut req = bot.send_document(chat_id, input);
+                    if let Some(thread_id) = parsed_thread_id {
+                        req = req.message_thread_id(thread_id);
+                    }
                     if !caption.is_empty() {
                         req = req.caption(caption);
                     }
@@ -1331,7 +1411,14 @@ impl TelegramOutbound {
 
         if !payload.text.is_empty() {
             let sent = self
-                .send_text_inner(account_handle, to, &payload.text, reply_to, false)
+                .send_text_inner(
+                    account_handle,
+                    to,
+                    &payload.text,
+                    reply_to,
+                    thread_id,
+                    false,
+                )
                 .await?;
             return Ok(sent);
         }
@@ -1347,10 +1434,12 @@ impl TelegramOutbound {
         longitude: f64,
         title: Option<&str>,
         reply_to: Option<&str>,
+        thread_id: Option<&str>,
     ) -> Result<Option<MessageId>> {
         let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_handle, to, "send_location", reply_to);
+        let thread_id = self.thread_id(account_handle, to, "send_location", thread_id);
         info!(
             account_handle,
             chat_id = to,
@@ -1365,12 +1454,18 @@ impl TelegramOutbound {
             // Venue shows the place name in the chat bubble.
             let address = format!("{latitude:.6}, {longitude:.6}");
             let mut req = bot.send_venue(chat_id, latitude, longitude, name, address);
+            if let Some(thread_id) = thread_id {
+                req = req.message_thread_id(thread_id);
+            }
             if let Some(ref rp) = rp {
                 req = req.reply_parameters(rp.clone());
             }
             req.await?
         } else {
             let mut req = bot.send_location(chat_id, latitude, longitude);
+            if let Some(thread_id) = thread_id {
+                req = req.message_thread_id(thread_id);
+            }
             if let Some(ref rp) = rp {
                 req = req.reply_parameters(rp.clone());
             }
@@ -1428,7 +1523,7 @@ impl TelegramOutbound {
         }
         let reply_to = reply_to_message_id.0.to_string();
         let _ = self
-            .send_text_inner(account_handle, to, overflow, Some(&reply_to), false)
+            .send_text_inner(account_handle, to, overflow, Some(&reply_to), None, false)
             .await?;
         Ok(())
     }
@@ -1444,7 +1539,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_text_inner(account_handle, to, text, reply_to, false)
+            .send_text_inner(account_handle, to, text, reply_to, None, false)
             .await?;
         Ok(())
     }
@@ -1457,7 +1552,45 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_text_inner(account_handle, to, text, reply_to, false)
+            .send_text_inner(account_handle, to, text, reply_to, None, false)
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
+    }
+
+    async fn send_text_to_target(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        text: &str,
+    ) -> Result<()> {
+        let _ = self
+            .send_text_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                text,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+                false,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn send_text_to_target_with_ref(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        text: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_text_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                text,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+                false,
+            )
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
@@ -1473,7 +1606,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_text_with_suffix_inner(account_handle, to, text, suffix_html, reply_to)
+            .send_text_with_suffix_inner(account_handle, to, text, suffix_html, reply_to, None)
             .await?;
         Ok(())
     }
@@ -1487,7 +1620,47 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_text_with_suffix_inner(account_handle, to, text, suffix_html, reply_to)
+            .send_text_with_suffix_inner(account_handle, to, text, suffix_html, reply_to, None)
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
+    }
+
+    async fn send_text_with_suffix_to_target(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        text: &str,
+        suffix_html: &str,
+    ) -> Result<()> {
+        let _ = self
+            .send_text_with_suffix_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                text,
+                suffix_html,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn send_text_with_suffix_to_target_with_ref(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        text: &str,
+        suffix_html: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_text_with_suffix_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                text,
+                suffix_html,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+            )
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
@@ -1497,7 +1670,23 @@ impl ChannelOutbound for TelegramOutbound {
     async fn send_typing(&self, account_handle: &str, to: &str) -> Result<()> {
         let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
-        send_chat_action_typing(&bot, chat_id).await?;
+        send_chat_action_typing(&bot, chat_id, None).await?;
+        Ok(())
+    }
+
+    async fn send_typing_to_target(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+    ) -> Result<()> {
+        let bot = self.get_bot(&target.chan_account_key)?;
+        let chat_id = ChatId(target.chat_id.parse::<i64>()?);
+        let thread_id = self.thread_id(
+            &target.chan_account_key,
+            &target.chat_id,
+            "send_typing",
+            target.thread_id.as_deref(),
+        );
+        send_chat_action_typing(&bot, chat_id, thread_id).await?;
         Ok(())
     }
 
@@ -1509,7 +1698,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_text_inner(account_handle, to, text, reply_to, true)
+            .send_text_inner(account_handle, to, text, reply_to, None, true)
             .await?;
         Ok(())
     }
@@ -1522,7 +1711,45 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_text_inner(account_handle, to, text, reply_to, true)
+            .send_text_inner(account_handle, to, text, reply_to, None, true)
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
+    }
+
+    async fn send_text_silent_to_target(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        text: &str,
+    ) -> Result<()> {
+        let _ = self
+            .send_text_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                text,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+                true,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn send_text_silent_to_target_with_ref(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        text: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_text_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                text,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+                true,
+            )
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
@@ -1537,7 +1764,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_media_inner(account_handle, to, payload, reply_to)
+            .send_media_inner(account_handle, to, payload, reply_to, None)
             .await?;
         Ok(())
     }
@@ -1550,7 +1777,43 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_media_inner(account_handle, to, payload, reply_to)
+            .send_media_inner(account_handle, to, payload, reply_to, None)
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
+    }
+
+    async fn send_media_to_target(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        payload: &ReplyPayload,
+    ) -> Result<()> {
+        let _ = self
+            .send_media_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                payload,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn send_media_to_target_with_ref(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        payload: &ReplyPayload,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_media_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                payload,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+            )
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
@@ -1567,7 +1830,15 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let _ = self
-            .send_location_inner(account_handle, to, latitude, longitude, title, reply_to)
+            .send_location_inner(
+                account_handle,
+                to,
+                latitude,
+                longitude,
+                title,
+                reply_to,
+                None,
+            )
             .await?;
         Ok(())
     }
@@ -1582,7 +1853,59 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<Option<SentMessageRef>> {
         let sent = self
-            .send_location_inner(account_handle, to, latitude, longitude, title, reply_to)
+            .send_location_inner(
+                account_handle,
+                to,
+                latitude,
+                longitude,
+                title,
+                reply_to,
+                None,
+            )
+            .await?;
+        Ok(sent.map(|id| SentMessageRef {
+            message_id: id.0.to_string(),
+        }))
+    }
+
+    async fn send_location_to_target(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        latitude: f64,
+        longitude: f64,
+        title: Option<&str>,
+    ) -> Result<()> {
+        let _ = self
+            .send_location_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                latitude,
+                longitude,
+                title,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn send_location_to_target_with_ref(
+        &self,
+        target: &moltis_channels::ChannelReplyTarget,
+        latitude: f64,
+        longitude: f64,
+        title: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        let sent = self
+            .send_location_inner(
+                &target.chan_account_key,
+                &target.chat_id,
+                latitude,
+                longitude,
+                title,
+                target.message_id.as_deref(),
+                target.thread_id.as_deref(),
+            )
             .await?;
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
@@ -1600,7 +1923,7 @@ impl TelegramOutbound {
     ) -> Result<()> {
         let chat_id = ChatId(to.parse::<i64>()?);
 
-        send_chat_action_typing(bot, chat_id).await?;
+        send_chat_action_typing(bot, chat_id, None).await?;
 
         if payload.media.is_some() {
             // Use the media path — but we need account_id, which we don't have here.
@@ -1681,6 +2004,7 @@ impl TelegramOutbound {
                     SendMessageOptions {
                         disable_notification: false,
                         reply_parameters: None,
+                        thread_id: None,
                     },
                     Some(OutboundDeliveryState::PlaceholderUnsent),
                     None,
@@ -1794,6 +2118,7 @@ impl TelegramOutbound {
                             SendMessageOptions {
                                 disable_notification: false,
                                 reply_parameters: None,
+                                thread_id: None,
                             },
                             Some(OutboundDeliveryState::PartialSent),
                             None,
@@ -1817,6 +2142,7 @@ impl TelegramOutbound {
                 account_handle,
                 to,
                 chat_id,
+                None,
                 "send_stream",
                 &mut typing_failed,
             )
@@ -1835,6 +2161,7 @@ impl TelegramOutbound {
                     account_handle,
                     to,
                     chat_id,
+                    None,
                     "send_stream",
                     &mut typing_failed,
                 )
@@ -1888,6 +2215,8 @@ mod tests {
         typing_calls: Mutex<usize>,
         last_send_text: Mutex<Option<String>>,
         last_edit_text: Mutex<Option<String>>,
+        last_typing_thread_id: Mutex<Option<i32>>,
+        last_send_thread_id: Mutex<Option<i32>>,
     }
 
     impl MockTextTransport {
@@ -1923,8 +2252,10 @@ mod tests {
         async fn send_typing(
             &self,
             _chat_id: ChatId,
+            thread_id: Option<ThreadId>,
         ) -> std::result::Result<(), TypingRequestError> {
             *self.typing_calls.lock().unwrap() += 1;
+            *self.last_typing_thread_id.lock().unwrap() = thread_id.map(|id| id.0.0);
             Ok(())
         }
 
@@ -1936,6 +2267,7 @@ mod tests {
         ) -> std::result::Result<MessageId, teloxide::RequestError> {
             *self.send_calls.lock().unwrap() += 1;
             *self.last_send_text.lock().unwrap() = Some(_text.to_string());
+            *self.last_send_thread_id.lock().unwrap() = _options.thread_id.map(|id| id.0.0);
             match self.send_results.lock().unwrap().pop_front() {
                 Some(MockSendResult::Ok(id)) => Ok(id),
                 Some(MockSendResult::Err(err)) => Err(err),
@@ -2263,6 +2595,7 @@ mod tests {
                 SendMessageOptions {
                     disable_notification: false,
                     reply_parameters: None,
+                    thread_id: None,
                 },
                 Some(OutboundDeliveryState::FirstChunkUnsent),
                 None,
@@ -2277,6 +2610,41 @@ mod tests {
 
         assert_eq!(sent, MessageId(42));
         assert_eq!(transport.send_calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn telegram_outbound_send_message_preserves_thread_id() {
+        let outbound = empty_outbound();
+        let transport =
+            MockTextTransport::with_send_results(vec![MockSendResult::Ok(MessageId(42))]);
+
+        let sent = outbound
+            .send_message_with_retry(
+                &transport,
+                retry_cfg(1),
+                "acct",
+                ChatId(1),
+                "1",
+                TelegramOutboundOp::SendMessage,
+                "hello",
+                SendMessageOptions {
+                    disable_notification: false,
+                    reply_parameters: None,
+                    thread_id: Some(ThreadId(MessageId(7))),
+                },
+                Some(OutboundDeliveryState::FirstChunkUnsent),
+                None,
+                Some(0),
+                Some(1),
+                None,
+                5,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(sent, MessageId(42));
+        assert_eq!(*transport.last_send_thread_id.lock().unwrap(), Some(7));
     }
 
     #[tokio::test]
@@ -2299,6 +2667,7 @@ mod tests {
                 SendMessageOptions {
                     disable_notification: false,
                     reply_parameters: None,
+                    thread_id: None,
                 },
                 Some(OutboundDeliveryState::FirstChunkUnsent),
                 None,
@@ -2334,6 +2703,7 @@ mod tests {
                 SendMessageOptions {
                     disable_notification: false,
                     reply_parameters: None,
+                    thread_id: None,
                 },
                 Some(OutboundDeliveryState::FirstChunkUnsent),
                 None,
@@ -2371,6 +2741,7 @@ mod tests {
                 SendMessageOptions {
                     disable_notification: false,
                     reply_parameters: None,
+                    thread_id: None,
                 },
                 Some(OutboundDeliveryState::PartialSent),
                 None,
@@ -2556,6 +2927,7 @@ mod tests {
         async fn send_typing(
             &self,
             _chat_id: ChatId,
+            _thread_id: Option<ThreadId>,
         ) -> std::result::Result<(), TypingRequestError> {
             self.typing_started.notify_waiters();
             std::future::pending::<()>().await;

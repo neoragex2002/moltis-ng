@@ -47,7 +47,7 @@ fn default_chan_chat_key(target: &ChannelReplyTarget) -> String {
         target.chan_type.as_str(),
         chan_user_id,
         &target.chat_id,
-        None,
+        target.thread_id.as_deref(),
     )
 }
 
@@ -55,6 +55,13 @@ async fn resolve_channel_session_id(
     target: &ChannelReplyTarget,
     metadata: &SqliteSessionMetadata,
 ) -> Option<String> {
+    if let Some(bucket_key) = target.bucket_key.as_deref()
+        && let Some(session_id) = metadata
+            .get_bucket_session_id(target.chan_type.as_str(), bucket_key)
+            .await
+    {
+        return Some(session_id);
+    }
     metadata
         .get_active_session_id(
             target.chan_type.as_str(),
@@ -72,6 +79,11 @@ async fn ensure_channel_session_id(
         return id;
     }
     let new_id = format!("session:{}", uuid::Uuid::new_v4());
+    if let Some(bucket_key) = target.bucket_key.as_deref() {
+        metadata
+            .set_bucket_session_id(target.chan_type.as_str(), bucket_key, &new_id)
+            .await;
+    }
     metadata
         .set_active_session_id(
             target.chan_type.as_str(),
@@ -83,26 +95,106 @@ async fn ensure_channel_session_id(
     new_id
 }
 
+struct ChannelBridgeSession {
+    chan_chat_key: String,
+    session_id: String,
+}
+
+async fn resolve_channel_bridge_session(
+    state: &GatewayState,
+    target: &ChannelReplyTarget,
+) -> ChannelBridgeSession {
+    let chan_chat_key = default_chan_chat_key(target);
+    let session_id = if let Some(ref sm) = state.services.session_metadata {
+        ensure_channel_session_id(target, sm).await
+    } else {
+        target
+            .bucket_key
+            .clone()
+            .unwrap_or_else(|| chan_chat_key.clone())
+    };
+
+    ChannelBridgeSession {
+        chan_chat_key,
+        session_id,
+    }
+}
+
+async fn persist_channel_bridge_binding(
+    state: &GatewayState,
+    target: &ChannelReplyTarget,
+    session_id: &str,
+) {
+    let Ok(binding_json) = serde_json::to_string(target) else {
+        return;
+    };
+    let Some(ref session_meta) = state.services.session_metadata else {
+        return;
+    };
+
+    let entry = session_meta.get(session_id).await;
+    if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
+        let label = if target.chan_type == ChannelType::Telegram {
+            let snapshots = state
+                .services
+                .channel
+                .telegram_bus_accounts_snapshot()
+                .await;
+            let u = crate::session_labels::resolve_telegram_bot_username(
+                &snapshots,
+                &target.chan_account_key,
+            )
+            .or(target.chan_user_name.as_deref());
+            crate::session_labels::format_telegram_session_label(
+                &target.chan_account_key,
+                u,
+                &target.chat_id,
+            )
+        } else {
+            session_id.to_string()
+        };
+        let _ = session_meta.upsert(session_id, Some(label)).await;
+    }
+
+    if let Some(bucket_key) = target.bucket_key.as_deref() {
+        session_meta
+            .set_bucket_session_id(target.chan_type.as_str(), bucket_key, session_id)
+            .await;
+    }
+    session_meta
+        .set_active_session_id(
+            target.chan_type.as_str(),
+            &target.chan_account_key,
+            &target.chat_id,
+            session_id,
+        )
+        .await;
+    session_meta
+        .set_channel_binding(session_id, Some(binding_json))
+        .await;
+}
+
 async fn run_with_telegram_typing_loop<T>(
     outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound>,
-    chan_account_key: String,
-    chat_id: String,
+    target: ChannelReplyTarget,
     op: &'static str,
     operation: impl Future<Output = T>,
 ) -> T {
     async fn send_typing_once(
         outbound: &Arc<dyn moltis_channels::plugin::ChannelOutbound>,
-        chan_account_key: &str,
-        chat_id: &str,
+        target: &ChannelReplyTarget,
         op: &'static str,
         typing_failed: &mut bool,
     ) {
-        match outbound.send_typing(chan_account_key, chat_id).await {
+        match outbound.send_typing_to_target(target).await {
             Ok(()) => {
                 if *typing_failed {
                     info!(
                         event = "telegram.typing.recovered",
-                        op, chan_account_key, chat_id, "typing indicator recovered"
+                        op,
+                        chan_account_key = target.chan_account_key,
+                        chat_id = target.chat_id,
+                        "typing indicator recovered"
                     );
                     *typing_failed = false;
                 }
@@ -112,8 +204,8 @@ async fn run_with_telegram_typing_loop<T>(
                     warn!(
                         event = "telegram.typing.failed",
                         op,
-                        chan_account_key,
-                        chat_id,
+                        chan_account_key = target.chan_account_key,
+                        chat_id = target.chat_id,
                         reason_code = "send_typing_failed",
                         error = %error,
                         "typing indicator failed"
@@ -123,8 +215,8 @@ async fn run_with_telegram_typing_loop<T>(
                     debug!(
                         event = "telegram.typing.failed",
                         op,
-                        chan_account_key,
-                        chat_id,
+                        chan_account_key = target.chan_account_key,
+                        chat_id = target.chat_id,
                         reason_code = "send_typing_failed",
                         "typing indicator still failing"
                     );
@@ -136,14 +228,7 @@ async fn run_with_telegram_typing_loop<T>(
     let operation = operation;
     let typing_loop = async {
         let mut typing_failed = false;
-        send_typing_once(
-            &outbound,
-            &chan_account_key,
-            &chat_id,
-            op,
-            &mut typing_failed,
-        )
-        .await;
+        send_typing_once(&outbound, &target, op, &mut typing_failed).await;
 
         let mut keepalive = tokio::time::interval_at(
             tokio::time::Instant::now() + TELEGRAM_TYPING_KEEPALIVE_INTERVAL,
@@ -153,14 +238,7 @@ async fn run_with_telegram_typing_loop<T>(
 
         loop {
             keepalive.tick().await;
-            send_typing_once(
-                &outbound,
-                &chan_account_key,
-                &chat_id,
-                op,
-                &mut typing_failed,
-            )
-            .await;
+            send_typing_once(&outbound, &target, op, &mut typing_failed).await;
         }
     };
 
@@ -175,25 +253,26 @@ async fn run_with_telegram_typing_loop<T>(
 
 fn spawn_telegram_typing_loop_until(
     outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound>,
-    chan_account_key: String,
-    chat_id: String,
+    target: ChannelReplyTarget,
     op: &'static str,
     completion: impl Future<Output = ()> + Send + 'static,
 ) {
     tokio::spawn(async move {
         async fn send_typing_once(
             outbound: &Arc<dyn moltis_channels::plugin::ChannelOutbound>,
-            chan_account_key: &str,
-            chat_id: &str,
+            target: &ChannelReplyTarget,
             op: &'static str,
             typing_failed: &mut bool,
         ) {
-            match outbound.send_typing(chan_account_key, chat_id).await {
+            match outbound.send_typing_to_target(target).await {
                 Ok(()) => {
                     if *typing_failed {
                         info!(
                             event = "telegram.typing.recovered",
-                            op, chan_account_key, chat_id, "typing indicator recovered"
+                            op,
+                            chan_account_key = target.chan_account_key,
+                            chat_id = target.chat_id,
+                            "typing indicator recovered"
                         );
                         *typing_failed = false;
                     }
@@ -201,21 +280,21 @@ fn spawn_telegram_typing_loop_until(
                 Err(error) => {
                     if !*typing_failed {
                         warn!(
-                            event = "telegram.typing.failed",
-                            op,
-                            chan_account_key,
-                            chat_id,
-                            reason_code = "send_typing_failed",
-                            error = %error,
-                            "typing indicator failed"
+                        event = "telegram.typing.failed",
+                        op,
+                        chan_account_key = target.chan_account_key,
+                        chat_id = target.chat_id,
+                        reason_code = "send_typing_failed",
+                        error = %error,
+                        "typing indicator failed"
                         );
                         *typing_failed = true;
                     } else {
                         debug!(
                             event = "telegram.typing.failed",
                             op,
-                            chan_account_key,
-                            chat_id,
+                            chan_account_key = target.chan_account_key,
+                            chat_id = target.chat_id,
                             reason_code = "send_typing_failed",
                             "typing indicator still failing"
                         );
@@ -231,8 +310,7 @@ fn spawn_telegram_typing_loop_until(
             _ = &mut completion => return,
             _ = send_typing_once(
                 &outbound,
-                &chan_account_key,
-                &chat_id,
+                &target,
                 op,
                 &mut typing_failed,
             ) => {}
@@ -250,8 +328,7 @@ fn spawn_telegram_typing_loop_until(
                 _ = keepalive.tick() => {
                     send_typing_once(
                         &outbound,
-                        &chan_account_key,
-                        &chat_id,
+                        &target,
                         op,
                         &mut typing_failed,
                     )
@@ -307,12 +384,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
         meta: ChannelMessageMeta,
     ) {
         if let Some(state) = self.state.get() {
-            let chan_chat_key = default_chan_chat_key(&reply_to);
-            let session_id = if let Some(ref sm) = state.services.session_metadata {
-                ensure_channel_session_id(&reply_to, sm).await
-            } else {
-                chan_chat_key.clone()
-            };
+            let bridge = resolve_channel_bridge_session(state, &reply_to).await;
+            let chan_chat_key = bridge.chan_chat_key;
+            let session_id = bridge.session_id;
             let trigger_id = crate::ids::new_trigger_id();
 
             // Broadcast a "chat" event so the web UI shows the user message
@@ -348,41 +422,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 .push_channel_reply(&session_id, &trigger_id, reply_to.clone())
                 .await;
 
-            // Persist channel binding so web UI messages on this session
-            // can be echoed back to the channel.
-            if let Ok(binding_json) = serde_json::to_string(&reply_to)
-                && let Some(ref session_meta) = state.services.session_metadata
-            {
-                // Ensure the session row exists and label it on first use.
-                // `set_channel_binding` is an UPDATE, so the row must exist
-                // before we can set the binding column.
-                let entry = session_meta.get(&session_id).await;
-                if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
-                    let label = if reply_to.chan_type == ChannelType::Telegram {
-                        let snapshots = state
-                            .services
-                            .channel
-                            .telegram_bus_accounts_snapshot()
-                            .await;
-                        let u = crate::session_labels::resolve_telegram_bot_username(
-                            &snapshots,
-                            &reply_to.chan_account_key,
-                        )
-                        .or(reply_to.chan_user_name.as_deref());
-                        crate::session_labels::format_telegram_session_label(
-                            &reply_to.chan_account_key,
-                            u,
-                            &reply_to.chat_id,
-                        )
-                    } else {
-                        session_id.clone()
-                    };
-                    let _ = session_meta.upsert(&session_id, Some(label)).await;
-                }
-                session_meta
-                    .set_channel_binding(&session_id, Some(binding_json))
-                    .await;
-            }
+            persist_channel_bridge_binding(state, &reply_to, &session_id).await;
 
             let chat = state.chat().await;
             let mut params = serde_json::json!({
@@ -471,18 +511,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
             if let Some(outbound) = state.services.channel_outbound_arc() {
                 let feedback_outbound = Arc::clone(&outbound);
-                let chan_account_key = reply_to.chan_account_key.clone();
-                let chat_id = reply_to.chat_id.clone();
-                let reply_to_message_id = reply_to.message_id.clone();
+                let typing_target = reply_to.clone();
                 let failure_feedback_outbound = Arc::clone(&feedback_outbound);
-                let failure_chan_account_key = chan_account_key.clone();
-                let failure_chat_id = chat_id.clone();
+                let failure_target = reply_to.clone();
                 let failure_session_id = session_id.clone();
                 let failure_trigger_id = trigger_id.clone();
                 let send_result = run_with_telegram_typing_loop(
                     outbound,
-                    chan_account_key.clone(),
-                    chat_id.clone(),
+                    typing_target.clone(),
                     "dispatch_to_chat_start",
                     async move {
                         let send_result = chat.send(params).await;
@@ -491,12 +527,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             let error_msg =
                                 "⚠️ Something went wrong. Please try again.".to_string();
                             if let Err(send_err) = failure_feedback_outbound
-                                .send_text(
-                                    &failure_chan_account_key,
-                                    &failure_chat_id,
-                                    &error_msg,
-                                    reply_to_message_id.as_deref(),
-                                )
+                                .send_text_to_target(&failure_target, &error_msg)
                                 .await
                             {
                                 warn!("failed to send error back to channel: {send_err}");
@@ -520,8 +551,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             let typing_chat = state.chat().await;
                             spawn_telegram_typing_loop_until(
                                 feedback_outbound,
-                                chan_account_key,
-                                chat_id,
+                                typing_target,
                                 "dispatch_to_chat_run",
                                 async move {
                                     if let Err(error) =
@@ -574,12 +604,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
             return;
         };
 
-        let chan_chat_key = default_chan_chat_key(&reply_to);
-        let session_id = if let Some(ref sm) = state.services.session_metadata {
-            ensure_channel_session_id(&reply_to, sm).await
-        } else {
-            chan_chat_key.clone()
-        };
+        let bridge = resolve_channel_bridge_session(state, &reply_to).await;
+        let chan_chat_key = bridge.chan_chat_key;
+        let session_id = bridge.session_id;
 
         // Real-time UI: show the inbound message as "channel_user", but mark it ingest-only.
         let msg_index = if let Some(ref store) = state.services.session_store {
@@ -608,37 +635,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         .await;
 
         // Persist channel binding so the session is treated as channel-bound.
-        if let Ok(binding_json) = serde_json::to_string(&reply_to)
-            && let Some(ref session_meta) = state.services.session_metadata
-        {
-            // Ensure the session row exists and label it on first use.
-            let entry = session_meta.get(&session_id).await;
-            if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
-                let label = if reply_to.chan_type == ChannelType::Telegram {
-                    let snapshots = state
-                        .services
-                        .channel
-                        .telegram_bus_accounts_snapshot()
-                        .await;
-                    let u = crate::session_labels::resolve_telegram_bot_username(
-                        &snapshots,
-                        &reply_to.chan_account_key,
-                    )
-                    .or(reply_to.chan_user_name.as_deref());
-                    crate::session_labels::format_telegram_session_label(
-                        &reply_to.chan_account_key,
-                        u,
-                        &reply_to.chat_id,
-                    )
-                } else {
-                    session_id.clone()
-                };
-                let _ = session_meta.upsert(&session_id, Some(label)).await;
-            }
-            session_meta
-                .set_channel_binding(&session_id, Some(binding_json))
-                .await;
-        }
+        persist_channel_bridge_binding(state, &reply_to, &session_id).await;
 
         // If a channel default model is configured, persist it on first use so that
         // the next addressed message uses the expected model.
@@ -700,9 +697,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
     ) {
         warn!(
             channel_type,
-            account_handle,
-            reason,
-            "disabling local channel account"
+            account_handle, reason, "disabling local channel account"
         );
 
         if let Some(state) = self.state.get() {
@@ -902,15 +897,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             };
             if let Some(outbound) = state.services.channel_outbound_arc() {
                 let error_msg = "⚠️ This attachment type isn't supported yet.".to_string();
-                if let Err(_send_err) = outbound
-                    .send_text(
-                        &reply_to.chan_account_key,
-                        &reply_to.chat_id,
-                        &error_msg,
-                        reply_to.message_id.as_deref(),
-                    )
-                    .await
-                {
+                if let Err(_send_err) = outbound.send_text_to_target(&reply_to, &error_msg).await {
                     warn!(
                         event = "channel.user_feedback.failed",
                         chan_type = ?reply_to.chan_type,
@@ -929,12 +916,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
             return;
         };
 
-        let chan_chat_key = default_chan_chat_key(&reply_to);
-        let session_id = if let Some(ref sm) = state.services.session_metadata {
-            ensure_channel_session_id(&reply_to, sm).await
-        } else {
-            chan_chat_key.clone()
-        };
+        let bridge = resolve_channel_bridge_session(state, &reply_to).await;
+        let chan_chat_key = bridge.chan_chat_key;
+        let session_id = bridge.session_id;
         let trigger_id = crate::ids::new_trigger_id();
 
         // Build multimodal content array (OpenAI format)
@@ -1003,38 +987,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             .push_channel_reply(&session_id, &trigger_id, reply_to.clone())
             .await;
 
-        // Persist channel binding (ensure session row exists first —
-        // set_channel_binding is an UPDATE so the row must already be present).
-        if let Ok(binding_json) = serde_json::to_string(&reply_to)
-            && let Some(ref session_meta) = state.services.session_metadata
-        {
-            let entry = session_meta.get(&session_id).await;
-            if entry.as_ref().is_none_or(|e| e.channel_binding.is_none()) {
-                let label = if reply_to.chan_type == ChannelType::Telegram {
-                    let snapshots = state
-                        .services
-                        .channel
-                        .telegram_bus_accounts_snapshot()
-                        .await;
-                    let u = crate::session_labels::resolve_telegram_bot_username(
-                        &snapshots,
-                        &reply_to.chan_account_key,
-                    )
-                    .or(reply_to.chan_user_name.as_deref());
-                    crate::session_labels::format_telegram_session_label(
-                        &reply_to.chan_account_key,
-                        u,
-                        &reply_to.chat_id,
-                    )
-                } else {
-                    session_id.clone()
-                };
-                let _ = session_meta.upsert(&session_id, Some(label)).await;
-            }
-            session_meta
-                .set_channel_binding(&session_id, Some(binding_json))
-                .await;
-        }
+        persist_channel_bridge_binding(state, &reply_to, &session_id).await;
 
         let chat = state.chat().await;
         let mut params = serde_json::json!({
@@ -1116,18 +1069,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
         if let Some(outbound) = state.services.channel_outbound_arc() {
             let feedback_outbound = Arc::clone(&outbound);
-            let chan_account_key = reply_to.chan_account_key.clone();
-            let chat_id = reply_to.chat_id.clone();
-            let reply_to_message_id = reply_to.message_id.clone();
+            let typing_target = reply_to.clone();
             let failure_feedback_outbound = Arc::clone(&feedback_outbound);
-            let failure_chan_account_key = chan_account_key.clone();
-            let failure_chat_id = chat_id.clone();
+            let failure_target = reply_to.clone();
             let failure_session_id = session_id.clone();
             let failure_trigger_id = trigger_id.clone();
             let send_result = run_with_telegram_typing_loop(
                 outbound,
-                chan_account_key.clone(),
-                chat_id.clone(),
+                typing_target.clone(),
                 "dispatch_to_chat_with_attachments_start",
                 async move {
                     let send_result = chat.send(params).await;
@@ -1135,12 +1084,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         error!("channel dispatch_to_chat_with_attachments failed: {e}");
                         let error_msg = "⚠️ Something went wrong. Please try again.".to_string();
                         if let Err(send_err) = failure_feedback_outbound
-                            .send_text(
-                                &failure_chan_account_key,
-                                &failure_chat_id,
-                                &error_msg,
-                                reply_to_message_id.as_deref(),
-                            )
+                            .send_text_to_target(&failure_target, &error_msg)
                             .await
                         {
                             warn!("failed to send error back to channel: {send_err}");
@@ -1164,8 +1108,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         let typing_chat = state.chat().await;
                         spawn_telegram_typing_loop_until(
                             feedback_outbound,
-                            chan_account_key,
-                            chat_id,
+                            typing_target,
                             "dispatch_to_chat_with_attachments_run",
                             async move {
                                 if let Err(error) = typing_chat.wait_run_completion(&run_id).await {
@@ -1216,8 +1159,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
             .session_metadata
             .as_ref()
             .ok_or_else(|| anyhow!("session metadata not available"))?;
-        let chan_chat_key = default_chan_chat_key(&reply_to);
-        let session_id = ensure_channel_session_id(&reply_to, session_metadata).await;
+        let bridge = resolve_channel_bridge_session(state, &reply_to).await;
+        let chan_chat_key = bridge.chan_chat_key;
+        let session_id = bridge.session_id;
         let chat = state.chat().await;
 
         // Extract the command name (first word) and args (rest).
@@ -1281,6 +1225,11 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         &new_id,
                     )
                     .await;
+                if let Some(bucket_key) = reply_to.bucket_key.as_deref() {
+                    session_metadata
+                        .set_bucket_session_id(reply_to.chan_type.as_str(), bucket_key, &new_id)
+                        .await;
+                }
 
                 info!(
                     chan_chat_key = %chan_chat_key,
@@ -1522,6 +1471,15 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             &target_session.key,
                         )
                         .await;
+                    if let Some(bucket_key) = reply_to.bucket_key.as_deref() {
+                        session_metadata
+                            .set_bucket_session_id(
+                                reply_to.chan_type.as_str(),
+                                bucket_key,
+                                &target_session.key,
+                            )
+                            .await;
+                    }
 
                     let label = target_session
                         .label
@@ -1934,6 +1892,8 @@ mod tests {
             chan_user_name: None,
             chat_id: "12345".into(),
             message_id: None,
+            thread_id: None,
+            bucket_key: None,
         };
         assert_eq!(default_chan_chat_key(&target), "telegram:bot1:12345");
     }
@@ -1946,6 +1906,8 @@ mod tests {
             chan_user_name: None,
             chat_id: "12345".into(),
             message_id: None,
+            thread_id: None,
+            bucket_key: None,
         };
         assert_eq!(default_chan_chat_key(&target), "telegram:8576199590:12345");
     }
@@ -1958,8 +1920,48 @@ mod tests {
             chan_user_name: None,
             chat_id: "-100999".into(),
             message_id: None,
+            thread_id: None,
+            bucket_key: None,
         };
         assert_eq!(default_chan_chat_key(&target), "telegram:bot1:-100999");
+    }
+
+    #[test]
+    fn channel_session_key_group_topic_includes_thread_id() {
+        let target = ChannelReplyTarget {
+            chan_type: ChannelType::Telegram,
+            chan_account_key: "telegram:bot1".into(),
+            chan_user_name: None,
+            chat_id: "-100999".into(),
+            message_id: None,
+            thread_id: Some("77".into()),
+            bucket_key: None,
+        };
+        assert_eq!(default_chan_chat_key(&target), "telegram:bot1:-100999:77");
+    }
+
+    #[tokio::test]
+    async fn bucket_session_mapping_takes_precedence_over_active_session() {
+        let metadata = sqlite_metadata().await;
+        metadata
+            .set_active_session_id("telegram", "telegram:bot1", "-100999", "session:old")
+            .await;
+        metadata
+            .set_bucket_session_id("telegram", "group:peer:-100999", "session:new")
+            .await;
+
+        let target = ChannelReplyTarget {
+            chan_type: ChannelType::Telegram,
+            chan_account_key: "telegram:bot1".into(),
+            chan_user_name: None,
+            chat_id: "-100999".into(),
+            message_id: None,
+            thread_id: None,
+            bucket_key: Some("group:peer:-100999".into()),
+        };
+
+        let session_id = resolve_channel_session_id(&target, metadata.as_ref()).await;
+        assert_eq!(session_id.as_deref(), Some("session:new"));
     }
 
     #[test]
@@ -2163,6 +2165,8 @@ mod tests {
                 chan_user_name: None,
                 chat_id: "123".into(),
                 message_id: Some("1".into()),
+                thread_id: None,
+                bucket_key: None,
             },
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
@@ -2384,6 +2388,8 @@ mod tests {
                 chan_user_name: None,
                 chat_id: "123".into(),
                 message_id: Some("1".into()),
+                thread_id: None,
+                bucket_key: None,
             },
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
@@ -2448,6 +2454,8 @@ mod tests {
                         chan_user_name: None,
                         chat_id: "123".into(),
                         message_id: Some("1".into()),
+                        thread_id: None,
+                        bucket_key: None,
                     },
                     ChannelMessageMeta {
                         chan_type: ChannelType::Telegram,
@@ -2536,6 +2544,8 @@ mod tests {
                         chan_user_name: None,
                         chat_id: "123".into(),
                         message_id: Some("1".into()),
+                        thread_id: None,
+                        bucket_key: None,
                     },
                     ChannelMessageMeta {
                         chan_type: ChannelType::Telegram,
@@ -2645,6 +2655,8 @@ mod tests {
                         chan_user_name: None,
                         chat_id: "123".into(),
                         message_id: Some("1".into()),
+                        thread_id: None,
+                        bucket_key: None,
                     },
                     ChannelMessageMeta {
                         chan_type: ChannelType::Telegram,
@@ -2715,6 +2727,8 @@ mod tests {
                 chan_user_name: None,
                 chat_id: "123".into(),
                 message_id: Some("1".into()),
+                thread_id: None,
+                bucket_key: None,
             },
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
@@ -2774,6 +2788,8 @@ mod tests {
                 chan_user_name: None,
                 chat_id: "123".into(),
                 message_id: Some("1".into()),
+                thread_id: None,
+                bucket_key: None,
             },
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
@@ -2874,6 +2890,8 @@ mod tests {
             snapshots: vec![TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
                 chan_user_name: Some("lovely_apple_bot".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
@@ -2910,6 +2928,8 @@ mod tests {
                 chan_user_name: None,
                 chat_id: "123".into(),
                 message_id: None,
+                thread_id: None,
+                bucket_key: None,
             },
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
@@ -2943,6 +2963,8 @@ mod tests {
             snapshots: vec![TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
                 chan_user_name: Some("lovely_apple_bot".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
@@ -2975,6 +2997,8 @@ mod tests {
                 chan_user_name: None,
                 chat_id: "-100".into(),
                 message_id: None,
+                thread_id: None,
+                bucket_key: None,
             },
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
@@ -3009,6 +3033,8 @@ mod tests {
             snapshots: vec![TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
                 chan_user_name: None,
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
                 relay_chain_enabled: false,
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
@@ -3041,6 +3067,8 @@ mod tests {
                 chan_user_name: None,
                 chat_id: "123".into(),
                 message_id: None,
+                thread_id: None,
+                bucket_key: None,
             },
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,

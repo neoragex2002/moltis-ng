@@ -96,6 +96,8 @@ impl TelegramPlugin {
             .map(|(account_handle, s)| TelegramBusAccountSnapshot {
                 account_handle: account_handle.clone(),
                 chan_user_name: s.bot_username.clone(),
+                dm_scope: s.config.dm_scope.clone(),
+                group_scope: s.config.group_scope.clone(),
                 relay_chain_enabled: s.config.relay_chain_enabled,
                 relay_hop_limit: s.config.relay_hop_limit,
                 epoch_relay_budget: s.config.epoch_relay_budget,

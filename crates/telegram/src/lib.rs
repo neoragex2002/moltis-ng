@@ -4,6 +4,7 @@
 //! messages via the Telegram Bot API, including edit-in-place streaming.
 
 pub mod access;
+pub mod adapter;
 pub mod bot;
 pub mod config;
 pub mod handlers;
