@@ -39,6 +39,27 @@
 - 它不等于 core 的最小公共概念表
 - 保存层为了可重放与可审计，可以比 core 公共概念更丰富
 
+## 与 C 阶段的关系
+
+本文档描述的是：
+
+- **最终持久化目标**
+
+它不是：
+
+- **C 阶段当前实施的前置条件**
+
+也就是说：
+
+- C 阶段可以先不改落盘
+- C 阶段可以继续复用 `SessionStore` / `PersistedMessage`
+- C 阶段的第一优先级仍是 Telegram adapter / core 边界收敛，以及 context ownership 收敛
+
+当前更准确的理解是：
+
+- `session_event` 是后续替换 legacy persistence bridge 的目标形态
+- 而不是 C 阶段必须同轮落地的内容
+
 ## 设计原则
 
 ### 1. 保存层是唯一事实来源

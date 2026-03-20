@@ -1,348 +1,284 @@
 # 当前代码现状与 V3 目标差距
 
+## 2026-03-20 最新结论
+
+以当前代码为准，如果先把“落盘改造 / `session_event` 持久化替换”排除掉，V3 C 阶段这次要收的东西已经基本收口：
+
+- TG 主消息、callback、edited live location、voice/location follow-up，都已经先走正式 `TelegramCoreBridge`，不再由 Telegram handler 直接跨层打旧入口：`crates/telegram/src/adapter.rs:103`、`crates/gateway/src/channel_events.rs:1800`、`crates/telegram/src/handlers.rs:4743`
+- gateway/core 侧的群聊文本整理、`ChannelTurnContext`、bucket/thread-aware web echo/final reply 真值链，已经改成新主链，不再依赖 chat 级 active session 猜测：`crates/gateway/src/channel_events.rs:126`、`crates/gateway/src/state.rs:92`、`crates/gateway/src/chat.rs:2322`
+- Telegram typing keepalive、transcript-format helper、relay route/reply helper 已收口到 Telegram adapter / outbound；gateway 只消费 helper 或 bridge，不再自带第二套独立语义：`crates/telegram/src/outbound.rs:370`、`crates/telegram/src/adapter.rs:147`、`crates/telegram/src/adapter.rs:163`
+- 升级兼容也已补回：如果老数据只有 `active_session_id`、还没回填 `bucket_session_id`，主路径会先复用匹配的旧 Telegram 会话并自动回填 bucket 映射，不会因为升级平白断上下文；但不同 bucket 仍不会错误共用：`crates/gateway/src/channel_events.rs:210`、`crates/gateway/src/chat.rs:7538`
+- topic/thread typing 也已修正回 thread-aware；论坛 topic 里的长回复不会把 typing 丢到根 chat：`crates/telegram/src/outbound.rs:355`
+- `_triggerId` / `_chanChatKey` / `channel_binding` 这批旧运行时桥接已经退出 TG 主路径真值判断；允许保留的尾巴只剩旧落盘承载：`crates/gateway/src/channel_events.rs:2182`、`crates/gateway/src/chat.rs:13515`
+
+一句更准确的人话：
+
+- **除落盘之外，Telegram adapter / core 的正式契约、职责归位、旧路径退场，这一轮已经收口。**
+- **后面剩下的主要硬差距，就是保存层本身还没换。**
+
+说明：
+
+- `ChannelEventSink` 还存在，但它对 Telegram 来说已经退到 gateway 内部复用和 OTP/UI 旁路事件，不再承担 TG 主路径跨层语义。
+- 这里说“active session fallback 退出真值路径”，指的是稳态真值；为兼容升级前旧行数据，仍保留一次性 bucket 回填，不算重新把 chat 级 fallback 带回主路径。
+- 下文的“历史差距拆解”已按 2026-03-20 的最新代码现状逐条回填状态；不会再出现“上面说收口、下面又在说没做”的口径冲突。
+
 本文档只定义一件事：
 
-- 当前代码库的主体现状，以及它与第三版目标形态之间的主要差距
+- 当前代码库离 V3 目标到底还差什么
 
 本文档不讨论：
 
-- 第三版整体设计原则本身
-- 第三版分阶段实施步骤
-- 历史数据迁移与兼容策略
+- V3 设计原则本身
+- V3 分阶段实施顺序
+- 落盘改造如何做
 
 也就是说，本文档讨论的是：
 
-- **现状是什么**
-- **距离目标还差什么**
+- **当前已经做到什么**
+- **除落盘之外，还差哪些硬差距**
 
 而不是：
 
-- **目标方案本身怎么设计**
-- **应该按什么顺序实施**
+- **V3 应该怎么设计**
+- **每一步具体怎么落地**
 
 ## 一句话结论
 
-当前代码库仍然主要处于第二版形态：
+如果把“落盘改造”先排除掉，当前代码已经不再卡在“正式契约、职责归位、旧路径退场”这几个 C 阶段核心问题上。
 
-- Telegram 相关逻辑已较多，但边界仍不清晰
-- session 语义、渠道绑定、落盘格式、上下文构造仍明显耦合
-- 核心层与渠道层还没有完成第三版要求的稳定拆分
+更准确的判断是：
 
-一句话：
+- **行为层已经对齐 V3 C 阶段目标**
+- **边界层和契约层也已收口到“只剩落盘尾巴”的状态**
 
-- **当前代码能跑，但主链仍是“渠道驱动 + 会话文本驱动”，离第三版的“语义驱动 + 统一事件驱动”还有明显距离**
+一句人话：
 
-## 当前代码的主体现状
+- **现在已经可以说：除落盘之外，Telegram adapter / core 这一刀已经切到位了。**
 
-## 1. 入站上下文模型仍是第二版混合形态
+## 现状总评
 
-当前统一入站对象 `MsgContext` 仍同时携带：
+从“除落盘外的 V3 终态”看，当前状态已经不是“两头都没收完”，而是：
 
-- 渠道字段
-- 会话字段
-- 路由字段
-- 历史遗留字段
+- 已经到位的：
+  - Telegram 入站归一化与 route/bucket 解析
+  - callback / live location / liveness / retry 这些 follow-up 基础能力
+  - 群聊最终文本整理已经回到 core 统一入口
+  - TG 主路径跨层已经显式走 `TelegramCoreBridge`
+  - web echo / final reply 的运行时主链已经切到 `ChannelTurnContext`
+  - active-session fallback 已退出 TG 主路径真值判断
+- 仍未到位的：
+  - 旧保存层还没有替换
 
-例如当前对象里同时存在：
+因此，当前更准确的定位是：
 
-- `chan_type`
-- `chan_account_key`
-- `session_id`
-- `chan_chat_key`
-- `group_id`
-- `guild_id`
-- `team_id`
+- **Telegram / core 运行时主链已经进入 V3 C 阶段完成态**
+- **剩余差距主要落在保存层，而不是边界层/契约层**
 
-这说明当前模型还没有完成第三版要求的职责拆分。
+## 当前已经完成的部分
 
-当前形态更像是：
+## 1. Telegram 专项入站对象已经存在
 
-- 把多轮迭代中不同阶段需要的字段都塞进一个总对象
+当前 Telegram 侧已经有比较明确的专项对象：
 
-而不是：
+- `TgInbound`：`crates/telegram/src/adapter.rs:46`
+- `TgRoute`：`crates/telegram/src/adapter.rs:54`
+- `resolve_tg_route(...)`：`crates/telegram/src/adapter.rs:211`
 
-- 按 core 语义与 adapter 细节分层建模
+handlers 里也确实是先构造 `TgInbound`，再解析 route，而不是继续全靠散点字段临时拼：
 
-## 2. session 绑定仍明显由渠道 chat 驱动
+- `build_tg_inbound(...)`：`crates/telegram/src/handlers.rs:3409`
+- 主入站使用 `build_tg_inbound(...) + resolve_tg_route(...)`：`crates/telegram/src/handlers.rs:529`, `crates/telegram/src/handlers.rs:801`, `crates/telegram/src/handlers.rs:943`
 
-当前 gateway 里的 channel 入口逻辑，会直接按：
+这说明 Telegram adapter 的“先归一化、再分桶”这一步已经成形。
 
-- `channel_type`
-- `chan_account_key`
-- `chat_id`
+## 2. 群聊最终文本整理已经主要回到 core
 
-查询或创建 active session。
+当前真正做 `TgGstV1` 群聊最终文本整理的是 core 侧统一入口：
 
-这说明当前会话主链仍然偏向：
+- `format_channel_inbound_text(...)`：`crates/gateway/src/channel_events.rs:126`
 
-- 先由渠道 chat/account 维度确定 session
+Telegram handler 侧现在主要做的是：
 
-而不是：
+- 提取 Telegram 原生事实
+- 计算 route / bucket
+- 构造 reply target
+- 构造 metadata
+- 决定是 `dispatch` 还是 `ingest`
 
-- 先由 `type` / `scope` / 语义轴决定会话，再由渠道层实现这些语义
+关键点在：
 
-换句话说，当前 session 定位的主要驱动力仍是：
+- `build_channel_message_meta(...)`：`crates/telegram/src/handlers.rs:3070`
+- 普通分发路径：`crates/telegram/src/handlers.rs:1482`
+- listen-only 路径：`crates/telegram/src/handlers.rs:529`
 
-- 渠道绑定表
+这比旧链路已经前进了一大步：Telegram 不再直接负责最终 speaker/envelope 的大部分落地文本。
 
-而不是：
+## 3. follow-up 基础链路已经较稳定
 
-- 第三版的统一会话语义层
+当前这些 Telegram 专项能力仍主要留在 Telegram adapter：
 
-## 3. `session_key` / `session_id` 体系仍未收敛成第三版语义
+- callback：`crates/telegram/src/handlers.rs:2629`
+- edited live location：`crates/telegram/src/handlers.rs:1797`
+- polling liveness：`crates/telegram/src/plugin.rs:523`
+- retry reason / retry budget：`crates/telegram/src/bot.rs:35`
 
-当前代码里虽然已经出现：
+这部分符合 V3 想要的方向：Telegram 专项 follow-up 没有继续被塞回 core 统一语义层。
 
-- `session_id`
-- `chan_chat_key`
-- `chan_account_key`
+## 4. 运行时回投/回声主链已经明显改进
 
-但它们在很多地方仍处于混合使用状态。
+当前 reply/echo 的运行时主链已经切到 `ChannelTurnContext`：
 
-尤其是：
+- `ChannelTurnContext`：`crates/gateway/src/state.rs:92`
+- 作用域已经修正为 `session_key + turn_id`：`crates/gateway/src/state.rs:554`
 
-- 有些地方把 `session_id` 当成持久会话桶
-- 有些地方又退回到 `chan_chat_key`
-- 还有一部分旧的 `SessionKey` / `DmScope` 代码存在，但并未成为实际统一主链
+这比旧的 session + trigger reply queue 明显更接近 V3 要求的“显式一次消息处理上下文”。
 
-这说明当前代码还没有形成第三版要求的：
+## 历史差距拆解（已基本收口）
 
-- `type` / `scope` -> `session_key` -> 当前 `session_id`
+下面按本轮实施前的拆解顺序，把每一项都用“已收口 / 仅剩落盘尾巴 / 非阻塞”标注清楚；避免出现“顶部说已收口、下文又在说还没做”的自相矛盾。
 
-这条稳定主链。
+## 1. TG / core 正式跨层主契约（已收口）
 
-## 4. Telegram 仍在主导部分 session 语义与会话文本语义
+这曾经是最大的差距：新对象已经有了，但 TG 主路径还在走旧入口壳。
 
-当前 Telegram 侧不只是做“原生事件解析”。
+截至 2026-03-20，这一项已经收口为：
 
-它还直接参与决定：
+- TG 主消息、callback、edited live location、voice/location follow-up 都优先走 `TelegramCoreBridge`：`crates/telegram/src/adapter.rs:103`、`crates/telegram/src/handlers.rs:943`、`crates/telegram/src/handlers.rs:2622`、`crates/telegram/src/handlers.rs:1770`
+- gateway 侧通过 `impl TelegramCoreBridge for GatewayChannelEventSink` 承接跨层入口：`crates/gateway/src/channel_events.rs:1844`
+- 回归已锁死“即便 legacy `event_sink` 仍存在，TG 主路径也会优先走 `core_bridge`”：`crates/telegram/src/handlers.rs:4743`
 
-- group listen-only 时写入什么文本
-- mirror / relay 时写入什么文本
-- group 会话文本应采用什么格式
+一句人话：**TG -> core 的主入口已经切到 `TelegramCoreBridge`，并被测试锁住。**
 
-甚至 Telegram 配置里直接存在：
+## 2. `gateway` 残留 Telegram adapter 职责（已收口到“core 只调 helper/bridge”）
 
-- `group_session_transcript_format`
+这项历史差距的核心不是“gateway 里不能出现任何 TG 字样”，而是：
 
-这说明当前 Telegram adapter 仍在主导一部分：
+- 不要在 gateway 再养一套“Telegram 自己的独立语义实现”（typing lifecycle、route/reply 的第二套判断、prompt 注入散点）
+- gateway 如果需要 TG 专项能力，应只通过 bridge 或 TG adapter/outbound 的 helper 完成
 
-- 给模型看的会话文本语义
+截至 2026-03-20，已收口为：
 
-而不是只输出结构化事实。
+- typing keepalive：gateway 侧只负责“何时需要保活”，发送细节统一走 `telegram/outbound` 的 targeted typing loop（带 thread/topic）：`crates/telegram/src/outbound.rs:355`、`crates/gateway/src/channel_events.rs:557`
+- TG-GST v1 system prompt 注入：gateway 侧不再直接读 Telegram 私有配置字段，只调用 `tg_gst_v1_system_prompt_block_for_binding(...)`：`crates/gateway/src/chat.rs:937`、`crates/telegram/src/adapter.rs:147`
+- group relay 的 bucket_key / reply 文本生成：已集中到 TG adapter helper，gateway 只消费结果：`crates/telegram/src/adapter.rs:163`、`crates/telegram/src/adapter.rs:188`、`crates/gateway/src/chat.rs:7347`
 
-这与第三版目标形态明显不同。
+同时说明一个“看起来还在 gateway，其实是预期归属”的点：
 
-## 5. gateway 里仍有大量 Telegram 特化逻辑
+- group relay / mirror / mention 这类“入模怎么组织、怎么写入 session history”的逻辑，本轮按 C 阶段口径仍归 core（因为它直接改写会话事实流/历史），并不等同于“Telegram 协议细节泄漏到 core”。
 
-当前 Telegram 相关逻辑并没有被完整收束在 Telegram adapter 内部。
+## 3. core 直接依赖 Telegram 配置/专项语义（已收敛为 snapshot + helper）
 
-gateway 里仍然直接处理了不少 Telegram 特化内容，例如：
+目标不是“core 完全看不见 Telegram”，而是“core 不要直接依赖 Telegram 的 raw update / secret config / 散点策略分支去决定主链语义”。
 
-- Telegram session 绑定
-- Telegram label 生成
-- Telegram group mirror / relay
-- Telegram 出站配套逻辑
+截至 2026-03-20，core 对 Telegram 的依赖已收敛成：
 
-这意味着当前分层仍然是：
+- 只读 `TelegramBusAccountSnapshot`（无 token 等 secret）来做 group scope / relay/mirror 的必要决策：`crates/telegram/src/config.rs:166`
+- 通过 TG adapter helper 解析：bucket_key、transcript-format system prompt block 等，不再散点重复实现：`crates/telegram/src/adapter.rs:132`、`crates/telegram/src/adapter.rs:147`、`crates/gateway/src/chat.rs:949`
 
-- adapter 一部分
-- gateway 一部分
-- session metadata 一部分
+一句人话：**core 不再“反向摸 Telegram 细节字段”，而是只吃“归一化后的 snapshot + helper 输出”。**
 
-而不是第三版希望的：
+## 4. session 主链仍是 bridge 形态（仅剩落盘尾巴）
 
-- 渠道层封装渠道细节
-- core 只处理 core 语义
+截至 2026-03-20，运行时“真值链”已收口为：
 
-## 6. 当前会话记录格式仍以 transcript / role-content 为中心
+- session 解析优先使用 `bucket_session_id`（bucket_key 真值），而不是 chat 级 active session 猜测：`crates/gateway/src/channel_events.rs:215`、`crates/gateway/src/chat.rs:7518`
+- `active_session_id` 仅保留“升级兼容一次性回填”，并带结构化日志标注：`crates/gateway/src/channel_events.rs:231`、`crates/gateway/src/chat.rs:7543`
+- `ChannelTurnContext` 以 `session_key + turn_id` 隔离，避免跨 session 串线回投：`crates/gateway/src/state.rs:554`
 
-当前 `SessionStore` 落的是 JSONL；
-而落盘主体 `PersistedMessage` 的中心仍是：
+仍未替换的部分主要是：
 
-- `role`
-- `content`
-- `channel`
-- tool result / assistant text 等
+- session history / metadata 仍建立在旧 `SessionStore` / `PersistedMessage` + metadata table 之上
+- `channel_binding` / `_chanChatKey` 仍作为“旧保存层/工具链”兼容载体存在（但已退出 TG 主路径真值判断）
 
-也就是说，当前保存层本质上仍然是：
+因此这条差距在本文档的归类里属于：**落盘尾巴（后续保存层替换阶段再清）**。
 
-- 面向会话文本的消息流
+## 5. 旧跨层模型仍在系统里并存（已与 TG 主路径脱钩 / 非阻塞）
 
-而不是：
+`MsgContext`/旧 routing/auto-reply 仍存在于仓库中，但截至 2026-03-20：
 
-- `session_event` 统一事件流
+- TG 主路径已经不再依赖这些旧模型完成路由与上下文（它们对本单来说是“系统里还在，但不参与主链”）
+- 是否要清理它们属于全局收口问题，不是 Telegram 垂直切的阻塞项
 
-这会导致：
+因此这里的差距状态是：**非阻塞（可在后续做全局清理）**。
 
-- 保存层与面向模型的表达仍然靠得比较近
-- adapter 整出来的会话文本仍容易反向影响保存层
+## 6. Telegram transcript-format / 群聊最终文本整理归属（已收口：格式在 core，hint 在 adapter）
 
-## 7. 当前上下文构造仍主要依赖旧会话文本主链
+截至 2026-03-20：
 
-虽然现在代码已经有了不少 hook、tool、channel、status log 等扩展能力，
-但主上下文仍主要围绕：
+- TG handler 不再输出 TgGstV1 的最终 speaker/envelope 文本，core 统一入口负责最终格式化：`crates/telegram/src/handlers.rs:943`、`crates/gateway/src/channel_events.rs:126`
+- TgGstV1 的 system prompt 注入通过 TG helper 从 `channel_binding` + snapshot 决定：`crates/gateway/src/chat.rs:937`、`crates/telegram/src/adapter.rs:147`
 
-- 读取旧 session 历史
-- 追加 user / assistant / tool result
-- 再交给现有 chat run 主链
+一句人话：**Telegram 侧只决定“怎么收/怎么发”，core 决定“模型看到什么文本”。**
 
-这和第三版目标里的：
+## 7. 落盘虽然不在本阶段做，但当前上下文主链仍深度依赖旧消息流（仍未做 / 真实剩余最大差距）
 
-- 统一事件记录层
-- `dm` / `group` 的上下文整理规则
-- 上下文引擎
+这一项就是你问“除了落盘之外”的“落盘”本体：
 
-还不是一回事。
+- 仍在大量依赖 `SessionStore` / `PersistedMessage`：`crates/sessions/src/store.rs:24`、`crates/sessions/src/message.rs:15`
+- gateway `chat.rs` 仍以旧消息流读写历史并组装上下文：`crates/gateway/src/chat.rs:2309`、`crates/gateway/src/chat.rs:5005`
 
-## 8. Telegram 复杂策略与基础会话语义仍未完全分离
+也因此：
 
-当前 Telegram group 的复杂能力，例如：
+- **除落盘之外**：这轮已经不再被“边界/契约/旧路径”卡住
+- **包含落盘**：仍差保存层替换与历史迁移这一整段工程
 
-- relay
-- mirror
-- mention 策略
-- topic/thread/forum 细节
+## 当前距离 V3 终态还有多远
 
-仍与 session、入站改写、落盘文本、出站行为较强耦合。
+如果你问的是本文档开头强调的口径——**先不算落盘**——那答案已经很明确：
 
-这说明当前代码还没有做到第三版要求的：
+- **除落盘外：已经收口**
+- **包含落盘：剩余几乎都集中在保存层替换（`session_event` + migration + context bridge 从旧消息流脱钩）**
 
-- 基础会话语义一层
-- 复杂渠道策略另一层
+一句人话：**现在的差距不是“边界还差一段”，而是“保存层还差一段”。**
 
-## 当前代码距离 V3 的主要差距
+## 当前可直接复用的基础
 
-## 1. 缺少稳定的“核心语义层”
+当前可以直接复用的部分仍然成立（并且多数已处于“完成态”，不需要再回头修边界）：
 
-第三版要求：
+当前可以直接复用的部分有：
 
-- 先有少量稳定的 core 语义
-- 再由不同 `type` / `scope` 按需引入其他语义轴
+- Telegram 入站归一化对象：`crates/telegram/src/adapter.rs:46`
+- Telegram route/bucket 解析：`crates/telegram/src/adapter.rs:211`
+- callback / live location follow-up 保持 bucket/thread-aware：`crates/telegram/src/handlers.rs:2622`、`crates/telegram/src/handlers.rs:1770`
+- polling liveness / retry：`crates/telegram/src/plugin.rs:523`、`crates/telegram/src/bot.rs:35`
+- core 侧群聊文本整理入口：`crates/gateway/src/channel_events.rs:126`
+- `ChannelTurnContext` 运行时回投主链：`crates/gateway/src/state.rs:92`, `crates/gateway/src/state.rs:554`
+- 现有 `SessionStore` / `PersistedMessage` 作为本阶段允许继续借用的承载：`crates/sessions/src/store.rs:24`, `crates/sessions/src/message.rs:15`
 
-当前代码则更接近：
+也就是说：下一步完全可以围绕“保存层替换”推进，而不是再回头补边界与主链语义。
 
-- 多种字段、历史概念、渠道概念并列混放
+## 建议把 gap 分成三类看（避免再混口径）
 
-差距在于：
+为了避免后面继续混淆，建议把 gap 永久分成三类看：
 
-- 还没有形成收敛的核心概念层
+### A. 本阶段已清掉的 gap（DONE）
 
-## 2. 缺少独立的渠道归一化边界
+这些是“除落盘外”本轮必须清掉的；截至 2026-03-20 已全部收口：
 
-第三版要求：
+- TG / core 正式跨层契约切到 `TelegramCoreBridge`
+- `ChannelTurnContext` 真值链替代 session+trigger 旧队列
+- web echo / final reply / follow-up 全链路 bucket/thread-aware
+- active-session fallback 退出稳态真值路径（仅保留升级一次性回填）
 
-- adapter 负责把原生渠道事件整理成结构化归一化结果
+### B. 后续阶段再做的 gap（PENDING）
 
-当前代码则更接近：
+这些是明确留给后续的：
 
-- Telegram handler 做一部分
-- gateway channel sink 做一部分
-- gateway chat 再做一部分
+- `session_event` 统一事件记录
+- `SessionStore` / `PersistedMessage` 替换
+- 历史数据迁移
 
-差距在于：
+### C. 非阻塞但建议后续清理的事项（Optional）
 
-- 渠道归一化边界还没有独立成型
+这些不阻塞“除落盘外已收口”的结论，但会影响后续保存层替换的成本与长期可维护性：
 
-## 3. 缺少统一的 session 语义主链
-
-第三版要求：
-
-- `type` / `scope` / 语义轴
-  -> `session_key`
-  -> 当前 `session_id`
-
-当前代码则更接近：
-
-- 渠道 account/chat 绑定
-  -> active session
-  -> 旧 session store
-
-差距在于：
-
-- 会话语义层还没有独立出来
-
-## 4. 缺少统一事件记录层
-
-第三版要求：
-
-- 用 `session_event` 保存稳定事实
-
-当前代码则更接近：
-
-- 用会话文本消息保存运行结果与显示文本
-
-差距在于：
-
-- 保存层还没有从面向模型的会话文本中脱离出来
-
-## 5. 缺少按 `type` 区分的上下文整理主链
-
-第三版要求：
-
-- 不同 `type` 有自己的上下文整理规则
-- 上下文引擎负责 assemble / compact
-
-当前代码则更接近：
-
-- 在旧会话文本历史上继续增量拼接
-
-差距在于：
-
-- 还没有真正形成“按 `type` 整理上下文”的这一段职责
-
-## 6. 缺少“渠道复杂策略”与“核心会话语义”的稳定隔离
-
-第三版要求：
-
-- relay / mirror / mention / thread 等复杂策略属于渠道实现问题
-- 这些策略不应直接污染 core 公共概念与统一事件记录模型
-
-当前代码则更接近：
-
-- 复杂策略与会话语义、落盘文本、上下文文本互相牵连
-
-差距在于：
-
-- 复杂策略层还没有从基础会话主链中抽离
-
-## 当前代码可以复用的部分
-
-虽然距离第三版还有明显差距，但当前代码并不是要整体推倒。
-
-当前仍有几块基础能力可以阶段性复用：
-
-- 现有 `SessionStore`
-- 现有 `PersistedMessage`
-- 现有 `sessions` metadata / active session 记录
-- 现有 chat run 主链
-- 现有 Telegram 入站/出站协议处理
-
-也就是说，当前代码最大的问题不是“没有东西”，而是：
-
-- **已有能力的职责边界还没有收敛到第三版要求的形态**
-
-## 这份现状文档的作用
-
-这份文档的作用不是替代整体方案或实施路线图。
-
-它的作用是单独回答两个问题：
-
-- 当前代码主要处在什么形态
-- 这些现状与第三版目标的主要差距在哪里
-
-因此三份文档的分工应当是：
-
-- `docs/src/refactor/v3-design.md`：讲第三版目标设计
-- `docs/src/refactor/v3-gap.md`：讲当前代码现状与差距
-- `docs/src/refactor/v3-roadmap.md`：讲第三版如何实施
+- 逐步退出 `_chanChatKey` / `_triggerId` 这类 legacy 工具/前端兼容字段（目前已退出真值路径，但仍在 payload 中存在）
+- 把“TG 专项 helper 的归属”在文档里说更死：哪些算 adapter 内部、哪些算稳定边界工具（避免后续又长出第二套）
 
 ## 相关文档
 
 - `docs/src/refactor/v3-design.md`
 - `docs/src/refactor/v3-roadmap.md`
-- `docs/src/concepts-and-ids.md`
-- `docs/src/refactor/dm-scope.md`
-- `docs/src/refactor/group-scope.md`
+- `docs/src/refactor/telegram-adapter-boundary.md`
 - `docs/src/refactor/session-context-layering.md`
 - `docs/src/refactor/session-event-canonical.md`

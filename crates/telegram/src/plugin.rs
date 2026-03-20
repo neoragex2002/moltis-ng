@@ -19,6 +19,7 @@ use moltis_channels::{
 };
 
 use crate::{
+    adapter::TelegramCoreBridge,
     bot,
     config::{TelegramAccountConfig, TelegramBusAccountSnapshot},
     outbound::TelegramOutbound,
@@ -34,6 +35,7 @@ pub struct TelegramPlugin {
     outbound: TelegramOutbound,
     message_log: Option<Arc<dyn MessageLog>>,
     event_sink: Option<Arc<dyn ChannelEventSink>>,
+    core_bridge: Option<Arc<dyn TelegramCoreBridge>>,
     probe_cache: RwLock<HashMap<String, (ChannelHealthSnapshot, Instant)>>,
 }
 
@@ -48,6 +50,7 @@ impl TelegramPlugin {
             outbound,
             message_log: None,
             event_sink: None,
+            core_bridge: None,
             probe_cache: RwLock::new(HashMap::new()),
         }
     }
@@ -59,6 +62,11 @@ impl TelegramPlugin {
 
     pub fn with_event_sink(mut self, sink: Arc<dyn ChannelEventSink>) -> Self {
         self.event_sink = Some(sink);
+        self
+    }
+
+    pub fn with_core_bridge(mut self, bridge: Arc<dyn TelegramCoreBridge>) -> Self {
+        self.core_bridge = Some(bridge);
         self
     }
 
@@ -178,6 +186,7 @@ impl ChannelPlugin for TelegramPlugin {
             Arc::clone(&self.accounts),
             self.message_log.clone(),
             self.event_sink.clone(),
+            self.core_bridge.clone(),
         )
         .await?;
         self.invalidate_probe_cache(account_handle);
@@ -340,6 +349,7 @@ mod tests {
             supervisor: Arc::new(std::sync::Mutex::new(None)),
             message_log: None,
             event_sink: None,
+            core_bridge: None,
             polling: Arc::new(std::sync::Mutex::new(
                 crate::state::PollingRuntimeState::new(90),
             )),

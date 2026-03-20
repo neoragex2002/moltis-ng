@@ -14,6 +14,7 @@ use {
 use moltis_channels::{ChannelEventSink, message_log::MessageLog};
 
 use crate::{
+    adapter::TelegramCoreBridge,
     config::TelegramAccountConfig,
     handlers,
     outbound::TelegramOutbound,
@@ -440,6 +441,7 @@ pub async fn start_polling(
     accounts: AccountStateMap,
     message_log: Option<Arc<dyn MessageLog>>,
     event_sink: Option<Arc<dyn ChannelEventSink>>,
+    core_bridge: Option<Arc<dyn TelegramCoreBridge>>,
 ) -> anyhow::Result<()> {
     let bot = build_bot(config.token.expose_secret())?;
 
@@ -465,6 +467,7 @@ pub async fn start_polling(
         supervisor: Arc::clone(&supervisor),
         message_log,
         event_sink,
+        core_bridge,
         polling: Arc::clone(&polling),
         otp: std::sync::Mutex::new(crate::otp::OtpState::new(otp_cooldown)),
     };

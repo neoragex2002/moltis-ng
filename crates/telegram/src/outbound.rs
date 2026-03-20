@@ -3,6 +3,7 @@ use {
     async_trait::async_trait,
     base64::Engine,
     rand::Rng,
+    std::future::Future,
     teloxide::{
         payloads::{
             SendAudioSetters, SendChatActionSetters, SendDocumentSetters, SendLocationSetters,
@@ -15,6 +16,7 @@ use {
 };
 
 use {
+    moltis_channels::{ChannelReplyTarget, ChannelType},
     moltis_channels::plugin::{
         ChannelOutbound, ChannelStreamOutbound, SentMessageRef, StreamEvent, StreamReceiver,
     },
@@ -22,6 +24,7 @@ use {
 };
 
 use crate::{
+    adapter::TgPrivateTarget,
     markdown::{self, TELEGRAM_MAX_MESSAGE_LEN},
     state::AccountStateMap,
 };
@@ -350,6 +353,18 @@ fn retry_after_secs(e: &teloxide::RequestError) -> Option<u64> {
     }
 }
 
+fn typing_reply_target(target: &TgPrivateTarget) -> ChannelReplyTarget {
+    ChannelReplyTarget {
+        chan_type: ChannelType::Telegram,
+        chan_account_key: target.account_handle.clone(),
+        chan_user_name: None,
+        chat_id: target.chat_id.clone(),
+        message_id: None,
+        thread_id: target.thread_id.clone(),
+        bucket_key: None,
+    }
+}
+
 pub(crate) async fn send_chat_action_typing(
     bot: &teloxide::Bot,
     chat_id: ChatId,
@@ -363,6 +378,164 @@ pub(crate) async fn send_chat_action_typing(
         Ok(result) => result.map(|_| ()).map_err(TypingRequestError::Request),
         Err(_) => Err(TypingRequestError::Timeout),
     }
+}
+
+pub async fn run_with_targeted_typing_loop<T>(
+    outbound: std::sync::Arc<dyn ChannelOutbound>,
+    target: TgPrivateTarget,
+    op: &'static str,
+    keepalive_interval: std::time::Duration,
+    operation: impl Future<Output = T>,
+) -> T {
+    async fn send_typing_once(
+        outbound: &std::sync::Arc<dyn ChannelOutbound>,
+        target: &TgPrivateTarget,
+        op: &'static str,
+        typing_failed: &mut bool,
+    ) {
+        let reply_target = typing_reply_target(target);
+        match outbound.send_typing_to_target(&reply_target).await {
+            Ok(()) => {
+                if *typing_failed {
+                    info!(
+                        event = "telegram.typing.recovered",
+                        op,
+                        chan_account_key = target.account_handle,
+                        chat_id = target.chat_id,
+                        "typing indicator recovered"
+                    );
+                    *typing_failed = false;
+                }
+            },
+            Err(error) => {
+                if !*typing_failed {
+                    warn!(
+                        event = "telegram.typing.failed",
+                        op,
+                        chan_account_key = target.account_handle,
+                        chat_id = target.chat_id,
+                        reason_code = "send_typing_failed",
+                        error = %error,
+                        "typing indicator failed"
+                    );
+                    *typing_failed = true;
+                } else {
+                    debug!(
+                        event = "telegram.typing.failed",
+                        op,
+                        chan_account_key = target.account_handle,
+                        chat_id = target.chat_id,
+                        reason_code = "send_typing_failed",
+                        "typing indicator still failing"
+                    );
+                }
+            },
+        }
+    }
+
+    let operation = operation;
+    let typing_loop = async {
+        let mut typing_failed = false;
+        send_typing_once(&outbound, &target, op, &mut typing_failed).await;
+
+        let mut keepalive = tokio::time::interval_at(
+            tokio::time::Instant::now() + keepalive_interval,
+            keepalive_interval,
+        );
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            keepalive.tick().await;
+            send_typing_once(&outbound, &target, op, &mut typing_failed).await;
+        }
+    };
+
+    tokio::pin!(operation);
+    tokio::pin!(typing_loop);
+
+    tokio::select! {
+        result = &mut operation => result,
+        _ = &mut typing_loop => unreachable!("telegram typing loop must stay pending until the operation completes"),
+    }
+}
+
+pub fn spawn_targeted_typing_loop_until(
+    outbound: std::sync::Arc<dyn ChannelOutbound>,
+    target: TgPrivateTarget,
+    op: &'static str,
+    keepalive_interval: std::time::Duration,
+    completion: impl Future<Output = ()> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        async fn send_typing_once(
+            outbound: &std::sync::Arc<dyn ChannelOutbound>,
+            target: &TgPrivateTarget,
+            op: &'static str,
+            typing_failed: &mut bool,
+        ) {
+            let reply_target = typing_reply_target(target);
+            match outbound.send_typing_to_target(&reply_target).await {
+                Ok(()) => {
+                    if *typing_failed {
+                        info!(
+                            event = "telegram.typing.recovered",
+                            op,
+                            chan_account_key = target.account_handle,
+                            chat_id = target.chat_id,
+                            "typing indicator recovered"
+                        );
+                        *typing_failed = false;
+                    }
+                },
+                Err(error) => {
+                    if !*typing_failed {
+                        warn!(
+                            event = "telegram.typing.failed",
+                            op,
+                            chan_account_key = target.account_handle,
+                            chat_id = target.chat_id,
+                            reason_code = "send_typing_failed",
+                            error = %error,
+                            "typing indicator failed"
+                        );
+                        *typing_failed = true;
+                    } else {
+                        debug!(
+                            event = "telegram.typing.failed",
+                            op,
+                            chan_account_key = target.account_handle,
+                            chat_id = target.chat_id,
+                            reason_code = "send_typing_failed",
+                            "typing indicator still failing"
+                        );
+                    }
+                },
+            }
+        }
+
+        let mut typing_failed = false;
+        tokio::pin!(completion);
+
+        tokio::select! {
+            _ = &mut completion => return,
+            _ = send_typing_once(&outbound, &target, op, &mut typing_failed) => {}
+        }
+
+        let mut keepalive = tokio::time::interval_at(
+            tokio::time::Instant::now() + keepalive_interval,
+            keepalive_interval,
+        );
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = &mut completion => break,
+                _ = keepalive.tick() => {
+                    send_typing_once(&outbound, &target, op, &mut typing_failed).await;
+                },
+            }
+        }
+    });
 }
 
 async fn send_typing_keepalive<T: TelegramTextTransport + ?Sized>(
@@ -2185,6 +2358,7 @@ mod tests {
     use {
         super::*,
         axum::{Json, Router, body::Bytes, extract::State, routing::post},
+        moltis_channels::ChannelReplyTarget,
         std::{
             collections::{HashMap, VecDeque},
             sync::{Arc, Mutex},
@@ -2318,6 +2492,7 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: None,
+            core_bridge: None,
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -2353,6 +2528,7 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: None,
+            core_bridge: None,
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -2996,6 +3172,113 @@ mod tests {
         tx.send(StreamEvent::Done).await.unwrap();
         drop(tx);
         task.await.unwrap().unwrap();
+    }
+
+    #[derive(Default)]
+    struct RecordingTypingOutbound {
+        typing_targets: Mutex<Vec<ChannelReplyTarget>>,
+    }
+
+    #[async_trait]
+    impl ChannelOutbound for RecordingTypingOutbound {
+        async fn send_text(
+            &self,
+            _chan_account_key: &str,
+            _to: &str,
+            _text: &str,
+            _reply_to: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_media(
+            &self,
+            _chan_account_key: &str,
+            _to: &str,
+            _payload: &ReplyPayload,
+            _reply_to: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> Result<()> {
+            panic!("run_with_targeted_typing_loop must use structured typing targets");
+        }
+
+        async fn send_typing_to_target(&self, target: &ChannelReplyTarget) -> Result<()> {
+            self.typing_targets.lock().unwrap().push(target.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_targeted_typing_loop_preserves_thread_id() {
+        let recorder = Arc::new(RecordingTypingOutbound::default());
+        let outbound: Arc<dyn ChannelOutbound> = recorder.clone();
+        let target = TgPrivateTarget {
+            account_handle: "telegram:acct".into(),
+            chat_id: "-1001".into(),
+            message_id: None,
+            thread_id: Some("77".into()),
+        };
+
+        run_with_targeted_typing_loop(
+            outbound,
+            target,
+            "test_typing_thread",
+            std::time::Duration::from_millis(5),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+            },
+        )
+        .await;
+
+        let typing_targets = recorder.typing_targets.lock().unwrap();
+        assert!(
+            !typing_targets.is_empty(),
+            "typing loop must emit at least one typing target"
+        );
+        assert_eq!(typing_targets[0].thread_id.as_deref(), Some("77"));
+    }
+
+    #[tokio::test]
+    async fn spawn_targeted_typing_loop_until_preserves_thread_id() {
+        let recorder = Arc::new(RecordingTypingOutbound::default());
+        let outbound: Arc<dyn ChannelOutbound> = recorder.clone();
+        let target = TgPrivateTarget {
+            account_handle: "telegram:acct".into(),
+            chat_id: "-1001".into(),
+            message_id: None,
+            thread_id: Some("77".into()),
+        };
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let finish_wait = Arc::clone(&finish);
+
+        spawn_targeted_typing_loop_until(
+            outbound,
+            target,
+            "test_typing_thread_background",
+            std::time::Duration::from_millis(5),
+            async move {
+                finish_wait.notified().await;
+            },
+        );
+
+        tokio::time::timeout(std::time::Duration::from_millis(50), async {
+            loop {
+                if !recorder.typing_targets.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("typing loop must emit a structured target");
+        finish.notify_waiters();
+        tokio::task::yield_now().await;
+
+        let typing_targets = recorder.typing_targets.lock().unwrap();
+        assert_eq!(typing_targets[0].thread_id.as_deref(), Some("77"));
     }
 
     #[tokio::test]

@@ -29,17 +29,29 @@
 - 先从 **Telegram 渠道适配边界** 开始
 - 再把 **Telegram 的 session 分桶/定位** 单独抽出
 - 期间阶段性复用现有 **会话记录** 与 **旧上下文链路**
+- 但要尽快清掉 Telegram 对 LLM 可见文本的残余塑形职责，让上下文整理真正由 core 统一负责
 - 然后按 **TG DM -> TG Group -> TG Group 复杂能力**
   的顺序逐段替换
-- 最后再把内部旧会话记录与旧上下文管理替换成第三版目标形态
+- 最后再把内部旧会话记录替换成第三版目标持久化形态
 
 一句人话：
 
-- **先收 Telegram 外壳，再逐步往里换核心**
+- **先把 Telegram 和 core 切干净，先不动落盘，最后再换最里面的保存层**
 
 第三版整体设计原则，见：
 
 - `docs/src/refactor/v3-design.md`
+
+## 2026-03-20 当前状态（不含落盘替换）
+
+截至 2026-03-20，如果先把“落盘改造 / `session_event` 持久化替换”排除掉：
+
+- Telegram adapter / core 的边界切分、bucket/thread-aware 路由与回投主链，已基本收口
+- 仍未完成且属于主线的剩余工作，集中在：保存层替换 + 历史迁移（阶段 7）
+
+当前代码现状与差距归档见：
+
+- `docs/src/refactor/v3-gap.md`
 
 ## 路线总原则
 
@@ -55,7 +67,7 @@
 后改：
 
 - 统一事件记录模型
-- core 上下文管理
+- `session_event` 原生持久化
 
 ### 2. 先垂直切 Telegram，不横扫全系统
 
@@ -75,11 +87,12 @@
 - Telegram 不再直接主导“给模型的文本”语义
 - Telegram 不再在多个模块里零散决定 session
 - Telegram 入口只负责归一化与交付
+- 最终给模型的上下文整理由 core 主链统一负责
 
 在边界稳定之前，不急着改：
 
 - 最终事件记录模型
-- 最终上下文管理
+- 最终持久化格式
 
 ### 4. 阶段性复用旧能力
 
@@ -88,7 +101,7 @@
 - 现有 `SessionStore`
 - 现有 `PersistedMessage`
 - 现有 chat.send / chat run 主链
-- 现有上下文整理链路
+- 现有上下文相关基础设施（仅作为 bridge 过渡）
 
 但复用方式必须是：
 
@@ -129,13 +142,13 @@ Telegram 侧的切换顺序应固定为：
 
 - **Telegram DM / Group 的会话定位规则如何统一收口**
 
-### 阶段 3：用新 Telegram 边界桥接旧会话记录与旧上下文
+### 阶段 3：桥接旧会话记录，并清理 Telegram 残余上下文塑形
 
 在不改内核存储格式的前提下，让新的 Telegram 输入边界先跑起来。
 
 这一阶段只回答一个问题：
 
-- **新 TG adapter 能否先稳定接上现有 `SessionStore` 与 chat 主链**
+- **新 TG adapter 能否先稳定接上现有 `SessionStore` 与 chat 主链，并把最终模型上下文整理统一收回 core**
 
 ### 阶段 4：先切 Telegram DM
 
@@ -183,7 +196,7 @@ Telegram 侧的切换顺序应固定为：
 当 Telegram 全链路都稳定跑在第三版边界上后，再逐步替换：
 
 - `session_event` 统一事件记录
-- core 上下文管理
+- core context bridge 的底层输入，改为 `session_event` 原生事实流
 - 旧会话文本驱动的保存/拼接路径
 
 也就是说：
@@ -218,6 +231,11 @@ Telegram adapter 输出的对象，至少应能稳定表达：
 - 当前消息属于普通消息、命令、listen-only、relay 候选中的哪一类
 - 一份仅供 Telegram adapter 自己后续解析的 `private_source` 私有载荷
 
+补充说明：
+
+- `private_source` 里可以携带 route 解析所需的本地线索（例如候选 sender/thread/message id）
+- 但这些线索不等于“已产出的 core 语义结果”；`peer`/`sender`/`bucket_key` 仍应在阶段 2 的 route resolver 中作为结果字段产出
+
 这里故意**不**要求阶段 1 直接产出：
 
 - `peer`
@@ -243,7 +261,7 @@ Telegram adapter 输出的对象，至少应能稳定表达：
 
 ### 本阶段为什么先做
 
-因为当前 Telegram 相关语义仍散落在：
+在开始改造前，Telegram 相关语义仍散落在：
 
 - `crates/telegram/src/handlers.rs`
 - `crates/gateway/src/channel_events.rs`
@@ -298,7 +316,7 @@ Telegram 侧不再在多个模块零散决定：
 - 不引入全渠道统一 resolver
 - 不处理其他渠道
 
-## 阶段 3：桥接旧会话记录与旧上下文
+## 阶段 3：桥接旧会话记录，并清理 Telegram 残余上下文塑形
 
 ### 本阶段目标
 
@@ -314,7 +332,7 @@ Telegram 侧不再在多个模块零散决定：
 - 现有 `PersistedMessage`
 - 现有 `SessionStore`
 - 现有 chat.send / agent run 主链
-- 现有上下文整理逻辑
+- 现有保存结构
 
 ### 本阶段完成后应达到的状态
 
@@ -322,11 +340,13 @@ Telegram 侧不再在多个模块零散决定：
 
 - Telegram 入口边界是新的
 - Telegram session 决策边界是新的
+- 最终给模型的上下文整理职责已经明确收口到 core 主链
 
 但第三版后半截还没替换：
 
 - 会话记录仍可先写旧格式
-- 上下文仍可先走旧链路
+- core 仍是先读取旧消息/旧 metadata，再桥接出当前需要的上下文
+- `session_event` 仍未落地
 
 ### 本阶段为什么关键
 
@@ -339,7 +359,7 @@ Telegram 侧不再在多个模块零散决定：
 
 桥接层的作用就是：
 
-- **让外层先变对，内层稍后再换**
+- **让 Telegram 外层和 core 分工先变对，旧落盘稍后再换**
 
 ## 阶段 4：切 Telegram DM
 
@@ -352,7 +372,7 @@ Telegram 侧不再在多个模块零散决定：
 - 文本入站
 - 基础 reply
 - 基础 session 进入
-- 基础上下文使用
+- 基础上下文桥接使用
 
 ### 本阶段为什么先切 DM
 
@@ -396,7 +416,7 @@ Telegram 侧不再在多个模块零散决定：
 它只应负责：
 
 - 提供 Telegram 原生信息
-- 交给上层 session resolver 与桥接层
+- 交给上层 session resolver 与 core context bridge
 
 ### 本阶段不要做什么
 
@@ -425,7 +445,7 @@ Telegram 侧不再在多个模块零散决定：
 复杂策略可以继续存在，但必须：
 
 - 通过 Telegram adapter 输出结构化信息
-- 通过 Telegram session resolver 和 core 上层接管语义
+- 通过 Telegram session resolver 和 core 上层接管会话语义与上下文语义
 - 不再把复杂语义直接写死在会话文本或给模型的文本里
 
 ## 阶段 7：最后替换内部旧内核
@@ -436,7 +456,7 @@ Telegram 侧不再在多个模块零散决定：
 
 - `session_event`
 - 统一事件记录持久化
-- core 上下文管理
+- core context bridge 的底层输入，改为 `session_event` 原生事实流
 
 ### 本阶段为什么最后做
 
@@ -453,7 +473,8 @@ Telegram 侧不再在多个模块零散决定：
 
 - 外层 Telegram adapter 已收敛
 - 中层 session 分桶/定位已收敛
-- 内层统一事件记录与上下文管理已完成替换
+- 内层统一事件记录已完成替换
+- core context engine 也不再依赖 legacy persistence bridge
 
 ## 每阶段的复用策略
 
@@ -466,27 +487,28 @@ Telegram 侧不再在多个模块零散决定：
 - 现有 `SessionStore`
 - 现有 `PersistedMessage`
 - 现有 chat.send / chat run
-- 现有上下文整理
+- 现有保存结构
 
 ### 阶段 4 ~ 6
 
 优先复用：
 
 - 现有落盘
-- 现有上下文整理
+- core context bridge
 
 只替换：
 
 - Telegram adapter 边界
 - Telegram session resolver
 - Telegram 业务链路
+- Telegram 残余 transcript / prompt shaping 逻辑
 
 ### 阶段 7
 
 再真正替换：
 
 - 统一事件记录模型
-- 上下文管理
+- legacy persistence bridge
 
 ## 本路线明确不建议的做法
 
@@ -495,7 +517,7 @@ Telegram 侧不再在多个模块零散决定：
 - 一开始就全局重构所有 core 契约
 - 一开始就把所有渠道一起纳入第三版
 - 一开始就把旧会话记录和旧上下文全部替换
-- 在 Telegram Group relay/mirror 还没收边界前先改最内层上下文管理
+- 在 Telegram 边界还没收住之前，就直接重写最终版 `session_event` 持久化
 - 按零散函数、零散字段、零散命名做碎片化替换
 
 ## 最后收口
@@ -503,9 +525,9 @@ Telegram 侧不再在多个模块零散决定：
 如果只记住一句话，就记住这句：
 
 - **第三版应先从 Telegram 外围收边界开始**
-- **期间阶段性复用旧会话记录与旧上下文**
+- **期间阶段性复用旧会话记录，但尽快清掉 Telegram 对上下文塑形的残余控制**
 - **按 TG DM -> TG Group -> TG Group 复杂能力 的顺序推进**
-- **最后再替换最里面的事件记录持久化与上下文管理**
+- **最后再替换最里面的事件记录持久化**
 
 ## 相关文档
 

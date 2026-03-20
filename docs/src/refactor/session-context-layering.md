@@ -32,6 +32,43 @@
 - 会话保存应尽量是统一、结构化、可重放的
 - 推理上下文应当是根据结构化会话事件**整理出来**的，而不是直接把 adapter 拼好的 transcript 当作唯一事实来源
 
+## C 阶段实施口径（当前优先级）
+
+当前 C 阶段先解决的是：
+
+- Telegram adapter / core 的职责边界
+- 最终给模型的上下文整理归属
+- Telegram 残余 transcript shaping 的清理
+
+当前 C 阶段暂不要求：
+
+- 立即落地 `session_event` 持久化
+- 立即替换 `SessionStore` / `PersistedMessage`
+- 立即完成全渠道统一实现
+
+也就是说，C 阶段允许采用：
+
+- **legacy persistence bridge**
+
+它的准确含义是：
+
+- 保存层暂时继续写旧记录
+- core 负责把旧记录桥接成当前需要的上下文输入
+- adapter 只负责归一化、路由语义与协议收发
+
+当前更准确的链路应当是：
+
+```text
+Telegram raw update
+  -> tg_inbound / tg_route
+  -> core session resolve
+  -> legacy persistence write/read
+  -> core context bridge
+  -> model input
+  -> core reply result
+  -> tg reply delivery
+```
+
 ## 必须先分开的三件事
 
 第三轮里，至少要把以下三件事彻底分开。
@@ -153,6 +190,43 @@
 - 但这些都属于 core 内部的上下文管理
 - 不需要再在架构层面额外拆成多个并列“大块”
 
+## C 阶段必须冻结的边界
+
+为了让 C 阶段能直接实施，下面几条边界需要先冻结。
+
+### 1. adapter 不再主导 LLM 可见文本
+
+尤其是 Telegram，不应再负责：
+
+- speaker/envelope 的最终文本格式
+- group transcript format 的最终选择
+- relay / mirror 的 LLM 可见前缀文本
+- “给模型看什么文本”的最终塑形
+
+它可以继续负责：
+
+- 原生消息解析
+- 结构化内容归一化
+- route / reply target / control follow-up 恢复
+- typing / retry / liveness / threading 这类协议行为
+
+### 2. core 必须拥有 context assemble / render
+
+从 C 阶段开始，core 至少应统一负责：
+
+- 读取当前 session 历史
+- 识别 `dm` / `group` 不同上下文规则
+- 处理 speaker、reply continuity、引用关系、窗口控制
+- 生成最终喂给模型的 messages / context blocks
+
+### 3. 保存层允许先 bridge，不要求先 final
+
+在 C 阶段里：
+
+- 可以继续写旧 `PersistedMessage`
+- 可以继续读旧 `SessionStore`
+- 但不允许再由 Telegram 反向定义保存层与上下文层边界
+
 ## 推荐的责任边界
 
 ### 先讲清一条方向性原则
@@ -209,6 +283,21 @@
 - 主导最终 LLM 上下文文本格式
 - 让不同渠道各自定义一套长期稳定 transcript 语义
 - 把本渠道内部概念直接扩散成 core 公共概念
+
+### C 阶段里 Telegram 还可以保留什么
+
+当前不需要为了 C 阶段，强行把以下能力从 Telegram adapter 挪走：
+
+- reply target 恢复
+- callback / location / control follow-up
+- typing keepalive
+- retry / backoff / liveness
+- thread/topic/reply_to 的 Telegram 协议细节
+
+这些能力的边界要求只是：
+
+- **它们属于 Telegram 的协议与策略职责**
+- **但它们不再决定最终给模型看的上下文文本**
 
 ## 为什么“保存格式”和“上下文格式”不能是同一层
 

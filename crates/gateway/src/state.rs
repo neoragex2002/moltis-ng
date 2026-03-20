@@ -88,6 +88,17 @@ pub struct TtsRuntimeOverride {
     pub model: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ChannelTurnContext {
+    pub turn_id: String,
+    pub session_key: String,
+    pub chan_chat_key: Option<String>,
+    pub reply_targets: Vec<ChannelReplyTarget>,
+    pub status_log: Vec<String>,
+}
+
+type SessionChannelTurnContexts = HashMap<String, ChannelTurnContext>;
+
 // ── Connected client ─────────────────────────────────────────────────────────
 
 /// A WebSocket client currently connected to the gateway.
@@ -268,10 +279,12 @@ pub struct GatewayInner {
     pub active_projects: HashMap<String, String>,
     /// Heartbeat configuration (for gon data and RPC methods).
     pub heartbeat_config: moltis_config::schema::HeartbeatConfig,
-    /// Pending channel reply targets: when a channel message triggers a chat
-    /// send, we queue the reply target so the "final" response can be routed
-    /// back to the originating channel.
-    pub channel_reply_queue: HashMap<String, HashMap<String, Vec<ChannelReplyTarget>>>,
+    /// Runtime per-turn channel delivery context.
+    ///
+    /// Each turn keeps the precise session binding, reply targets, and buffered
+    /// status log needed to deliver final replies without falling back to
+    /// chat-level guesses or hidden routing parameters.
+    pub channel_turn_contexts: HashMap<String, SessionChannelTurnContexts>,
     /// Per-session TTS runtime overrides (session_key -> override).
     pub tts_session_overrides: HashMap<String, TtsRuntimeOverride>,
     /// Per-channel-account TTS runtime overrides ((channel, account) -> override).
@@ -299,9 +312,6 @@ pub struct GatewayInner {
     pub llm_providers: Option<Arc<tokio::sync::RwLock<moltis_agents::providers::ProviderRegistry>>>,
     /// Cached user geolocation from browser Geolocation API, persisted to `USER.md`.
     pub cached_location: Option<moltis_config::GeoLocation>,
-    /// Per-session buffer for channel status messages (tool use, model selection).
-    /// Drained when the final response is delivered to the channel.
-    pub channel_status_log: HashMap<String, HashMap<String, Vec<String>>>,
 }
 
 impl GatewayInner {
@@ -317,7 +327,7 @@ impl GatewayInner {
             active_sessions: HashMap::new(),
             active_projects: HashMap::new(),
             heartbeat_config: moltis_config::schema::HeartbeatConfig::default(),
-            channel_reply_queue: HashMap::new(),
+            channel_turn_contexts: HashMap::new(),
             tts_session_overrides: HashMap::new(),
             tts_channel_overrides: HashMap::new(),
             hook_registry,
@@ -332,7 +342,6 @@ impl GatewayInner {
             push_service: None,
             llm_providers: None,
             cached_location: moltis_config::load_user().and_then(|u| u.location),
-            channel_status_log: HashMap::new(),
         }
     }
 
@@ -542,53 +551,107 @@ impl GatewayState {
         self.inner.read().await.clients.len()
     }
 
-    /// Push a reply target for a session (used when a channel message triggers chat.send).
+    pub async fn ensure_channel_turn_context(
+        &self,
+        turn_id: &str,
+        session_key: &str,
+        chan_chat_key: Option<String>,
+    ) {
+        let mut inner = self.inner.write().await;
+        let entry = inner
+            .channel_turn_contexts
+            .entry(session_key.to_string())
+            .or_default()
+            .entry(turn_id.to_string())
+            .or_insert_with(|| ChannelTurnContext {
+                turn_id: turn_id.to_string(),
+                session_key: session_key.to_string(),
+                chan_chat_key: chan_chat_key.clone(),
+                reply_targets: Vec::new(),
+                status_log: Vec::new(),
+            });
+        entry.session_key = session_key.to_string();
+        if entry.chan_chat_key.is_none() {
+            entry.chan_chat_key = chan_chat_key;
+        }
+    }
+
+    pub async fn channel_turn_context(
+        &self,
+        session_key: &str,
+        turn_id: &str,
+    ) -> Option<ChannelTurnContext> {
+        self.inner
+            .read()
+            .await
+            .channel_turn_contexts
+            .get(session_key)
+            .and_then(|turns| turns.get(turn_id))
+            .cloned()
+    }
+
+    /// Push a reply target for a session turn.
     pub async fn push_channel_reply(
         &self,
         session_key: &str,
-        trigger_id: &str,
+        turn_id: &str,
         target: ChannelReplyTarget,
     ) {
-        self.inner
-            .write()
-            .await
-            .channel_reply_queue
+        let mut inner = self.inner.write().await;
+        let entry = inner
+            .channel_turn_contexts
             .entry(session_key.to_string())
             .or_default()
-            .entry(trigger_id.to_string())
-            .or_default()
-            .push(target);
+            .entry(turn_id.to_string())
+            .or_insert_with(|| ChannelTurnContext {
+                turn_id: turn_id.to_string(),
+                session_key: session_key.to_string(),
+                chan_chat_key: None,
+                reply_targets: Vec::new(),
+                status_log: Vec::new(),
+            });
+        entry.session_key = session_key.to_string();
+        entry.reply_targets.push(target);
     }
 
-    /// Drain pending reply targets for a trigger on a session.
+    /// Drain pending reply targets for a turn on a session.
     pub async fn drain_channel_replies(
         &self,
         session_key: &str,
-        trigger_id: &str,
+        turn_id: &str,
     ) -> Vec<ChannelReplyTarget> {
         let mut inner = self.inner.write().await;
-        let Some(by_trigger) = inner.channel_reply_queue.get_mut(session_key) else {
+        let Some(turns) = inner.channel_turn_contexts.get_mut(session_key) else {
             return Vec::new();
         };
-        let drained = by_trigger.remove(trigger_id).unwrap_or_default();
-        if by_trigger.is_empty() {
-            inner.channel_reply_queue.remove(session_key);
+        let Some(turn) = turns.get_mut(turn_id) else {
+            return Vec::new();
+        };
+        let drained = std::mem::take(&mut turn.reply_targets);
+        let mut remove_session = false;
+        if turn.reply_targets.is_empty() && turn.status_log.is_empty() {
+            turns.remove(turn_id);
+            remove_session = turns.is_empty();
+        }
+        let _ = turns;
+        if remove_session {
+            inner.channel_turn_contexts.remove(session_key);
         }
         drained
     }
 
-    /// Get a copy of pending reply targets for a trigger without removing them.
+    /// Get a copy of pending reply targets for a turn without removing them.
     pub async fn peek_channel_replies(
         &self,
         session_key: &str,
-        trigger_id: &str,
+        turn_id: &str,
     ) -> Vec<ChannelReplyTarget> {
         let inner = self.inner.read().await;
         inner
-            .channel_reply_queue
+            .channel_turn_contexts
             .get(session_key)
-            .and_then(|m| m.get(trigger_id))
-            .cloned()
+            .and_then(|turns| turns.get(turn_id))
+            .map(|turn| turn.reply_targets.clone())
             .unwrap_or_default()
     }
 
@@ -597,10 +660,20 @@ impl GatewayState {
     /// Use only for defensive cleanup when a trigger id is unavailable.
     pub async fn drain_all_channel_replies(&self, session_key: &str) -> Vec<ChannelReplyTarget> {
         let mut inner = self.inner.write().await;
-        let Some(by_trigger) = inner.channel_reply_queue.remove(session_key) else {
+        let Some(mut turns) = inner.channel_turn_contexts.remove(session_key) else {
             return Vec::new();
         };
-        by_trigger.into_values().flatten().collect()
+        let mut drained = Vec::new();
+        for turn in turns.values_mut() {
+            drained.extend(std::mem::take(&mut turn.reply_targets));
+        }
+        turns.retain(|_, turn| !(turn.reply_targets.is_empty() && turn.status_log.is_empty()));
+        if !turns.is_empty() {
+            inner
+                .channel_turn_contexts
+                .insert(session_key.to_string(), turns);
+        }
+        drained
     }
 
     /// Record a run error (for send_sync to retrieve).
@@ -630,33 +703,48 @@ impl GatewayState {
     pub async fn push_channel_status_log(
         &self,
         session_key: &str,
-        trigger_id: &str,
+        turn_id: &str,
         message: String,
     ) {
-        self.inner
-            .write()
-            .await
-            .channel_status_log
+        let mut inner = self.inner.write().await;
+        let entry = inner
+            .channel_turn_contexts
             .entry(session_key.to_string())
             .or_default()
-            .entry(trigger_id.to_string())
-            .or_default()
-            .push(message);
+            .entry(turn_id.to_string())
+            .or_insert_with(|| ChannelTurnContext {
+                turn_id: turn_id.to_string(),
+                session_key: session_key.to_string(),
+                chan_chat_key: None,
+                reply_targets: Vec::new(),
+                status_log: Vec::new(),
+            });
+        entry.session_key = session_key.to_string();
+        entry.status_log.push(message);
     }
 
-    /// Drain buffered status log entries for a session + trigger.
+    /// Drain buffered status log entries for a session turn.
     pub async fn drain_channel_status_log(
         &self,
         session_key: &str,
-        trigger_id: &str,
+        turn_id: &str,
     ) -> Vec<String> {
         let mut inner = self.inner.write().await;
-        let Some(by_trigger) = inner.channel_status_log.get_mut(session_key) else {
+        let Some(turns) = inner.channel_turn_contexts.get_mut(session_key) else {
             return Vec::new();
         };
-        let drained = by_trigger.remove(trigger_id).unwrap_or_default();
-        if by_trigger.is_empty() {
-            inner.channel_status_log.remove(session_key);
+        let Some(turn) = turns.get_mut(turn_id) else {
+            return Vec::new();
+        };
+        let drained = std::mem::take(&mut turn.status_log);
+        let mut remove_session = false;
+        if turn.reply_targets.is_empty() && turn.status_log.is_empty() {
+            turns.remove(turn_id);
+            remove_session = turns.is_empty();
+        }
+        let _ = turns;
+        if remove_session {
+            inner.channel_turn_contexts.remove(session_key);
         }
         drained
     }
@@ -666,10 +754,20 @@ impl GatewayState {
     /// Use only for defensive cleanup when a trigger id is unavailable.
     pub async fn drain_all_channel_status_log(&self, session_key: &str) -> Vec<String> {
         let mut inner = self.inner.write().await;
-        let Some(by_trigger) = inner.channel_status_log.remove(session_key) else {
+        let Some(mut turns) = inner.channel_turn_contexts.remove(session_key) else {
             return Vec::new();
         };
-        by_trigger.into_values().flatten().collect()
+        let mut drained = Vec::new();
+        for turn in turns.values_mut() {
+            drained.extend(std::mem::take(&mut turn.status_log));
+        }
+        turns.retain(|_, turn| !(turn.reply_targets.is_empty() && turn.status_log.is_empty()));
+        if !turns.is_empty() {
+            inner
+                .channel_turn_contexts
+                .insert(session_key.to_string(), turns);
+        }
+        drained
     }
 
     /// Close a client: remove from registry and unregister from nodes.
@@ -842,5 +940,105 @@ mod tests {
         // Should not panic.
         state.disconnect_all_clients("noop").await;
         assert_eq!(state.client_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn channel_turn_context_is_scoped_by_session_and_turn_id() {
+        let state = test_state();
+
+        state
+            .ensure_channel_turn_context("turn:dup", "session:a", Some("telegram:a:1".into()))
+            .await;
+        state
+            .ensure_channel_turn_context("turn:dup", "session:b", Some("telegram:b:1".into()))
+            .await;
+
+        state
+            .push_channel_reply(
+                "session:a",
+                "turn:dup",
+                ChannelReplyTarget {
+                    chan_type: moltis_channels::ChannelType::Telegram,
+                    chan_account_key: "telegram:a".into(),
+                    chan_user_name: Some("bot-a".into()),
+                    chat_id: "1".into(),
+                    message_id: Some("11".into()),
+                    thread_id: None,
+                    bucket_key: Some("bucket:a".into()),
+                },
+            )
+            .await;
+        state
+            .push_channel_reply(
+                "session:b",
+                "turn:dup",
+                ChannelReplyTarget {
+                    chan_type: moltis_channels::ChannelType::Telegram,
+                    chan_account_key: "telegram:b".into(),
+                    chan_user_name: Some("bot-b".into()),
+                    chat_id: "1".into(),
+                    message_id: Some("22".into()),
+                    thread_id: None,
+                    bucket_key: Some("bucket:b".into()),
+                },
+            )
+            .await;
+        state
+            .push_channel_status_log("session:a", "turn:dup", "status:a".into())
+            .await;
+        state
+            .push_channel_status_log("session:b", "turn:dup", "status:b".into())
+            .await;
+
+        let turn_a = state
+            .channel_turn_context("session:a", "turn:dup")
+            .await
+            .expect("session a turn context must exist");
+        let turn_b = state
+            .channel_turn_context("session:b", "turn:dup")
+            .await
+            .expect("session b turn context must exist");
+        assert_eq!(turn_a.chan_chat_key.as_deref(), Some("telegram:a:1"));
+        assert_eq!(turn_b.chan_chat_key.as_deref(), Some("telegram:b:1"));
+        assert!(
+            state
+                .channel_turn_context("session:missing", "turn:dup")
+                .await
+                .is_none()
+        );
+
+        let peek_a = state.peek_channel_replies("session:a", "turn:dup").await;
+        let peek_b = state.peek_channel_replies("session:b", "turn:dup").await;
+        assert_eq!(peek_a.len(), 1);
+        assert_eq!(peek_b.len(), 1);
+        assert_eq!(peek_a[0].bucket_key.as_deref(), Some("bucket:a"));
+        assert_eq!(peek_b[0].bucket_key.as_deref(), Some("bucket:b"));
+
+        let drained_replies_a = state.drain_channel_replies("session:a", "turn:dup").await;
+        let drained_status_b = state.drain_channel_status_log("session:b", "turn:dup").await;
+        assert_eq!(drained_replies_a.len(), 1);
+        assert_eq!(drained_replies_a[0].message_id.as_deref(), Some("11"));
+        assert_eq!(drained_status_b, vec!["status:b".to_string()]);
+
+        assert_eq!(
+            state.drain_channel_status_log("session:a", "turn:dup").await,
+            vec!["status:a".to_string()]
+        );
+        let drained_replies_b = state.drain_channel_replies("session:b", "turn:dup").await;
+        assert_eq!(drained_replies_b.len(), 1);
+        assert_eq!(drained_replies_b[0].message_id.as_deref(), Some("22"));
+
+        assert!(
+            state
+                .channel_turn_context("session:a", "turn:dup")
+                .await
+                .is_none()
+        );
+        assert!(
+            state
+                .channel_turn_context("session:b", "turn:dup")
+                .await
+                .is_none()
+        );
     }
 }

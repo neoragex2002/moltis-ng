@@ -14,4 +14,12 @@ pub mod outbound;
 pub mod plugin;
 pub mod state;
 
-pub use {config::TelegramAccountConfig, plugin::TelegramPlugin};
+pub use {
+    adapter::{
+        TelegramCoreBridge, TgAttachment, TgFollowUpTarget, TgInbound, TgInboundKind,
+        TgInboundMode, TgInboundRequest, TgPrivateSource, TgPrivateTarget, TgReply, TgRoute,
+        TgTranscriptFormat,
+    },
+    config::TelegramAccountConfig,
+    plugin::TelegramPlugin,
+};

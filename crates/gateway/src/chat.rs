@@ -934,14 +934,6 @@ async fn build_prompt_runtime_context(
     }
 }
 
-const TG_GST_V1_SYSTEM_PROMPT_BLOCK: &str = r#"## Telegram Group Transcript (TG-GST v1)
-- Some inbound messages in this session may be formatted as: <speaker><addr_flag>: <body>
-- If <addr_flag> is " -> you", the message is explicitly addressed to you and requires your attention.
-- When replying/summarizing:
-  - Do NOT output transcript-style lines like "<speaker>: ...". Use normal prose/bullets.
-  - Do NOT start a line with "@someone" unless you intentionally want to delegate (this may trigger relay).
-  - If you must quote a line containing "@mentions", wrap it in '>' quote lines or fenced code blocks."#;
-
 async fn maybe_append_tg_gst_v1_system_prompt(
     state: &Arc<GatewayState>,
     session_entry: Option<&moltis_sessions::metadata::SessionEntry>,
@@ -953,36 +945,20 @@ async fn maybe_append_tg_gst_v1_system_prompt(
     let Some(binding) = entry.channel_binding.as_deref() else {
         return;
     };
-    let Ok(target) = serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding) else {
-        return;
-    };
-    if target.chan_type != moltis_channels::ChannelType::Telegram {
-        return;
-    }
-    let Ok(chat_i64) = target.chat_id.parse::<i64>() else {
-        return;
-    };
-    if chat_i64 >= 0 {
-        return;
-    }
 
     let snapshots = state
         .services
         .channel
         .telegram_bus_accounts_snapshot()
         .await;
-    let format = snapshots
-        .iter()
-        .find(|s| s.account_handle == target.chan_account_key)
-        .map(|s| s.group_session_transcript_format.clone())
-        .unwrap_or(moltis_telegram::config::GroupSessionTranscriptFormat::Legacy);
-
-    if format != moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1 {
+    let Some(block) =
+        moltis_telegram::adapter::tg_gst_v1_system_prompt_block_for_binding(binding, &snapshots)
+    else {
         return;
-    }
+    };
 
     system_prompt.push_str("\n\n");
-    system_prompt.push_str(TG_GST_V1_SYSTEM_PROMPT_BLOCK);
+    system_prompt.push_str(block);
 }
 
 fn effective_tool_policy(config: &moltis_config::MoltisConfig) -> ToolPolicy {
@@ -2142,28 +2118,22 @@ impl ChatService for LiveChatService {
             Some(id) => id.to_string(),
             None => self.session_key_for(conn_id.as_deref()).await,
         };
-        let chan_chat_key_from_params = params
-            .get("_chanChatKey")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from);
-        let queued_replay = params
-            .get("_queued_replay")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let trigger_id = params
-            .get("_triggerId")
+        let channel_turn_id = params
+            .get("_channelTurnId")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(String::from)
             .unwrap_or_else(|| {
                 let id = crate::ids::new_trigger_id();
-                params["_triggerId"] = serde_json::json!(id.clone());
+                params["_channelTurnId"] = serde_json::json!(id.clone());
                 id
             });
+        let queued_replay = params
+            .get("_queued_replay")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let trigger_id = channel_turn_id.clone();
 
         // Track client-side sequence number for ordering diagnostics.
         // Note: seq resets to 1 on page reload, so a drop from a high value
@@ -2323,7 +2293,7 @@ impl ChatService for LiveChatService {
         if let Some(obj) = user_val.as_object_mut() {
             obj.insert(
                 "triggerId".into(),
-                serde_json::Value::String(trigger_id.clone()),
+                serde_json::Value::String(channel_turn_id.clone()),
             );
             if let Some(v) = params.get("_mergedFromTriggerIds") {
                 obj.insert("mergedFromTriggerIds".into(), v.clone());
@@ -2347,9 +2317,7 @@ impl ChatService for LiveChatService {
         // If this is a web UI message on a channel-bound session, echo the
         // user message to the channel and register a reply target so the LLM
         // response is also delivered there.
-        let is_web_message = conn_id.is_some()
-            && params.get("_chanChatKey").is_none()
-            && params.get("channel").is_none();
+        let is_web_message = conn_id.is_some() && params.get("channel").is_none();
 
         if is_web_message
             && let Some(entry) = self.session_metadata.get(&session_key).await
@@ -2357,18 +2325,20 @@ impl ChatService for LiveChatService {
             && let Ok(target) =
                 serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
         {
-            if session_matches_channel_binding(
-                self.session_metadata.as_ref(),
-                &session_key,
-                &target,
+            let chan_chat_key = crate::session::sandbox_chan_chat_key_for_channel_binding(
+                binding_json,
             )
-            .await
-            {
-                // Push reply target so deliver_channel_replies sends the LLM response.
-                self.state
-                    .push_channel_reply(&session_key, &trigger_id, target.clone())
-                    .await;
-            }
+            .or_else(|| Some(default_chan_chat_key(&target)));
+            self.state
+                .ensure_channel_turn_context(
+                    &channel_turn_id,
+                    &session_key,
+                    chan_chat_key,
+                )
+                .await;
+            self.state
+                .push_channel_reply(&session_key, &channel_turn_id, target)
+                .await;
         }
 
         // Discover enabled skills/plugins for prompt injection.
@@ -2411,12 +2381,17 @@ impl ChatService for LiveChatService {
                 .map(String::from);
         }
 
-        let tool_chan_chat_key = chan_chat_key_from_params.clone().or_else(|| {
+        let tool_chan_chat_key = self
+            .state
+            .channel_turn_context(&session_key, &channel_turn_id)
+            .await
+            .and_then(|turn| turn.chan_chat_key)
+            .or_else(|| {
             session_entry
                 .as_ref()
                 .and_then(|entry| entry.channel_binding.as_deref())
                 .and_then(crate::session::sandbox_chan_chat_key_for_channel_binding)
-        });
+            });
 
         let state = Arc::clone(&self.state);
         let active_runs = Arc::clone(&self.active_runs);
@@ -2936,7 +2911,10 @@ impl ChatService for LiveChatService {
                         "⚠️ 我这边连续出错，已暂停处理后续请求；请稍后重试或重新 @我。";
                     let outbound = state_for_drain.services.channel_outbound_arc();
                     for msg in queued {
-                        let Some(tid) = msg.params.get("_triggerId").and_then(|v| v.as_str())
+                        let Some(tid) = msg
+                            .params
+                            .get("_channelTurnId")
+                            .and_then(|v| v.as_str())
                         else {
                             continue;
                         };
@@ -3018,7 +2996,7 @@ impl ChatService for LiveChatService {
                                 .iter()
                                 .filter_map(|m| {
                                     m.params
-                                        .get("_triggerId")
+                                        .get("_channelTurnId")
                                         .and_then(|v| v.as_str())
                                         .map(str::to_string)
                                 })
@@ -3026,7 +3004,7 @@ impl ChatService for LiveChatService {
                             let merged_trigger_id = crate::ids::new_trigger_id();
                             let last_trigger_id = last
                                 .params
-                                .get("_triggerId")
+                                .get("_channelTurnId")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
 
@@ -3064,7 +3042,7 @@ impl ChatService for LiveChatService {
                             let mut merged = last.params.clone();
                             merged["text"] = serde_json::json!(combined.join("\n\n"));
                             merged["_queued_replay"] = serde_json::json!(true);
-                            merged["_triggerId"] = serde_json::json!(merged_trigger_id);
+                            merged["_channelTurnId"] = serde_json::json!(merged_trigger_id);
                             merged["_mergedFromTriggerIds"] = serde_json::json!(merged_from);
                             if let Err(e) = chat.send(merged).await {
                                 warn!(session = %session_key_clone, error = %e, "failed to replay collected messages");
@@ -3104,12 +3082,13 @@ impl ChatService for LiveChatService {
             .and_then(|v| v.as_str())
             .unwrap_or("main")
             .to_string();
-        let chan_chat_key_from_params = params
-            .get("_chanChatKey")
+        let channel_turn_id = params
+            .get("_channelTurnId")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(String::from);
+            .map(String::from)
+            .unwrap_or_else(|| crate::ids::new_trigger_id());
 
         // Resolve provider.
         let provider: Arc<dyn moltis_agents::model::LlmProvider> = {
@@ -3126,7 +3105,7 @@ impl ChatService for LiveChatService {
             }
         };
 
-        let trigger_id = crate::ids::new_trigger_id();
+        let trigger_id = channel_turn_id.clone();
 
         // Persist the user message.
         let user_msg = PersistedMessage::user(&text);
@@ -3156,12 +3135,17 @@ impl ChatService for LiveChatService {
             .get("_acceptLanguage")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let tool_chan_chat_key = chan_chat_key_from_params.or_else(|| {
-            session_entry
-                .as_ref()
-                .and_then(|entry| entry.channel_binding.as_deref())
-                .and_then(crate::session::sandbox_chan_chat_key_for_channel_binding)
-        });
+        let tool_chan_chat_key = self
+            .state
+            .channel_turn_context(&session_key, &channel_turn_id)
+            .await
+            .and_then(|turn| turn.chan_chat_key)
+            .or_else(|| {
+                session_entry
+                    .as_ref()
+                    .and_then(|entry| entry.channel_binding.as_deref())
+                    .and_then(crate::session::sandbox_chan_chat_key_for_channel_binding)
+            });
 
         // Load conversation history (excluding the message we just appended).
         let mut history = self
@@ -3763,10 +3747,17 @@ impl ChatService for LiveChatService {
         // Sandbox info
         let sandbox_info = if let Some(ref router) = self.state.sandbox_router {
             let config = router.config();
-            let router_key = params
-                .get("_chanChatKey")
-                .and_then(|v| v.as_str())
-                .map(String::from)
+            let channel_turn_router_key = if let Some(turn_id) =
+                params.get("_channelTurnId").and_then(|v| v.as_str())
+            {
+                self.state
+                    .channel_turn_context(&session_key, turn_id)
+                    .await
+                    .and_then(|turn| turn.chan_chat_key)
+            } else {
+                None
+            };
+            let router_key = channel_turn_router_key
                 .or_else(|| {
                     session_entry
                         .as_ref()
@@ -6928,6 +6919,7 @@ fn extract_relay_groups(
 
 async fn dispatch_telegram_relay(
     state: &Arc<GatewayState>,
+    bus_accounts: &[moltis_telegram::config::TelegramBusAccountSnapshot],
     target_account_id: &str,
     target_handle: Option<String>,
     chat_id: &str,
@@ -6947,14 +6939,14 @@ async fn dispatch_telegram_relay(
     let target_chan_chat_key =
         moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, thread_id);
 
-    let target_bucket_key = telegram_group_bucket_key_for_account(
-        state,
+    let route = moltis_telegram::adapter::resolve_group_relay_route(
+        bus_accounts,
         target_account_id,
         chat_id,
         thread_id,
         source_sender_account_key,
     )
-    .await;
+    .ok_or_else(|| "target relay route not found".to_string())?;
     let target_session_id = resolve_telegram_session_id(
         state,
         target_account_id,
@@ -6978,31 +6970,47 @@ async fn dispatch_telegram_relay(
         target_account_id,
         chat_id,
         thread_id,
-        target_bucket_key.as_deref(),
+        Some(route.bucket_key.as_str()),
     )
     .await;
 
-    let reply_target = moltis_channels::ChannelReplyTarget {
-        chan_type: moltis_channels::ChannelType::Telegram,
-        chan_account_key: target_account_id.to_string(),
-        chan_user_name: target_handle,
+    let private_target = moltis_telegram::TgPrivateTarget {
+        account_handle: target_account_id.to_string(),
         chat_id: chat_id.to_string(),
         message_id: Some(reply_to_message_id.to_string()),
         thread_id: thread_id.map(str::to_string),
-        bucket_key: target_bucket_key,
     };
-    let trigger_id = crate::ids::new_trigger_id();
+    let reply_target = moltis_channels::ChannelReplyTarget {
+        chan_type: moltis_channels::ChannelType::Telegram,
+        chan_account_key: private_target.account_handle.clone(),
+        chan_user_name: target_handle,
+        chat_id: private_target.chat_id.clone(),
+        message_id: private_target.message_id.clone(),
+        thread_id: private_target.thread_id.clone(),
+        bucket_key: Some(route.bucket_key.clone()),
+    };
+    let channel_turn_id = crate::ids::new_trigger_id();
     state
-        .push_channel_reply(&target_session_id, &trigger_id, reply_target)
+        .ensure_channel_turn_context(
+            &channel_turn_id,
+            &target_session_id,
+            Some(target_chan_chat_key.clone()),
+        )
+        .await;
+    state
+        .push_channel_reply(&target_session_id, &channel_turn_id, reply_target)
         .await;
 
     let chat = state.chat().await;
+    let tg_reply = moltis_telegram::TgReply {
+        output: relay_text.to_string(),
+        private_target,
+    };
     let params = serde_json::json!({
-        "text": relay_text,
+        "text": tg_reply.output,
         "channel": channel_meta,
         "_sessionId": target_session_id,
-        "_chanChatKey": target_chan_chat_key,
-        "_triggerId": trigger_id,
+        "_channelTurnId": channel_turn_id,
     });
     chat.send(params).await.map_err(|e| e.to_string())?;
     Ok(())
@@ -7336,20 +7344,19 @@ Output format:
             }
         }
 
-        let target_format = bus_accounts
-            .iter()
-            .find(|a| a.account_handle == d.target_account_id)
-            .map(|a| a.group_session_transcript_format.clone())
-            .unwrap_or(moltis_telegram::config::GroupSessionTranscriptFormat::Legacy);
-
-        let relay_text = match target_format {
-            moltis_telegram::config::GroupSessionTranscriptFormat::Legacy => {
-                format!("（来自 {source_handle}）{}", d.task_text.trim())
+        let relay_text = moltis_telegram::adapter::build_group_relay_reply(
+            bus_accounts,
+            moltis_telegram::TgPrivateTarget {
+                account_handle: d.target_account_id.clone(),
+                chat_id: chat_id.to_string(),
+                message_id: Some(source_outbound_message_id.to_string()),
+                thread_id: thread_id.map(str::to_string),
             },
-            moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1 => {
-                format!("{source_username}(bot) -> you: {}", d.task_text.trim())
-            },
-        };
+            source_account_id,
+            source_account_handle,
+            &d.task_text,
+        )
+        .output;
         let channel_meta = serde_json::json!({
             "chanType": "telegram",
             "messageKind": "text",
@@ -7375,9 +7382,11 @@ Output format:
         let relay_chain_id = chain_id.clone();
         let budget = epoch_relay_budget;
         let relay_thread_id = thread_id.map(str::to_string);
+        let relay_bus_accounts = bus_accounts.to_vec();
         tokio::spawn(async move {
             if let Err(e) = dispatch_telegram_relay(
                 &state,
+                &relay_bus_accounts,
                 &target_account_id,
                 target_handle,
                 &chat_id,
@@ -7469,28 +7478,19 @@ async fn ensure_channel_bound_session(
     }
 }
 
-async fn session_matches_channel_binding(
-    metadata: &SqliteSessionMetadata,
-    session_id: &str,
-    target: &moltis_channels::ChannelReplyTarget,
-) -> bool {
-    if let Some(bucket_key) = target.bucket_key.as_deref()
-        && let Some(bound_session_id) = metadata
-            .get_bucket_session_id(target.chan_type.as_str(), bucket_key)
-            .await
-    {
-        return bound_session_id == session_id;
-    }
-
-    metadata
-        .get_active_session_id(
-            target.chan_type.as_str(),
-            &target.chan_account_key,
-            &target.chat_id,
-        )
-        .await
-        .map(|bound_session_id| bound_session_id == session_id)
-        .unwrap_or(true)
+fn default_chan_chat_key(target: &moltis_channels::ChannelReplyTarget) -> String {
+    let chan_user_id = match target.chan_type {
+        moltis_channels::ChannelType::Telegram => target
+            .chan_account_key
+            .strip_prefix("telegram:")
+            .unwrap_or(&target.chan_account_key),
+    };
+    moltis_common::identity::format_chan_chat_key(
+        target.chan_type.as_str(),
+        chan_user_id,
+        &target.chat_id,
+        target.thread_id.as_deref(),
+    )
 }
 
 async fn telegram_group_bucket_key_for_account(
@@ -7505,17 +7505,14 @@ async fn telegram_group_bucket_key_for_account(
         .channel
         .telegram_bus_accounts_snapshot()
         .await;
-    let snapshot = snapshots
-        .iter()
-        .find(|snapshot| snapshot.account_handle == chan_account_key)?;
-    let sender = sender_account_key.map(|value| value.strip_prefix("telegram:").unwrap_or(value));
-    Some(moltis_telegram::adapter::resolve_group_bucket_key(
-        &snapshot.group_scope,
-        &snapshot.account_handle,
+    moltis_telegram::adapter::resolve_group_relay_route(
+        &snapshots,
+        chan_account_key,
         chat_id,
-        sender,
         thread_id,
-    ))
+        sender_account_key,
+    )
+    .map(|route| route.bucket_key)
 }
 
 async fn resolve_telegram_session_id(
@@ -7525,26 +7522,61 @@ async fn resolve_telegram_session_id(
     thread_id: Option<&str>,
     sender_account_key: Option<&str>,
 ) -> String {
+    let snapshots = state
+        .services
+        .channel
+        .telegram_bus_accounts_snapshot()
+        .await;
     if let Some(ref sm) = state.services.session_metadata
-        && let Some(bucket_key) = telegram_group_bucket_key_for_account(
-            state,
+        && let Some(route) = moltis_telegram::adapter::resolve_group_relay_route(
+            &snapshots,
             chan_account_key,
             chat_id,
             thread_id,
             sender_account_key,
         )
-        .await
-        && let Some(key) = sm.get_bucket_session_id("telegram", &bucket_key).await
     {
-        return key;
-    }
+        if let Some(key) = sm.get_bucket_session_id("telegram", &route.bucket_key).await {
+            return key;
+        }
 
-    if let Some(ref sm) = state.services.session_metadata
-        && let Some(key) = sm
+        if let Some(active_session_id) = sm
             .get_active_session_id("telegram", chan_account_key, chat_id)
             .await
-    {
-        return key;
+        {
+            let active_entry = sm.get(&active_session_id).await;
+            let active_binding_matches = active_entry
+                .as_ref()
+                .and_then(|entry| entry.channel_binding.as_deref())
+                .and_then(|binding_json| {
+                    serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json).ok()
+                })
+                .is_none_or(|bound_target| {
+                    bound_target.chan_type == moltis_channels::ChannelType::Telegram
+                        && bound_target.chan_account_key == chan_account_key
+                        && bound_target.chat_id == chat_id
+                        && bound_target.thread_id.as_deref() == thread_id
+                        && bound_target
+                            .bucket_key
+                            .as_deref()
+                            .is_none_or(|existing| existing == route.bucket_key)
+                });
+            if active_binding_matches {
+                sm.set_bucket_session_id("telegram", &route.bucket_key, &active_session_id)
+                    .await;
+                info!(
+                    event = "telegram.session_compat.backfilled_bucket_session",
+                    chan_account_key,
+                    chat_id,
+                    thread_id = ?thread_id,
+                    bucket_key = route.bucket_key,
+                    session_id = active_session_id,
+                    reason_code = "legacy_active_session_without_bucket_mapping",
+                    "reused active telegram session and backfilled bucket mapping"
+                );
+                return active_session_id;
+            }
+        }
     }
     let chan_user_id = chan_account_key
         .strip_prefix("telegram:")
@@ -9940,10 +9972,15 @@ mod tests {
             1,
             "expected one internal_complete call"
         );
-        assert_eq!(
-            sent.get("_chanChatKey").and_then(|v| v.as_str()),
-            Some("telegram:bot2:-100")
-        );
+        let turn_id = sent
+            .get("_channelTurnId")
+            .and_then(|v| v.as_str())
+            .expect("relay dispatch must carry channel turn id");
+        let turn = state
+            .channel_turn_context("telegram:bot2:-100", turn_id)
+            .await
+            .expect("relay dispatch must register channel turn context");
+        assert_eq!(turn.chan_chat_key.as_deref(), Some("telegram:bot2:-100"));
         let relay_text = sent.get("text").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             relay_text.contains("帮我总结一下"),
@@ -10227,10 +10264,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            sent.get("_chanChatKey").and_then(|v| v.as_str()),
-            Some("telegram:bot2:-100")
-        );
+        let turn_id = sent
+            .get("_channelTurnId")
+            .and_then(|v| v.as_str())
+            .expect("relay dispatch must carry channel turn id");
+        let turn = state
+            .channel_turn_context("telegram:bot2:-100", turn_id)
+            .await
+            .expect("relay dispatch must register channel turn context");
+        assert_eq!(turn.chan_chat_key.as_deref(), Some("telegram:bot2:-100"));
         let recv2 = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
         assert!(recv2.is_err(), "expected only one dispatch under budget=1");
 
@@ -10344,10 +10386,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            sent.get("_chanChatKey").and_then(|v| v.as_str()),
-            Some("telegram:bot2:-100")
-        );
+        let turn_id = sent
+            .get("_channelTurnId")
+            .and_then(|v| v.as_str())
+            .expect("relay dispatch must carry channel turn id");
+        let turn = state
+            .channel_turn_context("telegram:bot2:-100", turn_id)
+            .await
+            .expect("relay dispatch must register channel turn context");
+        assert_eq!(turn.chan_chat_key.as_deref(), Some("telegram:bot2:-100"));
 
         let inner = state.inner.read().await;
         let entry = inner
@@ -11445,7 +11492,7 @@ echo @bot2
                 "text": "A",
                 "_sessionId": session_key,
                 "model": "delayed-fail-then-ok-model",
-                "_triggerId": "trg_a",
+                "_channelTurnId": "trg_a",
             }))
             .await
             .unwrap();
@@ -11455,7 +11502,7 @@ echo @bot2
                 "text": "B",
                 "_sessionId": session_key,
                 "model": "delayed-fail-then-ok-model",
-                "_triggerId": "trg_b",
+                "_channelTurnId": "trg_b",
             }))
             .await
             .unwrap();
@@ -13480,37 +13527,225 @@ echo @bot2
     }
 
     #[tokio::test]
-    async fn session_matches_channel_binding_prefers_bucket_mapping_over_chat_active_session() {
+    async fn resolve_telegram_session_id_reuses_legacy_active_session_for_matching_bucket() {
         let metadata = sqlite_metadata().await;
+        let legacy_binding = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:845".into(),
+            chan_user_name: None,
+            chat_id: "-100".into(),
+            message_id: None,
+            thread_id: None,
+            bucket_key: None,
+        })
+        .expect("serialize binding");
+        let _ = metadata.upsert("session:old", Some("legacy".into())).await;
+        metadata
+            .set_channel_binding("session:old", Some(legacy_binding))
+            .await;
+        metadata
+            .set_active_session_id("telegram", "telegram:845", "-100", "session:old")
+            .await;
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_session_metadata(Arc::clone(&metadata));
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
+                account_handle: "telegram:845".into(),
+                chan_user_name: Some("relay_bot".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::PerSender,
+                relay_chain_enabled: false,
+                relay_hop_limit: 0,
+                epoch_relay_budget: 128,
+                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            }],
+        });
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let resolved =
+            resolve_telegram_session_id(&state, "telegram:845", "-100", None, Some("telegram:42"))
+                .await;
+        assert_eq!(resolved, "session:old");
+        assert_eq!(
+            metadata
+                .get_bucket_session_id(
+                    "telegram",
+                    "group:account:telegram:845:peer:-100:sender:42"
+                )
+                .await
+                .as_deref(),
+            Some("session:old")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_telegram_session_id_does_not_reuse_active_session_from_other_bucket() {
+        let metadata = sqlite_metadata().await;
+        let bound_binding = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:845".into(),
+            chan_user_name: None,
+            chat_id: "-100".into(),
+            message_id: None,
+            thread_id: None,
+            bucket_key: Some("group:account:telegram:845:peer:-100:sender:41".into()),
+        })
+        .expect("serialize binding");
+        let _ = metadata.upsert("session:other", Some("other".into())).await;
+        metadata
+            .set_channel_binding("session:other", Some(bound_binding))
+            .await;
         metadata
             .set_active_session_id("telegram", "telegram:845", "-100", "session:other")
             .await;
-        metadata
-            .set_bucket_session_id(
-                "telegram",
-                "group:account:telegram:845:peer:-100:sender:1001",
-                "session:bucket",
-            )
-            .await;
 
-        let target = moltis_channels::ChannelReplyTarget {
+        let mut services = crate::services::GatewayServices::noop()
+            .with_session_metadata(Arc::clone(&metadata));
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
+                account_handle: "telegram:845".into(),
+                chan_user_name: Some("relay_bot".into()),
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::PerSender,
+                relay_chain_enabled: false,
+                relay_hop_limit: 0,
+                epoch_relay_budget: 128,
+                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
+                group_session_transcript_format:
+                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
+            }],
+        });
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let resolved =
+            resolve_telegram_session_id(&state, "telegram:845", "-100", None, Some("telegram:42"))
+                .await;
+        assert_eq!(resolved, "telegram:845:-100");
+    }
+
+    #[tokio::test]
+    async fn web_channel_echo_uses_session_binding_even_when_another_bucket_is_active() {
+        let _guard = crate::test_support::TestDirsGuard::new();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
+        let services = crate::services::GatewayServices::noop()
+            .with_session_store(Arc::clone(&store))
+            .with_session_metadata(Arc::clone(&metadata));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        ));
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> =
+            Arc::new(WaitCompletionProvider {
+                started: Arc::clone(&started),
+                finish: Arc::clone(&finish),
+            });
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_agents::providers::ModelInfo {
+                id: "wait-completion-model".to_string(),
+                provider: "wait-completion".to_string(),
+                display_name: "wait-completion".to_string(),
+                created_at: None,
+            },
+            Arc::clone(&provider),
+        );
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::clone(&state),
+            Arc::clone(&store),
+            Arc::clone(&metadata),
+        );
+
+        let bucket_key = "group:account:telegram:845:peer:-100:sender:1001";
+        let session_key = "session:bucket";
+        let binding = moltis_channels::ChannelReplyTarget {
             chan_type: moltis_channels::ChannelType::Telegram,
             chan_account_key: "telegram:845".to_string(),
             chan_user_name: Some("@lovely_apple_bot".to_string()),
             chat_id: "-100".to_string(),
-            message_id: None,
+            message_id: Some("77".to_string()),
             thread_id: None,
-            bucket_key: Some("group:account:telegram:845:peer:-100:sender:1001".to_string()),
+            bucket_key: Some(bucket_key.to_string()),
         };
+        let binding_json = serde_json::to_string(&binding).unwrap();
+        let _ = metadata.upsert(session_key, Some("bucket".to_string())).await;
+        metadata
+            .set_channel_binding(session_key, Some(binding_json))
+            .await;
+        metadata
+            .set_bucket_session_id("telegram", bucket_key, session_key)
+            .await;
+        metadata
+            .set_active_session_id("telegram", "telegram:845", "-100", "session:other")
+            .await;
 
-        assert!(
-            session_matches_channel_binding(metadata.as_ref(), "session:bucket", &target).await,
-            "bucket-bound sessions must keep their own Telegram echo even when another chat-level session is active"
-        );
-        assert!(
-            !session_matches_channel_binding(metadata.as_ref(), "session:other", &target).await,
-            "chat-level active session must not steal a bucket-bound Telegram echo"
-        );
+        let result = chat
+            .send(serde_json::json!({
+                "text": "hello from web",
+                "_sessionId": session_key,
+                "_connId": "conn:web",
+                "_channelTurnId": "turn:web:bucket",
+                "model": "wait-completion-model",
+            }))
+            .await
+            .expect("send should start background run");
+        let run_id = result
+            .get("runId")
+            .and_then(|value| value.as_str())
+            .expect("runId must be returned")
+            .to_string();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("background run must start");
+
+        let turn = state
+            .channel_turn_context(session_key, "turn:web:bucket")
+            .await
+            .expect("web echo must register channel turn context from session binding");
+        assert_eq!(turn.session_key, session_key);
+        assert_eq!(turn.chan_chat_key.as_deref(), Some("telegram:845:-100"));
+        assert_eq!(turn.reply_targets.len(), 1);
+        assert_eq!(turn.reply_targets[0].bucket_key.as_deref(), Some(bucket_key));
+        assert_eq!(turn.reply_targets[0].message_id.as_deref(), Some("77"));
+
+        finish.notify_waiters();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            chat.wait_run_completion(&run_id),
+        )
+        .await
+        .expect("run completion wait should finish")
+        .expect("wait_run_completion should succeed");
     }
 
     #[tokio::test]

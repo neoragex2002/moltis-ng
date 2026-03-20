@@ -57,6 +57,16 @@ tg_inbound {
 }
 ```
 
+这里的 `body` 指的是“通用内容体”，不是仅一段纯文本字符串。
+它至少应能表达以下稳定事实（与 `docs/src/refactor/channel-adapter-generic-interfaces.md` 里的 `MessageBody` 语义对齐）：
+
+- `text`（可空或为空字符串）
+- `has_attachments` / `has_location` 这类存在性标记（用于让 core 知道“这条消息不止纯文本”）
+
+补充说明：
+
+- 当前实现里，附件的二进制/对象载荷可以与 `tg_inbound` 并列携带（例如在 `TgInboundRequest.attachments`），不要求全部塞进 `tg_inbound.body`。
+
 并由 TG adapter 额外提供：
 
 ```text
@@ -81,6 +91,26 @@ send_tg_reply(tg_reply)
 - 不再把 mirror / relay / typing / reply threading 这类 TG 策略直接散落在 gateway/chat 主链
 - 不再让 TG adapter 直接主导最终 LLM 可见 transcript
 - 在不大改配置来源链路的前提下，先把 TG adapter 的职责边界钉死
+
+## C 阶段当前范围（不改落盘）
+
+当前 C 阶段的第一优先级，不是先改保存层，而是先把 TG adapter / core 分工收敛。
+
+因此这一阶段明确允许：
+
+- 继续复用旧 `SessionStore`
+- 继续复用旧 `PersistedMessage`
+- 继续复用现有 chat run 主链
+
+但这一阶段必须做到：
+
+- TG adapter 不再决定最终给模型看的 transcript 文本
+- TG adapter 不再决定 speaker/envelope 的最终 render
+- TG adapter 不再反向定义 core 的上下文边界
+
+一句话：
+
+- **C 阶段先切边界，不先换落盘**
 
 ## 命名原则
 
@@ -148,7 +178,7 @@ send_tg_reply(tg_reply)
 - DM allowlist / OTP
 - group mention / listen
 - relay / mirror / hop limit / budget / strictness
-- TG 侧 group transcript policy
+- 与 Telegram 协议直接相关的临时兼容开关
 
 #### `tg_policy`
 
@@ -159,7 +189,10 @@ send_tg_reply(tg_reply)
 - `dm_scope`
 - `group_scope`
 
-如果后续需要把 transcript policy、默认 model / persona / session defaults 进一步收口到 core，再单独推进。
+这里要特别说明：
+
+- `group_session_transcript_format` 这类“最终给模型看什么文本”的策略，不应继续作为 TG adapter 的长期职责
+- 如果当前阶段还保留兼容开关，也应只作为 bridge 过渡项，后续由 core context bridge 接管
 
 当前阶段不需要先改：
 
@@ -287,8 +320,8 @@ tg_inbound {
 ```text
 tg_content {
   text
-  attachments
-  location
+  has_attachments
+  has_location
 }
 ```
 
@@ -305,8 +338,8 @@ tg_content {
 
 - 文本消息 -> `text`
 - 语音消息 -> 先转写，再落到 `text`
-- 图片消息 -> 图片字节/附件对象进入 `attachments`
-- 位置共享 -> 进入 `location`
+- 图片消息 -> 附件载荷与 `tg_inbound` 并列携带，同时 `has_attachments = true`
+- 位置共享 -> 至少 `has_location = true`；坐标等细节可按实现需要放入 `text` / `private_source` / `adapter_hints`
 
 这里**不**应直接放：
 
@@ -364,11 +397,37 @@ tg_content {
 - `sender` 也不是所有场景下都稳定可得
 - `bucket_key` 取决于当前 `scope`
 
+补充说明：
+
+- `private_source` 可以携带 route 解析所需的本地线索（例如候选 peer/sender/thread_id/message_id）
+- 但这些线索不等于“已产出的 core 语义结果”；core 不应依赖解析 `private_source` 来获得 `peer`/`sender`/`bucket_key`
+
 因此需要第二步：
 
 ```text
 resolve_tg_route(tg_inbound, scope) -> tg_route
 ```
+
+## C 阶段主链应如何理解
+
+当前阶段更准确的主链应当是：
+
+```text
+raw telegram update
+  -> tg_inbound
+  -> resolve_tg_route(...)
+  -> core session resolve
+  -> legacy persistence write/read
+  -> core context bridge
+  -> core reply result
+  -> tg_reply / Telegram delivery
+```
+
+这里要特别强调：
+
+- TG adapter 负责 `tg_inbound` / `tg_route` / `tg_reply`
+- core 负责 session resolve、context assemble / render、reply 语义结果
+- 旧保存层只是当前阶段的 bridge，不应继续反过来定义 Telegram 边界
 
 ### `tg_route`
 
@@ -434,6 +493,15 @@ tg_route {
 它回答的是：
 
 - 这条消息在当前 scope 下应落入哪个逻辑会话桶
+
+它不是：
+
+- `session_key`（core 的逻辑会话桶名）
+
+更准确的关系是：
+
+- TG adapter 返回 `bucket_key`（可持久化、可比对的黑盒分桶编码）
+- core 再统一装配 `session_key`（例如：`<agent-prefix> + :<type>: + <bucket_key>`）
 
 这里故意不再抬出：
 
@@ -640,13 +708,13 @@ send_tg_reply(tg_reply)
 
 ## mirror / relay 的归属
 
-mirror / relay 都应被视为：
+mirror / relay 都是 Telegram 渠道侧的群策略，但它们不应被抬成 core 的**公共概念**。
 
-- **TG adapter 的 group policy**
+当前更准确的切分方式是：
 
-而不是：
-
-- core 的公共语义对象
+- TG adapter 负责：解析原生消息、识别候选、提供 `private_source` / helper、承接协议侧幂等/去重所需的本地线索
+- core 负责：把“是否 mirror/relay、如何写入会话事实流/历史”收口为可审计、可复放的上层决策（这属于 transcript/history shaping）
+- TG adapter 负责：最终把 core 的出站结果投递回 Telegram（含重试、thread/topic、reply_to 等协议细节）
 
 ### mirror
 
@@ -658,9 +726,8 @@ mirror / relay 都应被视为：
 
 当前更合理的方式是：
 
-- mirror 是否触发，由 TG adapter 自己决定
-- 如果需要写入 core，会生成一条新的 `tg_inbound`
-- 通常这条输入是 `mode = record_only`
+- mirror 是否触发，可以由 core 基于 adapter 导出的策略快照与入站线索统一决策
+- 若需要写入会话事实流，core 以“新增一条 record_only 的入站事实”来表达（而不是让 adapter 直接拼 LLM 可见文本）
 
 mirror 私有信息，例如：
 
@@ -680,9 +747,9 @@ mirror 私有信息，例如：
 
 当前更合理的方式是：
 
-- mention 解析、strict/loose、hop limit、epoch budget、dedupe，都留在 TG adapter 内部
-- 如果判定要委派，则由 TG adapter 生成一条新的 `tg_inbound`
-- 通常这条输入是 `mode = dispatch`
+- mention/候选解析、dedupe 线索、协议侧 hop 限制与重试，保持在 TG adapter 内部
+- relay 是否触发与如何落入会话事实流，由 core 统一决策并保持可观测性
+- 若需要对外委派/回投，则由 TG adapter 负责具体 Telegram 投递细节
 
 relay 私有信息，例如：
 
@@ -722,19 +789,12 @@ relay 私有信息，例如：
 - `crates/gateway/src/chat.rs`
 - `crates/gateway/src/session_labels.rs`
 
-这些部分今天仍承载了大量 TG 特有逻辑，例如：
+这些部分今天仍承载的，主要是两类：
 
-- active session 绑定
-- TG typing lifecycle
-- TG channel-bound session label
-- TG group mirror
-- TG group relay
-- TG 回复投递细节
-- TG-GST v1 prompt 注入
+1. **core 侧的会话/上下文主链职责**（例如 session resolve、`ChannelTurnContext` 运行时回投），这属于“职责归位”，不算 Telegram 协议泄漏。
+2. **允许保留的 bridge 尾巴**：旧保存层/旧 metadata 仍在（`SessionStore` / `PersistedMessage` / `channel_binding` 等），这部分在“落盘替换”阶段再统一收口。
 
-第三版早期阶段，TG adapter 的主要改造目标不是“重写一切”，而是：
-
-- **把这些仍散在 gateway 的 TG 特性，逐步并回 TG adapter 边界之内**
+也就是说：截至 2026-03-20，除落盘之外，Telegram adapter / core 的边界已基本收口；这份文档后续主要服务于“保持边界不再回退”，而不是继续大搬迁 Telegram 逻辑。
 
 ## 当前阶段的收敛结论
 
@@ -779,7 +839,22 @@ resolve_tg_route(tg_inbound, scope) -> tg_route
 - core 负责 `group_record` / `dm_record`
 - core 负责最终上下文整理与 renderer
 
-### 5. 配置来源尽量复用现有代码
+### 5. TG 协议行为仍留在 adapter
+
+这一阶段不要求把以下能力从 TG adapter 中抽走：
+
+- typing
+- retry / backoff
+- liveness / reconnect
+- reply target 恢复
+- callback / location / command 这类 follow-up 协议行为
+
+但要求是：
+
+- 它们只能决定“Telegram 怎么收、怎么发”
+- 不能再决定“模型最终看到的文本长什么样”
+
+### 6. 配置来源尽量复用现有代码
 
 当前阶段先不改：
 
@@ -796,20 +871,10 @@ resolve_tg_route(tg_inbound, scope) -> tg_route
 
 基于本文档，下一步最自然的工程动作是：
 
-1. 在 TG adapter 内部显式引入：
-  - `tg_inbound`
-  - `tg_route`
-  - `tg_control`
-  - `tg_reply`
-
-2. 先把 `handlers.rs` 中的聊天主链整理成：
-  - raw update -> `tg_inbound`
-
-3. 再把当前散在 gateway 的 TG route / reply / mirror / relay 逻辑逐步收回：
-   - `crates/gateway/src/channel_events.rs`
-   - `crates/gateway/src/chat.rs`
-
-4. 最后再把 group record / renderer 责任从 TG transcript shaping 中彻底抽回 core
+1. 在 TG adapter 内部显式引入 `tg_inbound` / `tg_route` / `tg_control` / `tg_reply`（截至 2026-03-20：已完成）
+2. `handlers.rs` 聊天主链整理为 raw update -> `tg_inbound` -> route -> bridge（截至 2026-03-20：已完成）
+3. 以正式 `TelegramCoreBridge` 作为跨层契约，避免 TG handler 直接跨层打旧入口（截至 2026-03-20：已完成）
+4. 后续的主线工程目标转为：替换旧保存层（`session_event` + migration），收掉“落盘尾巴”
 
 ## 相关文档
 

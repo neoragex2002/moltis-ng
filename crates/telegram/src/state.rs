@@ -8,7 +8,10 @@ use tokio_util::sync::CancellationToken;
 
 use moltis_channels::{ChannelEventSink, message_log::MessageLog};
 
-use crate::{config::TelegramAccountConfig, otp::OtpState, outbound::TelegramOutbound};
+use crate::{
+    adapter::TelegramCoreBridge, config::TelegramAccountConfig, otp::OtpState,
+    outbound::TelegramOutbound,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollingState {
@@ -76,6 +79,7 @@ pub struct AccountState {
     pub supervisor: Arc<Mutex<Option<JoinHandle<()>>>>,
     pub message_log: Option<Arc<dyn MessageLog>>,
     pub event_sink: Option<Arc<dyn ChannelEventSink>>,
+    pub core_bridge: Option<Arc<dyn TelegramCoreBridge>>,
     pub polling: Arc<Mutex<PollingRuntimeState>>,
     /// In-memory OTP challenges for self-approval (std::sync::Mutex because
     /// all OTP operations are synchronous HashMap lookups, never held across

@@ -1818,7 +1818,8 @@ pub async fn start_gateway(
         ));
         let mut tg_plugin = moltis_telegram::TelegramPlugin::new()
             .with_message_log(Arc::clone(&message_log))
-            .with_event_sink(channel_sink);
+            .with_event_sink(channel_sink.clone())
+            .with_core_bridge(channel_sink);
 
         // Start channels from config file (these take precedence).
         let tg_accounts = &config.channels.telegram;

@@ -43,6 +43,8 @@
 - 本文档不是当前阶段的直接施工蓝图
 - 当前实现应先以 `docs/src/refactor/telegram-adapter-boundary.md` 为准
 - 本文档更适合作为 Telegram 落地后的回看、提炼与校验材料
+- C 阶段不应阻塞在“全渠道通用 trait 一次性全部落地”上
+- 只要 Telegram 专项边界已经把 adapter / core 分工切清，就允许先以 TG-first 方式推进
 
 ## 一句话结论
 
@@ -155,6 +157,18 @@ Rust 有“抽象接口”的概念，对应的就是：
 - adapter 负责返回路由语义
 - core 负责生成 `dm_record` / `group_record`
 - core 负责最终 renderer / compact / 上下文整理
+
+当前 C 阶段里，这里的“core 负责”可以先通过：
+
+- `legacy persistence bridge`
+
+来落地。
+
+也就是说：
+
+- 当前不要求先完成 `session_event` 持久化
+- 也不要求先把所有通用 trait 都接进全系统
+- 但要求先把“最终上下文由谁负责”这件事收口到 core
 
 ## 命名规则
 
@@ -457,6 +471,11 @@ pub struct ResolvedRoute {
 
 - 上层概念来源
 
+术语对齐说明：
+
+- 在 `dm_scope` / `group_scope` 文档里，这个“黑盒分桶结果”也会被称为 `dm_subkey` / `group_subkey`
+- 在工程实现里通常统一叫 `bucket_key`，表示“可持久化、可比对的具体编码值”
+
 所以这里不应强行把：
 
 - `account`
@@ -756,6 +775,19 @@ Rust 里完全可以，而且应该这样做。
 
 先实现通用接口；
 TG 私有细节继续保留 `tg_*` 命名，不强装通用。
+
+### 6. C 阶段不以持久化替换为前置条件
+
+当前 C 阶段可以先做到：
+
+- `NormalizedMessage` / `ResolvedRoute` 语义收口
+- reply / control / route 边界收口
+- core context bridge 收口
+
+而暂不要求：
+
+- `session_event` 已经落地
+- legacy persistence bridge 已经被删除
 
 ## 相关文档
 
