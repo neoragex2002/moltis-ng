@@ -11,8 +11,8 @@ pub mod registry;
 pub mod store;
 
 pub use plugin::{
-    ChannelAttachment, ChannelEvent, ChannelEventSink, ChannelHealthSnapshot, ChannelMessageKind,
-    ChannelMessageMeta, ChannelOutbound, ChannelPlugin, ChannelReplyTarget, ChannelStatus,
-    ChannelStreamOutbound, ChannelTelegramMeta, ChannelTranscriptFormat, ChannelType,
-    StreamEvent, StreamReceiver, StreamSender, TelegramChatKind,
+    ChannelAttachment, ChannelEvent, ChannelEventSink, ChannelHealthSnapshot,
+    ChannelInboundContext, ChannelMessageKind, ChannelMessageMeta, ChannelOutbound, ChannelPlugin,
+    ChannelReplyTarget, ChannelStatus, ChannelStreamOutbound, ChannelType, StreamEvent,
+    StreamReceiver, StreamSender,
 };

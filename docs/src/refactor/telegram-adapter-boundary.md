@@ -29,6 +29,7 @@
 本文档与下列通用接口文档配套使用：
 
 - `docs/src/refactor/channel-adapter-generic-interfaces.md`
+- `docs/src/refactor/channel-info-exposure-boundary.md`
 
 两者关系是：
 
@@ -89,7 +90,7 @@ send_tg_reply(tg_reply)
 
 - 不再把 Telegram 私有字段直接抬成 core 公共概念
 - 不再把 mirror / relay / typing / reply threading 这类 TG 策略直接散落在 gateway/chat 主链
-- 不再让 TG adapter 直接主导最终 LLM 可见 transcript
+- 不再让 gateway/core 自行拼装 TG 群聊 transcript（TG-GST v1 由 TG adapter 产出）
 - 在不大改配置来源链路的前提下，先把 TG adapter 的职责边界钉死
 
 ## C 阶段当前范围（不改落盘）
@@ -104,8 +105,8 @@ send_tg_reply(tg_reply)
 
 但这一阶段必须做到：
 
-- TG adapter 不再决定最终给模型看的 transcript 文本
-- TG adapter 不再决定 speaker/envelope 的最终 render
+- TG adapter 负责把 Telegram 群聊消息转写为最终入站文本（TG-GST v1/现有拼装格式），core 只消费 `text`
+- TG 群聊的 speaker/mention/thread 等渠道细节不再扩散成 core 公共字段（由 adapter 转写与 `channel_binding` 封装）
 - TG adapter 不再反向定义 core 的上下文边界
 
 一句话：
@@ -191,8 +192,8 @@ send_tg_reply(tg_reply)
 
 这里要特别说明：
 
-- `group_session_transcript_format` 这类“最终给模型看什么文本”的策略，不应继续作为 TG adapter 的长期职责
-- 如果当前阶段还保留兼容开关，也应只作为 bridge 过渡项，后续由 core context bridge 接管
+ - “group session transcript format” 这类“最终给模型看什么文本”的策略，不应继续作为 TG adapter 的长期职责
+- 当前 C 阶段 one-cut 已冻结为：直接删除该配置项，不保留 bridge 过渡开关；TG adapter 直接产出当前固定口径的群聊入站文本
 
 当前阶段不需要先改：
 
@@ -343,17 +344,15 @@ tg_content {
 
 这里**不**应直接放：
 
-- mention entity 原始结构
-- Telegram file id
-- Telegram update 原文
-- TG-GST v1 最终 transcript 文本
-- legacy mirror / relay 前缀文本
+- mention entity 原始结构（平台 entity/offset 等）
+- Telegram file id 等传输细节
+- Telegram raw update 原文（含 JSON dump）
+- mirror/relay 等“内部来历标记”（如需，保留在 adapter 内部或放入 `private_source`）
 
 也就是说：
 
-- `body` 负责表达“消息内容是什么”
+- `body` 负责表达“消息内容是什么”（其中 `text` 是 core 可直接消费的最终文本；群聊可使用 TG-GST v1/现有格式）
 - 不负责表达“Telegram 原始协议长什么样”
-- 也不负责表达“最终给 LLM 的文本长什么样”
 
 ### `private_source`
 
@@ -548,31 +547,29 @@ tg_route {
 
 这一点必须明确：
 
-- **TG adapter 不负责最终 LLM 可见 transcript**
-- **core 负责把结构化群消息整理成会话记录，再由 core renderer 生成最终上下文**
+- **TG adapter 负责把 Telegram 群聊消息转写为 core 可直接消费的入站文本**（例如 TG-GST v1/现有拼装格式）
+- **core 负责会话语义、会话记录与上下文层级**，但不再依赖 Telegram 私有字段去拼装群聊 transcript
 
 也就是说，应拆成三步：
 
 1. TG adapter 归一化 raw update
-   - 产出 `tg_inbound`
+   - 产出 `tg_inbound`（其中 `body.text` 已是最终入站文本）
 
 2. TG adapter 解析 TG 路由语义
    - 产出 `tg_route`
 
 3. core 生成会话记录并整理上下文
-   - `dm_record`
-   - `group_record`
-   - 最终由对应 renderer 生成 LLM 可见上下文
+   - 把入站 `text` 当作消息内容，进入 session/context layering（不再二次渲染 TG transcript）
 
 这意味着：
 
-- TG adapter 不应继续直接主导最终 transcript 拼接
-- TG-GST v1 / legacy 这类文本整理逻辑，长期应由 core 的 group renderer 接管
+- gateway/core 不再拥有“TG 群聊 transcript renderer”这条旧路径
+- 任何需要的渠道投递细节，统一走 `session_id -> channel_binding -> adapter`（见 `docs/src/refactor/channel-info-exposure-boundary.md`）
 
 当前阶段可以复用现有代码逻辑，但归属目标应明确：
 
-- **逻辑可暂复用**
-- **职责应逐步迁回 core**
+- **逻辑可先稳定住**
+- **渠道细节不外溢**
 
 ## `dm_record` / `group_record` 属于 core
 

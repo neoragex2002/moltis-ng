@@ -364,43 +364,35 @@ impl moltis_agents::tool_registry::AgentTool for LocationTool {
             };
         }
 
-        // No browser connection — try channel-based location request.
-        if let Some(chan_chat_key) = params.get("_chanChatKey").and_then(|v| v.as_str())
-            && (chan_chat_key.starts_with("telegram:") || chan_chat_key.starts_with("discord:"))
-        {
-            let session_id = params
-                .get("_sessionId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("missing '_sessionId' context"))?;
-            let result = self.requester.request_channel_location(session_id).await?;
-            return match result.location {
-                Some(loc) => {
-                    let geocoded = reverse_geocode(loc.latitude, loc.longitude).await;
-                    let mut resp = serde_json::json!({
-                        "latitude": loc.latitude,
-                        "longitude": loc.longitude,
-                        "accuracy_meters": loc.accuracy,
-                        "source": "channel"
-                    });
-                    set_place_fields(&mut resp, geocoded.as_ref());
-                    Ok(resp)
-                },
-                None => {
-                    let msg = result
-                        .error
-                        .as_ref()
-                        .map_or("Unknown location error".to_string(), ToString::to_string);
-                    Ok(serde_json::json!({
-                        "error": msg,
-                        "available": false
-                    }))
-                },
-            };
+        // No browser connection — request channel-based location for this session.
+        let session_id = params
+            .get("_sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing '_sessionId' context"))?;
+        let result = self.requester.request_channel_location(session_id).await?;
+        match result.location {
+            Some(loc) => {
+                let geocoded = reverse_geocode(loc.latitude, loc.longitude).await;
+                let mut resp = serde_json::json!({
+                    "latitude": loc.latitude,
+                    "longitude": loc.longitude,
+                    "accuracy_meters": loc.accuracy,
+                    "source": "channel"
+                });
+                set_place_fields(&mut resp, geocoded.as_ref());
+                Ok(resp)
+            },
+            None => {
+                let msg = result
+                    .error
+                    .as_ref()
+                    .map_or("Unknown location error".to_string(), ToString::to_string);
+                Ok(serde_json::json!({
+                    "error": msg,
+                    "available": false
+                }))
+            },
         }
-
-        Err(anyhow::anyhow!(
-            "no client connection available for location request"
-        ))
     }
 }
 
@@ -554,7 +546,7 @@ mod tests {
         }));
 
         let err = tool.execute(serde_json::json!({})).await.unwrap_err();
-        assert!(err.to_string().contains("no client connection"));
+        assert!(err.to_string().contains("missing '_sessionId'"));
     }
 
     #[test]
@@ -653,7 +645,7 @@ mod tests {
         }));
 
         let result = tool
-            .execute(serde_json::json!({ "_sessionId": "session:abc", "_chanChatKey": "telegram:bot1:12345" }))
+            .execute(serde_json::json!({ "_sessionId": "session:abc" }))
             .await
             .unwrap();
         assert_eq!(result["latitude"], 51.5074);
@@ -679,7 +671,6 @@ mod tests {
         let _ = tool
             .execute(serde_json::json!({
                 "_sessionId": "session:abc",
-                "_chanChatKey": "telegram:bot1:12345",
             }))
             .await
             .unwrap();
@@ -688,7 +679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn channel_location_not_supported_for_non_channel_session() {
+    async fn channel_location_not_supported_for_unbound_session() {
         let tool = LocationTool::new(Arc::new(MockRequester {
             cached: None,
             response: LocationResult {
@@ -698,12 +689,12 @@ mod tests {
             channel_response: None,
         }));
 
-        // Non-channel session key should not attempt channel location.
-        let err = tool
-            .execute(serde_json::json!({ "_chanChatKey": "web:session:123" }))
+        let result = tool
+            .execute(serde_json::json!({ "_sessionId": "session:abc" }))
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("no client connection"));
+            .unwrap();
+        assert_eq!(result["available"], false);
+        assert!(result["error"].as_str().unwrap().contains("not supported"));
     }
 
     #[tokio::test]
@@ -718,7 +709,7 @@ mod tests {
         }));
 
         let err = tool.execute(serde_json::json!({})).await.unwrap_err();
-        assert!(err.to_string().contains("no client connection"));
+        assert!(err.to_string().contains("missing '_sessionId'"));
     }
 
     #[tokio::test]

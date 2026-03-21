@@ -209,50 +209,54 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
 
     async fn request_channel_location(
         &self,
-        session_key: &str,
+        session_id: &str,
     ) -> anyhow::Result<moltis_tools::location::LocationResult> {
         use moltis_tools::location::{LocationError, LocationResult};
 
-        // Resolve to the persistent session id used for metadata + pending invokes.
-        //
-        // Channel-originated tool calls often carry a deterministic `_chanChatKey`
-        // (e.g. `telegram:<bot_id>:<chat_id>`). Channel sessions, however, are
-        // stored under an opaque `session:<uuid>` key. Tools may pass either
-        // value here, so we normalize to the active persistent session id when
-        // possible.
         let session_meta = self
             .state
             .services
             .session_metadata
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("session metadata not available"))?;
-        let lookup_key = if session_key.starts_with("session:") {
-            session_key.to_string()
-        } else if let Some(parts) = moltis_common::identity::parse_chan_chat_key(session_key) {
-            let chan_account_key = format!("{}:{}", parts.channel, parts.chan_user_id);
-            session_meta
-                .get_active_session_id(parts.channel, &chan_account_key, parts.chat_id)
-                .await
-                .unwrap_or_else(|| session_key.to_string())
-        } else {
-            session_key.to_string()
+        let Some(entry) = session_meta.get(session_id).await else {
+            warn!(
+                reason_code = "channel_location_unknown_session",
+                session_id = %session_id,
+                "request_channel_location rejected: session metadata not found"
+            );
+            return Ok(LocationResult {
+                location: None,
+                error: Some(LocationError::NotSupported),
+            });
         };
 
-        // Look up channel binding from session metadata (fall back to the original key for
-        // legacy rows that still use deterministic keys).
-        let entry = match session_meta.get(&lookup_key).await {
-            Some(e) => e,
-            None if lookup_key != session_key => session_meta
-                .get(session_key)
-                .await
-                .ok_or_else(|| anyhow::anyhow!("no session metadata for key {session_key}"))?,
-            None => return Err(anyhow::anyhow!("no session metadata for key {session_key}")),
+        let Some(binding_json) = entry.channel_binding else {
+            info!(
+                reason_code = "channel_location_not_supported",
+                session_id = %session_id,
+                "request_channel_location rejected: no channel binding"
+            );
+            return Ok(LocationResult {
+                location: None,
+                error: Some(LocationError::NotSupported),
+            });
         };
-        let binding_json = entry
-            .channel_binding
-            .ok_or_else(|| anyhow::anyhow!("no channel binding for session {}", entry.key))?;
-        let reply_target: moltis_channels::ChannelReplyTarget =
-            serde_json::from_str(&binding_json)?;
+
+        let Some(reply_target_ref) =
+            moltis_telegram::adapter::reply_target_ref_from_binding(&binding_json)
+        else {
+            warn!(
+                reason_code = "channel_location_binding_unsupported_or_invalid",
+                session_id = %session_id,
+                binding_len = binding_json.len(),
+                "request_channel_location rejected: channel binding unsupported or invalid"
+            );
+            return Ok(LocationResult {
+                location: None,
+                error: Some(LocationError::NotSupported),
+            });
+        };
 
         // Send a message asking the user to share their location.
         let outbound = self
@@ -261,11 +265,9 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
             .channel_outbound_arc()
             .ok_or_else(|| anyhow::anyhow!("no channel outbound available"))?;
         outbound
-            .send_text(
-                &reply_target.chan_account_key,
-                &reply_target.chat_id,
+            .send_text_by_reply_target_ref_with_ref(
+                &reply_target_ref,
                 "Please share your location using the attachment menu (📎 → Location).",
-                None,
             )
             .await?;
 
@@ -910,11 +912,11 @@ pub async fn start_gateway(
 
     // Seed default workspace files and keep PEOPLE.md aligned to IDENTITY.md
     // without touching PEOPLE.md body content.
-    if let Err(e) = moltis_config::ensure_default_person_seeded() {
-        warn!(error = %e, "failed to seed people/default workspace files");
+    if let Err(e) = moltis_config::ensure_default_agent_seeded() {
+        warn!(error = %e, "failed to seed agents/default workspace files");
     }
     if let Err(e) = moltis_config::sync_people_md_from_identities() {
-        warn!(error = %e, "failed to sync PEOPLE.md from people/<name>/IDENTITY.md");
+        warn!(error = %e, "failed to sync PEOPLE.md from agents/<agent_id>/IDENTITY.md");
     }
 
     let instance_slug_value = instance_slug(&config);
@@ -3867,7 +3869,7 @@ async fn build_gon_data(gw: &GatewayState) -> GonData {
         SandboxGonInfo {
             backend: router.backend_name().to_owned(),
             os: std::env::consts::OS,
-            scope: router.config().scope.to_string(),
+            scope: router.config().scope_key.to_string(),
             idle_ttl_secs: router.config().idle_ttl_secs,
             default_image: router.default_image().await,
         }
@@ -5634,6 +5636,8 @@ mod tests {
 
         let payload = moltis_common::hooks::HookPayload::Command {
             session_id: "smoke-session".into(),
+            session_key: None,
+            channel_target: None,
             action: "new".into(),
             sender_id: None,
         };

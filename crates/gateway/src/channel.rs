@@ -77,7 +77,6 @@ fn classify_telegram_config_patch(patch: &Value) -> Result<TelegramConfigPatchKi
             | "relay_hop_limit"
             | "epoch_relay_budget"
             | "relay_strictness"
-            | "group_session_transcript_format"
             | "stream_mode"
             | "edit_throttle_ms"
             | "outbound_max_attempts"
@@ -87,7 +86,7 @@ fn classify_telegram_config_patch(patch: &Value) -> Result<TelegramConfigPatchKi
             | "model_provider"
             | "otp_self_approval"
             | "otp_cooldown_secs"
-            | "persona_id" => {},
+            | "agent_id" => {},
             "token" | "chan_user_id" | "chan_user_name" | "chan_nickname" => {
                 touches_identity = true;
             },
@@ -104,6 +103,27 @@ fn classify_telegram_config_patch(patch: &Value) -> Result<TelegramConfigPatchKi
     } else {
         TelegramConfigPatchKind::HotUpdate
     })
+}
+
+fn normalize_telegram_runtime_config(
+    mut config: Value,
+) -> Result<(Value, Vec<&'static str>), String> {
+    let config_obj = config
+        .as_object_mut()
+        .ok_or_else(|| "config must be an object".to_string())?;
+
+    let mut removed_fields = Vec::new();
+    if config_obj
+        .remove("group_session_transcript_format")
+        .is_some()
+    {
+        removed_fields.push("group_session_transcript_format");
+    }
+
+    let parsed: moltis_telegram::TelegramAccountConfig =
+        serde_json::from_value(config).map_err(|e| e.to_string())?;
+    let canonical = serde_json::to_value(parsed).map_err(|e| e.to_string())?;
+    Ok((canonical, removed_fields))
 }
 
 fn merge_telegram_account_keys(
@@ -470,7 +490,16 @@ impl ChannelService for LiveChannelService {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("channel '{chan_account_key}' not found in store"))?;
 
-        let mut config = stored.config.clone();
+        let (mut config, removed_fields) =
+            normalize_telegram_runtime_config(stored.config.clone())?;
+        if !removed_fields.is_empty() {
+            warn!(
+                chan_account_key,
+                reason_code = "legacy_telegram_config_field_removed_on_sender_approval",
+                legacy_fields = ?removed_fields,
+                "removed legacy telegram config fields before sender approval update"
+            );
+        }
         let allowlist = config
             .as_object_mut()
             .ok_or_else(|| "config is not an object".to_string())?
@@ -539,7 +568,16 @@ impl ChannelService for LiveChannelService {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("channel '{chan_account_key}' not found in store"))?;
 
-        let mut config = stored.config.clone();
+        let (mut config, removed_fields) =
+            normalize_telegram_runtime_config(stored.config.clone())?;
+        if !removed_fields.is_empty() {
+            warn!(
+                chan_account_key,
+                reason_code = "legacy_telegram_config_field_removed_on_sender_denial",
+                legacy_fields = ?removed_fields,
+                "removed legacy telegram config fields before sender denial update"
+            );
+        }
         if let Some(arr) = config
             .as_object_mut()
             .and_then(|o| o.get_mut("allowlist"))
@@ -588,11 +626,11 @@ impl ChannelService for LiveChannelService {
         tg.bus_accounts_snapshot()
     }
 
-    async fn telegram_account_persona_id(&self, chan_account_key: &str) -> Option<String> {
+    async fn telegram_account_agent_id(&self, chan_account_key: &str) -> Option<String> {
         let stored = self.store.get(chan_account_key).await.ok().flatten()?;
         let cfg: moltis_telegram::TelegramAccountConfig =
             serde_json::from_value(stored.config).ok()?;
-        cfg.persona_id
+        cfg.agent_id
     }
 }
 
@@ -681,6 +719,37 @@ mod tests {
             TelegramConfigPatchKind::IdentityChange
         );
         assert!(classify_telegram_config_patch(&serde_json::json!({"unexpected": true})).is_err());
+    }
+
+    #[test]
+    fn normalize_telegram_runtime_config_strips_removed_transcript_field() {
+        let (normalized, removed_fields) = normalize_telegram_runtime_config(serde_json::json!({
+            "token": "123:ABC",
+            "dm_policy": "allowlist",
+            "allowlist": ["alice"],
+            "group_session_transcript_format": "legacy"
+        }))
+        .unwrap();
+
+        assert_eq!(removed_fields, vec!["group_session_transcript_format"]);
+        assert_eq!(normalized["token"], "123:ABC");
+        assert_eq!(normalized["dm_policy"], "allowlist");
+        assert_eq!(normalized["allowlist"], serde_json::json!(["alice"]));
+        assert!(normalized.get("group_session_transcript_format").is_none());
+    }
+
+    #[test]
+    fn normalize_telegram_runtime_config_still_rejects_legacy_persona_id() {
+        let err = normalize_telegram_runtime_config(serde_json::json!({
+            "token": "123:ABC",
+            "persona_id": "legacy_agent"
+        }))
+        .unwrap_err();
+
+        assert!(
+            err.contains("unknown field `persona_id`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -27,26 +27,26 @@ const SPAWN_DEPTH_KEY: &str = "_spawn_depth";
 /// Callback for emitting events from the sub-agent back to the parent UI.
 pub type OnSpawnEvent = Arc<dyn Fn(RunnerEvent) + Send + Sync>;
 
-struct LoadedPersona {
+struct LoadedAgent {
     identity_md_raw: Option<String>,
     soul_text: Option<String>,
     agents_text: Option<String>,
     tools_text: Option<String>,
 }
 
-fn load_persona(persona_id: Option<&str>) -> LoadedPersona {
-    LoadedPersona {
-        identity_md_raw: persona_id
-            .and_then(moltis_config::load_persona_identity_md_raw)
+fn load_agent(agent_id: Option<&str>) -> LoadedAgent {
+    LoadedAgent {
+        identity_md_raw: agent_id
+            .and_then(moltis_config::load_agent_identity_md_raw)
             .or_else(moltis_config::load_identity_md_raw),
-        soul_text: persona_id
-            .and_then(moltis_config::load_persona_soul)
+        soul_text: agent_id
+            .and_then(moltis_config::load_agent_soul)
             .or_else(moltis_config::load_soul),
-        agents_text: persona_id
-            .and_then(moltis_config::load_persona_agents_md)
+        agents_text: agent_id
+            .and_then(moltis_config::load_agent_agents_md)
             .or_else(moltis_config::load_agents_md),
-        tools_text: persona_id
-            .and_then(moltis_config::load_persona_tools_md)
+        tools_text: agent_id
+            .and_then(moltis_config::load_agent_tools_md)
             .or_else(moltis_config::load_tools_md),
     }
 }
@@ -114,9 +114,9 @@ impl AgentTool for SpawnAgentTool {
                     "type": "string",
                     "description": "Model ID to use (e.g. a cheaper model). If not specified, uses the parent's current model."
                 },
-                "persona_id": {
+                "agentId": {
                     "type": "string",
-                    "description": "Persona ID to use for the sub-agent. Defaults to the system default persona; does not implicitly inherit from the parent session."
+                    "description": "Agent ID to use for the sub-agent. Defaults to the system default agent; does not implicitly inherit from the parent session."
                 }
             },
             "required": ["task"]
@@ -129,8 +129,8 @@ impl AgentTool for SpawnAgentTool {
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: task"))?;
         let context = params["context"].as_str().unwrap_or("");
         let model_id = params["model"].as_str();
-        let persona_id = params.get("persona_id").and_then(|v| v.as_str());
-        let persona_id = match persona_id.map(str::trim) {
+        let agent_id = params.get("agentId").and_then(|v| v.as_str());
+        let agent_id = match agent_id.map(str::trim) {
             Some("") | None => None,
             Some("default") => None,
             Some(other) => Some(other),
@@ -173,7 +173,7 @@ impl AgentTool for SpawnAgentTool {
         // Build filtered tool registry (no spawn_agent to prevent recursive spawning).
         let sub_tools = self.tool_registry.clone_without(&["spawn_agent"]);
 
-        let persona = load_persona(persona_id);
+        let agent = load_agent(agent_id);
 
         let mut tool_context = serde_json::json!({
             SPAWN_DEPTH_KEY: depth + 1,
@@ -181,8 +181,8 @@ impl AgentTool for SpawnAgentTool {
         if let Some(session_id) = params.get("_sessionId") {
             tool_context["_sessionId"] = session_id.clone();
         }
-        if let Some(chan_chat_key) = params.get("_chanChatKey") {
-            tool_context["_chanChatKey"] = chan_chat_key.clone();
+        if let Some(session_key) = params.get("_sessionKey") {
+            tool_context["_sessionKey"] = session_key.clone();
         }
         if let Some(conn_id) = params.get("_connId") {
             tool_context["_connId"] = conn_id.clone();
@@ -207,18 +207,18 @@ impl AgentTool for SpawnAgentTool {
             .and_then(|v| v.as_str())
             .unwrap_or("main");
 
-        let persona_label = persona_id.unwrap_or("default");
+        let agent_label = agent_id.unwrap_or("default");
         let canonical = build_canonical_system_prompt_v1(
             &sub_tools,
             provider.supports_tools(),
             false, // sub-agent: include tool inventory when available
             None,
             &[],
-            persona_label,
-            persona.identity_md_raw.as_deref(),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
+            agent_label,
+            agent.identity_md_raw.as_deref(),
+            agent.soul_text.as_deref(),
+            agent.agents_text.as_deref(),
+            agent.tools_text.as_deref(),
             PromptReplyMedium::Text,
             None,
             session_id,

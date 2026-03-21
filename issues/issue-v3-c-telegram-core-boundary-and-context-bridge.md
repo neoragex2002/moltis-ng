@@ -40,7 +40,7 @@
 
 **已知差异/后续优化（非阻塞）**
 - 本单明确不改最终落盘格式，不引入 `session_event` 持久化替换。
-- `_chanChatKey` 仍保留为工具调用上下文提示字段，但已不再参与 session 选择、channel echo、final reply 回投真值判断：`crates/gateway/src/chat.rs:2408`
+- `_chanChatKey`（V2 跨域桥）已退出 TG 主路径真值判断，但当前仍残留在工具上下文与部分 router/sandbox 辅助链路；彻底删除与 `session_key/session_id` 统一改名，跟踪在：`issues/issue-v3-session-ids-and-channel-boundary-one-cut.md:1`
 - `ChannelEventSink` 仍保留给 OTP 审批、实时 UI 事件这类旁路能力使用；但它已不再承担 TG 主消息 / callback / live location / voice 主路径跨层语义。
 - relay / mirror / mention / listen-only / addressed / topic-thread / reply continuity、voice / photo / unsupported attachment 继续沿用现有行为；本单只收职责边界，不重写规则。
 

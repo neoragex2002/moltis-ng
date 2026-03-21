@@ -104,56 +104,48 @@ pub fn render_strict_template(
     vars: &BTreeMap<String, String>,
 ) -> Result<String, PromptSubstError> {
     let s = escape_braces_for_validation(template.to_string());
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(s.len() + 128);
     let mut i: usize = 0;
+    let mut out = String::with_capacity(s.len() + 128);
 
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            // Find closing braces.
-            let mut j = i + 2;
-            while j + 1 < bytes.len() {
-                if bytes[j] == b'}' && bytes[j + 1] == b'}' {
-                    break;
-                }
-                j += 1;
-            }
-            if j + 1 >= bytes.len() {
-                // Malformed; emit literal.
-                out.extend_from_slice(b"{{");
-                i += 2;
-                continue;
-            }
-            let name = &s[i + 2..j];
-            if is_valid_var_name(name) {
-                let Some(val) = vars.get(name) else {
-                    return Err(PromptSubstError::MissingVar {
-                        var: name.to_string(),
-                    });
-                };
-                out.extend_from_slice(val.as_bytes());
-                i = j + 2;
-                continue;
-            }
+    while i < s.len() {
+        let Some(rel_start) = s[i..].find("{{") else {
+            out.push_str(&s[i..]);
+            break;
+        };
+        let start = i + rel_start;
+        out.push_str(&s[i..start]);
 
-            // Not a strict var; treat as literal.
-            out.extend_from_slice(b"{{");
-            i += 2;
+        let Some(rel_end) = s[start + 2..].find("}}") else {
+            // Malformed; emit literal.
+            out.push_str("{{");
+            i = start + 2;
+            continue;
+        };
+        let end = start + 2 + rel_end;
+
+        let name = &s[start + 2..end];
+        if is_valid_var_name(name) {
+            let Some(val) = vars.get(name) else {
+                return Err(PromptSubstError::MissingVar {
+                    var: name.to_string(),
+                });
+            };
+            out.push_str(val);
+            i = end + 2;
             continue;
         }
 
-        out.push(bytes[i]);
-        i += 1;
+        // Not a strict var; treat as literal.
+        out.push_str("{{");
+        i = start + 2;
     }
 
-    let result = String::from_utf8(out).expect("render_strict_template: internal utf8 invariant");
-
     // Validate there are no remaining strict placeholders.
-    for var in extract_strict_vars(&result) {
+    if let Some(var) = extract_strict_vars(&out).into_iter().next() {
         return Err(PromptSubstError::UnreplacedVar { var });
     }
 
-    Ok(unescape_braces(result))
+    Ok(unescape_braces(out))
 }
 
 #[cfg(test)]

@@ -32,7 +32,9 @@ use {
             PromptSandboxRuntimeContext, build_canonical_system_prompt_v1,
         },
         providers::{ProviderRegistry, raw_model_id},
-        runner::{RunnerEvent, run_agent_loop_streaming},
+        runner::{
+            RunnerEvent, RunnerHookContext, run_agent_loop_streaming_with_prefix_and_hook_context,
+        },
         tool_registry::ToolRegistry,
     },
     moltis_common::text::{truncate_utf8, truncate_utf8_with_suffix},
@@ -131,6 +133,7 @@ fn to_prompt_reply_medium(m: ReplyMedium) -> PromptReplyMedium {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TelegramOutboundFailureMeta {
     outbound_op: &'static str,
@@ -138,6 +141,7 @@ struct TelegramOutboundFailureMeta {
     delivery_state: &'static str,
 }
 
+#[cfg(test)]
 fn telegram_outbound_failure_meta(err: &anyhow::Error) -> TelegramOutboundFailureMeta {
     err.downcast_ref::<moltis_telegram::outbound::TelegramOutboundError>()
         .map(|err| TelegramOutboundFailureMeta {
@@ -303,7 +307,7 @@ fn as_sent_preamble_for_provider(
     }
 }
 
-async fn resolve_session_persona_id(
+async fn resolve_session_agent_id(
     state: &GatewayState,
     runtime_context: Option<&PromptRuntimeContext>,
 ) -> Option<String> {
@@ -316,8 +320,24 @@ async fn resolve_session_persona_id(
     state
         .services
         .channel
-        .telegram_account_persona_id(&account_handle)
+        .telegram_account_agent_id(&account_handle)
         .await
+}
+
+fn channel_target_from_session_entry(
+    entry: Option<&moltis_sessions::metadata::SessionEntry>,
+) -> Option<moltis_common::types::ChannelTarget> {
+    entry
+        .and_then(|entry| entry.channel_binding.as_deref())
+        .and_then(moltis_telegram::adapter::channel_target_from_binding)
+}
+
+fn session_key_from_session_entry(
+    entry: Option<&moltis_sessions::metadata::SessionEntry>,
+) -> Option<String> {
+    entry
+        .and_then(|entry| entry.channel_binding.as_deref())
+        .and_then(moltis_telegram::adapter::session_key_from_binding)
 }
 
 #[allow(dead_code)]
@@ -811,8 +831,8 @@ async fn detect_host_sudo_access() -> (Option<bool>, Option<String>) {
     }
 }
 
-/// Pre-loaded persona data used to build the system prompt.
-struct PromptPersona {
+/// Pre-loaded agent data used to build the system prompt.
+struct PromptAgent {
     config: moltis_config::MoltisConfig,
     identity_md_raw: Option<String>,
     soul_text: Option<String>,
@@ -820,25 +840,25 @@ struct PromptPersona {
     tools_text: Option<String>,
 }
 
-/// Load persona Type4 templates + config used for runtime tool filtering.
+/// Load agent Type4 templates + config used for runtime tool filtering.
 ///
-/// Both `run_with_tools` and `run_streaming` need the same persona data;
+/// Both `run_with_tools` and `run_streaming` need the same agent data;
 /// this function avoids duplicating the merge logic.
-fn load_prompt_persona_with_id(persona_id: Option<&str>) -> PromptPersona {
+fn load_prompt_agent_with_id(agent_id: Option<&str>) -> PromptAgent {
     let config = moltis_config::discover_and_load();
-    PromptPersona {
+    PromptAgent {
         config,
-        identity_md_raw: persona_id
-            .and_then(moltis_config::load_persona_identity_md_raw)
+        identity_md_raw: agent_id
+            .and_then(moltis_config::load_agent_identity_md_raw)
             .or_else(moltis_config::load_identity_md_raw),
-        soul_text: persona_id
-            .and_then(moltis_config::load_persona_soul)
+        soul_text: agent_id
+            .and_then(moltis_config::load_agent_soul)
             .or_else(moltis_config::load_soul),
-        agents_text: persona_id
-            .and_then(moltis_config::load_persona_agents_md)
+        agents_text: agent_id
+            .and_then(moltis_config::load_agent_agents_md)
             .or_else(moltis_config::load_agents_md),
-        tools_text: persona_id
-            .and_then(moltis_config::load_persona_tools_md)
+        tools_text: agent_id
+            .and_then(moltis_config::load_agent_tools_md)
             .or_else(moltis_config::load_tools_md),
     }
 }
@@ -852,17 +872,14 @@ async fn build_prompt_runtime_context(
     let sudo_fut = detect_host_sudo_access();
     let sandbox_fut = async {
         if let Some(ref router) = state.sandbox_router {
-            let router_key = session_entry
-                .map(crate::session::sandbox_router_key_for_entry)
-                .unwrap_or_else(|| session_key.to_string());
-            let is_sandboxed = router.is_sandboxed(&router_key).await;
+            let is_sandboxed = router.is_sandboxed(session_key).await;
             let config = router.config();
             Some(PromptSandboxRuntimeContext {
                 exec_sandboxed: is_sandboxed,
                 mode: Some(config.mode.to_string()),
                 backend: Some(router.backend_name().to_string()),
-                scope: Some(config.scope.to_string()),
-                image: Some(router.resolve_image(&router_key, None).await),
+                scope: Some(config.scope_key.to_string()),
+                image: Some(router.resolve_image(session_key, None).await),
                 data_mount: Some(config.data_mount.to_string()),
                 no_network: Some(config.no_network),
                 session_override: session_entry.and_then(|entry| entry.sandbox_enabled),
@@ -896,11 +913,7 @@ async fn build_prompt_runtime_context(
         .as_ref()
         .map(|loc| loc.to_string());
 
-    let channel_target = session_entry
-        .and_then(|entry| entry.channel_binding.as_deref())
-        .and_then(|binding| {
-            serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding).ok()
-        });
+    let channel_target = channel_target_from_session_entry(session_entry);
 
     let host_ctx = PromptHostRuntimeContext {
         host: Some(state.hostname.clone()),
@@ -910,16 +923,12 @@ async fn build_prompt_runtime_context(
         provider: Some(provider.name().to_string()),
         model: Some(provider.id().to_string()),
         session_id: Some(session_key.to_string()),
-        channel: channel_target
-            .as_ref()
-            .map(|t| t.chan_type.as_str().to_string()),
+        channel: channel_target.as_ref().map(|t| t.channel_type.to_string()),
         channel_account_id: channel_target
             .as_ref()
-            .and_then(|t| moltis_common::identity::parse_chan_account_key(&t.chan_account_key))
+            .and_then(|t| moltis_common::identity::parse_chan_account_key(&t.account_key))
             .map(|p| p.chan_user_id.to_string()),
-        channel_account_handle: channel_target
-            .as_ref()
-            .and_then(|t| t.chan_user_name.clone()),
+        channel_account_handle: None,
         channel_chat_id: channel_target.as_ref().map(|t| t.chat_id.clone()),
         sudo_non_interactive,
         sudo_status,
@@ -2261,8 +2270,11 @@ impl ChatService for LiveChatService {
                 .get("channel")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let session_entry = self.session_metadata.get(&session_key).await;
             let payload = moltis_common::hooks::HookPayload::MessageReceived {
                 session_id: session_key.clone(),
+                session_key: session_key_from_session_entry(session_entry.as_ref()),
+                channel_target: channel_target_from_session_entry(session_entry.as_ref()),
                 content: text.clone(),
                 channel,
             };
@@ -2322,23 +2334,30 @@ impl ChatService for LiveChatService {
         if is_web_message
             && let Some(entry) = self.session_metadata.get(&session_key).await
             && let Some(ref binding_json) = entry.channel_binding
-            && let Ok(target) =
-                serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
         {
-            let chan_chat_key = crate::session::sandbox_chan_chat_key_for_channel_binding(
-                binding_json,
-            )
-            .or_else(|| Some(default_chan_chat_key(&target)));
-            self.state
-                .ensure_channel_turn_context(
-                    &channel_turn_id,
-                    &session_key,
-                    chan_chat_key,
-                )
-                .await;
-            self.state
-                .push_channel_reply(&session_key, &channel_turn_id, target)
-                .await;
+            let session_key_for_turn =
+                moltis_telegram::adapter::session_key_from_binding(binding_json);
+            let reply_target_ref =
+                moltis_telegram::adapter::reply_target_ref_from_binding(binding_json);
+            if let Some(reply_target_ref) = reply_target_ref {
+                self.state
+                    .ensure_channel_turn_context(
+                        &channel_turn_id,
+                        &session_key,
+                        session_key_for_turn,
+                    )
+                    .await;
+                self.state
+                    .push_channel_reply(&session_key, &channel_turn_id, reply_target_ref)
+                    .await;
+            } else {
+                warn!(
+                    event = "channel.reply_target_ref.missing",
+                    session_id = %session_key,
+                    reason_code = "missing_reply_target_ref",
+                    "channel-bound session binding could not be encoded to reply_target_ref"
+                );
+            }
         }
 
         // Discover enabled skills/plugins for prompt injection.
@@ -2381,16 +2400,16 @@ impl ChatService for LiveChatService {
                 .map(String::from);
         }
 
-        let tool_chan_chat_key = self
+        let tool_session_key = self
             .state
             .channel_turn_context(&session_key, &channel_turn_id)
             .await
-            .and_then(|turn| turn.chan_chat_key)
+            .and_then(|turn| turn.session_key)
             .or_else(|| {
-            session_entry
-                .as_ref()
-                .and_then(|entry| entry.channel_binding.as_deref())
-                .and_then(crate::session::sandbox_chan_chat_key_for_channel_binding)
+                session_entry
+                    .as_ref()
+                    .and_then(|entry| entry.channel_binding.as_deref())
+                    .and_then(moltis_telegram::adapter::session_key_from_binding)
             });
 
         let state = Arc::clone(&self.state);
@@ -2433,7 +2452,7 @@ impl ChatService for LiveChatService {
         let session_store = Arc::clone(&self.session_store);
         let session_metadata = Arc::clone(&self.session_metadata);
         let session_key_clone = session_key.clone();
-        let tool_chan_chat_key_clone = tool_chan_chat_key.clone();
+        let tool_session_key_clone = tool_session_key.clone();
         let accept_language = params
             .get("_acceptLanguage")
             .and_then(|v| v.as_str())
@@ -2496,9 +2515,9 @@ impl ChatService for LiveChatService {
             );
         }
 
-        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
-        let persona_id_effective = persona_id.as_deref().unwrap_or("default");
-        let persona = load_prompt_persona_with_id(persona_id.as_deref());
+        let agent_id = resolve_session_agent_id(&self.state, Some(&runtime_context)).await;
+        let agent_id_effective = agent_id.as_deref().unwrap_or("default");
+        let agent = load_prompt_agent_with_id(agent_id.as_deref());
 
         let supports_tools = provider.supports_tools();
         let filtered_registry = if stream_only {
@@ -2507,7 +2526,7 @@ impl ChatService for LiveChatService {
             let registry_guard = self.tool_registry.read().await;
             apply_runtime_tool_filters(
                 &registry_guard,
-                &persona.config,
+                &agent.config,
                 &discovered_skills,
                 mcp_disabled,
             )
@@ -2519,11 +2538,11 @@ impl ChatService for LiveChatService {
             stream_only,
             project_context.as_deref(),
             &discovered_skills,
-            persona_id_effective,
-            persona.identity_md_raw.as_deref(),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
+            agent_id_effective,
+            agent.identity_md_raw.as_deref(),
+            agent.soul_text.as_deref(),
+            agent.agents_text.as_deref(),
+            agent.tools_text.as_deref(),
             to_prompt_reply_medium(desired_reply_medium),
             Some(&runtime_context),
             &session_key,
@@ -2784,7 +2803,7 @@ impl ChatService for LiveChatService {
                         &history,
                         &session_key_clone,
                         &trigger_id,
-                        tool_chan_chat_key_clone.as_deref(),
+                        tool_session_key_clone.as_deref(),
                         desired_reply_medium,
                         ctx_ref,
                         Some(&runtime_context),
@@ -2911,10 +2930,7 @@ impl ChatService for LiveChatService {
                         "⚠️ 我这边连续出错，已暂停处理后续请求；请稍后重试或重新 @我。";
                     let outbound = state_for_drain.services.channel_outbound_arc();
                     for msg in queued {
-                        let Some(tid) = msg
-                            .params
-                            .get("_channelTurnId")
-                            .and_then(|v| v.as_str())
+                        let Some(tid) = msg.params.get("_channelTurnId").and_then(|v| v.as_str())
                         else {
                             continue;
                         };
@@ -2930,7 +2946,7 @@ impl ChatService for LiveChatService {
                             continue;
                         }
                         if let Some(ref outbound) = outbound {
-                            deliver_channel_replies_to_targets(
+                            deliver_channel_replies_to_reply_target_refs(
                                 Arc::clone(outbound),
                                 targets,
                                 &session_key_clone,
@@ -3135,16 +3151,16 @@ impl ChatService for LiveChatService {
             .get("_acceptLanguage")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let tool_chan_chat_key = self
+        let tool_session_key = self
             .state
             .channel_turn_context(&session_key, &channel_turn_id)
             .await
-            .and_then(|turn| turn.chan_chat_key)
+            .and_then(|turn| turn.session_key)
             .or_else(|| {
                 session_entry
                     .as_ref()
                     .and_then(|entry| entry.channel_binding.as_deref())
-                    .and_then(crate::session::sandbox_chan_chat_key_for_channel_binding)
+                    .and_then(moltis_telegram::adapter::session_key_from_binding)
             });
 
         // Load conversation history (excluding the message we just appended).
@@ -3159,9 +3175,9 @@ impl ChatService for LiveChatService {
 
         // Proactive compaction for send_sync (channels / API callers).
         let budget = CompactionBudget::for_provider(provider.as_ref());
-        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
-        let persona_id_effective = persona_id.as_deref().unwrap_or("default");
-        let persona = load_prompt_persona_with_id(persona_id.as_deref());
+        let agent_id = resolve_session_agent_id(&self.state, Some(&runtime_context)).await;
+        let agent_id_effective = agent_id.as_deref().unwrap_or("default");
+        let agent = load_prompt_agent_with_id(agent_id.as_deref());
 
         let supports_tools = provider.supports_tools();
         let filtered_registry = if stream_only {
@@ -3170,7 +3186,7 @@ impl ChatService for LiveChatService {
             let registry_guard = self.tool_registry.read().await;
             apply_runtime_tool_filters(
                 &registry_guard,
-                &persona.config,
+                &agent.config,
                 &[],
                 false, // send_sync: MCP tools always enabled for API calls
             )
@@ -3182,11 +3198,11 @@ impl ChatService for LiveChatService {
             stream_only,
             None,
             &[],
-            persona_id_effective,
-            persona.identity_md_raw.as_deref(),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
+            agent_id_effective,
+            agent.identity_md_raw.as_deref(),
+            agent.soul_text.as_deref(),
+            agent.agents_text.as_deref(),
+            agent.tools_text.as_deref(),
             to_prompt_reply_medium(desired_reply_medium),
             Some(&runtime_context),
             &session_key,
@@ -3309,7 +3325,7 @@ impl ChatService for LiveChatService {
                 &history,
                 &session_key,
                 &trigger_id,
-                tool_chan_chat_key.as_deref(),
+                tool_session_key.as_deref(),
                 desired_reply_medium,
                 None,
                 Some(&runtime_context),
@@ -3747,36 +3763,45 @@ impl ChatService for LiveChatService {
         // Sandbox info
         let sandbox_info = if let Some(ref router) = self.state.sandbox_router {
             let config = router.config();
-            let channel_turn_router_key = if let Some(turn_id) =
-                params.get("_channelTurnId").and_then(|v| v.as_str())
-            {
-                self.state
-                    .channel_turn_context(&session_key, turn_id)
-                    .await
-                    .and_then(|turn| turn.chan_chat_key)
-            } else {
-                None
-            };
-            let router_key = channel_turn_router_key
-                .or_else(|| {
-                    session_entry
-                        .as_ref()
-                        .map(crate::session::sandbox_router_key_for_entry)
-                })
-                .unwrap_or_else(|| session_key.clone());
+            let channel_turn_router_key =
+                if let Some(turn_id) = params.get("_channelTurnId").and_then(|v| v.as_str()) {
+                    self.state
+                        .channel_turn_context(&session_key, turn_id)
+                        .await
+                        .and_then(|turn| turn.session_key)
+                } else {
+                    None
+                };
+            let session_bucket_key = channel_turn_router_key.or_else(|| {
+                session_entry
+                    .as_ref()
+                    .and_then(|entry| entry.channel_binding.as_deref())
+                    .and_then(moltis_telegram::adapter::session_key_from_binding)
+            });
 
-            let is_sandboxed = router.is_sandboxed(&router_key).await;
-            let effective_image = router.resolve_image(&router_key, None).await;
+            let is_sandboxed = router.is_sandboxed(&session_key).await;
+            let effective_image = router.resolve_image(&session_key, None).await;
             let container_name = {
-                let id = router.sandbox_id_for(&router_key);
-                format!(
-                    "{}-{}",
-                    config
-                        .container_prefix
-                        .as_deref()
-                        .unwrap_or("moltis-sandbox"),
-                    id.key
-                )
+                match router.sandbox_id_for(&session_key, session_bucket_key.as_deref()) {
+                    Ok(id) => Some(format!(
+                        "{}-{}",
+                        config
+                            .container_prefix
+                            .as_deref()
+                            .unwrap_or("moltis-sandbox"),
+                        id.key
+                    )),
+                    Err(e) => {
+                        tracing::debug!(
+                            session_id = %session_key,
+                            session_key = ?session_bucket_key,
+                            reason_code = "sandbox_container_name_key_error",
+                            error = %e,
+                            "failed to derive sandbox id for container name"
+                        );
+                        None
+                    },
+                }
             };
             let (mounts, mount_allowlist, external_mounts_status) = sandbox_mount_debug_info(
                 &app_config.tools.exec.sandbox,
@@ -3787,7 +3812,7 @@ impl ChatService for LiveChatService {
                 "enabled": is_sandboxed,
                 "backend": router.backend_name(),
                 "mode": config.mode,
-                "scope": config.scope,
+                "scope": config.scope_key.to_string(),
                 "dataMount": config.data_mount,
                 "mountAllowlist": mount_allowlist,
                 "mounts": mounts,
@@ -3857,9 +3882,9 @@ impl ChatService for LiveChatService {
             session_entry.as_ref(),
         )
         .await;
-        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
-        let persona_id_effective = persona_id.as_deref().unwrap_or("default").to_string();
-        let persona = load_prompt_persona_with_id(persona_id.as_deref());
+        let agent_id = resolve_session_agent_id(&self.state, Some(&runtime_context)).await;
+        let agent_id_effective = agent_id.as_deref().unwrap_or("default").to_string();
+        let agent = load_prompt_agent_with_id(agent_id.as_deref());
 
         let filtered_registry = if stream_only {
             ToolRegistry::new()
@@ -3867,7 +3892,7 @@ impl ChatService for LiveChatService {
             let registry_guard = self.tool_registry.read().await;
             apply_runtime_tool_filters(
                 &registry_guard,
-                &persona.config,
+                &agent.config,
                 &discovered_skills,
                 mcp_disabled,
             )
@@ -3879,11 +3904,11 @@ impl ChatService for LiveChatService {
             stream_only,
             project_context.as_deref(),
             &discovered_skills,
-            &persona_id_effective,
-            persona.identity_md_raw.as_deref(),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
+            &agent_id_effective,
+            agent.identity_md_raw.as_deref(),
+            agent.soul_text.as_deref(),
+            agent.agents_text.as_deref(),
+            agent.tools_text.as_deref(),
             PromptReplyMedium::Text,
             Some(&runtime_context),
             &session_key,
@@ -3945,7 +3970,7 @@ impl ChatService for LiveChatService {
             "supportsTools": supports_tools,
             "compaction": compaction_info,
             "tokenDebug": token_debug,
-            "personaIdEffective": persona_id_effective,
+            "agentIdEffective": agent_id_effective,
             "asSentPreamble": as_sent_preamble,
             "asSent": as_sent,
             "promptTemplateWarnings": prompt_template_warnings
@@ -4006,9 +4031,9 @@ impl ChatService for LiveChatService {
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
 
-        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
-        let persona_id_effective = persona_id.as_deref().unwrap_or("default").to_string();
-        let persona = load_prompt_persona_with_id(persona_id.as_deref());
+        let agent_id = resolve_session_agent_id(&self.state, Some(&runtime_context)).await;
+        let agent_id_effective = agent_id.as_deref().unwrap_or("default").to_string();
+        let agent = load_prompt_agent_with_id(agent_id.as_deref());
 
         // Discover skills.
         let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
@@ -4036,7 +4061,7 @@ impl ChatService for LiveChatService {
             let registry_guard = self.tool_registry.read().await;
             apply_runtime_tool_filters(
                 &registry_guard,
-                &persona.config,
+                &agent.config,
                 &discovered_skills,
                 mcp_disabled,
             )
@@ -4048,11 +4073,11 @@ impl ChatService for LiveChatService {
             stream_only,
             project_context.as_deref(),
             &discovered_skills,
-            &persona_id_effective,
-            persona.identity_md_raw.as_deref(),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
+            &agent_id_effective,
+            agent.identity_md_raw.as_deref(),
+            agent.soul_text.as_deref(),
+            agent.agents_text.as_deref(),
+            agent.tools_text.as_deref(),
             PromptReplyMedium::Text,
             Some(&runtime_context),
             &session_key,
@@ -4097,7 +4122,7 @@ impl ChatService for LiveChatService {
             "charCount": system_prompt.len(),
             "native_tools": native_tools,
             "toolCount": tool_count,
-            "personaIdEffective": persona_id_effective,
+            "agentIdEffective": agent_id_effective,
             "asSentPreamble": as_sent_preamble,
             "asSent": as_sent,
             "promptTemplateWarnings": prompt_template_warnings,
@@ -4156,9 +4181,9 @@ impl ChatService for LiveChatService {
                 .map(String::from);
         }
 
-        let persona_id = resolve_session_persona_id(&self.state, Some(&runtime_context)).await;
-        let persona_id_effective = persona_id.as_deref().unwrap_or("default").to_string();
-        let persona = load_prompt_persona_with_id(persona_id.as_deref());
+        let agent_id = resolve_session_agent_id(&self.state, Some(&runtime_context)).await;
+        let agent_id_effective = agent_id.as_deref().unwrap_or("default").to_string();
+        let agent = load_prompt_agent_with_id(agent_id.as_deref());
 
         // Resolve project context.
         let project_context = self
@@ -4191,7 +4216,7 @@ impl ChatService for LiveChatService {
             let registry_guard = self.tool_registry.read().await;
             apply_runtime_tool_filters(
                 &registry_guard,
-                &persona.config,
+                &agent.config,
                 &discovered_skills,
                 mcp_disabled,
             )
@@ -4208,11 +4233,11 @@ impl ChatService for LiveChatService {
             stream_only,
             project_context.as_deref(),
             &discovered_skills,
-            &persona_id_effective,
-            persona.identity_md_raw.as_deref(),
-            persona.soul_text.as_deref(),
-            persona.agents_text.as_deref(),
-            persona.tools_text.as_deref(),
+            &agent_id_effective,
+            agent.identity_md_raw.as_deref(),
+            agent.soul_text.as_deref(),
+            agent.agents_text.as_deref(),
+            agent.tools_text.as_deref(),
             PromptReplyMedium::Text,
             Some(&runtime_context),
             &session_key,
@@ -4288,7 +4313,7 @@ impl ChatService for LiveChatService {
             "messageCount": message_count,
             "systemPromptChars": system_prompt_chars,
             "totalChars": total_chars,
-            "personaIdEffective": persona_id_effective,
+            "agentIdEffective": agent_id_effective,
             "asSentPreamble": as_sent_preamble,
             "asSent": as_sent,
             "promptTemplateWarnings": prompt_template_warnings,
@@ -4467,7 +4492,7 @@ async fn handle_run_failed_event(
                     _ => format!("{}/{}", normalized.stage.as_str(), normalized.kind.as_str()),
                 };
                 let text = format!("\u{26A0}\u{FE0F} {} code={code}", normalized.message.user);
-                deliver_channel_replies_to_targets(
+                deliver_channel_replies_to_reply_target_refs(
                     outbound,
                     targets,
                     &event.session_key,
@@ -4586,7 +4611,7 @@ async fn run_with_tools(
     history_raw: &[serde_json::Value],
     session_key: &str,
     trigger_id: &str,
-    chan_chat_key: Option<&str>,
+    session_key_for_tools: Option<&str>,
     desired_reply_medium: ReplyMedium,
     project_context: Option<&str>,
     runtime_context: Option<&PromptRuntimeContext>,
@@ -4599,15 +4624,15 @@ async fn run_with_tools(
     mcp_disabled: bool,
     client_seq: Option<u64>,
 ) -> Option<ChatRunOutput> {
-    let persona_id = resolve_session_persona_id(state, runtime_context).await;
-    let persona_id_effective = persona_id.as_deref().unwrap_or("default");
-    let persona = load_prompt_persona_with_id(persona_id.as_deref());
+    let agent_id = resolve_session_agent_id(state, runtime_context).await;
+    let agent_id_effective = agent_id.as_deref().unwrap_or("default");
+    let agent = load_prompt_agent_with_id(agent_id.as_deref());
 
     let native_tools = provider.supports_tools();
 
     let filtered_registry = {
         let registry_guard = tool_registry.read().await;
-        apply_runtime_tool_filters(&registry_guard, &persona.config, skills, mcp_disabled)
+        apply_runtime_tool_filters(&registry_guard, &agent.config, skills, mcp_disabled)
     };
 
     let canonical = match build_canonical_system_prompt_v1(
@@ -4616,11 +4641,11 @@ async fn run_with_tools(
         false, // run_with_tools: include tool inventory when available
         project_context,
         skills,
-        persona_id_effective,
-        persona.identity_md_raw.as_deref(),
-        persona.soul_text.as_deref(),
-        persona.agents_text.as_deref(),
-        persona.tools_text.as_deref(),
+        agent_id_effective,
+        agent.identity_md_raw.as_deref(),
+        agent.soul_text.as_deref(),
+        agent.agents_text.as_deref(),
+        agent.tools_text.as_deref(),
         to_prompt_reply_medium(desired_reply_medium),
         runtime_context,
         session_key,
@@ -4655,16 +4680,29 @@ async fn run_with_tools(
 
     // Determine if this session is sandboxed (for browser tool execution mode)
     let session_is_sandboxed = if let Some(ref router) = state.sandbox_router {
-        let router_key = chan_chat_key.unwrap_or(session_key);
-        router.is_sandboxed(router_key).await
+        router.is_sandboxed(session_key).await
     } else {
         false
     };
+    let session_entry_for_hooks = if hook_registry.is_some() {
+        if let Some(ref sm) = state.services.session_metadata {
+            sm.get(session_key).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let session_key_for_hooks = session_key_from_session_entry(session_entry_for_hooks.as_ref());
+    let channel_target_for_hooks =
+        channel_target_from_session_entry(session_entry_for_hooks.as_ref());
 
     // Dispatch BeforeAgentStart hook (may block).
     if let Some(ref hooks) = hook_registry {
         let payload = moltis_common::hooks::HookPayload::BeforeAgentStart {
             session_id: session_key.to_string(),
+            session_key: session_key_for_hooks.clone(),
+            channel_target: channel_target_for_hooks.clone(),
             model: provider.id().to_string(),
         };
         match hooks.dispatch(&payload).await {
@@ -4714,6 +4752,8 @@ async fn run_with_tools(
     let model_for_events = model_id.to_string();
     let session_store_for_events = session_store.map(Arc::clone);
     let hook_registry_for_events = hook_registry.clone();
+    let session_key_for_hooks_for_event_forwarder = session_key_for_hooks.clone();
+    let channel_target_for_hooks_for_event_forwarder = channel_target_for_hooks.clone();
     let (on_event, mut event_rx) = ordered_runner_event_callback();
     let event_forwarder = tokio::spawn(async move {
         // Track tool call arguments from ToolCallStart so they can be persisted in ToolCallEnd.
@@ -4728,6 +4768,8 @@ async fn run_with_tools(
             let model = model_for_events.clone();
             let store = session_store_for_events.clone();
             let hook_registry = hook_registry_for_events.clone();
+            let session_key_for_hooks_opt = session_key_for_hooks_for_event_forwarder.clone();
+            let channel_target_for_hooks_opt = channel_target_for_hooks_for_event_forwarder.clone();
             let seq = client_seq;
             let payload = match event {
                 RunnerEvent::Thinking => serde_json::json!({
@@ -4948,6 +4990,8 @@ async fn run_with_tools(
                             let hook_payload =
                                 moltis_common::hooks::HookPayload::ToolResultPersist {
                                     session_id: sk.clone(),
+                                    session_key: session_key_for_hooks_opt.clone(),
+                                    channel_target: channel_target_for_hooks_opt.clone(),
                                     tool_name: name.clone(),
                                     result: persisted_result_for_store
                                         .clone()
@@ -5098,8 +5142,8 @@ async fn run_with_tools(
         "_runId": run_id,
         "_sandbox": session_is_sandboxed,
     });
-    if let Some(chan_chat_key) = chan_chat_key {
-        tool_context["_chanChatKey"] = serde_json::json!(chan_chat_key);
+    if let Some(session_key_for_tools) = session_key_for_tools {
+        tool_context["_sessionKey"] = serde_json::json!(session_key_for_tools);
     }
     if let Some(lang) = accept_language.as_deref() {
         tool_context["_acceptLanguage"] = serde_json::json!(lang);
@@ -5109,14 +5153,19 @@ async fn run_with_tools(
     }
 
     let provider_ref = provider.clone();
-    let first_result = run_agent_loop_streaming(
+    let runner_hook_context = RunnerHookContext {
+        session_key: session_key_for_hooks.clone(),
+        channel_target: channel_target_for_hooks.clone(),
+    };
+    let first_result = run_agent_loop_streaming_with_prefix_and_hook_context(
         provider,
         &filtered_registry,
-        &system_prompt_text,
+        vec![ChatMessage::system(&system_prompt_text)],
         user_content,
         Some(&on_event),
         hist,
         Some(tool_context.clone()),
+        Some(runner_hook_context.clone()),
         hook_registry.clone(),
     )
     .await;
@@ -5193,14 +5242,15 @@ async fn run_with_tools(
                         Some(compacted_chat)
                     };
 
-                    run_agent_loop_streaming(
+                    run_agent_loop_streaming_with_prefix_and_hook_context(
                         provider_ref.clone(),
                         &filtered_registry,
-                        &system_prompt_text,
+                        vec![ChatMessage::system(&system_prompt_text)],
                         user_content,
                         Some(&on_event),
                         retry_hist,
                         Some(tool_context),
+                        Some(runner_hook_context),
                         hook_registry.clone(),
                     )
                     .await
@@ -5245,6 +5295,8 @@ async fn run_with_tools(
             if let Some(ref hooks) = hook_registry {
                 let payload = moltis_common::hooks::HookPayload::MessageSending {
                     session_id: session_key.to_string(),
+                    session_key: session_key_for_hooks.clone(),
+                    channel_target: channel_target_for_hooks.clone(),
                     content: display_text.clone(),
                 };
                 match hooks.dispatch(&payload).await {
@@ -5377,6 +5429,8 @@ async fn run_with_tools(
             if let Some(ref hooks) = hook_registry {
                 let payload = moltis_common::hooks::HookPayload::MessageSent {
                     session_id: session_key.to_string(),
+                    session_key: session_key_for_hooks.clone(),
+                    channel_target: channel_target_for_hooks.clone(),
                     content: display_text.clone(),
                 };
                 if let Err(e) = hooks.dispatch(&payload).await {
@@ -5385,6 +5439,8 @@ async fn run_with_tools(
 
                 let payload = moltis_common::hooks::HookPayload::AgentEnd {
                     session_id: session_key.to_string(),
+                    session_key: session_key_for_hooks.clone(),
+                    channel_target: channel_target_for_hooks.clone(),
                     text: display_text.clone(),
                     iterations: result.iterations,
                     tool_calls: result.tool_calls_made,
@@ -5751,24 +5807,32 @@ async fn compact_session(
     state: &Arc<GatewayState>,
     hook_registry: Option<Arc<moltis_common::hooks::HookRegistry>>,
     store: &Arc<SessionStore>,
-    session_key: &str,
+    session_id: &str,
     provider: &Arc<dyn moltis_agents::model::LlmProvider>,
     keep_last_user_rounds: usize,
 ) -> Result<CompactionResult, String> {
-    let history = store.read(session_key).await.map_err(|e| e.to_string())?;
+    let history = store.read(session_id).await.map_err(|e| e.to_string())?;
     if history.is_empty() {
         return Err("nothing to compact".into());
     }
 
     let pre_message_count = history.len();
+    let session_entry = if let Some(ref sm) = state.services.session_metadata {
+        sm.get(session_id).await
+    } else {
+        None
+    };
+    let session_key_for_hooks = session_key_from_session_entry(session_entry.as_ref());
 
     if let Some(ref hooks) = hook_registry {
         let payload = moltis_common::hooks::HookPayload::BeforeCompaction {
-            session_id: session_key.to_string(),
+            session_id: session_id.to_string(),
+            session_key: session_key_for_hooks.clone(),
+            channel_target: channel_target_from_session_entry(session_entry.as_ref()),
             message_count: pre_message_count,
         };
         if let Err(e) = hooks.dispatch(&payload).await {
-            warn!(session = %session_key, error = %e, "BeforeCompaction hook failed");
+            warn!(session = %session_id, error = %e, "BeforeCompaction hook failed");
         }
     }
 
@@ -5780,7 +5844,7 @@ async fn compact_session(
             Arc::clone(provider),
             &chat_history_for_memory,
             &memory_dir,
-            Some(session_key),
+            Some(session_id),
         )
         .await
         {
@@ -5840,7 +5904,7 @@ If something is unknown, write \"Unknown\" instead of guessing.",
     ));
 
     let llm_context = moltis_agents::model::LlmRequestContext {
-        session_id: Some(session_key.to_string()),
+        session_id: Some(session_id.to_string()),
         run_id: None,
     };
     let mut stream =
@@ -5866,7 +5930,7 @@ If something is unknown, write \"Unknown\" instead of guessing.",
         build_compacted_history(&history, &summary, keep_last_user_rounds, created_at)?;
 
     store
-        .replace_history(session_key, compacted.clone())
+        .replace_history(session_id, compacted.clone())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -5880,10 +5944,10 @@ If something is unknown, write \"Unknown\" instead of guessing.",
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let filename = format!("compaction-{}-{ts}.md", session_key);
+            let filename = format!("compaction-{}-{ts}.md", session_id);
             let path = memory_dir.join(&filename);
             let content = format!(
-                "# Compaction Summary\n\n- **Session**: {session_key}\n- **Timestamp**: {ts}\n\n{summary}"
+                "# Compaction Summary\n\n- **Session**: {session_id}\n- **Timestamp**: {ts}\n\n{summary}"
             );
             if let Err(e) = tokio::fs::write(&path, &content).await {
                 warn!(error = %e, "compact: failed to write memory file");
@@ -5900,11 +5964,13 @@ If something is unknown, write \"Unknown\" instead of guessing.",
 
     if let Some(ref hooks) = hook_registry {
         let payload = moltis_common::hooks::HookPayload::AfterCompaction {
-            session_id: session_key.to_string(),
+            session_id: session_id.to_string(),
+            session_key: session_key_for_hooks.clone(),
+            channel_target: channel_target_from_session_entry(session_entry.as_ref()),
             summary_len: summary.len(),
         };
         if let Err(e) = hooks.dispatch(&payload).await {
-            warn!(session = %session_key, error = %e, "AfterCompaction hook failed");
+            warn!(session = %session_id, error = %e, "AfterCompaction hook failed");
         }
     }
 
@@ -5936,14 +6002,22 @@ async fn run_streaming(
     session_store: Option<&Arc<SessionStore>>,
     client_seq: Option<u64>,
 ) -> Option<ChatRunOutput> {
-    let persona_id = resolve_session_persona_id(state, runtime_context).await;
-    let persona = load_prompt_persona_with_id(persona_id.as_deref());
+    let agent_id = resolve_session_agent_id(state, runtime_context).await;
+    let agent = load_prompt_agent_with_id(agent_id.as_deref());
     let hook_registry = state.inner.read().await.hook_registry.clone();
+    let session_entry = if let Some(ref sm) = state.services.session_metadata {
+        sm.get(session_key).await
+    } else {
+        None
+    };
+    let session_key_for_hooks = session_key_from_session_entry(session_entry.as_ref());
 
     // Dispatch BeforeAgentStart hook (may block).
     if let Some(ref hooks) = hook_registry {
         let payload = moltis_common::hooks::HookPayload::BeforeAgentStart {
             session_id: session_key.to_string(),
+            session_key: session_key_for_hooks.clone(),
+            channel_target: channel_target_from_session_entry(session_entry.as_ref()),
             model: provider.id().to_string(),
         };
         match hooks.dispatch(&payload).await {
@@ -5991,11 +6065,11 @@ async fn run_streaming(
         true, // run_streaming: no tools
         project_context,
         _skills,
-        persona_id.as_deref().unwrap_or("default"),
-        persona.identity_md_raw.as_deref(),
-        persona.soul_text.as_deref(),
-        persona.agents_text.as_deref(),
-        persona.tools_text.as_deref(),
+        agent_id.as_deref().unwrap_or("default"),
+        agent.identity_md_raw.as_deref(),
+        agent.soul_text.as_deref(),
+        agent.agents_text.as_deref(),
+        agent.tools_text.as_deref(),
         to_prompt_reply_medium(desired_reply_medium),
         runtime_context,
         session_key,
@@ -6112,6 +6186,8 @@ async fn run_streaming(
                 if let Some(ref hooks) = hook_registry {
                     let payload = moltis_common::hooks::HookPayload::MessageSending {
                         session_id: session_key.to_string(),
+                        session_key: session_key_for_hooks.clone(),
+                        channel_target: channel_target_from_session_entry(session_entry.as_ref()),
                         content: accumulated.clone(),
                     };
                     match hooks.dispatch(&payload).await {
@@ -6251,6 +6327,8 @@ async fn run_streaming(
                 if let Some(ref hooks) = hook_registry {
                     let payload = moltis_common::hooks::HookPayload::MessageSent {
                         session_id: session_key.to_string(),
+                        session_key: session_key_for_hooks.clone(),
+                        channel_target: channel_target_from_session_entry(session_entry.as_ref()),
                         content: accumulated.clone(),
                     };
                     if let Err(e) = hooks.dispatch(&payload).await {
@@ -6259,6 +6337,8 @@ async fn run_streaming(
 
                     let payload = moltis_common::hooks::HookPayload::AgentEnd {
                         session_id: session_key.to_string(),
+                        session_key: session_key_for_hooks.clone(),
+                        channel_target: channel_target_from_session_entry(session_entry.as_ref()),
                         text: accumulated.clone(),
                         iterations: 1,
                         tool_calls: 0,
@@ -6419,7 +6499,7 @@ async fn deliver_channel_replies(
             return;
         },
     };
-    deliver_channel_replies_to_targets(
+    deliver_channel_replies_to_reply_target_refs(
         outbound,
         targets,
         session_key,
@@ -6598,14 +6678,17 @@ async fn telegram_group_target_session_exists(
         return false;
     };
 
-    let target_session_id = resolve_telegram_session_id(
+    let Some(target_session_id) = resolve_telegram_session_id(
         state,
         target_account_id,
         chat_id,
         thread_id,
         sender_account_key,
     )
-    .await;
+    .await
+    else {
+        return false;
+    };
 
     if let Some(ref sm) = state.services.session_metadata {
         return sm.get(&target_session_id).await.is_some();
@@ -6822,7 +6905,6 @@ fn trim_trailing_connectors(s: &str) -> &str {
 #[derive(Debug, Clone)]
 struct RelayDirective {
     target_account_id: String,
-    target_handle: Option<String>,
     task_text: String,
 }
 
@@ -6830,7 +6912,6 @@ struct RelayDirective {
 struct RelayTargetMention {
     mention_username: String,
     target_account_id: String,
-    target_handle: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -6891,14 +6972,13 @@ fn extract_relay_groups(
             if is_non_bot_broadcast_mention(&m.username) {
                 continue;
             }
-            if let Some((aid, handle)) = username_to_account.get(&m.username) {
+            if let Some((aid, _handle)) = username_to_account.get(&m.username) {
                 if aid == source_account_id {
                     continue;
                 }
                 resolved.push(RelayTargetMention {
                     mention_username: m.username.clone(),
                     target_account_id: aid.clone(),
-                    target_handle: handle.clone(),
                 });
             }
         }
@@ -6921,7 +7001,6 @@ async fn dispatch_telegram_relay(
     state: &Arc<GatewayState>,
     bus_accounts: &[moltis_telegram::config::TelegramBusAccountSnapshot],
     target_account_id: &str,
-    target_handle: Option<String>,
     chat_id: &str,
     thread_id: Option<&str>,
     source_sender_account_key: Option<&str>,
@@ -6932,12 +7011,6 @@ async fn dispatch_telegram_relay(
     let Some(ref store) = state.services.session_store else {
         return Err("session store not configured".into());
     };
-
-    let chan_user_id = target_account_id
-        .strip_prefix("telegram:")
-        .unwrap_or(target_account_id);
-    let target_chan_chat_key =
-        moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, thread_id);
 
     let route = moltis_telegram::adapter::resolve_group_relay_route(
         bus_accounts,
@@ -6954,7 +7027,8 @@ async fn dispatch_telegram_relay(
         thread_id,
         source_sender_account_key,
     )
-    .await;
+    .await
+    .ok_or_else(|| "target session does not exist for this group".to_string())?;
     let session_exists = if let Some(ref sm) = state.services.session_metadata {
         sm.get(&target_session_id).await.is_some()
     } else {
@@ -6980,25 +7054,23 @@ async fn dispatch_telegram_relay(
         message_id: Some(reply_to_message_id.to_string()),
         thread_id: thread_id.map(str::to_string),
     };
-    let reply_target = moltis_channels::ChannelReplyTarget {
-        chan_type: moltis_channels::ChannelType::Telegram,
-        chan_account_key: private_target.account_handle.clone(),
-        chan_user_name: target_handle,
-        chat_id: private_target.chat_id.clone(),
-        message_id: private_target.message_id.clone(),
-        thread_id: private_target.thread_id.clone(),
-        bucket_key: Some(route.bucket_key.clone()),
-    };
+    let reply_target_ref = moltis_telegram::adapter::reply_target_ref_for_target(
+        &private_target.account_handle,
+        &private_target.chat_id,
+        private_target.thread_id.as_deref(),
+        private_target.message_id.as_deref(),
+    )
+    .ok_or_else(|| "failed to encode reply_target_ref".to_string())?;
     let channel_turn_id = crate::ids::new_trigger_id();
     state
         .ensure_channel_turn_context(
             &channel_turn_id,
             &target_session_id,
-            Some(target_chan_chat_key.clone()),
+            Some(route.bucket_key.clone()),
         )
         .await;
     state
-        .push_channel_reply(&target_session_id, &channel_turn_id, reply_target)
+        .push_channel_reply(&target_session_id, &channel_turn_id, reply_target_ref)
         .await;
 
     let chat = state.chat().await;
@@ -7010,6 +7082,7 @@ async fn dispatch_telegram_relay(
         "text": tg_reply.output,
         "channel": channel_meta,
         "_sessionId": target_session_id,
+        "_sessionKey": route.bucket_key,
         "_channelTurnId": channel_turn_id,
     });
     chat.send(params).await.map_err(|e| e.to_string())?;
@@ -7054,8 +7127,6 @@ async fn maybe_relay_telegram_group_mentions(
             relay_hop_limit: 3,
             epoch_relay_budget: DEFAULT_EPOCH_RELAY_BUDGET,
             relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
-            group_session_transcript_format:
-                moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
         });
 
     let groups = extract_relay_groups(outbound_text, bus_accounts, source_account_id);
@@ -7196,7 +7267,6 @@ async fn maybe_relay_telegram_group_mentions(
         for (ti, m) in g.mentions.iter().enumerate() {
             let d = RelayDirective {
                 target_account_id: m.target_account_id.clone(),
-                target_handle: m.target_handle.clone(),
                 task_text: g.task_text.clone(),
             };
             if g.line_start {
@@ -7378,7 +7448,6 @@ Output format:
         let source_account_id = source_account_id.to_string();
         let hop = next_hop;
         let target_account_id = d.target_account_id.clone();
-        let target_handle = d.target_handle.clone();
         let relay_chain_id = chain_id.clone();
         let budget = epoch_relay_budget;
         let relay_thread_id = thread_id.map(str::to_string);
@@ -7388,7 +7457,6 @@ Output format:
                 &state,
                 &relay_bus_accounts,
                 &target_account_id,
-                target_handle,
                 &chat_id,
                 relay_thread_id.as_deref(),
                 Some(&source_account_id),
@@ -7430,17 +7498,12 @@ async fn ensure_channel_bound_session(
         return;
     };
 
-    let binding = moltis_channels::ChannelReplyTarget {
-        chan_type: moltis_channels::ChannelType::Telegram,
-        chan_account_key: chan_account_key.to_string(),
-        chan_user_name: None,
-        chat_id: chat_id.to_string(),
-        message_id: None,
-        thread_id: thread_id.map(str::to_string),
-        bucket_key: bucket_key.map(str::to_string),
-    };
-
-    let Ok(binding_json) = serde_json::to_string(&binding) else {
+    let Some(binding_json) = moltis_telegram::adapter::telegram_binding_json_for_bucket(
+        chan_account_key,
+        chat_id,
+        thread_id,
+        bucket_key,
+    ) else {
         return;
     };
 
@@ -7478,21 +7541,6 @@ async fn ensure_channel_bound_session(
     }
 }
 
-fn default_chan_chat_key(target: &moltis_channels::ChannelReplyTarget) -> String {
-    let chan_user_id = match target.chan_type {
-        moltis_channels::ChannelType::Telegram => target
-            .chan_account_key
-            .strip_prefix("telegram:")
-            .unwrap_or(&target.chan_account_key),
-    };
-    moltis_common::identity::format_chan_chat_key(
-        target.chan_type.as_str(),
-        chan_user_id,
-        &target.chat_id,
-        target.thread_id.as_deref(),
-    )
-}
-
 async fn telegram_group_bucket_key_for_account(
     state: &Arc<GatewayState>,
     chan_account_key: &str,
@@ -7521,67 +7569,86 @@ async fn resolve_telegram_session_id(
     chat_id: &str,
     thread_id: Option<&str>,
     sender_account_key: Option<&str>,
-) -> String {
+) -> Option<String> {
+    let legacy_session_id = {
+        let mut legacy = format!("{chan_account_key}:{chat_id}");
+        if let Some(tid) = thread_id.map(str::trim).filter(|s| !s.is_empty()) {
+            legacy.push(':');
+            legacy.push_str(tid);
+        }
+        legacy
+    };
+
+    if state.services.session_metadata.is_none() {
+        return Some(legacy_session_id);
+    }
+
     let snapshots = state
         .services
         .channel
         .telegram_bus_accounts_snapshot()
         .await;
-    if let Some(ref sm) = state.services.session_metadata
-        && let Some(route) = moltis_telegram::adapter::resolve_group_relay_route(
-            &snapshots,
-            chan_account_key,
-            chat_id,
-            thread_id,
-            sender_account_key,
-        )
-    {
-        if let Some(key) = sm.get_bucket_session_id("telegram", &route.bucket_key).await {
-            return key;
-        }
+    let sm = state.services.session_metadata.as_ref()?;
+    let route = moltis_telegram::adapter::resolve_group_relay_route(
+        &snapshots,
+        chan_account_key,
+        chat_id,
+        thread_id,
+        sender_account_key,
+    );
+    let Some(route) = route else {
+        return Some(legacy_session_id);
+    };
 
-        if let Some(active_session_id) = sm
-            .get_active_session_id("telegram", chan_account_key, chat_id)
-            .await
-        {
-            let active_entry = sm.get(&active_session_id).await;
-            let active_binding_matches = active_entry
-                .as_ref()
-                .and_then(|entry| entry.channel_binding.as_deref())
-                .and_then(|binding_json| {
-                    serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json).ok()
-                })
-                .is_none_or(|bound_target| {
-                    bound_target.chan_type == moltis_channels::ChannelType::Telegram
-                        && bound_target.chan_account_key == chan_account_key
-                        && bound_target.chat_id == chat_id
-                        && bound_target.thread_id.as_deref() == thread_id
-                        && bound_target
-                            .bucket_key
-                            .as_deref()
-                            .is_none_or(|existing| existing == route.bucket_key)
-                });
-            if active_binding_matches {
-                sm.set_bucket_session_id("telegram", &route.bucket_key, &active_session_id)
-                    .await;
-                info!(
-                    event = "telegram.session_compat.backfilled_bucket_session",
-                    chan_account_key,
-                    chat_id,
-                    thread_id = ?thread_id,
-                    bucket_key = route.bucket_key,
-                    session_id = active_session_id,
-                    reason_code = "legacy_active_session_without_bucket_mapping",
-                    "reused active telegram session and backfilled bucket mapping"
-                );
-                return active_session_id;
-            }
-        }
+    if let Some(key) = sm
+        .get_bucket_session_id("telegram", &route.bucket_key)
+        .await
+    {
+        return Some(key);
     }
-    let chan_user_id = chan_account_key
-        .strip_prefix("telegram:")
-        .unwrap_or(chan_account_key);
-    moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, thread_id)
+
+    let Some(active_session_id) = sm
+        .get_active_session_id("telegram", chan_account_key, chat_id)
+        .await
+    else {
+        return None;
+    };
+
+    let active_entry = sm.get(&active_session_id).await;
+    let active_binding_matches = active_entry
+        .as_ref()
+        .and_then(|entry| entry.channel_binding.as_deref())
+        .is_none_or(|binding_json| {
+            let target = moltis_telegram::adapter::channel_target_from_binding(binding_json);
+            let binding_bucket_key =
+                moltis_telegram::adapter::session_key_from_binding(binding_json);
+            target.is_none_or(|target| {
+                target.channel_type == "telegram"
+                    && target.account_key == chan_account_key
+                    && target.chat_id == chat_id
+                    && target.thread_id.as_deref() == thread_id
+                    && binding_bucket_key
+                        .as_deref()
+                        .is_none_or(|existing| existing == route.bucket_key)
+            })
+        });
+    if !active_binding_matches {
+        return None;
+    }
+
+    sm.set_bucket_session_id("telegram", &route.bucket_key, &active_session_id)
+        .await;
+    info!(
+        event = "telegram.session_compat.backfilled_bucket_session",
+        chan_account_key,
+        chat_id,
+        thread_id = ?thread_id,
+        bucket_key = route.bucket_key,
+        session_id = active_session_id,
+        reason_code = "legacy_active_session_without_bucket_mapping",
+        "reused active telegram session and backfilled bucket mapping"
+    );
+    Some(active_session_id)
 }
 
 async fn maybe_mirror_telegram_group_reply(
@@ -7619,16 +7686,6 @@ async fn maybe_mirror_telegram_group_reply(
     let source_username = source_bot_handle
         .strip_prefix('@')
         .unwrap_or(&source_bot_handle);
-    let snapshots = state
-        .services
-        .channel
-        .telegram_bus_accounts_snapshot()
-        .await;
-    let mut format_by_account =
-        HashMap::<String, moltis_telegram::config::GroupSessionTranscriptFormat>::new();
-    for s in snapshots {
-        format_by_account.insert(s.account_handle, s.group_session_transcript_format);
-    }
 
     let channel_meta = serde_json::json!({
         "chanType": "telegram",
@@ -7661,7 +7718,7 @@ async fn maybe_mirror_telegram_group_reply(
             Some(source_account_id),
         )
         .await;
-        let target_session_key = resolve_telegram_session_id(
+        let target_session_id = resolve_telegram_session_id(
             state,
             &target_account_id,
             chat_id,
@@ -7669,14 +7726,17 @@ async fn maybe_mirror_telegram_group_reply(
             Some(source_account_id),
         )
         .await;
+        let Some(target_session_id) = target_session_id else {
+            continue;
+        };
 
         // Only mirror into sessions that already exist for this (bot, group) pair.
         // This prevents accidental creation of "phantom" group sessions for bots
         // that are not actually in the group.
         let session_exists = if let Some(ref sm) = state.services.session_metadata {
-            sm.get(&target_session_key).await.is_some()
+            sm.get(&target_session_id).await.is_some()
         } else {
-            store.count(&target_session_key).await.unwrap_or(0) > 0
+            store.count(&target_session_id).await.unwrap_or(0) > 0
         };
         if !session_exists {
             continue;
@@ -7684,7 +7744,7 @@ async fn maybe_mirror_telegram_group_reply(
 
         ensure_channel_bound_session(
             state,
-            &target_session_key,
+            &target_session_id,
             &target_account_id,
             chat_id,
             thread_id,
@@ -7693,12 +7753,7 @@ async fn maybe_mirror_telegram_group_reply(
         .await;
 
         if let Ok(found) = store
-            .tail_contains_channel_field_value(
-                &target_session_key,
-                "mirrorKey",
-                mirror_key_str,
-                200,
-            )
+            .tail_contains_channel_field_value(&target_session_id, "mirrorKey", mirror_key_str, 200)
             .await
         {
             if found {
@@ -7707,28 +7762,17 @@ async fn maybe_mirror_telegram_group_reply(
         }
 
         let msg_index = if let Some(ref sm) = state.services.session_metadata {
-            sm.get(&target_session_key)
+            sm.get(&target_session_id)
                 .await
                 .map(|e| e.message_count)
                 .unwrap_or(0) as usize
         } else {
-            store.count(&target_session_key).await.unwrap_or(0) as usize
+            store.count(&target_session_id).await.unwrap_or(0) as usize
         };
-        let mirrored_content = match format_by_account
-            .get(&target_account_id)
-            .cloned()
-            .unwrap_or(moltis_telegram::config::GroupSessionTranscriptFormat::Legacy)
-        {
-            moltis_telegram::config::GroupSessionTranscriptFormat::Legacy => {
-                format!("[{source_bot_handle} mirror] {text}")
-            },
-            moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1 => {
-                format!("{source_username}(bot): {text}")
-            },
-        };
+        let mirrored_content = format!("{source_username}(bot): {text}");
         let user_msg = PersistedMessage::user_with_channel(mirrored_content, channel_meta.clone());
         let user_val = user_msg.to_value();
-        if let Err(e) = store.append(&target_session_key, &user_val).await {
+        if let Err(e) = store.append(&target_session_id, &user_val).await {
             warn!(
                 source_account_id,
                 target_account_id,
@@ -7740,11 +7784,10 @@ async fn maybe_mirror_telegram_group_reply(
         }
 
         if let Some(ref sm) = state.services.session_metadata {
-            sm.touch(&target_session_key, (msg_index + 1) as u32).await;
+            sm.touch(&target_session_id, (msg_index + 1) as u32).await;
             if msg_index == 0 {
                 let preview = extract_preview_from_value(&user_val);
-                sm.set_preview(&target_session_key, preview.as_deref())
-                    .await;
+                sm.set_preview(&target_session_id, preview.as_deref()).await;
             }
         }
 
@@ -7764,6 +7807,7 @@ struct ChannelDeliveryDiag {
     trigger_id: Option<String>,
 }
 
+#[cfg(test)]
 async fn deliver_channel_replies_to_targets(
     outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound>,
     targets: Vec<moltis_channels::ChannelReplyTarget>,
@@ -8001,6 +8045,254 @@ async fn deliver_channel_replies_to_targets(
     }
 }
 
+async fn deliver_channel_replies_to_reply_target_refs(
+    outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound>,
+    reply_target_refs: Vec<String>,
+    session_id: &str,
+    text: &str,
+    state: Arc<GatewayState>,
+    desired_reply_medium: ReplyMedium,
+    status_log: Vec<String>,
+    diag: Option<ChannelDeliveryDiag>,
+) {
+    let session_id = session_id.to_string();
+    let text = text.to_string();
+    let diag = diag.unwrap_or_default();
+
+    let bus_accounts = Arc::new(
+        state
+            .services
+            .channel
+            .telegram_bus_accounts_snapshot()
+            .await,
+    );
+    let inbound_relay_ctx = load_telegram_relay_inbound_context(&state, &session_id).await;
+    let logbook_html = format_logbook_html(&status_log);
+
+    let channel_target = if let Some(ref sm) = state.services.session_metadata
+        && let Some(entry) = sm.get(&session_id).await
+        && let Some(binding) = entry.channel_binding.as_deref()
+    {
+        moltis_telegram::adapter::channel_target_from_binding(binding)
+    } else {
+        None
+    };
+    let channel_key = channel_target
+        .as_ref()
+        .map(|t| format!("{}:{}", t.channel_type, t.account_key));
+
+    let mut tasks = Vec::with_capacity(reply_target_refs.len());
+    for reply_target_ref in reply_target_refs {
+        let outbound = Arc::clone(&outbound);
+        let state = Arc::clone(&state);
+        let session_id = session_id.clone();
+        let text = text.clone();
+        let logbook_html = logbook_html.clone();
+        let bus_accounts = Arc::clone(&bus_accounts);
+        let inbound_relay_ctx = inbound_relay_ctx.clone();
+        let diag = diag.clone();
+        let channel_target = channel_target.clone();
+        let channel_key = channel_key.clone();
+        tasks.push(tokio::spawn(async move {
+            let reply_target_ref_hash = sha256_hex(&reply_target_ref);
+            let inbound_id = reply_target_ref_hash.as_str();
+
+            if matches!(desired_reply_medium, ReplyMedium::Voice) {
+                if let Some(mut payload) =
+                    build_tts_payload_for_channel_key(&state, &session_id, channel_key.as_deref(), &text)
+                        .await
+                {
+                    let transcript = std::mem::take(&mut payload.text);
+                    let (voice_payload, follow_up_text) =
+                        if transcript.len() <= moltis_telegram::markdown::TELEGRAM_CAPTION_LIMIT {
+                            payload.text = transcript.clone();
+                            (payload, None)
+                        } else {
+                            (payload, Some(transcript))
+                        };
+
+                    let sent_ref = match outbound
+                        .send_media_by_reply_target_ref_with_ref(&reply_target_ref, &voice_payload)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(
+                                event = "channel_delivery.failed",
+                                code = "send_media_failed",
+                                op = "channel.send_media_by_reply_target_ref",
+                                run_id = ?diag.run_id,
+                                trigger_id = ?diag.trigger_id,
+                                reply_target_ref_hash = %reply_target_ref_hash,
+                                reason_code = "send_media_failed",
+                                "failed to send channel voice reply: {e}"
+                            );
+                            return;
+                        }
+                    };
+
+                    if let Some(follow_up) = follow_up_text {
+                        let result = if logbook_html.is_empty() {
+                            outbound
+                                .send_text_by_reply_target_ref_with_ref(&reply_target_ref, &follow_up)
+                                .await
+                        } else {
+                            outbound
+                                .send_text_with_suffix_by_reply_target_ref_with_ref(
+                                    &reply_target_ref,
+                                    &follow_up,
+                                    &logbook_html,
+                                )
+                                .await
+                        };
+                        if let Err(e) = result {
+                            warn!(
+                                event = "channel_delivery.failed",
+                                code = "send_text_failed",
+                                op = "channel.send_text_by_reply_target_ref",
+                                run_id = ?diag.run_id,
+                                trigger_id = ?diag.trigger_id,
+                                reply_target_ref_hash = %reply_target_ref_hash,
+                                reason_code = "send_text_failed",
+                                "failed to send voice transcript follow-up: {e}"
+                            );
+                        }
+                    } else if !logbook_html.is_empty()
+                        && let Err(e) = outbound
+                            .send_text_with_suffix_by_reply_target_ref_with_ref(
+                                &reply_target_ref,
+                                "",
+                                &logbook_html,
+                            )
+                            .await
+                    {
+                        warn!(
+                            event = "channel_delivery.failed",
+                            code = "send_text_failed",
+                            op = "channel.send_logbook_follow_up",
+                            run_id = ?diag.run_id,
+                            trigger_id = ?diag.trigger_id,
+                            reply_target_ref_hash = %reply_target_ref_hash,
+                            reason_code = "send_text_failed",
+                            "failed to send logbook follow-up: {e}"
+                        );
+                    }
+
+                    if let Some(ref ct) = channel_target
+                        && ct.channel_type == "telegram"
+                    {
+                        maybe_mirror_telegram_group_reply(
+                            &state,
+                            &ct.account_key,
+                            None,
+                            &ct.chat_id,
+                            ct.thread_id.as_deref(),
+                            Some(inbound_id),
+                            &voice_payload.text,
+                        )
+                        .await;
+
+                        if let Some(ref sent) = sent_ref {
+                            maybe_relay_telegram_group_mentions(
+                                &state,
+                                bus_accounts.as_ref(),
+                                inbound_relay_ctx,
+                                &ct.account_key,
+                                None,
+                                &ct.chat_id,
+                                ct.thread_id.as_deref(),
+                                Some(inbound_id),
+                                &sent.message_id,
+                                &voice_payload.text,
+                            )
+                            .await;
+                        }
+                    }
+                    return;
+                }
+            }
+
+            let result = if logbook_html.is_empty() {
+                outbound
+                    .send_text_by_reply_target_ref_with_ref(&reply_target_ref, &text)
+                    .await
+            } else {
+                outbound
+                    .send_text_with_suffix_by_reply_target_ref_with_ref(
+                        &reply_target_ref,
+                        &text,
+                        &logbook_html,
+                    )
+                    .await
+            };
+            let sent_ref = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        event = "channel_delivery.failed",
+                        code = "send_text_failed",
+                        op = "channel.send_text_by_reply_target_ref",
+                        run_id = ?diag.run_id,
+                        trigger_id = ?diag.trigger_id,
+                        reply_target_ref_hash = %reply_target_ref_hash,
+                        reason_code = "send_text_failed",
+                        "failed to send channel reply: {e}"
+                    );
+                    return;
+                }
+            };
+
+            if let Some(ref ct) = channel_target
+                && ct.channel_type == "telegram"
+            {
+                maybe_mirror_telegram_group_reply(
+                    &state,
+                    &ct.account_key,
+                    None,
+                    &ct.chat_id,
+                    ct.thread_id.as_deref(),
+                    Some(inbound_id),
+                    &text,
+                )
+                .await;
+
+                if let Some(ref sent) = sent_ref {
+                    maybe_relay_telegram_group_mentions(
+                        &state,
+                        bus_accounts.as_ref(),
+                        inbound_relay_ctx,
+                        &ct.account_key,
+                        None,
+                        &ct.chat_id,
+                        ct.thread_id.as_deref(),
+                        Some(inbound_id),
+                        &sent.message_id,
+                        &text,
+                    )
+                    .await;
+                } else {
+                    warn!(
+                        event = "channel_delivery.degraded",
+                        code = "missing_message_id_ref",
+                        op = "channel.send_text_by_reply_target_ref",
+                        run_id = ?diag.run_id,
+                        trigger_id = ?diag.trigger_id,
+                        reply_target_ref_hash = %reply_target_ref_hash,
+                        reason_code = "missing_message_id_ref",
+                        "channel reply sent but no message_id ref returned (relay disabled for this reply)"
+                    );
+                }
+            }
+        }));
+    }
+
+    for task in tasks {
+        if let Err(e) = task.await {
+            warn!(error = %e, "channel reply task join failed");
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TtsStatusResponse {
     enabled: bool,
@@ -8078,6 +8370,7 @@ async fn generate_tts_audio(
         .ok()
 }
 
+#[cfg(test)]
 async fn build_tts_payload(
     state: &Arc<GatewayState>,
     session_key: &str,
@@ -8102,6 +8395,63 @@ async fn build_tts_payload(
         (
             inner.tts_channel_overrides.get(&channel_key).cloned(),
             inner.tts_session_overrides.get(session_key).cloned(),
+        )
+    };
+    let resolved = channel_override.or(session_override);
+
+    let request = TtsConvertRequest {
+        text: &sanitized,
+        format: "ogg",
+        provider: resolved.as_ref().and_then(|o| o.provider.clone()),
+        voice_id: resolved.as_ref().and_then(|o| o.voice_id.clone()),
+        model: resolved.as_ref().and_then(|o| o.model.clone()),
+    };
+
+    let tts_result = state
+        .services
+        .tts
+        .convert(serde_json::to_value(request).ok()?)
+        .await
+        .ok()?;
+
+    let response: TtsConvertResponse = serde_json::from_value(tts_result).ok()?;
+
+    let mime_type = response
+        .mime_type
+        .unwrap_or_else(|| "audio/ogg".to_string());
+
+    Some(ReplyPayload {
+        text: text.to_string(),
+        media: Some(MediaAttachment {
+            url: format!("data:{mime_type};base64,{}", response.audio),
+            mime_type,
+        }),
+        reply_to_message_id: None,
+        silent: false,
+    })
+}
+
+async fn build_tts_payload_for_channel_key(
+    state: &Arc<GatewayState>,
+    session_id: &str,
+    channel_key: Option<&str>,
+    text: &str,
+) -> Option<moltis_common::types::ReplyPayload> {
+    use moltis_common::types::{MediaAttachment, ReplyPayload};
+
+    let tts_status = state.services.tts.status().await.ok()?;
+    let status: TtsStatusResponse = serde_json::from_value(tts_status).ok()?;
+    if !status.enabled {
+        return None;
+    }
+
+    let sanitized = moltis_voice::tts::sanitize_text_for_tts(text);
+
+    let (channel_override, session_override) = {
+        let inner = state.inner.read().await;
+        (
+            channel_key.and_then(|k| inner.tts_channel_overrides.get(k).cloned()),
+            inner.tts_session_overrides.get(session_id).cloned(),
         )
     };
     let resolved = channel_override.or(session_override);
@@ -8251,14 +8601,23 @@ async fn send_screenshot_to_channels(
 ) {
     use moltis_common::types::{MediaAttachment, ReplyPayload};
 
-    let targets = state.peek_channel_replies(session_key, trigger_id).await;
-    if targets.is_empty() {
+    let reply_target_refs = state.peek_channel_replies(session_key, trigger_id).await;
+    if reply_target_refs.is_empty() {
         return;
     }
 
     let outbound = match state.services.channel_outbound_arc() {
         Some(o) => o,
         None => return,
+    };
+
+    let channel_target = if let Some(ref sm) = state.services.session_metadata
+        && let Some(entry) = sm.get(session_key).await
+        && let Some(binding) = entry.channel_binding.as_deref()
+    {
+        moltis_telegram::adapter::channel_target_from_binding(binding)
+    } else {
+        None
     };
 
     let payload = ReplyPayload {
@@ -8271,53 +8630,52 @@ async fn send_screenshot_to_channels(
         silent: false,
     };
 
-    let mut tasks = Vec::with_capacity(targets.len());
-    for target in targets {
+    let mut tasks = Vec::with_capacity(reply_target_refs.len());
+    for reply_target_ref in reply_target_refs {
         let outbound = Arc::clone(&outbound);
         let state = Arc::clone(state);
         let payload = payload.clone();
+        let channel_target = channel_target.clone();
         tasks.push(tokio::spawn(async move {
-            match target.chan_type {
-                moltis_channels::ChannelType::Telegram => {
-                    let reply_to = target.message_id.as_deref();
-                    if let Err(_e) = outbound
-                        .send_media_to_target_with_ref(&target, &payload)
-                        .await
-                    {
-                        warn!(
-                            event = "telegram.outbound.media_failed",
-                            chan_account_key = %target.chan_account_key,
-                            chat_id = %target.chat_id,
-                            reason_code = "send_media_failed",
-                            "failed to send screenshot to channel"
-                        );
-                        // Notify the user of the error
-                        let error_msg =
-                            "⚠️ Failed to send screenshot. Please try again.".to_string();
-                        let _ = outbound
-                            .send_text_to_target_with_ref(&target, &error_msg)
-                            .await;
-                    } else {
-                        debug!(
-                            chan_account_key = target.chan_account_key,
-                            chat_id = target.chat_id,
-                            "sent screenshot to telegram"
-                        );
+            let reply_target_ref_hash = sha256_hex(&reply_target_ref);
+            if let Err(e) = outbound
+                .send_media_by_reply_target_ref_with_ref(&reply_target_ref, &payload)
+                .await
+            {
+                warn!(
+                    event = "channel.outbound.media_failed",
+                    op = "channel.send_media_by_reply_target_ref",
+                    reply_target_ref_hash = %reply_target_ref_hash,
+                    reason_code = "send_media_failed",
+                    "failed to send screenshot to channel: {e}"
+                );
+                let error_msg = "⚠️ Failed to send screenshot. Please try again.".to_string();
+                let _ = outbound
+                    .send_text_by_reply_target_ref_with_ref(&reply_target_ref, &error_msg)
+                    .await;
+                return;
+            }
 
-                        // V1 media mirror: write a compact placeholder into other bots' sessions
-                        // (do not mirror media bytes/URLs).
-                        maybe_mirror_telegram_group_reply(
-                            &state,
-                            &target.chan_account_key,
-                            target.chan_user_name.as_deref(),
-                            &target.chat_id,
-                            target.thread_id.as_deref(),
-                            reply_to,
-                            "（发送了一张图片）",
-                        )
-                        .await;
-                    }
-                },
+            debug!(
+                reply_target_ref_hash = %reply_target_ref_hash,
+                "sent screenshot to channel"
+            );
+
+            if let Some(ref ct) = channel_target
+                && ct.channel_type == "telegram"
+            {
+                // V1 media mirror: write a compact placeholder into other bots' sessions
+                // (do not mirror media bytes/URLs).
+                maybe_mirror_telegram_group_reply(
+                    &state,
+                    &ct.account_key,
+                    None,
+                    &ct.chat_id,
+                    ct.thread_id.as_deref(),
+                    Some(reply_target_ref_hash.as_str()),
+                    "（发送了一张图片）",
+                )
+                .await;
             }
         }));
     }
@@ -8339,8 +8697,8 @@ async fn send_location_to_channels(
     longitude: f64,
     title: Option<&str>,
 ) {
-    let targets = state.peek_channel_replies(session_key, trigger_id).await;
-    if targets.is_empty() {
+    let reply_target_refs = state.peek_channel_replies(session_key, trigger_id).await;
+    if reply_target_refs.is_empty() {
         return;
     }
 
@@ -8351,29 +8709,31 @@ async fn send_location_to_channels(
 
     let title_owned = title.map(String::from);
 
-    let mut tasks = Vec::with_capacity(targets.len());
-    for target in targets {
+    let mut tasks = Vec::with_capacity(reply_target_refs.len());
+    for reply_target_ref in reply_target_refs {
         let outbound = Arc::clone(&outbound);
         let title_ref = title_owned.clone();
         tasks.push(tokio::spawn(async move {
             if let Err(e) = outbound
-                .send_location_to_target_with_ref(
-                    &target,
+                .send_location_by_reply_target_ref_with_ref(
+                    &reply_target_ref,
                     latitude,
                     longitude,
                     title_ref.as_deref(),
                 )
                 .await
             {
+                let reply_target_ref_hash = sha256_hex(&reply_target_ref);
                 warn!(
-                    chan_account_key = target.chan_account_key,
-                    chat_id = target.chat_id,
+                    event = "channel.outbound.location_failed",
+                    op = "channel.send_location_by_reply_target_ref",
+                    reply_target_ref_hash = %reply_target_ref_hash,
+                    reason_code = "send_location_failed",
                     "failed to send location to channel: {e}"
                 );
             } else {
                 debug!(
-                    chan_account_key = target.chan_account_key,
-                    chat_id = target.chat_id,
+                    reply_target_ref_hash = %sha256_hex(&reply_target_ref),
                     "sent location pin to telegram"
                 );
             }
@@ -8445,6 +8805,21 @@ mod tests {
             .await
             .unwrap();
         Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(pool))
+    }
+
+    fn telegram_reply_target_ref(
+        chan_account_key: &str,
+        chat_id: &str,
+        message_id: Option<&str>,
+        thread_id: Option<&str>,
+    ) -> String {
+        moltis_telegram::adapter::reply_target_ref_for_target(
+            chan_account_key,
+            chat_id,
+            thread_id,
+            message_id,
+        )
+        .expect("telegram reply_target_ref must encode")
     }
 
     struct DummyTool {
@@ -8759,7 +9134,7 @@ mod tests {
     }
 
     struct ContextAssertingTool {
-        expected_chan_chat_key: String,
+        expected_session_key: String,
         expected_session_id: String,
         called: Arc<AtomicUsize>,
     }
@@ -8779,15 +9154,15 @@ mod tests {
         }
 
         async fn execute(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-            let chan_chat_key = params
-                .get("_chanChatKey")
+            let session_key = params
+                .get("_sessionKey")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let session_id = params
                 .get("_sessionId")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            assert_eq!(chan_chat_key, self.expected_chan_chat_key.as_str());
+            assert_eq!(session_key, self.expected_session_key.as_str());
             assert_eq!(session_id, self.expected_session_id.as_str());
             self.called.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::json!({ "ok": true }))
@@ -9084,6 +9459,75 @@ mod tests {
             Ok(())
         }
 
+        async fn send_text_by_reply_target_ref_with_ref(
+            &self,
+            reply_target_ref: &str,
+            text: &str,
+        ) -> Result<Option<moltis_channels::plugin::SentMessageRef>> {
+            let target =
+                moltis_telegram::adapter::inbound_target_from_reply_target_ref(reply_target_ref)
+                    .ok_or_else(|| anyhow::anyhow!("invalid reply_target_ref"))?;
+            self.send_text(
+                &target.chan_account_key,
+                &target.chat_id,
+                text,
+                target.message_id.as_deref(),
+            )
+            .await?;
+            Ok(None)
+        }
+
+        async fn send_text_with_suffix_by_reply_target_ref_with_ref(
+            &self,
+            reply_target_ref: &str,
+            text: &str,
+            suffix_html: &str,
+        ) -> Result<Option<moltis_channels::plugin::SentMessageRef>> {
+            let combined = format!("{text}{suffix_html}");
+            self.send_text_by_reply_target_ref_with_ref(reply_target_ref, &combined)
+                .await
+        }
+
+        async fn send_media_by_reply_target_ref_with_ref(
+            &self,
+            reply_target_ref: &str,
+            payload: &ReplyPayload,
+        ) -> Result<Option<moltis_channels::plugin::SentMessageRef>> {
+            let target =
+                moltis_telegram::adapter::inbound_target_from_reply_target_ref(reply_target_ref)
+                    .ok_or_else(|| anyhow::anyhow!("invalid reply_target_ref"))?;
+            self.send_media(
+                &target.chan_account_key,
+                &target.chat_id,
+                payload,
+                target.message_id.as_deref(),
+            )
+            .await?;
+            Ok(None)
+        }
+
+        async fn send_location_by_reply_target_ref_with_ref(
+            &self,
+            reply_target_ref: &str,
+            latitude: f64,
+            longitude: f64,
+            title: Option<&str>,
+        ) -> Result<Option<moltis_channels::plugin::SentMessageRef>> {
+            let target =
+                moltis_telegram::adapter::inbound_target_from_reply_target_ref(reply_target_ref)
+                    .ok_or_else(|| anyhow::anyhow!("invalid reply_target_ref"))?;
+            self.send_location_with_ref(
+                &target.chan_account_key,
+                &target.chat_id,
+                latitude,
+                longitude,
+                title,
+                target.message_id.as_deref(),
+            )
+            .await?;
+            Ok(None)
+        }
+
         async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> Result<()> {
             self.typings.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -9228,7 +9672,7 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert!(
-            content.starts_with("[@lovely_apple_bot mirror] "),
+            content.starts_with("lovely_apple_bot(bot): "),
             "unexpected mirror prefix: {content}"
         );
         let mirror_key = fluffy[1]
@@ -9269,8 +9713,6 @@ mod tests {
                     relay_hop_limit: 3,
                     epoch_relay_budget: 128,
                     relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
-                    group_session_transcript_format:
-                        moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
                 },
                 moltis_telegram::config::TelegramBusAccountSnapshot {
                     account_handle: "telegram:fluffy".into(),
@@ -9281,8 +9723,6 @@ mod tests {
                     relay_hop_limit: 3,
                     epoch_relay_budget: 128,
                     relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
-                    group_session_transcript_format:
-                        moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1,
                 },
             ],
         });
@@ -9392,10 +9832,12 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
 
         let mut services = crate::services::GatewayServices::noop()
             .with_channel_outbound(Arc::clone(&outbound))
-            .with_session_store(Arc::clone(&store));
+            .with_session_store(Arc::clone(&store))
+            .with_session_metadata(Arc::clone(&metadata));
         services.channel = Arc::new(MirrorChannelService {
             accounts: vec!["telegram:lovely".to_string(), "telegram:fluffy".to_string()],
             snapshots: Vec::new(),
@@ -9413,23 +9855,30 @@ mod tests {
         // Pending reply target for this session (so screenshot sender has a target).
         let session_key = "telegram:lovely:-100";
         let trigger_id = crate::ids::new_trigger_id();
+        let binding_json = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:lovely".to_string(),
+            chan_user_name: None,
+            chat_id: "-100".to_string(),
+            message_id: None,
+            thread_id: None,
+            bucket_key: Some("group:account:telegram:lovely:peer:-100".to_string()),
+        })
+        .unwrap();
+        let _ = metadata.upsert(session_key, None).await;
+        metadata
+            .set_channel_binding(session_key, Some(binding_json))
+            .await;
         state
             .push_channel_reply(
                 session_key,
                 &trigger_id,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:lovely".to_string(),
-                    chan_user_name: Some("@lovely_apple_bot".to_string()),
-                    chat_id: "-100".to_string(),
-                    message_id: Some("184".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:lovely", "-100", Some("184"), None),
             )
             .await;
 
         // Ensure the target bot has an existing (bot, group) session.
+        let _ = metadata.upsert("telegram:fluffy:-100", None).await;
         seed_session(store.as_ref(), "telegram:fluffy:-100").await;
 
         // Send a dummy data URI screenshot.
@@ -9452,7 +9901,7 @@ mod tests {
             "expected placeholder, got: {content}"
         );
         assert!(
-            content.starts_with("[@lovely_apple_bot mirror] "),
+            content.starts_with("telegram:lovely(bot): "),
             "unexpected prefix: {content}"
         );
     }
@@ -9510,7 +9959,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert_eq!(ctx["personaIdEffective"], "default");
+        assert_eq!(ctx["agentIdEffective"], "default");
         let preamble = ctx["asSentPreamble"]
             .as_array()
             .expect("asSentPreamble array");
@@ -9528,7 +9977,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert_eq!(raw["personaIdEffective"], "default");
+        assert_eq!(raw["agentIdEffective"], "default");
         let preamble = raw["asSentPreamble"]
             .as_array()
             .expect("asSentPreamble array");
@@ -9541,7 +9990,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert_eq!(full["personaIdEffective"], "default");
+        assert_eq!(full["agentIdEffective"], "default");
         let preamble = full["asSentPreamble"]
             .as_array()
             .expect("asSentPreamble array");
@@ -9717,12 +10166,12 @@ mod tests {
         assert_eq!(as_sent["kind"], "local_llm_prompt_v1");
     }
 
-    struct PersonaChannelService {
-        persona_id: String,
+    struct AgentChannelService {
+        agent_id: String,
     }
 
     #[async_trait]
-    impl crate::services::ChannelService for PersonaChannelService {
+    impl crate::services::ChannelService for AgentChannelService {
         async fn status(&self) -> ServiceResult {
             Err("not implemented".into())
         }
@@ -9751,21 +10200,21 @@ mod tests {
             Err("not implemented".into())
         }
 
-        async fn telegram_account_persona_id(&self, account_id: &str) -> Option<String> {
-            (account_id == "telegram:lovely").then(|| self.persona_id.clone())
+        async fn telegram_account_agent_id(&self, account_id: &str) -> Option<String> {
+            (account_id == "telegram:lovely").then(|| self.agent_id.clone())
         }
     }
 
     #[tokio::test]
-    async fn debug_endpoints_use_effective_persona_id_from_telegram_binding() {
+    async fn debug_endpoints_use_effective_agent_id_from_telegram_binding() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
         let metadata = sqlite_metadata().await;
 
         let mut services =
             crate::services::GatewayServices::noop().with_session_store(Arc::clone(&store));
-        services.channel = Arc::new(PersonaChannelService {
-            persona_id: "my_persona".to_string(),
+        services.channel = Arc::new(AgentChannelService {
+            agent_id: "my_agent".to_string(),
         });
 
         let state = Arc::new(crate::state::GatewayState::new(
@@ -9793,7 +10242,7 @@ mod tests {
         );
 
         // Seed a telegram channel binding into session metadata so runtime_context.host.channel
-        // becomes "telegram" and persona routing becomes active.
+        // becomes "telegram" and agent routing becomes active.
         metadata.upsert("main", None).await.unwrap();
         let binding = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
             chan_type: moltis_channels::ChannelType::Telegram,
@@ -9827,7 +10276,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert_eq!(ctx["personaIdEffective"], "my_persona");
+        assert_eq!(ctx["agentIdEffective"], "my_agent");
     }
 
     struct RelayLabelingChatService {
@@ -9930,8 +10379,6 @@ mod tests {
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Loose,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
@@ -9942,8 +10389,6 @@ mod tests {
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -9980,15 +10425,18 @@ mod tests {
             .channel_turn_context("telegram:bot2:-100", turn_id)
             .await
             .expect("relay dispatch must register channel turn context");
-        assert_eq!(turn.chan_chat_key.as_deref(), Some("telegram:bot2:-100"));
+        assert_eq!(
+            turn.session_key.as_deref(),
+            Some("group:account:telegram:bot2:peer:-100")
+        );
         let relay_text = sent.get("text").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             relay_text.contains("帮我总结一下"),
             "unexpected relay text: {relay_text}"
         );
         assert!(
-            relay_text.contains("来自"),
-            "expected relay attribution prefix, got: {relay_text}"
+            relay_text.contains("(bot) -> you:"),
+            "expected TG-GST v1 relay prefix, got: {relay_text}"
         );
         assert!(sent.get("channel").is_some(), "expected channel metadata");
     }
@@ -10035,8 +10483,6 @@ mod tests {
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Loose,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
@@ -10047,8 +10493,6 @@ mod tests {
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1,
             },
         ];
 
@@ -10126,8 +10570,6 @@ mod tests {
                 relay_hop_limit: 1,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Loose,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
@@ -10138,8 +10580,6 @@ mod tests {
                 relay_hop_limit: 1,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -10213,8 +10653,6 @@ mod tests {
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
@@ -10225,8 +10663,6 @@ mod tests {
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot3".into(),
@@ -10237,8 +10673,6 @@ mod tests {
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -10272,7 +10706,10 @@ mod tests {
             .channel_turn_context("telegram:bot2:-100", turn_id)
             .await
             .expect("relay dispatch must register channel turn context");
-        assert_eq!(turn.chan_chat_key.as_deref(), Some("telegram:bot2:-100"));
+        assert_eq!(
+            turn.session_key.as_deref(),
+            Some("group:account:telegram:bot2:peer:-100")
+        );
         let recv2 = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
         assert!(recv2.is_err(), "expected only one dispatch under budget=1");
 
@@ -10335,8 +10772,6 @@ mod tests {
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
@@ -10347,8 +10782,6 @@ mod tests {
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot3".into(),
@@ -10359,8 +10792,6 @@ mod tests {
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -10394,7 +10825,10 @@ mod tests {
             .channel_turn_context("telegram:bot2:-100", turn_id)
             .await
             .expect("relay dispatch must register channel turn context");
-        assert_eq!(turn.chan_chat_key.as_deref(), Some("telegram:bot2:-100"));
+        assert_eq!(
+            turn.session_key.as_deref(),
+            Some("group:account:telegram:bot2:peer:-100")
+        );
 
         let inner = state.inner.read().await;
         let entry = inner
@@ -10500,8 +10934,6 @@ mod tests {
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
@@ -10512,8 +10944,6 @@ mod tests {
                 relay_hop_limit: 100,
                 epoch_relay_budget: 1,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -10618,8 +11048,6 @@ mod tests {
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
@@ -10630,8 +11058,6 @@ mod tests {
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -10673,8 +11099,6 @@ mod tests {
             relay_hop_limit: 3,
             epoch_relay_budget: 128,
             relay_strictness: RelayStrictness::Strict,
-            group_session_transcript_format:
-                moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
         }];
 
         let text = r#"
@@ -10711,8 +11135,6 @@ echo @bot2
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
             TelegramBusAccountSnapshot {
                 account_handle: "telegram:bot2".into(),
@@ -10723,8 +11145,6 @@ echo @bot2
                 relay_hop_limit: 3,
                 epoch_relay_budget: 128,
                 relay_strictness: RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             },
         ];
 
@@ -10822,15 +11242,7 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 &trigger_id,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("7".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("7"), None),
             )
             .await;
         state
@@ -10906,15 +11318,7 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 &trigger_id,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("9".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("9"), None),
             )
             .await;
         state
@@ -10980,15 +11384,7 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 &trigger_id,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("7".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("7"), None),
             )
             .await;
 
@@ -11014,15 +11410,7 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 &trigger_id,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("8".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("8"), None),
             )
             .await;
 
@@ -11077,30 +11465,14 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 trigger_a,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("1".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("1"), None),
             )
             .await;
         state
             .push_channel_reply(
                 session_key,
                 trigger_b,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("2".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("2"), None),
             )
             .await;
 
@@ -11148,30 +11520,14 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 trigger_a,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("1".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("1"), None),
             )
             .await;
         state
             .push_channel_reply(
                 session_key,
                 trigger_b,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("2".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("2"), None),
             )
             .await;
 
@@ -11237,15 +11593,7 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 trigger_id,
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("1".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("1"), None),
             )
             .await;
 
@@ -11460,30 +11808,14 @@ echo @bot2
             .push_channel_reply(
                 session_key,
                 "trg_a",
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("1".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("1"), None),
             )
             .await;
         state
             .push_channel_reply(
                 session_key,
                 "trg_b",
-                moltis_channels::ChannelReplyTarget {
-                    chan_type: moltis_channels::ChannelType::Telegram,
-                    chan_account_key: "telegram:acct".to_string(),
-                    chan_user_name: None,
-                    chat_id: "123".to_string(),
-                    message_id: Some("2".to_string()),
-                    thread_id: None,
-                    bucket_key: None,
-                },
+                telegram_reply_target_ref("telegram:acct", "123", Some("2"), None),
             )
             .await;
 
@@ -11818,7 +12150,7 @@ echo @bot2
             .write()
             .await
             .register(Box::new(ContextAssertingTool {
-                expected_chan_chat_key: "telegram:bot1:123".to_string(),
+                expected_session_key: "bucket:test".to_string(),
                 expected_session_id: "session:abc".to_string(),
                 called: Arc::clone(&tool_called),
             }));
@@ -11835,7 +12167,7 @@ echo @bot2
             &[],
             "session:abc",
             "trg_test",
-            Some("telegram:bot1:123"),
+            Some("bucket:test"),
             ReplyMedium::Text,
             None,
             None,
@@ -11857,13 +12189,34 @@ echo @bot2
 
     #[tokio::test]
     async fn run_with_tools_emits_message_and_tool_persist_hooks() {
+        let metadata = sqlite_metadata().await;
+        metadata
+            .upsert("session:abc", Some("hook coverage".into()))
+            .await
+            .expect("session metadata upsert");
+        let binding_json = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:845".to_string(),
+            chan_user_name: Some("@lovely_apple_bot".to_string()),
+            chat_id: "-100".to_string(),
+            message_id: Some("77".to_string()),
+            thread_id: Some("42".to_string()),
+            bucket_key: Some("group:account:telegram:845:peer:-100:thread:42:sender:1001".into()),
+        })
+        .unwrap();
+        metadata
+            .set_channel_binding("session:abc", Some(binding_json))
+            .await;
+
+        let services =
+            crate::services::GatewayServices::noop().with_session_metadata(Arc::clone(&metadata));
         let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
-            crate::services::GatewayServices::noop(),
+            services,
         );
         let model_store = Arc::new(RwLock::new(DisabledModelsStore::default()));
 
@@ -11880,7 +12233,7 @@ echo @bot2
             .write()
             .await
             .register(Box::new(ContextAssertingTool {
-                expected_chan_chat_key: "telegram:bot1:123".to_string(),
+                expected_session_key: "bucket:test".to_string(),
                 expected_session_id: "session:abc".to_string(),
                 called: Arc::clone(&tool_called),
             }));
@@ -11890,8 +12243,12 @@ echo @bot2
         hooks.register(Arc::new(RecordingHookHandler {
             subscribed: vec![
                 HookEvent::BeforeAgentStart,
+                HookEvent::BeforeLLMCall,
+                HookEvent::AfterLLMCall,
                 HookEvent::MessageSending,
                 HookEvent::MessageSent,
+                HookEvent::BeforeToolCall,
+                HookEvent::AfterToolCall,
                 HookEvent::AgentEnd,
                 HookEvent::ToolResultPersist,
             ],
@@ -11915,7 +12272,7 @@ echo @bot2
             &[],
             "session:abc",
             "trg_test",
-            Some("telegram:bot1:123"),
+            Some("bucket:test"),
             ReplyMedium::Text,
             None,
             None,
@@ -11983,6 +12340,57 @@ echo @bot2
         assert_eq!(agent_end["text"], "HOOKED");
         assert_eq!(agent_end["iterations"], 2);
         assert_eq!(agent_end["toolCalls"], 1);
+
+        let before_llm = seen_vals
+            .iter()
+            .find(|v| v.get("event").and_then(|e| e.as_str()) == Some("BeforeLLMCall"))
+            .expect("missing BeforeLLMCall payload");
+        assert_eq!(
+            before_llm["sessionKey"],
+            serde_json::json!("group:account:telegram:845:peer:-100:thread:42:sender:1001")
+        );
+        assert_eq!(
+            before_llm["channelTarget"]["type"],
+            serde_json::json!("telegram")
+        );
+        assert_eq!(
+            before_llm["channelTarget"]["accountKey"],
+            serde_json::json!("telegram:845")
+        );
+        assert_eq!(
+            before_llm["channelTarget"]["chatId"],
+            serde_json::json!("-100")
+        );
+        assert_eq!(
+            before_llm["channelTarget"]["threadId"],
+            serde_json::json!("42")
+        );
+
+        let before_tool = seen_vals
+            .iter()
+            .find(|v| v.get("event").and_then(|e| e.as_str()) == Some("BeforeToolCall"))
+            .expect("missing BeforeToolCall payload");
+        assert_eq!(
+            before_tool["sessionKey"],
+            serde_json::json!("group:account:telegram:845:peer:-100:thread:42:sender:1001")
+        );
+        assert_eq!(
+            before_tool["channelTarget"]["type"],
+            serde_json::json!("telegram")
+        );
+
+        let after_tool = seen_vals
+            .iter()
+            .find(|v| v.get("event").and_then(|e| e.as_str()) == Some("AfterToolCall"))
+            .expect("missing AfterToolCall payload");
+        assert_eq!(
+            after_tool["sessionKey"],
+            serde_json::json!("group:account:telegram:845:peer:-100:thread:42:sender:1001")
+        );
+        assert_eq!(
+            after_tool["channelTarget"]["type"],
+            serde_json::json!("telegram")
+        );
     }
 
     #[tokio::test]
@@ -13501,8 +13909,6 @@ echo @bot2
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             }],
         });
 
@@ -13547,8 +13953,8 @@ echo @bot2
             .set_active_session_id("telegram", "telegram:845", "-100", "session:old")
             .await;
 
-        let mut services = crate::services::GatewayServices::noop()
-            .with_session_metadata(Arc::clone(&metadata));
+        let mut services =
+            crate::services::GatewayServices::noop().with_session_metadata(Arc::clone(&metadata));
         services.channel = Arc::new(SnapshotChannelService {
             snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
@@ -13559,8 +13965,6 @@ echo @bot2
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             }],
         });
         let state = Arc::new(crate::state::GatewayState::new(
@@ -13574,14 +13978,12 @@ echo @bot2
 
         let resolved =
             resolve_telegram_session_id(&state, "telegram:845", "-100", None, Some("telegram:42"))
-                .await;
+                .await
+                .expect("resolved session id");
         assert_eq!(resolved, "session:old");
         assert_eq!(
             metadata
-                .get_bucket_session_id(
-                    "telegram",
-                    "group:account:telegram:845:peer:-100:sender:42"
-                )
+                .get_bucket_session_id("telegram", "group:account:telegram:845:peer:-100:sender:42")
                 .await
                 .as_deref(),
             Some("session:old")
@@ -13609,8 +14011,8 @@ echo @bot2
             .set_active_session_id("telegram", "telegram:845", "-100", "session:other")
             .await;
 
-        let mut services = crate::services::GatewayServices::noop()
-            .with_session_metadata(Arc::clone(&metadata));
+        let mut services =
+            crate::services::GatewayServices::noop().with_session_metadata(Arc::clone(&metadata));
         services.channel = Arc::new(SnapshotChannelService {
             snapshots: vec![moltis_telegram::config::TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
@@ -13621,8 +14023,6 @@ echo @bot2
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             }],
         });
         let state = Arc::new(crate::state::GatewayState::new(
@@ -13637,7 +14037,10 @@ echo @bot2
         let resolved =
             resolve_telegram_session_id(&state, "telegram:845", "-100", None, Some("telegram:42"))
                 .await;
-        assert_eq!(resolved, "telegram:845:-100");
+        assert!(
+            resolved.is_none(),
+            "must not reuse an active session from another bucket"
+        );
     }
 
     #[tokio::test]
@@ -13697,7 +14100,9 @@ echo @bot2
             bucket_key: Some(bucket_key.to_string()),
         };
         let binding_json = serde_json::to_string(&binding).unwrap();
-        let _ = metadata.upsert(session_key, Some("bucket".to_string())).await;
+        let _ = metadata
+            .upsert(session_key, Some("bucket".to_string()))
+            .await;
         metadata
             .set_channel_binding(session_key, Some(binding_json))
             .await;
@@ -13732,11 +14137,13 @@ echo @bot2
             .channel_turn_context(session_key, "turn:web:bucket")
             .await
             .expect("web echo must register channel turn context from session binding");
-        assert_eq!(turn.session_key, session_key);
-        assert_eq!(turn.chan_chat_key.as_deref(), Some("telegram:845:-100"));
-        assert_eq!(turn.reply_targets.len(), 1);
-        assert_eq!(turn.reply_targets[0].bucket_key.as_deref(), Some(bucket_key));
-        assert_eq!(turn.reply_targets[0].message_id.as_deref(), Some("77"));
+        assert_eq!(turn.session_key.as_deref(), Some(bucket_key));
+        assert_eq!(turn.reply_target_refs.len(), 1);
+        let decoded = moltis_telegram::adapter::inbound_target_from_reply_target_ref(
+            &turn.reply_target_refs[0],
+        )
+        .expect("reply_target_ref must decode");
+        assert_eq!(decoded.message_id.as_deref(), Some("77"));
 
         finish.notify_waiters();
         tokio::time::timeout(
@@ -13767,8 +14174,6 @@ echo @bot2
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::Legacy,
             }],
         });
 
@@ -13837,8 +14242,6 @@ echo @bot2
                 relay_hop_limit: 0,
                 epoch_relay_budget: 128,
                 relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
-                group_session_transcript_format:
-                    moltis_telegram::config::GroupSessionTranscriptFormat::TgGstV1,
             }],
         });
 

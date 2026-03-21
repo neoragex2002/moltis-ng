@@ -383,10 +383,10 @@ pub trait ChannelService: Send + Sync {
         Vec::new()
     }
 
-    /// Resolve the configured persona_id for a Telegram account, if any.
+    /// Resolve the configured agent_id for a Telegram account, if any.
     ///
     /// Default implementation returns `None` for non-live/noop services.
-    async fn telegram_account_persona_id(&self, _account_id: &str) -> Option<String> {
+    async fn telegram_account_agent_id(&self, _account_id: &str) -> Option<String> {
         None
     }
 }

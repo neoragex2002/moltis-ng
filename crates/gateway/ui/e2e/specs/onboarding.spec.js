@@ -2,9 +2,83 @@ const { expect, test } = require("@playwright/test");
 const { watchPageErrors } = require("../helpers");
 
 const LLM_STEP_HEADING = /^(Add LLMs|Add providers)$/;
+const IDENTITY_STEP_HEADING = /^(Set up your agent|Set up your identity)$/;
 
 function isVisible(locator) {
 	return locator.isVisible().catch(() => false);
+}
+
+async function delayWebSocketOpen(page, delayMs = 1500) {
+	await page.addInitScript((delay) => {
+		const NativeWebSocket = window.WebSocket;
+
+		class DelayedWebSocket {
+			static CONNECTING = NativeWebSocket.CONNECTING;
+			static OPEN = NativeWebSocket.OPEN;
+			static CLOSING = NativeWebSocket.CLOSING;
+			static CLOSED = NativeWebSocket.CLOSED;
+
+			constructor(url, protocols) {
+				this._ws = new NativeWebSocket(url, protocols);
+				this.readyState = NativeWebSocket.CONNECTING;
+				this.onopen = null;
+				this.onmessage = null;
+				this.onerror = null;
+				this.onclose = null;
+
+				this._ws.onopen = (event) => {
+					window.setTimeout(() => {
+						this.readyState = NativeWebSocket.OPEN;
+						if (typeof this.onopen === "function") this.onopen(event);
+					}, delay);
+				};
+				this._ws.onmessage = (event) => {
+					if (typeof this.onmessage === "function") this.onmessage(event);
+				};
+				this._ws.onerror = (event) => {
+					if (typeof this.onerror === "function") this.onerror(event);
+				};
+				this._ws.onclose = (event) => {
+					this.readyState = NativeWebSocket.CLOSED;
+					if (typeof this.onclose === "function") this.onclose(event);
+				};
+			}
+
+			send(data) {
+				return this._ws.send(data);
+			}
+
+			close(code, reason) {
+				return this._ws.close(code, reason);
+			}
+
+			get bufferedAmount() {
+				return this._ws.bufferedAmount;
+			}
+
+			get extensions() {
+				return this._ws.extensions;
+			}
+
+			get protocol() {
+				return this._ws.protocol;
+			}
+
+			get url() {
+				return this._ws.url;
+			}
+
+			get binaryType() {
+				return this._ws.binaryType;
+			}
+
+			set binaryType(value) {
+				this._ws.binaryType = value;
+			}
+		}
+
+		window.WebSocket = DelayedWebSocket;
+	}, delayMs);
 }
 
 async function maybeSkipAuth(page) {
@@ -158,6 +232,30 @@ test.describe("Onboarding wizard", () => {
 		await expect(page.getByPlaceholder("e.g. Alice")).toBeVisible();
 		await expect(page.getByPlaceholder("e.g. Rex")).toBeVisible();
 		await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeVisible();
+	});
+
+	test("identity continue waits for delayed websocket readiness", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await delayWebSocketOpen(page, 1500);
+		await page.goto("/onboarding");
+		await page.waitForLoadState("networkidle");
+
+		const authHeading = page.getByRole("heading", { name: "Secure your instance", exact: true });
+		if (await authHeading.isVisible().catch(() => false)) {
+			const authSkip = page.getByRole("button", { name: "Skip for now", exact: true });
+			if (await authSkip.isVisible().catch(() => false)) {
+				await authSkip.click();
+			}
+		}
+
+		await expect(page.getByRole("heading", { name: IDENTITY_STEP_HEADING })).toBeVisible();
+		await page.getByPlaceholder("e.g. Alice").fill("E2E User");
+		await page.getByPlaceholder("e.g. Rex").fill("E2E Bot");
+		await page.getByRole("button", { name: "Continue", exact: true }).click();
+
+		await expect(page.getByRole("heading", { name: LLM_STEP_HEADING })).toBeVisible({ timeout: 15_000 });
+		await expect(page.getByText("Error: WebSocket not connected")).toHaveCount(0);
+		expect(pageErrors).toEqual([]);
 	});
 
 	test("page has no JS errors through wizard", async ({ page }) => {

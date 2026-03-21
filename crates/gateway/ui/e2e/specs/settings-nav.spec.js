@@ -69,7 +69,7 @@ test.describe("Settings navigation", () => {
 			await navigateAndWait(page, "/settings/personas");
 			await expect(page.getByRole("heading", { name: "Personas", exact: true })).toBeVisible();
 
-			await expect(page.getByText("persona_id", { exact: true })).toBeVisible();
+			await expect(page.getByText("agent_id", { exact: true })).toBeVisible();
 			await expect(page.locator("select")).toBeVisible();
 			await expect(page.getByRole("button", { name: "Save", exact: true })).toBeVisible();
 		});

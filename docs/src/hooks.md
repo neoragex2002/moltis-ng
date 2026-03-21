@@ -79,9 +79,9 @@ Fires before each LLM API call. The payload includes the full message array, pro
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `sessionId` | string | Persistent session bucket identifier |
-| `chanChatKey` | string/null | Deterministic channel chat coordinate (channel-bound sessions only) |
-| `chanAccountKey` | string/null | Channel account stable key (channel-bound sessions only) |
+| `sessionId` | string | Session instance id |
+| `sessionKey` | string/null | Logical bucket key (cross-domain) |
+| `channelTarget` | object/null | Optional channel coordinate derived from `channel_binding` (shell hooks default to null; set `MOLTIS_HOOK_INCLUDE_CHANNEL_TARGET=1` in hook env to receive it) |
 | `provider` | string | Provider name (e.g. "openai", "anthropic") |
 | `model` | string | Model ID (e.g. "gpt-5.2-codex", "qwen2.5-coder-7b-q4_k_m") |
 | `messages` | array | Serialized message array (OpenAI format) |
@@ -96,9 +96,9 @@ Fires after the LLM response is received but before tool calls execute. For stre
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `sessionId` | string | Persistent session bucket identifier |
-| `chanChatKey` | string/null | Deterministic channel chat coordinate (channel-bound sessions only) |
-| `chanAccountKey` | string/null | Channel account stable key (channel-bound sessions only) |
+| `sessionId` | string | Session instance id |
+| `sessionKey` | string/null | Logical bucket key (cross-domain) |
+| `channelTarget` | object/null | Optional channel coordinate derived from `channel_binding` (shell hooks default to null; set `MOLTIS_HOOK_INCLUDE_CHANNEL_TARGET=1` in hook env to receive it) |
 | `provider` | string | Provider name |
 | `model` | string | Model ID |
 | `text` | string/null | LLM response text |
@@ -225,11 +225,13 @@ The event payload is passed as JSON on stdin:
 {
   "event": "BeforeToolCall",
   "sessionId": "session:abc",
+  "sessionKey": "bucket:xyz",
   "toolName": "exec",
+  "channelTarget": null,
   "arguments": {
     "command": "ls -la",
     "_sessionId": "session:abc",
-    "_chanChatKey": "telegram:123:-100",
+    "_sessionKey": "bucket:xyz",
     "_connId": "ws-conn-1"
   }
 }

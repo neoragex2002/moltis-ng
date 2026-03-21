@@ -55,7 +55,7 @@ Commands run inside isolated containers for security:
 ```toml
 [tools.exec.sandbox]
 mode = "all"                    # "off" | "non-main" | "all"
-scope = "chat"                  # "session" | "chat" | "bot" | "global"
+scope_key = "session_key"       # "session_id" | "session_key"
 backend = "auto"                # "auto" | "docker" (apple-container is not supported)
 no_network = true
 
@@ -231,7 +231,7 @@ default = "openai-codex"
 
 [tools.exec.sandbox]
 mode = "all"
-scope = "chat"
+scope_key = "session_key"
 backend = "docker"
 no_network = true
 data_mount = "ro"

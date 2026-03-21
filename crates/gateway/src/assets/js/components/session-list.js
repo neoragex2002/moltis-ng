@@ -30,9 +30,9 @@ var spinnerFrames = [
 function isTelegramSession(s) {
 	var sessionId = s.sessionId || "";
 	if (sessionId.startsWith("telegram:")) return true;
-	var target = s.chanReplyTarget || null;
-	if (!target) return false;
-	return target.chanType === "telegram";
+	var channel = s.channel || null;
+	if (!channel) return false;
+	return channel.type === "telegram";
 }
 
 function formatHHMM(epochMs) {

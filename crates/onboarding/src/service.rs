@@ -69,7 +69,7 @@ impl LiveOnboardingService {
         }
 
         // Ensure workspace files exist before pre-populating.
-        let _ = moltis_config::ensure_default_person_seeded();
+        let _ = moltis_config::ensure_default_agent_seeded();
         let _ = moltis_config::ensure_people_md_seeded();
 
         let mut ws = WizardState::new();
@@ -176,7 +176,7 @@ impl LiveOnboardingService {
     /// Accepts: `{name?, emoji?, creature?, vibe?, soul?, user_name?}`
     pub fn identity_update(&self, params: Value) -> anyhow::Result<Value> {
         // Ensure workspace files exist.
-        let _ = moltis_config::ensure_default_person_seeded();
+        let _ = moltis_config::ensure_default_agent_seeded();
         let _ = moltis_config::ensure_people_md_seeded();
 
         let mut identity = moltis_config::load_identity().unwrap_or_default();
@@ -421,7 +421,7 @@ fn save_people_display_name(person_name: &str, display_name: Option<&str>) -> an
         found = Some(last);
     }
 
-    let entry = found.unwrap();
+    let entry = found.ok_or_else(|| anyhow::anyhow!("PEOPLE.md entry insertion failed"))?;
     let key = serde_yaml::Value::String("display_name".to_string());
     let next = display_name.unwrap_or("").trim();
     if next.is_empty() {
@@ -493,7 +493,7 @@ mod tests {
         let status = svc.wizard_status();
         assert_eq!(status["onboarded"], true);
 
-        assert!(dir.path().join("people/default/IDENTITY.md").exists());
+        assert!(dir.path().join("agents/default/IDENTITY.md").exists());
         assert!(dir.path().join("USER.md").exists());
         moltis_config::clear_data_dir();
     }
@@ -587,7 +587,7 @@ mod tests {
         let res = svc.identity_update(json!({ "soul": null })).unwrap();
         assert!(res["soul"].is_null());
 
-        let soul_path = dir.path().join("people/default/SOUL.md");
+        let soul_path = dir.path().join("agents/default/SOUL.md");
         // save_soul(None) writes an empty file (not deleted) to prevent re-seeding
         assert!(soul_path.exists());
         assert!(std::fs::read_to_string(&soul_path).unwrap().is_empty());

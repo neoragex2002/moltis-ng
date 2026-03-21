@@ -277,10 +277,47 @@ fn categorize_packages(packages: &[String]) -> Vec<(&'static str, Vec<&str>)> {
 /// Query the sandbox container for installed packages via `dpkg-query`.
 ///
 /// Returns `None` if the container is not reachable (not running, etc.).
-async fn query_sandbox_packages(router: &SandboxRouter, session_key: &str) -> Option<Vec<String>> {
-    let _lease = router.acquire_lease(session_key);
-    router.touch(session_key);
-    let id = router.sandbox_id_for(session_key);
+async fn query_sandbox_packages(
+    router: &SandboxRouter,
+    session_id: &str,
+    session_key: Option<&str>,
+) -> Option<Vec<String>> {
+    let _lease = match router.acquire_lease(session_id, session_key) {
+        Ok(lease) => lease,
+        Err(e) => {
+            debug!(
+                session_id,
+                session_key,
+                reason_code = "sandbox_packages_key_error",
+                error = %e,
+                "cannot acquire sandbox lease"
+            );
+            return None;
+        },
+    };
+    if let Err(e) = router.touch(session_id, session_key) {
+        debug!(
+            session_id,
+            session_key,
+            reason_code = "sandbox_packages_key_error",
+            error = %e,
+            "cannot touch sandbox key"
+        );
+        return None;
+    }
+    let id = match router.sandbox_id_for(session_id, session_key) {
+        Ok(id) => id,
+        Err(e) => {
+            debug!(
+                session_id,
+                session_key,
+                reason_code = "sandbox_packages_key_error",
+                error = %e,
+                "cannot derive sandbox id"
+            );
+            return None;
+        },
+    };
     let opts = ExecOpts {
         timeout: std::time::Duration::from_secs(5),
         ..Default::default()
@@ -290,7 +327,7 @@ async fn query_sandbox_packages(router: &SandboxRouter, session_key: &str) -> Op
     let cmd = "dpkg-query -W -f='${Package}\n'";
 
     let result = router.backend().exec(&id, cmd, &opts).await;
-    router.touch(session_key);
+    let _ = router.touch(session_id, session_key);
 
     match result {
         Ok(result) if result.exit_code == 0 => {
@@ -439,16 +476,15 @@ impl AgentTool for SandboxPackagesTool {
         });
 
         // Hybrid: try querying the running sandbox container for extra packages.
-        // Prefer deterministic channel chat coordinate when available, but fall back
-        // to sessionId for non-channel tool calls.
-        let session_key = params
-            .get("_chanChatKey")
-            .or_else(|| params.get("_sessionId"))
+        let session_id = params
+            .get("_sessionId")
             .and_then(|v| v.as_str())
             .unwrap_or("main");
+        let session_key = params.get("_sessionKey").and_then(|v| v.as_str());
 
-        if router.is_sandboxed(session_key).await
-            && let Some(sandbox_pkgs) = query_sandbox_packages(router, session_key).await
+        if router.is_sandboxed(session_id).await
+            && let Some(sandbox_pkgs) =
+                query_sandbox_packages(router, session_id, session_key).await
         {
             let extras = extra_packages(&sandbox_pkgs, packages);
             if !extras.is_empty() {

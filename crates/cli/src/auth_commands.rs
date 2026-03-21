@@ -162,7 +162,7 @@ fn logout(provider: &str) -> Result<()> {
 }
 
 fn reset_identity() -> Result<()> {
-    moltis_config::ensure_default_person_seeded()?;
+    moltis_config::ensure_default_agent_seeded()?;
 
     let identity = moltis_config::AgentIdentity {
         name: Some("default".to_string()),

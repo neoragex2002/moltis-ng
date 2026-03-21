@@ -15,6 +15,7 @@ use std::{
 };
 
 use {
+    crate::types::ChannelTarget,
     anyhow::Result,
     async_trait::async_trait,
     serde::{Deserialize, Serialize},
@@ -101,11 +102,17 @@ pub enum HookPayload {
     #[serde(rename_all = "camelCase")]
     BeforeAgentStart {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         model: String,
     },
     #[serde(rename_all = "camelCase")]
     AgentEnd {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         text: String,
         iterations: usize,
         tool_calls: usize,
@@ -113,8 +120,9 @@ pub enum HookPayload {
     #[serde(rename_all = "camelCase")]
     BeforeLLMCall {
         session_id: String,
-        chan_chat_key: Option<String>,
-        chan_account_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         provider: String,
         model: String,
         messages: Value,
@@ -126,8 +134,9 @@ pub enum HookPayload {
     #[serde(rename_all = "camelCase")]
     AfterLLMCall {
         session_id: String,
-        chan_chat_key: Option<String>,
-        chan_account_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         provider: String,
         model: String,
         text: Option<String>,
@@ -139,38 +148,59 @@ pub enum HookPayload {
     #[serde(rename_all = "camelCase")]
     BeforeCompaction {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         message_count: usize,
     },
     #[serde(rename_all = "camelCase")]
     AfterCompaction {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         summary_len: usize,
     },
     #[serde(rename_all = "camelCase")]
     MessageReceived {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         content: String,
         channel: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     MessageSending {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         content: String,
     },
     #[serde(rename_all = "camelCase")]
     MessageSent {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         content: String,
     },
     #[serde(rename_all = "camelCase")]
     BeforeToolCall {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         tool_name: String,
         arguments: Value,
     },
     #[serde(rename_all = "camelCase")]
     AfterToolCall {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         tool_name: String,
         success: bool,
         result: Option<Value>,
@@ -178,16 +208,25 @@ pub enum HookPayload {
     #[serde(rename_all = "camelCase")]
     ToolResultPersist {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         tool_name: String,
         result: Value,
     },
     #[serde(rename_all = "camelCase")]
     SessionStart {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
     },
     #[serde(rename_all = "camelCase")]
     SessionEnd {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
     },
     GatewayStart {
         address: String,
@@ -196,6 +235,9 @@ pub enum HookPayload {
     #[serde(rename_all = "camelCase")]
     Command {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_key: Option<String>,
+        channel_target: Option<ChannelTarget>,
         action: String,
         sender_id: Option<String>,
     },
@@ -712,6 +754,8 @@ mod tests {
     fn modifying_payload() -> HookPayload {
         HookPayload::BeforeToolCall {
             session_id: "test".into(),
+            session_key: None,
+            channel_target: None,
             tool_name: "exec".into(),
             arguments: serde_json::json!({}),
         }
@@ -720,6 +764,8 @@ mod tests {
     fn read_only_payload() -> HookPayload {
         HookPayload::SessionStart {
             session_id: "test".into(),
+            session_key: None,
+            channel_target: None,
         }
     }
 
@@ -842,6 +888,8 @@ mod tests {
     fn command_event_and_payload() {
         let payload = HookPayload::Command {
             session_id: "test".into(),
+            session_key: None,
+            channel_target: None,
             action: "new".into(),
             sender_id: None,
         };
@@ -878,8 +926,8 @@ mod tests {
     fn before_llm_call_payload_event() {
         let payload = HookPayload::BeforeLLMCall {
             session_id: "sess-1".into(),
-            chan_chat_key: None,
-            chan_account_key: None,
+            session_key: None,
+            channel_target: None,
             provider: "openai".into(),
             model: "gpt-4o".into(),
             messages: serde_json::json!([{"role": "user", "content": "hello"}]),
@@ -894,8 +942,8 @@ mod tests {
     fn after_llm_call_payload_event() {
         let payload = HookPayload::AfterLLMCall {
             session_id: "sess-1".into(),
-            chan_chat_key: None,
-            chan_account_key: None,
+            session_key: None,
+            channel_target: None,
             provider: "anthropic".into(),
             model: "claude-sonnet-4-20250514".into(),
             text: Some("Hello!".into()),
@@ -918,8 +966,8 @@ mod tests {
     fn llm_hook_payloads_serialize_round_trip() {
         let before = HookPayload::BeforeLLMCall {
             session_id: "s".into(),
-            chan_chat_key: None,
-            chan_account_key: None,
+            session_key: None,
+            channel_target: None,
             provider: "p".into(),
             model: "m".into(),
             messages: serde_json::json!([]),
@@ -933,8 +981,8 @@ mod tests {
 
         let after = HookPayload::AfterLLMCall {
             session_id: "s".into(),
-            chan_chat_key: None,
-            chan_account_key: None,
+            session_key: None,
+            channel_target: None,
             provider: "p".into(),
             model: "m".into(),
             text: None,
@@ -952,8 +1000,8 @@ mod tests {
     fn llm_hook_payloads_include_channel_keys_in_json() {
         let before = HookPayload::BeforeLLMCall {
             session_id: "s".into(),
-            chan_chat_key: None,
-            chan_account_key: None,
+            session_key: None,
+            channel_target: None,
             provider: "p".into(),
             model: "m".into(),
             messages: serde_json::json!([]),
@@ -962,13 +1010,16 @@ mod tests {
             iteration: 1,
         };
         let json = serde_json::to_string(&before).unwrap();
-        assert!(json.contains("\"chanChatKey\""));
-        assert!(json.contains("\"chanAccountKey\""));
+        assert!(json.contains("\"channelTarget\""));
+        let legacy_chat_key = format!("{}{}", "chan", "ChatKey");
+        let legacy_account_key = format!("{}{}", "chan", "AccountKey");
+        assert!(!json.contains(&format!("\"{legacy_chat_key}\"")));
+        assert!(!json.contains(&format!("\"{legacy_account_key}\"")));
 
         let after = HookPayload::AfterLLMCall {
             session_id: "s".into(),
-            chan_chat_key: None,
-            chan_account_key: None,
+            session_key: None,
+            channel_target: None,
             provider: "p".into(),
             model: "m".into(),
             text: None,
@@ -978,7 +1029,8 @@ mod tests {
             iteration: 1,
         };
         let json = serde_json::to_string(&after).unwrap();
-        assert!(json.contains("\"chanChatKey\""));
-        assert!(json.contains("\"chanAccountKey\""));
+        assert!(json.contains("\"channelTarget\""));
+        assert!(!json.contains(&format!("\"{legacy_chat_key}\"")));
+        assert!(!json.contains(&format!("\"{legacy_account_key}\"")));
     }
 }

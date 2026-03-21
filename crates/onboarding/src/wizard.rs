@@ -120,7 +120,7 @@ fn set_people_display_name(person_name: &str, display_name: Option<&str>) -> any
         };
         found = Some(last);
     }
-    let entry = found.unwrap();
+    let entry = found.ok_or_else(|| anyhow::anyhow!("PEOPLE.md entry insertion failed"))?;
     let key = serde_yaml::Value::String("display_name".to_string());
     let next = display_name.unwrap_or("").trim();
     if next.is_empty() {

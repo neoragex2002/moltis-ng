@@ -30,64 +30,6 @@ pub fn chan_user_id_from_chan_account_key<'a>(
     Some(parts.chan_user_id)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChanChatKeyParts<'a> {
-    pub channel: &'a str,
-    pub chan_user_id: &'a str,
-    pub chat_id: &'a str,
-    pub thread_id: Option<&'a str>,
-}
-
-pub fn format_chan_chat_key(
-    channel: &str,
-    chan_user_id: &str,
-    chat_id: &str,
-    thread_id: Option<&str>,
-) -> String {
-    match thread_id {
-        Some(tid) if !tid.trim().is_empty() => {
-            format!(
-                "{}:{}:{}:{}",
-                channel.trim(),
-                chan_user_id.trim(),
-                chat_id.trim(),
-                tid.trim()
-            )
-        },
-        _ => format!(
-            "{}:{}:{}",
-            channel.trim(),
-            chan_user_id.trim(),
-            chat_id.trim()
-        ),
-    }
-}
-
-pub fn parse_chan_chat_key(key: &str) -> Option<ChanChatKeyParts<'_>> {
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut parts = trimmed.split(':');
-    let channel = parts.next()?;
-    let chan_user_id = parts.next()?;
-    let chat_id = parts.next()?;
-    let thread_id = parts.next();
-    if parts.next().is_some() {
-        return None;
-    }
-    if channel.is_empty() || chan_user_id.is_empty() || chat_id.is_empty() {
-        return None;
-    }
-    let thread_id = thread_id.filter(|s| !s.trim().is_empty());
-    Some(ChanChatKeyParts {
-        channel,
-        chan_user_id,
-        chat_id,
-        thread_id,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,28 +47,5 @@ mod tests {
             chan_user_id_from_chan_account_key("telegram:123", Some("discord")),
             None
         );
-    }
-
-    #[test]
-    fn parses_session_key_three_or_four_parts() {
-        let p = parse_chan_chat_key("telegram:123:-100").unwrap();
-        assert_eq!(p.channel, "telegram");
-        assert_eq!(p.chan_user_id, "123");
-        assert_eq!(p.chat_id, "-100");
-        assert_eq!(p.thread_id, None);
-
-        let p = parse_chan_chat_key("telegram:123:-100:12").unwrap();
-        assert_eq!(p.thread_id, Some("12"));
-        assert_eq!(
-            format_chan_chat_key("telegram", "123", "-100", Some("12")),
-            "telegram:123:-100:12"
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_session_key() {
-        assert!(parse_chan_chat_key("").is_none());
-        assert!(parse_chan_chat_key("a:b").is_none());
-        assert!(parse_chan_chat_key("a:b:c:d:e").is_none());
     }
 }

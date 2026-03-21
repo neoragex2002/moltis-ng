@@ -65,10 +65,10 @@ fn person_dir(name: &str) -> anyhow::Result<PathBuf> {
     if name.is_empty() {
         anyhow::bail!("missing 'name'");
     }
-    if !moltis_config::is_valid_person_name(name) {
+    if !moltis_config::is_valid_agent_id(name) {
         anyhow::bail!("invalid name");
     }
-    Ok(moltis_config::people_dir().join(name))
+    Ok(moltis_config::agents_dir().join(name))
 }
 
 fn person_paths(name: &str) -> anyhow::Result<(PathBuf, PathBuf, PathBuf, PathBuf)> {
@@ -120,7 +120,7 @@ fn save_frontmatter_doc(path: &Path, doc: &FrontmatterDoc) -> anyhow::Result<()>
 fn ensure_person_seeded(name: &str) -> anyhow::Result<()> {
     if name == "default" {
         // Keep existing default seeding behavior centralized.
-        moltis_config::ensure_default_person_seeded()?;
+        moltis_config::ensure_default_agent_seeded()?;
         return Ok(());
     }
 
@@ -164,10 +164,10 @@ fn yaml_scalar_value(v: &serde_json::Value) -> anyhow::Result<Option<serde_yaml:
 }
 
 pub(crate) fn person_list() -> anyhow::Result<serde_json::Value> {
-    moltis_config::ensure_default_person_seeded()?;
+    moltis_config::ensure_default_agent_seeded()?;
 
     let mut names: Vec<String> = Vec::new();
-    let root = moltis_config::people_dir();
+    let root = moltis_config::agents_dir();
     if let Ok(rd) = std::fs::read_dir(&root) {
         for entry in rd.flatten() {
             let Ok(ft) = entry.file_type() else {
@@ -177,14 +177,14 @@ pub(crate) fn person_list() -> anyhow::Result<serde_json::Value> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if moltis_config::is_valid_person_name(&name) {
+            if moltis_config::is_valid_agent_id(&name) {
                 names.push(name);
             }
         }
     }
     names.sort();
 
-    let people = names
+    let agents = names
         .into_iter()
         .map(|name| {
             serde_json::json!({
@@ -194,7 +194,7 @@ pub(crate) fn person_list() -> anyhow::Result<serde_json::Value> {
         })
         .collect::<Vec<_>>();
 
-    Ok(serde_json::json!({ "people": people }))
+    Ok(serde_json::json!({ "agents": agents }))
 }
 
 pub(crate) fn person_get(params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -207,7 +207,7 @@ pub(crate) fn person_get(params: &serde_json::Value) -> anyhow::Result<serde_jso
     if name.is_empty() {
         anyhow::bail!("missing 'name'");
     }
-    if !moltis_config::is_valid_person_name(&name) {
+    if !moltis_config::is_valid_agent_id(&name) {
         anyhow::bail!("invalid name");
     }
 
@@ -258,7 +258,7 @@ pub(crate) fn person_save(params: &serde_json::Value) -> anyhow::Result<serde_js
     if name.is_empty() {
         anyhow::bail!("missing 'name'");
     }
-    if !moltis_config::is_valid_person_name(&name) {
+    if !moltis_config::is_valid_agent_id(&name) {
         anyhow::bail!("invalid name");
     }
 
@@ -354,7 +354,7 @@ pub(crate) fn person_delete(params: &serde_json::Value) -> anyhow::Result<serde_
     if name.is_empty() {
         anyhow::bail!("missing 'name'");
     }
-    if !moltis_config::is_valid_person_name(&name) {
+    if !moltis_config::is_valid_agent_id(&name) {
         anyhow::bail!("invalid name");
     }
     if name == "default" {
@@ -377,8 +377,8 @@ mod tests {
     fn person_list_includes_default() {
         let _guard = crate::test_support::TestDirsGuard::new();
         let out = person_list().unwrap();
-        let people = out["people"].as_array().unwrap();
-        assert!(people.iter().any(|p| p["name"] == "default"));
+        let agents = out["agents"].as_array().unwrap();
+        assert!(agents.iter().any(|p| p["name"] == "default"));
     }
 
     #[test]
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(out["name"], "ops");
         assert_eq!(out["identity"]["name"], "ops");
 
-        let dir = moltis_config::people_dir().join("ops");
+        let dir = moltis_config::agents_dir().join("ops");
         assert!(dir.join("IDENTITY.md").exists());
         assert!(dir.join("SOUL.md").exists());
         assert!(dir.join("TOOLS.md").exists());
@@ -400,7 +400,7 @@ mod tests {
     fn person_save_forces_identity_name_and_preserves_body_by_default() {
         let _guard = crate::test_support::TestDirsGuard::new();
 
-        let dir = moltis_config::people_dir().join("research");
+        let dir = moltis_config::agents_dir().join("research");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("IDENTITY.md"),
@@ -442,7 +442,7 @@ mod tests {
     fn saving_soul_does_not_modify_identity_or_people_md() {
         let _guard = crate::test_support::TestDirsGuard::new();
 
-        let dir = moltis_config::people_dir().join("ops");
+        let dir = moltis_config::agents_dir().join("ops");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("IDENTITY.md"),
@@ -485,7 +485,7 @@ mod tests {
     fn saving_tools_does_not_modify_identity_or_people_md() {
         let _guard = crate::test_support::TestDirsGuard::new();
 
-        let dir = moltis_config::people_dir().join("ops");
+        let dir = moltis_config::agents_dir().join("ops");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("IDENTITY.md"),
@@ -528,7 +528,7 @@ mod tests {
     fn saving_agents_does_not_modify_identity_or_people_md() {
         let _guard = crate::test_support::TestDirsGuard::new();
 
-        let dir = moltis_config::people_dir().join("ops");
+        let dir = moltis_config::agents_dir().join("ops");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("IDENTITY.md"),

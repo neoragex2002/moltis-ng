@@ -11,11 +11,11 @@ function sandboxRuntimeAvailable() {
 }
 
 function sandboxScope() {
-	return S.sandboxInfo?.scope || "session";
+	return S.sandboxInfo?.scope || "session_id";
 }
 
 function perSessionImageSupported() {
-	return sandboxScope() === "session";
+	return sandboxScope() === "session_id";
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: UI state management with multiple controls
@@ -43,7 +43,7 @@ function applySandboxControlAvailability() {
 		if (title) {
 			S.sandboxImageBtn.title = title;
 		} else if (!perSession) {
-			S.sandboxImageBtn.title = `Sandbox image is managed by tools.exec.sandbox.scope=${sandboxScope()}`;
+			S.sandboxImageBtn.title = `Sandbox image is managed by tools.exec.sandbox.scope_key=${sandboxScope()}`;
 		} else {
 			S.sandboxImageBtn.title = "Sandbox image";
 		}

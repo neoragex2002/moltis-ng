@@ -12,8 +12,8 @@ pub(crate) struct PersonaFiles {
     pub agents: String,
 }
 
-pub(crate) fn is_valid_persona_id(persona_id: &str) -> bool {
-    let id = persona_id;
+pub(crate) fn is_valid_persona_id(agent_id: &str) -> bool {
+    let id = agent_id;
     if id.is_empty() || id.len() > 64 {
         return false;
     }
@@ -21,11 +21,11 @@ pub(crate) fn is_valid_persona_id(persona_id: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
-pub(crate) fn persona_dir(persona_id: &str) -> anyhow::Result<PathBuf> {
-    if !is_valid_persona_id(persona_id) {
-        anyhow::bail!("invalid persona_id");
+pub(crate) fn persona_dir(agent_id: &str) -> anyhow::Result<PathBuf> {
+    if !is_valid_persona_id(agent_id) {
+        anyhow::bail!("invalid agent_id");
     }
-    Ok(moltis_config::personas_dir().join(persona_id))
+    Ok(moltis_config::personas_dir().join(agent_id))
 }
 
 fn read_optional_string(path: &Path) -> anyhow::Result<String> {
@@ -112,11 +112,11 @@ pub(crate) fn list_personas() -> anyhow::Result<Vec<String>> {
     Ok(out)
 }
 
-pub(crate) fn get_persona(persona_id: &str) -> anyhow::Result<PersonaFiles> {
-    if persona_id == DEFAULT_PERSONA_ID {
+pub(crate) fn get_persona(agent_id: &str) -> anyhow::Result<PersonaFiles> {
+    if agent_id == DEFAULT_PERSONA_ID {
         ensure_default_persona_seeded()?;
     }
-    let dir = persona_dir(persona_id)?;
+    let dir = persona_dir(agent_id)?;
     Ok(PersonaFiles {
         identity: read_optional_string(&dir.join("IDENTITY.md"))?,
         soul: read_optional_string(&dir.join("SOUL.md"))?,
@@ -125,8 +125,8 @@ pub(crate) fn get_persona(persona_id: &str) -> anyhow::Result<PersonaFiles> {
     })
 }
 
-pub(crate) fn save_persona(persona_id: &str, files: &PersonaFiles) -> anyhow::Result<()> {
-    let dir = persona_dir(persona_id)?;
+pub(crate) fn save_persona(agent_id: &str, files: &PersonaFiles) -> anyhow::Result<()> {
+    let dir = persona_dir(agent_id)?;
     std::fs::create_dir_all(&dir)?;
 
     write_string(&dir.join("IDENTITY.md"), &files.identity)?;
@@ -136,11 +136,11 @@ pub(crate) fn save_persona(persona_id: &str, files: &PersonaFiles) -> anyhow::Re
     Ok(())
 }
 
-pub(crate) fn delete_persona(persona_id: &str) -> anyhow::Result<()> {
-    if persona_id == DEFAULT_PERSONA_ID {
+pub(crate) fn delete_persona(agent_id: &str) -> anyhow::Result<()> {
+    if agent_id == DEFAULT_PERSONA_ID {
         anyhow::bail!("cannot delete default persona");
     }
-    let dir = persona_dir(persona_id)?;
+    let dir = persona_dir(agent_id)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }
@@ -149,7 +149,7 @@ pub(crate) fn delete_persona(persona_id: &str) -> anyhow::Result<()> {
 
 pub(crate) fn clone_persona(from_id: &str, to_id: &str) -> anyhow::Result<()> {
     if from_id == to_id {
-        anyhow::bail!("source and destination persona_id must differ");
+        anyhow::bail!("source and destination agent_id must differ");
     }
     let files = get_persona(from_id)?;
     let dest_dir = persona_dir(to_id)?;

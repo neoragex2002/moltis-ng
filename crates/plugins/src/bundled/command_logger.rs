@@ -57,6 +57,7 @@ impl HookHandler for CommandLoggerHook {
             session_id,
             action,
             sender_id,
+            ..
         } = payload
         {
             if let Err(e) = self.ensure_file() {
@@ -91,6 +92,7 @@ impl HookHandler for CommandLoggerHook {
             session_id,
             action,
             sender_id,
+            ..
         } = payload
             && self.ensure_file().is_ok()
         {
@@ -126,6 +128,8 @@ mod tests {
 
         let payload = HookPayload::Command {
             session_id: "sess-1".into(),
+            session_key: None,
+            channel_target: None,
             action: "new".into(),
             sender_id: Some("user-1".into()),
         };
@@ -149,6 +153,8 @@ mod tests {
 
         let payload = HookPayload::SessionStart {
             session_id: "test".into(),
+            session_key: None,
+            channel_target: None,
         };
         hook.handle(HookEvent::Command, &payload).await.unwrap();
         // File shouldn't even be created

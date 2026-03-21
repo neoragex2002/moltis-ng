@@ -511,8 +511,7 @@ pub async fn handle_message_direct(
             && matches!(reason, AccessDenied::NotMentioned)
             && let Some(ref bridge) = core_bridge
         {
-            let tg_gst_v1 = config.group_session_transcript_format
-                == crate::config::GroupSessionTranscriptFormat::TgGstV1;
+            let tg_gst_v1 = true;
             let mut body = text.clone().unwrap_or_default();
             let inbound_message_kind = message_kind(&msg);
             let sender_id = msg.from.as_ref().map(|u| u.id.0 as u64);
@@ -544,7 +543,6 @@ pub async fn handle_message_direct(
                     &inbound,
                     route,
                     build_tg_private_target(account_handle, &msg),
-                    config.group_session_transcript_format,
                     sender_name.clone(),
                     username.clone(),
                     sender_id,
@@ -1073,8 +1071,9 @@ pub async fn handle_message_direct(
                             &chat_id,
                             "slash_command_context",
                             async move {
-                                let context_result =
-                                    bridge.dispatch_command("context", follow_up_target.clone()).await;
+                                let context_result = bridge
+                                    .dispatch_command("context", follow_up_target.clone())
+                                    .await;
                                 match context_result {
                                     Ok(text) => {
                                         if let Err(_e) = send_context_card(
@@ -1141,8 +1140,9 @@ pub async fn handle_message_direct(
                             &chat_id,
                             "slash_command_model",
                             async move {
-                                let list_result =
-                                    bridge.dispatch_command("model", follow_up_target.clone()).await;
+                                let list_result = bridge
+                                    .dispatch_command("model", follow_up_target.clone())
+                                    .await;
                                 match list_result {
                                     Ok(text) => {
                                         if let Err(_e) =
@@ -1409,9 +1409,7 @@ pub async fn handle_message_direct(
         let inbound_message_kind = message_kind(&msg);
         let sender_id = msg.from.as_ref().map(|u| u.id.0 as u64);
         let sender_is_bot = msg.from.as_ref().is_some_and(|u| u.is_bot);
-        let tg_gst_v1 = chat_type == ChatType::Group
-            && config.group_session_transcript_format
-                == crate::config::GroupSessionTranscriptFormat::TgGstV1;
+        let tg_gst_v1 = chat_type == ChatType::Group;
 
         if tg_gst_v1 {
             if let Some(ref bot_username) = bot_username
@@ -1432,7 +1430,6 @@ pub async fn handle_message_direct(
                     &presence_inbound,
                     route.clone(),
                     private_target.clone(),
-                    config.group_session_transcript_format,
                     sender_name.clone(),
                     username.clone(),
                     sender_id,
@@ -1529,7 +1526,6 @@ pub async fn handle_message_direct(
             &final_inbound,
             route,
             private_target,
-            config.group_session_transcript_format,
             sender_name.clone(),
             username.clone(),
             sender_id,
@@ -1872,7 +1868,9 @@ pub async fn handle_edited_location(
     let (core_bridge, config) = {
         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
         (
-            accts.get(account_handle).and_then(|s| s.core_bridge.clone()),
+            accts
+                .get(account_handle)
+                .and_then(|s| s.core_bridge.clone()),
             accts.get(account_handle).map(|s| s.config.clone()),
         )
     };
@@ -3463,15 +3461,6 @@ fn build_tg_inbound(
     inbound
 }
 
-fn tg_transcript_format(
-    format: crate::config::GroupSessionTranscriptFormat,
-) -> TgTranscriptFormat {
-    match format {
-        crate::config::GroupSessionTranscriptFormat::Legacy => TgTranscriptFormat::Legacy,
-        crate::config::GroupSessionTranscriptFormat::TgGstV1 => TgTranscriptFormat::TgGstV1,
-    }
-}
-
 fn build_tg_private_target(account_handle: &str, msg: &Message) -> TgPrivateTarget {
     TgPrivateTarget {
         account_handle: account_handle.to_string(),
@@ -3485,7 +3474,6 @@ fn build_tg_inbound_request(
     inbound: &TgInbound,
     route: TgRoute,
     private_target: TgPrivateTarget,
-    transcript_format: crate::config::GroupSessionTranscriptFormat,
     sender_name: Option<String>,
     username: Option<String>,
     sender_id: Option<u64>,
@@ -3494,11 +3482,28 @@ fn build_tg_inbound_request(
     model: Option<String>,
     attachments: Vec<TgAttachment>,
 ) -> TgInboundRequest {
+    let transcript_format = TgTranscriptFormat::TgGstV1;
+    let addressed = route.addressed;
+    let username_ref = username.as_deref();
+    let sender_name_ref = sender_name.as_deref();
+    let mut inbound = inbound.clone();
+    if inbound.kind == TgInboundKind::Group && transcript_format == TgTranscriptFormat::TgGstV1 {
+        inbound.body.text = crate::adapter::tg_gst_v1_format_inbound_text(
+            inbound.body.text.as_str(),
+            message_kind,
+            username_ref,
+            sender_id,
+            sender_name_ref,
+            sender_is_bot,
+            addressed,
+        );
+    }
+
     TgInboundRequest {
-        inbound: inbound.clone(),
+        inbound,
         route,
         private_target,
-        transcript_format: tg_transcript_format(transcript_format),
+        transcript_format,
         sender_name,
         username,
         sender_id,
@@ -4137,14 +4142,6 @@ fn tg_gst_v1_strip_mentions_for_presence_check(
     (out, true)
 }
 
-#[allow(dead_code)]
-fn build_chan_chat_key(chan_account_key: &str, chat_id: &str, thread_id: Option<&str>) -> String {
-    let chan_user_id = chan_account_key
-        .strip_prefix("telegram:")
-        .unwrap_or(chan_account_key);
-    moltis_common::identity::format_chan_chat_key("telegram", chan_user_id, chat_id, thread_id)
-}
-
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
@@ -4152,10 +4149,7 @@ mod tests {
         super::*,
         std::{
             collections::HashMap,
-            sync::{
-                Arc, Mutex,
-                atomic::Ordering,
-            },
+            sync::{Arc, Mutex, atomic::Ordering},
         },
     };
 
@@ -4164,8 +4158,8 @@ mod tests {
         async_trait::async_trait,
         axum::{Json, Router, body::Bytes, extract::State, http::Uri, routing::post},
         moltis_channels::{
-            ChannelEvent, ChannelEventSink, ChannelMessageMeta, ChannelReplyTarget,
-            ChannelTelegramMeta, ChannelTranscriptFormat, TelegramChatKind,
+            ChannelEvent, ChannelEventSink, ChannelInboundContext, ChannelMessageMeta,
+            ChannelReplyTarget,
         },
         secrecy::Secret,
         serde::{Deserialize, Serialize},
@@ -4366,61 +4360,12 @@ mod tests {
             .expect("lock requests")
             .push(CapturedTelegramRequest::FileDownload {
                 path: uri.path().to_string(),
-        });
+            });
         axum::body::Bytes::from_static(b"abcd")
     }
 
-    fn mock_sink_format_text(text: &str, meta: &ChannelMessageMeta) -> String {
-        let Some(ref telegram) = meta.telegram else {
-            return text.to_string();
-        };
-        if telegram.chat_kind != TelegramChatKind::Group
-            || telegram.transcript_format != ChannelTranscriptFormat::TgGstV1
-        {
-            return text.to_string();
-        }
-
-        let body = {
-            let Some(kind) = meta.message_kind else {
-                return text.to_string();
-            };
-            if matches!(kind, ChannelMessageKind::Text) {
-                text.to_string()
-            } else {
-                let tag = match kind {
-                    ChannelMessageKind::Photo => "photo",
-                    ChannelMessageKind::Video => "video",
-                    ChannelMessageKind::Voice => "voice",
-                    ChannelMessageKind::Audio => "audio",
-                    ChannelMessageKind::Document => "file",
-                    ChannelMessageKind::Location => "location",
-                    _ => "attachment",
-                };
-                if text.trim().is_empty() {
-                    format!("[{tag}]")
-                } else {
-                    format!("[{tag}] caption: {text}")
-                }
-            }
-        };
-
-        let speaker = if let Some(username) = meta.username.as_deref().filter(|s| !s.trim().is_empty()) {
-            username.trim().to_string()
-        } else if let Some(sender_id) = telegram.sender_id {
-            match meta.sender_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                Some(sender_name) => format!("tg:{sender_id}({sender_name})"),
-                None => format!("tg:{sender_id}"),
-            }
-        } else {
-            "tg:unknown".to_string()
-        };
-        let mut speaker = speaker;
-        if telegram.sender_is_bot {
-            speaker.push_str("(bot)");
-        }
-
-        let addressed = if telegram.addressed { " -> you" } else { "" };
-        format!("{speaker}{addressed}: {body}")
+    fn mock_sink_format_text(text: &str, _meta: &ChannelMessageMeta) -> String {
+        text.to_string()
     }
 
     #[derive(Default)]
@@ -4433,8 +4378,8 @@ mod tests {
         last_dispatch_text: Mutex<Option<String>>,
         last_ingest_text: Mutex<Option<String>>,
         last_command: Mutex<Option<String>>,
-        last_command_reply_target: Mutex<Option<ChannelReplyTarget>>,
-        last_location_reply_target: Mutex<Option<ChannelReplyTarget>>,
+        last_command_ctx: Mutex<Option<ChannelInboundContext>>,
+        last_location_ctx: Mutex<Option<ChannelInboundContext>>,
         command_response: Mutex<Option<String>>,
     }
 
@@ -4445,7 +4390,7 @@ mod tests {
         async fn dispatch_to_chat(
             &self,
             text: &str,
-            _reply_to: ChannelReplyTarget,
+            _ctx: ChannelInboundContext,
             meta: ChannelMessageMeta,
         ) {
             let mut last = self.last_dispatch_text.lock().unwrap();
@@ -4457,7 +4402,7 @@ mod tests {
         async fn ingest_only(
             &self,
             text: &str,
-            _reply_to: ChannelReplyTarget,
+            _ctx: ChannelInboundContext,
             meta: ChannelMessageMeta,
         ) {
             let mut last = self.last_ingest_text.lock().unwrap();
@@ -4469,15 +4414,15 @@ mod tests {
         async fn dispatch_command(
             &self,
             command: &str,
-            reply_to: ChannelReplyTarget,
+            ctx: ChannelInboundContext,
         ) -> anyhow::Result<String> {
             {
                 let mut last = self.last_command.lock().unwrap();
                 *last = Some(command.to_string());
             }
             {
-                let mut last = self.last_command_reply_target.lock().unwrap();
-                *last = Some(reply_to);
+                let mut last = self.last_command_ctx.lock().unwrap();
+                *last = Some(ctx);
             }
             self.command_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4512,12 +4457,12 @@ mod tests {
 
         async fn update_location(
             &self,
-            reply_to: &ChannelReplyTarget,
+            ctx: ChannelInboundContext,
             _latitude: f64,
             _longitude: f64,
         ) -> bool {
-            let mut last = self.last_location_reply_target.lock().unwrap();
-            *last = Some(reply_to.clone());
+            let mut last = self.last_location_ctx.lock().unwrap();
+            *last = Some(ctx);
             self.resolve_location
                 .load(std::sync::atomic::Ordering::Relaxed)
         }
@@ -4526,14 +4471,25 @@ mod tests {
     #[async_trait]
     impl crate::adapter::TelegramCoreBridge for MockSink {
         async fn handle_inbound(&self, request: TgInboundRequest) {
-            let reply_to = ChannelReplyTarget {
+            let bucket_key = request.route.bucket_key.clone();
+            let reply_target_ref = crate::adapter::reply_target_ref_for_target(
+                request.private_target.account_handle.as_str(),
+                request.private_target.chat_id.as_str(),
+                request.private_target.thread_id.as_deref(),
+                request.private_target.message_id.as_deref(),
+            )
+            .unwrap_or_else(|| "{}".to_string());
+            let channel_binding = crate::adapter::telegram_binding_json_for_bucket(
+                request.private_target.account_handle.as_str(),
+                request.private_target.chat_id.as_str(),
+                request.private_target.thread_id.as_deref(),
+                Some(bucket_key.as_str()),
+            );
+            let ctx = ChannelInboundContext {
                 chan_type: ChannelType::Telegram,
-                chan_account_key: request.private_target.account_handle,
-                chan_user_name: None,
-                chat_id: request.private_target.chat_id,
-                message_id: request.private_target.message_id,
-                thread_id: request.private_target.thread_id,
-                bucket_key: Some(request.route.bucket_key),
+                session_key: bucket_key,
+                reply_target_ref,
+                channel_binding,
             };
             let meta = ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
@@ -4541,27 +4497,14 @@ mod tests {
                 username: request.username,
                 message_kind: request.message_kind,
                 model: request.model,
-                telegram: Some(ChannelTelegramMeta {
-                    chat_kind: match request.inbound.kind {
-                        TgInboundKind::Dm => TelegramChatKind::Direct,
-                        TgInboundKind::Group => TelegramChatKind::Group,
-                    },
-                    transcript_format: match request.transcript_format {
-                        TgTranscriptFormat::Legacy => ChannelTranscriptFormat::Legacy,
-                        TgTranscriptFormat::TgGstV1 => ChannelTranscriptFormat::TgGstV1,
-                    },
-                    sender_id: request.sender_id,
-                    sender_is_bot: request.sender_is_bot,
-                    addressed: request.route.addressed,
-                }),
             };
             let text = request.inbound.body.text;
             match request.inbound.mode {
                 TgInboundMode::Dispatch => {
-                    <Self as ChannelEventSink>::dispatch_to_chat(self, &text, reply_to, meta).await;
+                    <Self as ChannelEventSink>::dispatch_to_chat(self, &text, ctx, meta).await;
                 },
                 TgInboundMode::RecordOnly => {
-                    <Self as ChannelEventSink>::ingest_only(self, &text, reply_to, meta).await;
+                    <Self as ChannelEventSink>::ingest_only(self, &text, ctx, meta).await;
                 },
             }
         }
@@ -4571,17 +4514,28 @@ mod tests {
             command: &str,
             target: TgFollowUpTarget,
         ) -> anyhow::Result<String> {
+            let bucket_key = target.route.bucket_key.clone();
+            let reply_target_ref = crate::adapter::reply_target_ref_for_target(
+                target.private_target.account_handle.as_str(),
+                target.private_target.chat_id.as_str(),
+                target.private_target.thread_id.as_deref(),
+                target.private_target.message_id.as_deref(),
+            )
+            .ok_or_else(|| anyhow::anyhow!("missing reply_target_ref"))?;
+            let channel_binding = crate::adapter::telegram_binding_json_for_bucket(
+                target.private_target.account_handle.as_str(),
+                target.private_target.chat_id.as_str(),
+                target.private_target.thread_id.as_deref(),
+                Some(bucket_key.as_str()),
+            );
             <Self as ChannelEventSink>::dispatch_command(
                 self,
                 command,
-                ChannelReplyTarget {
+                ChannelInboundContext {
                     chan_type: ChannelType::Telegram,
-                    chan_account_key: target.private_target.account_handle,
-                    chan_user_name: None,
-                    chat_id: target.private_target.chat_id,
-                    message_id: target.private_target.message_id,
-                    thread_id: target.private_target.thread_id,
-                    bucket_key: Some(target.route.bucket_key),
+                    session_key: bucket_key,
+                    reply_target_ref,
+                    channel_binding,
                 },
             )
             .await
@@ -4605,16 +4559,28 @@ mod tests {
             latitude: f64,
             longitude: f64,
         ) -> bool {
+            let bucket_key = target.route.bucket_key.clone();
+            let Some(reply_target_ref) = crate::adapter::reply_target_ref_for_target(
+                target.private_target.account_handle.as_str(),
+                target.private_target.chat_id.as_str(),
+                target.private_target.thread_id.as_deref(),
+                target.private_target.message_id.as_deref(),
+            ) else {
+                return false;
+            };
+            let channel_binding = crate::adapter::telegram_binding_json_for_bucket(
+                target.private_target.account_handle.as_str(),
+                target.private_target.chat_id.as_str(),
+                target.private_target.thread_id.as_deref(),
+                Some(bucket_key.as_str()),
+            );
             <Self as ChannelEventSink>::update_location(
                 self,
-                &ChannelReplyTarget {
+                ChannelInboundContext {
                     chan_type: ChannelType::Telegram,
-                    chan_account_key: target.private_target.account_handle,
-                    chan_user_name: None,
-                    chat_id: target.private_target.chat_id,
-                    message_id: target.private_target.message_id,
-                    thread_id: target.private_target.thread_id,
-                    bucket_key: Some(target.route.bucket_key),
+                    session_key: bucket_key,
+                    reply_target_ref,
+                    channel_binding,
                 },
                 latitude,
                 longitude,
@@ -4635,7 +4601,7 @@ mod tests {
         async fn dispatch_to_chat(
             &self,
             _text: &str,
-            _reply_to: ChannelReplyTarget,
+            _ctx: ChannelInboundContext,
             _meta: ChannelMessageMeta,
         ) {
             self.old_path_calls.fetch_add(1, Ordering::Relaxed);
@@ -4644,7 +4610,7 @@ mod tests {
         async fn ingest_only(
             &self,
             _text: &str,
-            _reply_to: ChannelReplyTarget,
+            _ctx: ChannelInboundContext,
             _meta: ChannelMessageMeta,
         ) {
             self.old_path_calls.fetch_add(1, Ordering::Relaxed);
@@ -4653,7 +4619,7 @@ mod tests {
         async fn dispatch_command(
             &self,
             _command: &str,
-            _reply_to: ChannelReplyTarget,
+            _ctx: ChannelInboundContext,
         ) -> anyhow::Result<String> {
             self.old_path_calls.fetch_add(1, Ordering::Relaxed);
             Ok(String::new())
@@ -4679,10 +4645,11 @@ mod tests {
 
         async fn update_location(
             &self,
-            _reply_to: &ChannelReplyTarget,
+            _ctx: ChannelInboundContext,
             _latitude: f64,
             _longitude: f64,
         ) -> bool {
+            let _ = _ctx;
             self.old_path_calls.fetch_add(1, Ordering::Relaxed);
             false
         }
@@ -4806,10 +4773,13 @@ mod tests {
             .unwrap()
             .clone()
             .expect("recorded request");
-        assert_eq!(request.route.bucket_key, "group:account:telegram:test-account:peer:-100123");
+        assert_eq!(
+            request.route.bucket_key,
+            "group:account:telegram:test-account:peer:-100123"
+        );
         assert_eq!(request.private_target.chat_id, "-100123");
         assert_eq!(request.private_target.thread_id.as_deref(), Some("9"));
-        assert_eq!(request.inbound.body.text, "hello");
+        assert_eq!(request.inbound.body.text, "alice -> you: @test_bot hello");
     }
 
     #[tokio::test]
@@ -5024,24 +4994,6 @@ mod tests {
         assert_eq!(longitude, 120.2);
     }
 
-    #[test]
-    fn session_key_dm() {
-        let key = build_chan_chat_key("telegram:bot1", "1001", None);
-        assert_eq!(key, "telegram:bot1:1001");
-    }
-
-    #[test]
-    fn session_key_group() {
-        let key = build_chan_chat_key("telegram:bot1", "-100999", None);
-        assert_eq!(key, "telegram:bot1:-100999");
-    }
-
-    #[test]
-    fn session_key_thread() {
-        let key = build_chan_chat_key("telegram:bot1", "-100999", Some("12"));
-        assert_eq!(key, "telegram:bot1:-100999:12");
-    }
-
     /// Security: the OTP challenge message sent to the Telegram user must
     /// NEVER contain the verification code.  The code should only be visible
     /// to the admin in the web UI.  If this test fails, unauthenticated users
@@ -5164,7 +5116,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -5280,7 +5234,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -5379,7 +5335,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -5462,7 +5420,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -5500,7 +5460,7 @@ mod tests {
             1
         );
         let last = sink.last_ingest_text.lock().unwrap().clone();
-        assert_eq!(last.as_deref(), Some("hello everyone"));
+        assert_eq!(last.as_deref(), Some("alice: hello everyone"));
     }
 
     #[tokio::test]
@@ -5517,8 +5477,6 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
-                group_session_transcript_format:
-                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(
@@ -5534,7 +5492,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -5604,7 +5564,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -5644,8 +5606,7 @@ mod tests {
             0
         );
         let last = sink.last_dispatch_text.lock().unwrap().clone();
-        // Self-mention is stripped before dispatch.
-        assert_eq!(last.as_deref(), Some("hi"));
+        assert_eq!(last.as_deref(), Some("alice -> you: @test_bot hi"));
     }
 
     #[tokio::test]
@@ -5662,8 +5623,6 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
-                group_session_transcript_format:
-                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(
@@ -5679,7 +5638,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -5736,8 +5697,6 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
-                group_session_transcript_format:
-                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(
@@ -5753,7 +5712,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -5862,8 +5823,6 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
-                group_session_transcript_format:
-                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(
@@ -5879,7 +5838,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -5956,8 +5917,6 @@ mod tests {
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
                 mention_mode: moltis_channels::gating::MentionMode::Always,
-                group_session_transcript_format:
-                    crate::config::GroupSessionTranscriptFormat::TgGstV1,
                 ..Default::default()
             };
             map.insert(
@@ -5973,7 +5932,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -6070,7 +6031,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -6183,7 +6146,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -6312,7 +6277,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -6493,7 +6460,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -6524,17 +6493,16 @@ mod tests {
             .await
             .expect("handle edited location");
 
-        let target = sink
-            .last_location_reply_target
+        let ctx = sink
+            .last_location_ctx
             .lock()
             .unwrap()
             .clone()
-            .expect("expected update_location target");
-        assert_eq!(target.chat_id, "-100999");
-        assert_eq!(
-            target.bucket_key.as_deref(),
-            Some(expected_bucket_key.as_str())
-        );
+            .expect("expected update_location context");
+        assert_eq!(ctx.session_key, expected_bucket_key);
+        let decoded = crate::adapter::inbound_target_from_reply_target_ref(&ctx.reply_target_ref)
+            .expect("decode reply_target_ref");
+        assert_eq!(decoded.chat_id, "-100999");
     }
 
     #[test]
@@ -7051,7 +7019,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -7196,7 +7166,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -7250,17 +7222,16 @@ mod tests {
             .await
             .expect("handle callback");
 
-        let target = sink
-            .last_command_reply_target
+        let ctx = sink
+            .last_command_ctx
             .lock()
             .unwrap()
             .clone()
-            .expect("expected callback dispatch target");
-        assert_eq!(target.chat_id, "-100999");
-        assert_eq!(
-            target.bucket_key.as_deref(),
-            Some(expected_bucket_key.as_str())
-        );
+            .expect("expected callback dispatch context");
+        assert_eq!(ctx.session_key, expected_bucket_key);
+        let decoded = crate::adapter::inbound_target_from_reply_target_ref(&ctx.reply_target_ref)
+            .expect("decode reply_target_ref");
+        assert_eq!(decoded.chat_id, "-100999");
 
         let _ = shutdown_tx.send(());
         server.await.expect("server join");
@@ -7335,7 +7306,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -7362,17 +7335,16 @@ mod tests {
             .await
             .expect("handle callback");
 
-        let target = sink
-            .last_command_reply_target
+        let ctx = sink
+            .last_command_ctx
             .lock()
             .unwrap()
             .clone()
-            .expect("expected callback dispatch target");
-        assert_eq!(target.chat_id, "-100999");
-        assert_eq!(
-            target.bucket_key.as_deref(),
-            Some(expected_bucket_key.as_str())
-        );
+            .expect("expected callback dispatch context");
+        assert_eq!(ctx.session_key, expected_bucket_key);
+        let decoded = crate::adapter::inbound_target_from_reply_target_ref(&ctx.reply_target_ref)
+            .expect("decode reply_target_ref");
+        assert_eq!(decoded.chat_id, "-100999");
 
         let _ = shutdown_tx.send(());
         server.await.expect("server join");
@@ -7491,7 +7463,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -7601,7 +7575,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -7761,7 +7737,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -7878,7 +7856,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -8095,7 +8075,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
-                    core_bridge: Some(Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),

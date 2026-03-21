@@ -224,11 +224,9 @@ mode = "all"                      # Which commands to sandbox:
                                   #   "off"      - No sandboxing (commands run on host)
                                   #   "non-main" - Sandbox all except main session
                                   #   "all"      - Sandbox everything (recommended)
-scope = "chat"                    # Container lifecycle:
-                                  #   "session" - Container per session (most isolated)
-                                  #   "chat"    - Container per chat (default; e.g. Telegram group)
-                                  #   "bot"     - Container per bot/account
-                                  #   "global"  - Single shared container
+scope_key = "session_key"         # Container reuse key:
+                                  #   "session_id"  - Container per session instance
+                                  #   "session_key" - Shared by logical session bucket
 idle_ttl_secs = 0                 # Idle container TTL (seconds):
                                   #   0   - Disable TTL (default)
                                   #   >0  - Auto-cleanup when idle for TTL

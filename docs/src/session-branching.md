@@ -5,9 +5,8 @@ conversation at any point. The new session diverges without affecting the
 original — useful for exploring alternative approaches, running "what if"
 scenarios, or preserving a checkpoint before a risky prompt.
 
-In channel-bound sessions, forking creates a new `sessionId` (persistent session
-bucket) while keeping the same `chanChatKey` (deterministic channel chat
-coordinate).
+In channel-bound sessions, forking creates a new `sessionId` (session instance)
+while keeping the same `sessionKey` (logical channel bucket).
 
 ## Forking from the UI
 
@@ -60,7 +59,7 @@ When forking, the new session inherits:
 |-----------|---------------|
 | Messages (up to fork point) | Worktree branch |
 | Model selection | Sandbox settings |
-| Project assignment | Channel reply target (`chanReplyTarget`) |
+| Project assignment | Channel binding / reply target state |
 | MCP disabled flag | |
 
 ## Parent-Child Relationships

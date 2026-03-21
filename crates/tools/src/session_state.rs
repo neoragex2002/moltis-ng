@@ -190,7 +190,7 @@ mod tests {
                 "operation": "get",
                 "namespace": "ns",
                 "key": "k",
-                "_chanChatKey": "telegram:bot1:123",
+                "_sessionKey": "telegram:bot1:123",
             }))
             .await
             .unwrap_err();

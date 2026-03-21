@@ -15,7 +15,7 @@ Canonical v1 builds a single cross-provider system prompt string, then relies on
 each provider adapter to map it to its protocol:
 
 - Entry point: `build_canonical_system_prompt_v1()` (`crates/agents/src/prompt.rs`)
-- User-owned Type4 templates: `people/<persona_id>/{IDENTITY,SOUL,AGENTS,TOOLS}.md`
+- User-owned Type4 templates: `agents/<agent_id>/{IDENTITY,SOUL,AGENTS,TOOLS}.md`
 - Strict template vars: `{{var}}` (with `{{{{` / `}}}}` escapes), rendered via
   `crates/config/src/prompt_subst.rs`
 - Canonical v1 does not add wrapper headings (e.g. `# System`) or fixed runtime

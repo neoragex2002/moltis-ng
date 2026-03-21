@@ -275,7 +275,7 @@ mod tests {
             .execute(json!({
                 "label": "Branch",
                 "_sessionId": parent_id,
-                "_chanChatKey": "telegram:bot1:123",
+                "_sessionKey": "telegram:bot1:123",
             }))
             .await
             .unwrap();

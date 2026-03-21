@@ -1252,7 +1252,17 @@ pub struct ResourceLimitsConfig {
 #[serde(default)]
 pub struct SandboxConfig {
     pub mode: String,
-    pub scope: String,
+    /// Deprecated legacy field. Use `scope_key` instead.
+    ///
+    /// This is retained only to allow validation to fail-fast when an old config
+    /// still sets `tools.exec.sandbox.scope`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Sandbox bucketing key source.
+    ///
+    /// - `"session_id"`: sandbox is keyed by session instance (recommended default)
+    /// - `"session_key"`: sandbox is keyed by logical session bucket (e.g. DM/group bucket)
+    pub scope_key: String,
     /// Idle TTL for sandbox containers (seconds).
     ///
     /// - `>0`: idle containers may be reclaimed after TTL.
@@ -1297,6 +1307,15 @@ pub struct SandboxConfig {
     /// Set to an empty list to skip provisioning.
     #[serde(default = "default_sandbox_packages")]
     pub packages: Vec<String>,
+}
+
+#[must_use]
+pub fn legacy_sandbox_scope_to_scope_key(scope: &str) -> Option<&'static str> {
+    match scope.trim() {
+        "session" => Some("session_id"),
+        "chat" | "bot" | "global" => Some("session_key"),
+        _ => None,
+    }
 }
 
 /// External mount configuration entry for sandbox containers.
@@ -1481,7 +1500,8 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             mode: "all".into(),
-            scope: "chat".into(),
+            scope: None,
+            scope_key: "session_id".into(),
             idle_ttl_secs: 0,
             data_mount: "ro".into(),
             data_mount_type: None,

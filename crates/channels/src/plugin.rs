@@ -83,6 +83,19 @@ pub enum ChannelEvent {
     },
 }
 
+/// Per-inbound-message context needed by the gateway for V3 session routing and
+/// outbound reply delivery.
+#[derive(Debug, Clone)]
+pub struct ChannelInboundContext {
+    pub chan_type: ChannelType,
+    /// V3 cross-domain bridge key ("bucket key"). This is *not* a session id.
+    pub session_key: String,
+    /// Adapter-private opaque reference describing where to send replies.
+    pub reply_target_ref: String,
+    /// Adapter-private session-level binding blob (for session metadata persistence).
+    pub channel_binding: Option<String>,
+}
+
 /// Sink for channel events — the gateway provides the concrete implementation.
 #[async_trait]
 pub trait ChannelEventSink: Send + Sync {
@@ -95,7 +108,7 @@ pub trait ChannelEventSink: Send + Sync {
     async fn dispatch_to_chat(
         &self,
         text: &str,
-        reply_to: ChannelReplyTarget,
+        ctx: ChannelInboundContext,
         meta: ChannelMessageMeta,
     );
 
@@ -105,14 +118,14 @@ pub trait ChannelEventSink: Send + Sync {
     /// This enables "listen/sidecar" group modes where only addressed
     /// messages generate replies, but all messages can still be recorded
     /// as context.
-    async fn ingest_only(&self, text: &str, reply_to: ChannelReplyTarget, meta: ChannelMessageMeta);
+    async fn ingest_only(&self, text: &str, ctx: ChannelInboundContext, meta: ChannelMessageMeta);
 
     /// Dispatch a slash command (e.g. "new", "clear", "compact", "context")
     /// and return a text result to send back to the channel.
     async fn dispatch_command(
         &self,
         command: &str,
-        reply_to: ChannelReplyTarget,
+        ctx: ChannelInboundContext,
     ) -> anyhow::Result<String>;
 
     /// Request disabling a channel account due to a runtime error.
@@ -152,10 +165,11 @@ pub trait ChannelEventSink: Send + Sync {
     /// Returns `true` if a pending tool-triggered location request was resolved.
     async fn update_location(
         &self,
-        _reply_to: &ChannelReplyTarget,
+        _ctx: ChannelInboundContext,
         _latitude: f64,
         _longitude: f64,
     ) -> bool {
+        let _ = _ctx;
         false
     }
 
@@ -168,12 +182,12 @@ pub trait ChannelEventSink: Send + Sync {
         &self,
         text: &str,
         attachments: Vec<ChannelAttachment>,
-        reply_to: ChannelReplyTarget,
+        ctx: ChannelInboundContext,
         meta: ChannelMessageMeta,
     ) {
         // Default implementation ignores attachments and just sends text.
         let _ = attachments;
-        self.dispatch_to_chat(text, reply_to, meta).await;
+        self.dispatch_to_chat(text, ctx, meta).await;
     }
 }
 
@@ -190,8 +204,6 @@ pub struct ChannelMessageMeta {
     /// Default model configured for this channel account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub telegram: Option<ChannelTelegramMeta>,
 }
 
 /// Inbound channel message media kind.
@@ -206,31 +218,6 @@ pub enum ChannelMessageKind {
     Video,
     Location,
     Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelTranscriptFormat {
-    Legacy,
-    TgGstV1,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TelegramChatKind {
-    Direct,
-    Group,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChannelTelegramMeta {
-    pub chat_kind: TelegramChatKind,
-    pub transcript_format: ChannelTranscriptFormat,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sender_id: Option<u64>,
-    pub sender_is_bot: bool,
-    pub addressed: bool,
 }
 
 /// An attachment (image, file) from a channel message.
@@ -348,6 +335,37 @@ pub trait ChannelOutbound: Send + Sync {
         .await
     }
 
+    /// Send text to an opaque `reply_target_ref` and return a best-effort ref.
+    ///
+    /// The `reply_target_ref` format is channel-adapter private and must be
+    /// parsed by the adapter implementation (e.g. Telegram outbound). The
+    /// default implementation returns an error.
+    async fn send_text_by_reply_target_ref_with_ref(
+        &self,
+        reply_target_ref: &str,
+        text: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        let _ = (reply_target_ref, text);
+        Err(anyhow::anyhow!(
+            "reply_target_ref not supported for send_text"
+        ))
+    }
+
+    /// Send text plus suffix to an opaque `reply_target_ref` and return a best-effort ref.
+    ///
+    /// Default implementation returns an error.
+    async fn send_text_with_suffix_by_reply_target_ref_with_ref(
+        &self,
+        reply_target_ref: &str,
+        text: &str,
+        suffix_html: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        let _ = (reply_target_ref, text, suffix_html);
+        Err(anyhow::anyhow!(
+            "reply_target_ref not supported for send_text_with_suffix"
+        ))
+    }
+
     async fn send_media(
         &self,
         chan_account_key: &str,
@@ -399,6 +417,20 @@ pub trait ChannelOutbound: Send + Sync {
             target.message_id.as_deref(),
         )
         .await
+    }
+
+    /// Send media to an opaque `reply_target_ref` and return a best-effort ref.
+    ///
+    /// Default implementation returns an error.
+    async fn send_media_by_reply_target_ref_with_ref(
+        &self,
+        reply_target_ref: &str,
+        payload: &ReplyPayload,
+    ) -> Result<Option<SentMessageRef>> {
+        let _ = (reply_target_ref, payload);
+        Err(anyhow::anyhow!(
+            "reply_target_ref not supported for send_media"
+        ))
     }
     /// Send a "typing" indicator. No-op by default.
     async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> Result<()> {
@@ -602,6 +634,22 @@ pub trait ChannelOutbound: Send + Sync {
         )
         .await
     }
+
+    /// Send a location pin to an opaque `reply_target_ref` and return a best-effort ref.
+    ///
+    /// Default implementation returns an error.
+    async fn send_location_by_reply_target_ref_with_ref(
+        &self,
+        reply_target_ref: &str,
+        latitude: f64,
+        longitude: f64,
+        title: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        let _ = (reply_target_ref, latitude, longitude, title);
+        Err(anyhow::anyhow!(
+            "reply_target_ref not supported for send_location"
+        ))
+    }
 }
 
 /// Best-effort reference to an outbound message sent on a channel.
@@ -666,7 +714,7 @@ mod tests {
         async fn dispatch_to_chat(
             &self,
             _text: &str,
-            _reply_to: ChannelReplyTarget,
+            _ctx: ChannelInboundContext,
             _meta: ChannelMessageMeta,
         ) {
         }
@@ -674,7 +722,7 @@ mod tests {
         async fn ingest_only(
             &self,
             _text: &str,
-            _reply_to: ChannelReplyTarget,
+            _ctx: ChannelInboundContext,
             _meta: ChannelMessageMeta,
         ) {
         }
@@ -682,7 +730,7 @@ mod tests {
         async fn dispatch_command(
             &self,
             _command: &str,
-            _reply_to: ChannelReplyTarget,
+            _ctx: ChannelInboundContext,
         ) -> anyhow::Result<String> {
             Ok(String::new())
         }
@@ -705,14 +753,13 @@ mod tests {
     #[tokio::test]
     async fn default_update_location_returns_false() {
         let sink = DummySink;
-        let target = ChannelReplyTarget {
+        let ctx = ChannelInboundContext {
             chan_type: ChannelType::Telegram,
-            chan_account_key: "telegram:1".into(),
-            chan_user_name: None,
-            chat_id: "42".into(),
-            message_id: None,
+            session_key: "test".into(),
+            reply_target_ref: "{}".into(),
+            channel_binding: None,
         };
-        assert!(!sink.update_location(&target, 48.8566, 2.3522).await);
+        assert!(!sink.update_location(ctx, 48.8566, 2.3522).await);
     }
 
     struct DummyOutbound;

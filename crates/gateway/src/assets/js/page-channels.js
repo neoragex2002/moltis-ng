@@ -28,9 +28,9 @@ export function prefetchChannels() {
 			S.setCachedChannels(ch);
 		}
 	});
-	sendRpc("workspace.person.list", {}).then((res) => {
+	sendRpc("workspace.agent.list", {}).then((res) => {
 		if (res?.ok) {
-			var ids = (res.payload?.people || []).map((p) => p.name).filter(Boolean);
+			var ids = (res.payload?.agents || []).map((p) => p.name).filter(Boolean);
 			agentNames.value = ids;
 			agentNamesLoaded.value = isAgentListLoaded(ids);
 		} else {
@@ -53,9 +53,9 @@ function loadChannels() {
 			updateNavCount("channels", ch.length);
 		}
 	});
-	sendRpc("workspace.person.list", {}).then((res) => {
+	sendRpc("workspace.agent.list", {}).then((res) => {
 		if (res?.ok) {
-			var ids = (res.payload?.people || []).map((p) => p.name).filter(Boolean);
+			var ids = (res.payload?.agents || []).map((p) => p.name).filter(Boolean);
 			agentNames.value = ids;
 			agentNamesLoaded.value = isAgentListLoaded(ids);
 		} else {
@@ -81,10 +81,10 @@ function TelegramIcon() {
 }
 
 // ── Channel card ─────────────────────────────────────────────
-function ChannelCard(props) {
-	var ch = props.channel;
-	var cfg = ch.config || {};
-	var configuredAgent = cfg.persona_id || "";
+	function ChannelCard(props) {
+		var ch = props.channel;
+		var cfg = ch.config || {};
+		var configuredAgent = cfg.agent_id || "";
 	var agentMissing = Boolean(
 		configuredAgent &&
 			agentNamesLoaded.value &&
@@ -333,22 +333,21 @@ function AddChannelModal() {
 			error.value = "Bot token is required.";
 			return;
 		}
-		var agentName = form.querySelector("[data-field=agentName]")?.value?.trim() || "";
+			var agentName = form.querySelector("[data-field=agentName]")?.value?.trim() || "";
 		error.value = "";
 		saving.value = true;
 			var addConfig = {
 				token: token,
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
 				mention_mode: form.querySelector("[data-field=mentionMode]").value,
-				group_session_transcript_format: form.querySelector("[data-field=groupTranscriptFormat]").value,
 				allowlist: allowlistItems.value,
 				relay_strictness: form.querySelector("[data-field=relayStrictness]").value,
 				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
 				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
-		if (agentName) {
-			addConfig.persona_id = agentName;
-		}
+			if (agentName) {
+				addConfig.agent_id = agentName;
+			}
 		if (addModel.value) {
 			addConfig.model = addModel.value;
 			var found = modelsSig.value.find((x) => x.id === addModel.value);
@@ -392,9 +391,9 @@ function AddChannelModal() {
         <div class="text-xs text-[var(--muted)] channel-help" style="margin-top:2px;">See the <a href="https://core.telegram.org/bots/tutorial" target="_blank" class="text-[var(--accent)]" style="text-decoration:underline;">Telegram Bot Tutorial</a> for more details.</div>
       </div>
 	      <label class="text-xs text-[var(--muted)]">Agent (optional)</label>
-				<div class="text-xs text-[var(--muted)]" style="margin-top:-2px;margin-bottom:6px;">
-					Choose an agent under <code>${"people/<name>/"}</code>.
-				</div>
+					<div class="text-xs text-[var(--muted)]" style="margin-top:-2px;margin-bottom:6px;">
+						Choose an agent under <code>${"agents/<agent_id>/"}</code>.
+					</div>
 	      <select data-field="agentName" style=${selectStyle} name="telegram_agent_name">
 					<option value="">(default)</option>
 					${agentNames.value.map((id) => html`<option key=${id} value=${id}>${id}</option>`)}
@@ -422,11 +421,6 @@ function AddChannelModal() {
 	        <option value="mention">Must @mention bot</option>
 	        <option value="always">Always respond</option>
 	      </select>
-      <label class="text-xs text-[var(--muted)]">Group Session Transcript</label>
-      <select data-field="groupTranscriptFormat" style=${selectStyle}>
-        <option value="legacy">Legacy</option>
-        <option value="tg_gst_v1">TG-GST v1</option>
-      </select>
       <label class="text-xs text-[var(--muted)]">Group Relay Strictness</label>
       <select data-field="relayStrictness" style=${selectStyle}>
         <option value="strict">Strict (avoid false triggers)</option>
@@ -477,19 +471,18 @@ function EditChannelModal() {
 		var form = e.target.closest(".channel-form");
 		error.value = "";
 		saving.value = true;
-		var agentName = form.querySelector("[data-field=agentName]")?.value?.trim() || "";
+			var agentName = form.querySelector("[data-field=agentName]")?.value?.trim() || "";
 			var updateConfig = {
 				token: cfg.token || "",
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
 				mention_mode: form.querySelector("[data-field=mentionMode]").value,
-				group_session_transcript_format: form.querySelector("[data-field=groupTranscriptFormat]").value,
 				allowlist: allowlistItems.value,
 				relay_strictness: form.querySelector("[data-field=relayStrictness]").value,
 				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
 				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
-		// Allow clearing agent binding by sending explicit null.
-		updateConfig.persona_id = agentName ? agentName : null;
+			// Allow clearing agent binding by sending explicit null.
+			updateConfig.agent_id = agentName ? agentName : null;
 		if (editModel.value) {
 			updateConfig.model = editModel.value;
 			var found = modelsSig.value.find((x) => x.id === editModel.value);
@@ -517,7 +510,7 @@ function EditChannelModal() {
 	var selectStyle =
 		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;cursor:pointer;";
 
-	var configuredAgent = cfg.persona_id || "";
+		var configuredAgent = cfg.agent_id || "";
 	var agentMissing = Boolean(
 		configuredAgent &&
 			agentNamesLoaded.value &&
@@ -531,9 +524,9 @@ function EditChannelModal() {
     <div class="channel-form">
 			<div class="text-sm text-[var(--text-strong)]">${ch.name || ch.chanAccountKey}</div>
       <label class="text-xs text-[var(--muted)]">Agent (optional)</label>
-			<div class="text-xs text-[var(--muted)]" style="margin-top:-2px;margin-bottom:6px;">
-				Choose an agent under <code>${"people/<name>/"}</code>.
-			</div>
+				<div class="text-xs text-[var(--muted)]" style="margin-top:-2px;margin-bottom:6px;">
+					Choose an agent under <code>${"agents/<agent_id>/"}</code>.
+				</div>
       <select data-field="agentName" style=${selectStyle} value=${configuredAgent || ""} name="telegram_agent_name_edit">
         <option value="">(default)</option>
         ${agentNames.value.map((id) => html`<option key=${id} value=${id}>${id}</option>`)}
@@ -550,11 +543,6 @@ function EditChannelModal() {
 	        <option value="mention">Must @mention bot</option>
 	        <option value="always">Always respond</option>
 	      </select>
-      <label class="text-xs text-[var(--muted)]">Group Session Transcript</label>
-      <select data-field="groupTranscriptFormat" style=${selectStyle} value=${cfg.group_session_transcript_format || "legacy"}>
-        <option value="legacy">Legacy</option>
-        <option value="tg_gst_v1">TG-GST v1</option>
-      </select>
       <label class="text-xs text-[var(--muted)]">Group Relay Strictness</label>
       <select data-field="relayStrictness" style=${selectStyle} value=${cfg.relay_strictness || "strict"}>
         <option value="strict">Strict (avoid false triggers)</option>

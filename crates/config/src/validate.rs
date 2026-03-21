@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, path::Path};
 
-use crate::schema::MoltisConfig;
+use crate::schema::{MoltisConfig, legacy_sandbox_scope_to_scope_key};
 
 /// Severity level for a diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -167,6 +167,7 @@ fn build_schema_map() -> KnownKeys {
         Struct(HashMap::from([
             ("mode", Leaf),
             ("scope", Leaf),
+            ("scope_key", Leaf),
             ("idle_ttl_secs", Leaf),
             ("data_mount", Leaf),
             ("data_mount_type", Leaf),
@@ -821,6 +822,13 @@ fn check_semantic_warnings(
         .and_then(|v| v.get("exec"))
         .and_then(|v| v.get("sandbox"))
         .is_some();
+    let sandbox_table = toml_value
+        .get("tools")
+        .and_then(|v| v.get("exec"))
+        .and_then(|v| v.get("sandbox"))
+        .and_then(|v| v.as_table());
+    let sandbox_scope_present = sandbox_table.and_then(|v| v.get("scope")).is_some();
+    let sandbox_scope_key_present = sandbox_table.and_then(|v| v.get("scope_key")).is_some();
 
     // auth.disabled + non-localhost
     if config.auth.disabled && !is_localhost {
@@ -1013,17 +1021,47 @@ fn check_semantic_warnings(
         }
     }
 
-    // Unknown sandbox scope
-    let valid_sandbox_scopes = ["session", "chat", "bot", "global"];
-    let scope = config.tools.exec.sandbox.scope.as_str();
-    if !valid_sandbox_scopes.contains(&scope) {
+    // Sandbox scope_key (legacy `tools.exec.sandbox.scope` still maps during migration).
+    if let Some(scope) = config.tools.exec.sandbox.scope.as_deref() {
+        if sandbox_scope_present && sandbox_scope_key_present {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                category: "breaking-change",
+                path: "tools.exec.sandbox.scope".into(),
+                message:
+                    "tools.exec.sandbox.scope cannot be combined with tools.exec.sandbox.scope_key; keep only scope_key"
+                        .into(),
+            });
+        } else if let Some(mapped_scope_key) = legacy_sandbox_scope_to_scope_key(scope) {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                category: "breaking-change",
+                path: "tools.exec.sandbox.scope".into(),
+                message: format!(
+                    "tools.exec.sandbox.scope is deprecated; use tools.exec.sandbox.scope_key = \"{mapped_scope_key}\""
+                ),
+            });
+        } else {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                category: "unknown-field",
+                path: "tools.exec.sandbox.scope".into(),
+                message:
+                    "invalid tools.exec.sandbox.scope; expected one of: session, chat, bot, global"
+                        .into(),
+            });
+        }
+    }
+    let valid_sandbox_scope_keys = ["session_id", "session_key"];
+    let scope_key = config.tools.exec.sandbox.scope_key.as_str();
+    if !valid_sandbox_scope_keys.contains(&scope_key) {
         diagnostics.push(Diagnostic {
             severity: Severity::Error,
             category: "unknown-field",
-            path: "tools.exec.sandbox.scope".into(),
+            path: "tools.exec.sandbox.scope_key".into(),
             message: format!(
-                "invalid sandbox scope \"{scope}\"; expected one of: {}",
-                valid_sandbox_scopes.join(", ")
+                "invalid sandbox scope_key \"{scope_key}\"; expected one of: {}",
+                valid_sandbox_scope_keys.join(", ")
             ),
         });
     }
@@ -1483,6 +1521,66 @@ bnd = "0.0.0.0"
             result.diagnostics
         );
         assert!(unknown.unwrap().message.contains("bind"));
+    }
+
+    #[test]
+    fn legacy_sandbox_scope_chat_warns_but_does_not_error() {
+        let toml = r#"
+[tools.exec.sandbox]
+mode = "off"
+scope = "chat"
+"#;
+        let result = validate_toml_str(toml);
+        assert!(
+            result.diagnostics.iter().any(|d| {
+                d.severity == Severity::Warning && d.path == "tools.exec.sandbox.scope"
+            }),
+            "expected deprecation warning, got: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            result.diagnostics.iter().all(|d| {
+                !(d.severity == Severity::Error && d.path == "tools.exec.sandbox.scope")
+            }),
+            "legacy scope should not hard-fail: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn sandbox_scope_and_scope_key_conflict_errors() {
+        let toml = r#"
+[tools.exec.sandbox]
+mode = "off"
+scope = "chat"
+scope_key = "session_id"
+"#;
+        let result = validate_toml_str(toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| { d.severity == Severity::Error && d.path == "tools.exec.sandbox.scope" }),
+            "expected conflict error, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn default_config_template_uses_scope_key() {
+        let toml = crate::template::default_config_template(13131);
+        assert!(toml.contains("scope_key = \"session_key\""));
+        assert!(!toml.contains("\nscope = \"chat\""));
+
+        let result = validate_toml_str(&toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| d.path != "tools.exec.sandbox.scope"),
+            "default template should not reference legacy sandbox scope: {:?}",
+            result.diagnostics
+        );
     }
 
     #[test]

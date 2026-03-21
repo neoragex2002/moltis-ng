@@ -78,8 +78,28 @@ impl HookHandler for ShellHookHandler {
     }
 
     async fn handle(&self, _event: HookEvent, payload: &HookPayload) -> Result<HookAction> {
+        fn env_truthy(value: Option<&String>) -> bool {
+            matches!(
+                value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+                Some("1") | Some("true") | Some("yes") | Some("on")
+            )
+        }
+
+        // Default: shell hooks receive `channelTarget=null` unless explicitly opted-in.
+        // This preserves the "channel boundary" principle (avoid leaking delivery coordinates)
+        // while still allowing specific hooks to request the minimal coordinates when needed.
+        let include_channel_target = env_truthy(self.env.get("MOLTIS_HOOK_INCLUDE_CHANNEL_TARGET"));
+
+        let mut payload_val =
+            serde_json::to_value(payload).context("failed to serialize hook payload")?;
+        if !include_channel_target {
+            if let Some(obj) = payload_val.as_object_mut() {
+                obj.insert("channelTarget".into(), Value::Null);
+            }
+        }
+
         let payload_json =
-            serde_json::to_string(payload).context("failed to serialize hook payload")?;
+            serde_json::to_string(&payload_val).context("failed to serialize hook payload")?;
 
         debug!(
             hook = %self.hook_name,
@@ -178,6 +198,13 @@ mod tests {
     fn test_payload() -> HookPayload {
         HookPayload::SessionStart {
             session_id: "test-123".into(),
+            session_key: None,
+            channel_target: Some(moltis_common::types::ChannelTarget {
+                channel_type: "telegram".into(),
+                account_key: "telegram:acct".into(),
+                chat_id: "123".into(),
+                thread_id: None,
+            }),
         }
     }
 
@@ -250,6 +277,46 @@ mod tests {
             .unwrap();
         match result {
             HookAction::ModifyPayload(v) => assert_eq!(v["sessionId"], "test-123"),
+            _ => panic!("expected ModifyPayload, got: {result:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_hook_redacts_channel_target_by_default() {
+        let handler = ShellHookHandler::new(
+            "test-channel-target-redact",
+            r#"INPUT=$(cat); echo "$INPUT" | grep -q '"channelTarget":null' && echo '{"action":"modify","data":{"sawNull":true}}' || echo '{"action":"modify","data":{"sawNull":false}}'"#,
+            vec![HookEvent::SessionStart],
+            Duration::from_secs(5),
+            HashMap::new(),
+        );
+        let result = handler
+            .handle(HookEvent::SessionStart, &test_payload())
+            .await
+            .unwrap();
+        match result {
+            HookAction::ModifyPayload(v) => assert_eq!(v["sawNull"], true),
+            _ => panic!("expected ModifyPayload, got: {result:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_hook_includes_channel_target_when_opted_in() {
+        let mut env = HashMap::new();
+        env.insert("MOLTIS_HOOK_INCLUDE_CHANNEL_TARGET".into(), "1".into());
+        let handler = ShellHookHandler::new(
+            "test-channel-target-include",
+            r#"INPUT=$(cat); echo "$INPUT" | grep -q '"channelTarget":{' && echo "$INPUT" | grep -q '"type":"telegram"' && echo "$INPUT" | grep -q '"accountKey":"telegram:acct"' && echo "$INPUT" | grep -q '"chatId":"123"' && echo '{"action":"modify","data":{"sawObject":true}}' || echo '{"action":"modify","data":{"sawObject":false}}'"#,
+            vec![HookEvent::SessionStart],
+            Duration::from_secs(5),
+            env,
+        );
+        let result = handler
+            .handle(HookEvent::SessionStart, &test_payload())
+            .await
+            .unwrap();
+        match result {
+            HookAction::ModifyPayload(v) => assert_eq!(v["sawObject"], true),
             _ => panic!("expected ModifyPayload, got: {result:?}"),
         }
     }

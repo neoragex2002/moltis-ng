@@ -91,8 +91,8 @@ const READ_METHODS: &[&str] = &[
     "agent.identity.get",
     "workspace.user.get",
     "workspace.people.get",
-    "workspace.person.list",
-    "workspace.person.get",
+    "workspace.agent.list",
+    "workspace.agent.get",
     "skills.list",
     "skills.status",
     "skills.security.status",
@@ -148,8 +148,8 @@ const WRITE_METHODS: &[&str] = &[
     "workspace.user.update",
     "workspace.people.updateEntry",
     "workspace.people.sync",
-    "workspace.person.save",
-    "workspace.person.delete",
+    "workspace.agent.save",
+    "workspace.agent.delete",
     "wake",
     "talk.mode",
     "tts.enable",
@@ -1338,9 +1338,9 @@ impl MethodRegistry {
             }),
         );
 
-        // Workspace (private people/<name>/...)
+        // Workspace (private agents/<agent_id>/...)
         self.register(
-            "workspace.person.list",
+            "workspace.agent.list",
             Box::new(|_ctx| {
                 Box::pin(async move {
                     let payload = crate::person::person_list()
@@ -1350,7 +1350,7 @@ impl MethodRegistry {
             }),
         );
         self.register(
-            "workspace.person.get",
+            "workspace.agent.get",
             Box::new(|ctx| {
                 Box::pin(async move {
                     let payload = crate::person::person_get(&ctx.params)
@@ -1360,7 +1360,7 @@ impl MethodRegistry {
             }),
         );
         self.register(
-            "workspace.person.save",
+            "workspace.agent.save",
             Box::new(|ctx| {
                 Box::pin(async move {
                     let payload = crate::person::person_save(&ctx.params)
@@ -1370,7 +1370,7 @@ impl MethodRegistry {
             }),
         );
         self.register(
-            "workspace.person.delete",
+            "workspace.agent.delete",
             Box::new(|ctx| {
                 Box::pin(async move {
                     let payload = crate::person::person_delete(&ctx.params)

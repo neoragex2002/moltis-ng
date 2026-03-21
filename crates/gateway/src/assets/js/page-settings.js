@@ -326,7 +326,7 @@ function UserSection() {
 	</div>`;
 }
 
-// ── People section (private agents under people/<name>/) ─────
+	// ── Agents section (private agents under agents/<agent_id>/) ─────
 
 function PeoplePrivateSection() {
 	var [loadingList, setLoadingList] = useState(true);
@@ -364,10 +364,10 @@ function PeoplePrivateSection() {
 	function loadList(nextSelected) {
 		setLoadingList(true);
 		setError(null);
-		sendRpc("workspace.person.list", {}).then((res) => {
+		sendRpc("workspace.agent.list", {}).then((res) => {
 			setLoadingList(false);
 			if (res?.ok) {
-				var list = res.payload?.people || [];
+					var list = res.payload?.agents || [];
 				setPeopleList(list);
 				if (nextSelected) {
 					setSelectedName(nextSelected);
@@ -375,7 +375,7 @@ function PeoplePrivateSection() {
 					setSelectedName(list[0].name);
 				}
 			} else {
-				setError(res?.error?.message || "Failed to load people/<name>/");
+					setError(res?.error?.message || "Failed to load agents/<agent_id>/");
 			}
 			rerender();
 		});
@@ -386,7 +386,7 @@ function PeoplePrivateSection() {
 		var requestId = ++docRequestId.current;
 		setLoadingDoc(true);
 		setError(null);
-		sendRpc("workspace.person.get", { name }).then((res) => {
+		sendRpc("workspace.agent.get", { name }).then((res) => {
 			if (docRequestId.current !== requestId) return;
 			setLoadingDoc(false);
 			if (res?.ok) {
@@ -419,7 +419,7 @@ function PeoplePrivateSection() {
 		var name = selectedName;
 		setSavingKey("identity");
 		setError(null);
-		sendRpc("workspace.person.save", {
+		sendRpc("workspace.agent.save", {
 			name,
 			identityPatch: {
 				emoji: (emoji || "").trim() || null,
@@ -458,7 +458,7 @@ function PeoplePrivateSection() {
 		setError(null);
 		var payload = { name };
 		payload[key] = value || "";
-		sendRpc("workspace.person.save", payload).then((res) => {
+		sendRpc("workspace.agent.save", payload).then((res) => {
 			setSavingKey("");
 			if (selectedName !== name) {
 				rerender();
@@ -491,7 +491,7 @@ function PeoplePrivateSection() {
 		if (!name) return;
 		setSavingKey("new");
 		setError(null);
-		sendRpc("workspace.person.save", { name }).then((res) => {
+		sendRpc("workspace.agent.save", { name }).then((res) => {
 			setSavingKey("");
 			if (res?.ok) {
 				setShowNewModal(false);
@@ -510,7 +510,7 @@ function PeoplePrivateSection() {
 		if (!name || !baseDoc) return;
 		setSavingKey("clone");
 		setError(null);
-		sendRpc("workspace.person.save", {
+		sendRpc("workspace.agent.save", {
 			name,
 			identityPatch: {
 				emoji: baseDoc.identity?.emoji ?? null,
@@ -539,7 +539,7 @@ function PeoplePrivateSection() {
 		if (isDefault()) return;
 		setSavingKey("delete");
 		setError(null);
-		sendRpc("workspace.person.delete", { name: selectedName }).then((res) => {
+		sendRpc("workspace.agent.delete", { name: selectedName }).then((res) => {
 			setSavingKey("");
 			if (res?.ok) {
 				setShowDeleteModal(false);
@@ -620,7 +620,7 @@ function PeoplePrivateSection() {
 				</div>
 			</div>
 			<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:0;">
-				Private agent configuration under <code>people/${"<name>"}/</code>.
+				Private agent configuration under <code>agents/${"<agent_id>"}/</code>.
 			</p>
 		</div>
 
@@ -630,7 +630,7 @@ function PeoplePrivateSection() {
 			<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
 				<div>
 					<div class="text-sm font-medium text-[var(--text-strong)]">Identity</div>
-					<div class="text-xs text-[var(--muted)]"><code>people/${selectedName}/IDENTITY.md</code></div>
+						<div class="text-xs text-[var(--muted)]"><code>agents/${selectedName}/IDENTITY.md</code></div>
 				</div>
 				<div style="display:flex;align-items:center;gap:8px;">
 					<button type="button" class="provider-btn provider-btn-sm" disabled=${savingKey || !isIdentityDirty()} onClick=${saveIdentity}>
@@ -667,13 +667,13 @@ function PeoplePrivateSection() {
 			/>
 		</div>
 
-		${renderSection("Soul", `people/${selectedName}/SOUL.md`, isTextDirty("soul", soul), "soul", soul, setSoul, () => saveText("soul", soul))}
-		${renderSection("Agents", `people/${selectedName}/AGENTS.md`, isTextDirty("agents", agents), "agents", agents, setAgents, () => saveText("agents", agents))}
-		${renderSection("Tools", `people/${selectedName}/TOOLS.md`, isTextDirty("tools", tools), "tools", tools, setTools, () => saveText("tools", tools))}
+			${renderSection("Soul", `agents/${selectedName}/SOUL.md`, isTextDirty("soul", soul), "soul", soul, setSoul, () => saveText("soul", soul))}
+			${renderSection("Agents", `agents/${selectedName}/AGENTS.md`, isTextDirty("agents", agents), "agents", agents, setAgents, () => saveText("agents", agents))}
+			${renderSection("Tools", `agents/${selectedName}/TOOLS.md`, isTextDirty("tools", tools), "tools", tools, setTools, () => saveText("tools", tools))}
 
 		<${Modal} show=${showNewModal} onClose=${() => setShowNewModal(false)} title="New agent">
 			<div style="display:flex;flex-direction:column;gap:10px;">
-				<div class="text-xs text-[var(--muted)]">Creates <code>people/${"<name>"}/</code> and seeds default files.</div>
+				<div class="text-xs text-[var(--muted)]">Creates <code>agents/${"<agent_id>"}/</code> and seeds default files.</div>
 				<label class="text-xs text-[var(--muted)]">Agent name</label>
 				<input class="provider-key-input" placeholder="e.g. ops" value=${newName} onInput=${(e) => setNewName(e.target.value)} />
 				<button class="provider-btn" onClick=${onCreate} disabled=${savingKey === "new" || !(newName || "").trim()}>
@@ -696,7 +696,7 @@ function PeoplePrivateSection() {
 		<${Modal} show=${showDeleteModal} onClose=${() => setShowDeleteModal(false)} title="Delete agent">
 			<div style="display:flex;flex-direction:column;gap:10px;">
 				<div class="text-sm text-[var(--text)]">Delete <code>${selectedName}</code>?</div>
-				<div class="text-xs text-[var(--muted)]">This removes <code>people/${selectedName}/</code> from disk. It does not remove any entry from <code>PEOPLE.md</code>.</div>
+					<div class="text-xs text-[var(--muted)]">This removes <code>agents/${selectedName}/</code> from disk. It does not remove any entry from <code>PEOPLE.md</code>.</div>
 				<button class="provider-btn provider-btn-danger" onClick=${onDelete} disabled=${savingKey === "delete" || isDefault()}>
 					${savingKey === "delete" ? "Deleting\u2026" : "Delete"}
 				</button>
@@ -736,9 +736,9 @@ function ContactsSection() {
 	}
 
 	function loadPersonList() {
-		sendRpc("workspace.person.list", {}).then((res) => {
+		sendRpc("workspace.agent.list", {}).then((res) => {
 			if (res?.ok) {
-				setPersonNames((res.payload?.people || []).map((p) => p.name));
+				setPersonNames((res.payload?.agents || []).map((p) => p.name));
 			}
 			rerender();
 		});
@@ -845,7 +845,7 @@ function ContactsSection() {
 					<select style=${selectStyle} value=${selectedName} onChange=${(e) => setSelectedName(e.target.value)}>
 						${(doc.people || []).map((p) => html`<option key=${p.name} value=${p.name}>${p.name}</option>`)}
 					</select>
-					${isMissingDir() ? html`<span class="text-xs" style="color:var(--error);">Missing: people/${selectedName}/</span>` : null}
+						${isMissingDir() ? html`<span class="text-xs" style="color:var(--error);">Missing: agents/${selectedName}/</span>` : null}
 					<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${loadContacts} disabled=${saving}>
 						Reload
 					</button>
@@ -861,7 +861,7 @@ function ContactsSection() {
 				</div>
 			</div>
 			<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:900px;margin:0;">
-				Public directory stored in <code>PEOPLE.md</code>. <span style="color:var(--muted);">Name/Emoji/Creature are synced from <code>people/${"<name>"}/IDENTITY.md</code>.</span>
+				Public directory stored in <code>PEOPLE.md</code>. <span style="color:var(--muted);">Name/Emoji/Creature are synced from <code>agents/${"<agent_id>"}/IDENTITY.md</code>.</span>
 			</p>
 		</div>
 

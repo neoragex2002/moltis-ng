@@ -1525,6 +1525,40 @@ mod tests {
     }
 
     #[test]
+    fn prompt_cache_key_differs_for_different_session_ids() {
+        let mut cfg = OpenAiResponsesPromptCacheConfig::default();
+        cfg.enabled = true;
+        cfg.bucket_hash = PromptCacheBucketHashConfig::Bool(false);
+
+        let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
+        let ctx_a = LlmRequestContext {
+            session_id: Some("session:a".to_string()),
+            run_id: None,
+        };
+        let ctx_b = LlmRequestContext {
+            session_id: Some("session:b".to_string()),
+            run_id: None,
+        };
+
+        let body_a = provider.build_responses_body_with_context(
+            Some(&ctx_a),
+            &[ChatMessage::user("ping")],
+            &[],
+            false,
+        );
+        let body_b = provider.build_responses_body_with_context(
+            Some(&ctx_b),
+            &[ChatMessage::user("ping")],
+            &[],
+            false,
+        );
+
+        assert_eq!(body_a["prompt_cache_key"].as_str(), Some("session:a"));
+        assert_eq!(body_b["prompt_cache_key"].as_str(), Some("session:b"));
+        assert_ne!(body_a["prompt_cache_key"], body_b["prompt_cache_key"]);
+    }
+
+    #[test]
     fn build_responses_body_hashes_prompt_cache_key_when_auto_and_long() {
         let mut cfg = OpenAiResponsesPromptCacheConfig::default();
         cfg.enabled = true;

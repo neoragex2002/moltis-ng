@@ -528,7 +528,7 @@ pub fn build_openai_responses_developer_prompts(
     native_tools: bool,
     project_context: Option<&str>,
     skills: &[SkillMetadata],
-    persona_id: &str,
+    agent_id: &str,
     identity_md_raw: Option<&str>,
     soul_text: Option<&str>,
     agents_text: Option<&str>,
@@ -538,7 +538,7 @@ pub fn build_openai_responses_developer_prompts(
     let system = format!("# 系统（System）\n\n{OPENAI_RESPONSES_SYSTEM_ZH_CN}");
 
     let mut persona = String::new();
-    persona.push_str(&format!("# 人格（Persona: {persona_id}）\n\n"));
+    persona.push_str(&format!("# 人格（Agent: {agent_id}）\n\n"));
 
     persona.push_str("## 1. 身份 (Identity, Who are you?)\n");
     if let Some(raw) = identity_md_raw
@@ -574,7 +574,7 @@ pub fn build_openai_responses_developer_prompts(
     persona
         .push_str("- 当你被问到“你认识哪些人 / 有哪些账号或 bots / 有哪些代理或角色”等问题时：\n");
     persona.push_str(&format!(
-        "    1. 必须先读取 {SANDBOX_DATA_DIR}/PEOPLE.md\n    2. 再基于该文件内容回答\n    3. 不得靠记忆或猜测其中名单\n    4. PEOPLE.md 是公共通信录：字段可由用户在 UI 中维护；其中 emoji/creature 由系统从 people/<name>/IDENTITY.md 自动对齐；正文为手工说明（UI 只读）\n\n"
+        "    1. 必须先读取 {SANDBOX_DATA_DIR}/PEOPLE.md\n    2. 再基于该文件内容回答\n    3. 不得靠记忆或猜测其中名单\n    4. PEOPLE.md 是公共通信录：字段可由用户在 UI 中维护；其中 emoji/creature 由系统从 agents/<agent_id>/IDENTITY.md 自动对齐；正文为手工说明（UI 只读）\n\n"
     ));
 
     persona.push_str("## 5. 对工作区规则的个人偏好\n\n");
@@ -1667,7 +1667,7 @@ mod tests {
         assert!(prompts.system.contains("## 指南"));
         assert!(prompts.system.contains("## 静默回复"));
 
-        assert!(prompts.persona.contains("# 人格（Persona: default）"));
+        assert!(prompts.persona.contains("# 人格（Agent: default）"));
         assert!(prompts.persona.contains("## 1. 身份"));
         assert!(prompts.persona.contains("# IDENTITY.md"));
         assert!(prompts.persona.contains("# SOUL.md"));

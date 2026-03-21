@@ -9,6 +9,7 @@
 - [Quickstart](quickstart.md)
 - [Installation](installation.md)
 - [Configuration](configuration.md)
+- [面向 V3 设计的配置重置与恢复](config-reset-and-recovery.md)
 - [Local Validation](local-validation.md)
 - [End-to-End Testing](e2e-testing.md)
 
@@ -56,6 +57,7 @@
 - [V3 Extension Guidance](refactor/v3-extension-guidance.md)
 - [Channel Adapter Generic Interfaces](refactor/channel-adapter-generic-interfaces.md)
 - [Telegram Adapter Boundary](refactor/telegram-adapter-boundary.md)
+- [V3 Channel Info Exposure Boundary](refactor/channel-info-exposure-boundary.md)
 - [Session Scope Overview](refactor/session-scope-overview.md)
 - [Session Context Layering](refactor/session-context-layering.md)
 - [Session Event Canonical](refactor/session-event-canonical.md)

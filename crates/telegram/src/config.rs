@@ -56,20 +56,9 @@ pub enum StreamMode {
     Off,
 }
 
-/// How Telegram *group* inbound/mirror/relay messages are formatted when written into
-/// the session transcript (LLM-visible `content`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GroupSessionTranscriptFormat {
-    /// Legacy behavior (self-mention stripping / whitespace normalization / mirror+relay prefixes).
-    #[default]
-    Legacy,
-    /// TG-GST v1 (Telegram Group Session Transcript v1).
-    TgGstV1,
-}
-
 /// Configuration for a single Telegram bot account.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(default)]
 pub struct TelegramAccountConfig {
     /// Bot token from @BotFather.
@@ -109,11 +98,6 @@ pub struct TelegramAccountConfig {
     /// Relay parsing strictness.
     pub relay_strictness: RelayStrictness,
 
-    /// Group session transcript format for LLM-visible `content`.
-    ///
-    /// Default: `legacy`.
-    pub group_session_transcript_format: GroupSessionTranscriptFormat,
-
     /// How streaming responses are delivered.
     pub stream_mode: StreamMode,
 
@@ -146,9 +130,9 @@ pub struct TelegramAccountConfig {
     /// Cooldown in seconds after 3 failed OTP attempts (default: 300).
     pub otp_cooldown_secs: u64,
 
-    /// Optional persona ID bound to this Telegram bot (named persona directory).
+    /// Optional agent ID bound to this Telegram bot (named agent directory).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub persona_id: Option<String>,
+    pub agent_id: Option<String>,
 
     /// Telegram bot user id from `getMe.id` (stable primary key).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,7 +161,6 @@ pub struct TelegramBusAccountSnapshot {
     pub relay_hop_limit: u32,
     pub epoch_relay_budget: u32,
     pub relay_strictness: RelayStrictness,
-    pub group_session_transcript_format: GroupSessionTranscriptFormat,
 }
 
 impl std::fmt::Debug for TelegramAccountConfig {
@@ -209,7 +192,6 @@ impl Default for TelegramAccountConfig {
             relay_hop_limit: 3,
             epoch_relay_budget: 128,
             relay_strictness: RelayStrictness::default(),
-            group_session_transcript_format: GroupSessionTranscriptFormat::default(),
             stream_mode: StreamMode::default(),
             edit_throttle_ms: 300,
             outbound_max_attempts: 3,
@@ -219,7 +201,7 @@ impl Default for TelegramAccountConfig {
             model_provider: None,
             otp_self_approval: true,
             otp_cooldown_secs: 300,
-            persona_id: None,
+            agent_id: None,
             chan_user_id: None,
             chan_user_name: None,
             chan_nickname: None,
@@ -248,10 +230,6 @@ mod tests {
         assert_eq!(cfg.relay_hop_limit, 3);
         assert_eq!(cfg.epoch_relay_budget, 128);
         assert_eq!(cfg.relay_strictness, RelayStrictness::Strict);
-        assert_eq!(
-            cfg.group_session_transcript_format,
-            GroupSessionTranscriptFormat::Legacy
-        );
     }
 
     #[test]
@@ -282,6 +260,19 @@ mod tests {
         }"#;
         let cfg: TelegramAccountConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.mention_mode, MentionMode::Mention);
+    }
+
+    #[test]
+    fn deserialize_rejects_legacy_persona_id() {
+        let json = r#"{
+            "token": "123:ABC",
+            "persona_id": "legacy_agent"
+        }"#;
+        let err = serde_json::from_str::<TelegramAccountConfig>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `persona_id`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

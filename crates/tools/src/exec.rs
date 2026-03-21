@@ -267,14 +267,14 @@ impl AgentTool for ExecTool {
             .min(1800); // cap at 30 minutes
 
         // Check sandbox state early — we need it for working_dir resolution.
-        // Prefer deterministic channel chat coordinate when available, but fall back
-        // to sessionId for non-channel tool calls (avoids incorrectly defaulting to "main").
-        let sandbox_key = params
-            .get("_chanChatKey")
-            .or_else(|| params.get("_sessionId"))
-            .and_then(|v| v.as_str());
+        let session_id = params
+            .get("_sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("main");
+        let session_key = params.get("_sessionKey").and_then(|v| v.as_str());
+
         let is_sandboxed = if let Some(ref router) = self.sandbox_router {
-            router.is_sandboxed(sandbox_key.unwrap_or("main")).await
+            router.is_sandboxed(session_id).await
         } else {
             self.sandbox_id.is_some()
         };
@@ -380,32 +380,36 @@ impl AgentTool for ExecTool {
 
         // Resolve sandbox: dynamic per-session router takes priority over static sandbox.
         let result = if let Some(ref router) = self.sandbox_router {
-            let sk = sandbox_key.unwrap_or("main");
             if is_sandboxed {
-                let _lease = router.acquire_lease(sk);
-                router.touch(sk);
-                let image = router.resolve_image(sk, None).await;
-                let id = router.ensure_ready_for_session(sk, Some(&image)).await?;
+                let _lease = router.acquire_lease(session_id, session_key)?;
+                router.touch(session_id, session_key)?;
+                let image = router.resolve_image(session_id, None).await;
+                let id = router
+                    .ensure_ready_for_session(session_id, session_key, Some(&image))
+                    .await?;
                 let backend = router.backend();
-                info!(session = sk, sandbox_id = %id, backend = backend.backend_name(), image, "sandbox ensure_ready");
-                debug!(session = sk, sandbox_id = %id, command, "sandbox running command");
+                info!(session_id, session_key, sandbox_id = %id, backend = backend.backend_name(), image, "sandbox ensure_ready");
+                debug!(session_id, session_key, sandbox_id = %id, command, "sandbox running command");
                 let mut sandbox_result = backend.exec(&id, command, &opts).await?;
                 if sandbox_result.exit_code != 0
                     && is_container_not_running_exec_error(&sandbox_result.stderr)
                 {
                     warn!(
-                        session = sk,
+                        session_id,
+                        session_key,
                         sandbox_id = %id,
                         command,
                         "sandbox exec failed because container is not running, reinitializing and retrying once"
                     );
-                    router.ensure_ready_for_session(sk, Some(&image)).await?;
+                    router
+                        .ensure_ready_for_session(session_id, session_key, Some(&image))
+                        .await?;
                     sandbox_result = backend.exec(&id, command, &opts).await?;
                 }
-                router.touch(sk);
+                router.touch(session_id, session_key)?;
                 sandbox_result
             } else {
-                debug!(session = sk, command, "running unsandboxed");
+                debug!(session_id, session_key, command, "running unsandboxed");
                 exec_command(command, &opts).await?
             }
         } else if let Some(ref id) = self.sandbox_id {
@@ -710,11 +714,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_tool_with_sandbox() {
-        use crate::sandbox::{NoSandbox, SandboxScope};
+        use crate::sandbox::{NoSandbox, SandboxScopeKey};
 
         let sandbox: Arc<dyn Sandbox> = Arc::new(NoSandbox);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "test-session".into(),
         };
         let temp_dir = tempfile::tempdir().unwrap();
@@ -736,11 +740,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_tool_cleanup_with_sandbox() {
-        use crate::sandbox::{NoSandbox, SandboxScope};
+        use crate::sandbox::{NoSandbox, SandboxScopeKey};
 
         let sandbox: Arc<dyn Sandbox> = Arc::new(NoSandbox);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "cleanup-test".into(),
         };
         let tool = ExecTool::default().with_sandbox(sandbox, id);
@@ -868,7 +872,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_tool_with_sandbox_router_session_key() {
-        use crate::sandbox::{SandboxConfig, SandboxMode, SandboxRouter, SandboxScope};
+        use crate::sandbox::{SandboxConfig, SandboxMode, SandboxRouter, SandboxScopeKey};
 
         struct MarkerSandbox;
 
@@ -907,7 +911,7 @@ mod tests {
         let router = Arc::new(SandboxRouter::with_backend(
             SandboxConfig {
                 mode: SandboxMode::Off,
-                scope: SandboxScope::Session,
+                scope_key: SandboxScopeKey::SessionId,
                 ..Default::default()
             },
             Arc::new(MarkerSandbox),
@@ -927,6 +931,70 @@ mod tests {
         assert_eq!(
             result["stdout"].as_str().unwrap().trim(),
             "sandboxed:session-abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exec_tool_with_sandbox_router_scope_key_session_key() {
+        use crate::sandbox::{SandboxConfig, SandboxMode, SandboxRouter, SandboxScopeKey};
+
+        struct MarkerSandbox;
+
+        #[async_trait]
+        impl Sandbox for MarkerSandbox {
+            fn backend_name(&self) -> &'static str {
+                "marker"
+            }
+
+            async fn ensure_ready(
+                &self,
+                _id: &SandboxId,
+                _image_override: Option<&str>,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            async fn exec(
+                &self,
+                id: &SandboxId,
+                _command: &str,
+                _opts: &ExecOpts,
+            ) -> Result<ExecResult> {
+                Ok(ExecResult {
+                    stdout: format!("sandboxed:{}", id.key),
+                    stderr: String::new(),
+                    exit_code: 0,
+                })
+            }
+
+            async fn cleanup(&self, _id: &SandboxId) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let router = Arc::new(SandboxRouter::with_backend(
+            SandboxConfig {
+                mode: SandboxMode::All,
+                scope_key: SandboxScopeKey::SessionKey,
+                ..Default::default()
+            },
+            Arc::new(MarkerSandbox),
+        ));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut tool = ExecTool::default().with_sandbox_router(router);
+        tool.working_dir = Some(temp_dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "echo routed",
+                "_sessionId": "session:abc",
+                "_sessionKey": "bucket:xyz"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            result["stdout"].as_str().unwrap().trim(),
+            "sandboxed:bucket-xyz"
         );
     }
 

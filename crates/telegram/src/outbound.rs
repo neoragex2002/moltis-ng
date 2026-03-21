@@ -16,10 +16,10 @@ use {
 };
 
 use {
-    moltis_channels::{ChannelReplyTarget, ChannelType},
     moltis_channels::plugin::{
         ChannelOutbound, ChannelStreamOutbound, SentMessageRef, StreamEvent, StreamReceiver,
     },
+    moltis_channels::{ChannelReplyTarget, ChannelType},
     moltis_common::types::ReplyPayload,
 };
 
@@ -1770,6 +1770,30 @@ impl ChannelOutbound for TelegramOutbound {
         }))
     }
 
+    async fn send_text_by_reply_target_ref_with_ref(
+        &self,
+        reply_target_ref: &str,
+        text: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        let target = crate::adapter::inbound_target_from_reply_target_ref(reply_target_ref)
+            .ok_or_else(|| anyhow::anyhow!("invalid reply_target_ref for telegram send_text"))?;
+        self.send_text_to_target_with_ref(&target, text).await
+    }
+
+    async fn send_text_with_suffix_by_reply_target_ref_with_ref(
+        &self,
+        reply_target_ref: &str,
+        text: &str,
+        suffix_html: &str,
+    ) -> Result<Option<SentMessageRef>> {
+        let target = crate::adapter::inbound_target_from_reply_target_ref(reply_target_ref)
+            .ok_or_else(|| {
+                anyhow::anyhow!("invalid reply_target_ref for telegram send_text_with_suffix")
+            })?;
+        self.send_text_with_suffix_to_target_with_ref(&target, text, suffix_html)
+            .await
+    }
+
     async fn send_text_with_suffix(
         &self,
         account_handle: &str,
@@ -1993,6 +2017,16 @@ impl ChannelOutbound for TelegramOutbound {
         }))
     }
 
+    async fn send_media_by_reply_target_ref_with_ref(
+        &self,
+        reply_target_ref: &str,
+        payload: &ReplyPayload,
+    ) -> Result<Option<SentMessageRef>> {
+        let target = crate::adapter::inbound_target_from_reply_target_ref(reply_target_ref)
+            .ok_or_else(|| anyhow::anyhow!("invalid reply_target_ref for telegram send_media"))?;
+        self.send_media_to_target_with_ref(&target, payload).await
+    }
+
     async fn send_location(
         &self,
         account_handle: &str,
@@ -2039,6 +2073,21 @@ impl ChannelOutbound for TelegramOutbound {
         Ok(sent.map(|id| SentMessageRef {
             message_id: id.0.to_string(),
         }))
+    }
+
+    async fn send_location_by_reply_target_ref_with_ref(
+        &self,
+        reply_target_ref: &str,
+        latitude: f64,
+        longitude: f64,
+        title: Option<&str>,
+    ) -> Result<Option<SentMessageRef>> {
+        let target = crate::adapter::inbound_target_from_reply_target_ref(reply_target_ref)
+            .ok_or_else(|| {
+                anyhow::anyhow!("invalid reply_target_ref for telegram send_location")
+            })?;
+        self.send_location_to_target_with_ref(&target, latitude, longitude, title)
+            .await
     }
 
     async fn send_location_to_target(
@@ -2492,7 +2541,7 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: None,
-            core_bridge: None,
+                    core_bridge: None,
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),
@@ -2528,7 +2577,7 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: None,
-            core_bridge: None,
+                    core_bridge: None,
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),

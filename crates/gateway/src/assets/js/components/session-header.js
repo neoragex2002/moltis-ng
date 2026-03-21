@@ -32,7 +32,7 @@ export function SessionHeader() {
 	var displayName = fullName.length > 20 ? `${fullName.slice(0, 20)}\u2026` : fullName;
 
 	var isMain = currentKey === "main";
-	var isChannel = session?.chanReplyTarget || currentKey.startsWith("telegram:");
+	var isChannel = session?.channel || currentKey.startsWith("telegram:");
 	var isCron = currentKey.startsWith("cron:");
 	var canRename = !(isMain || isChannel || isCron);
 

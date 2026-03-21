@@ -1,5 +1,8 @@
 # 当前代码现状与 V3 目标差距
 
+> 补充说明（2026-03-20）：
+> 本文档尚未完成与最新 one-cut 主单的再同步。若本文与 `issues/issue-v3-session-ids-and-channel-boundary-one-cut.md`、`issues/issue-v3-one-cut-readiness-gaps.md`、`docs/src/refactor/channel-info-exposure-boundary.md`、`docs/src/refactor/telegram-adapter-boundary.md` 冲突，以后者为准。
+
 ## 2026-03-20 最新结论
 
 以当前代码为准，如果先把“落盘改造 / `session_event` 持久化替换”排除掉，V3 C 阶段这次要收的东西已经基本收口：
@@ -9,7 +12,7 @@
 - Telegram typing keepalive、transcript-format helper、relay route/reply helper 已收口到 Telegram adapter / outbound；gateway 只消费 helper 或 bridge，不再自带第二套独立语义：`crates/telegram/src/outbound.rs:370`、`crates/telegram/src/adapter.rs:147`、`crates/telegram/src/adapter.rs:163`
 - 升级兼容也已补回：如果老数据只有 `active_session_id`、还没回填 `bucket_session_id`，主路径会先复用匹配的旧 Telegram 会话并自动回填 bucket 映射，不会因为升级平白断上下文；但不同 bucket 仍不会错误共用：`crates/gateway/src/channel_events.rs:210`、`crates/gateway/src/chat.rs:7538`
 - topic/thread typing 也已修正回 thread-aware；论坛 topic 里的长回复不会把 typing 丢到根 chat：`crates/telegram/src/outbound.rs:355`
-- `_triggerId` / `_chanChatKey` / `channel_binding` 这批旧运行时桥接已经退出 TG 主路径真值判断；允许保留的尾巴只剩旧落盘承载：`crates/gateway/src/channel_events.rs:2182`、`crates/gateway/src/chat.rs:13515`
+- `_triggerId` / legacy tool-chat key / `channel_binding` 这批旧运行时桥接已经退出 TG 主路径真值判断；允许保留的尾巴只剩旧落盘承载：`crates/gateway/src/channel_events.rs:2182`、`crates/gateway/src/chat.rs:13515`
 
 一句更准确的人话：
 
@@ -188,7 +191,7 @@ Telegram handler 侧现在主要做的是：
 仍未替换的部分主要是：
 
 - session history / metadata 仍建立在旧 `SessionStore` / `PersistedMessage` + metadata table 之上
-- `channel_binding` / `_chanChatKey` 仍作为“旧保存层/工具链”兼容载体存在（但已退出 TG 主路径真值判断）
+- `channel_binding` / legacy tool-chat key 仍作为“旧保存层/工具链”兼容载体存在（但已退出 TG 主路径真值判断）
 
 因此这条差距在本文档的归类里属于：**落盘尾巴（后续保存层替换阶段再清）**。
 
@@ -272,7 +275,7 @@ Telegram handler 侧现在主要做的是：
 
 这些不阻塞“除落盘外已收口”的结论，但会影响后续保存层替换的成本与长期可维护性：
 
-- 逐步退出 `_chanChatKey` / `_triggerId` 这类 legacy 工具/前端兼容字段（目前已退出真值路径，但仍在 payload 中存在）
+- 逐步退出 legacy tool-chat key / `_triggerId` 这类 legacy 工具/前端兼容字段（目前已退出真值路径，但仍在 payload 中存在）
 - 把“TG 专项 helper 的归属”在文档里说更死：哪些算 adapter 内部、哪些算稳定边界工具（避免后续又长出第二套）
 
 ## 相关文档

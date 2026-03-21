@@ -195,7 +195,7 @@ function updateClearAllVisibility() {
 			s.sessionId !== "main" &&
 			!s.sessionId.startsWith("cron:") &&
 			!s.sessionId.startsWith("telegram:") &&
-			!s.chanReplyTarget,
+			!s.channel,
 	);
 	clearAllBtn.classList.toggle("hidden", !hasClearable);
 }
@@ -208,7 +208,7 @@ if (clearAllBtn) {
 				s.sessionId !== "main" &&
 				!s.sessionId.startsWith("cron:") &&
 				!s.sessionId.startsWith("telegram:") &&
-				!s.chanReplyTarget,
+				!s.channel,
 		).length;
 		if (count === 0) return;
 		confirmDialog(
@@ -228,7 +228,7 @@ if (clearAllBtn) {
 						active.sessionId === "main" ||
 						active.sessionId.startsWith("cron:") ||
 						active.sessionId.startsWith("telegram:") ||
-						active.chanReplyTarget;
+						active.channel;
 					if (!wasKept) {
 						switchSession("main");
 					}

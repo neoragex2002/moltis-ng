@@ -222,7 +222,7 @@ pub(crate) fn people_update_entry(params: &serde_json::Value) -> anyhow::Result<
     if name.is_empty() {
         anyhow::bail!("missing 'name'");
     }
-    if !moltis_config::is_valid_person_name(&name) {
+    if !moltis_config::is_valid_agent_id(&name) {
         anyhow::bail!("invalid name");
     }
 
@@ -331,7 +331,7 @@ mod tests {
         let _guard = crate::test_support::TestDirsGuard::new();
 
         // Ensure default is seeded so sync/get paths exist.
-        moltis_config::ensure_default_person_seeded().unwrap();
+        moltis_config::ensure_default_agent_seeded().unwrap();
         moltis_config::ensure_people_md_seeded().unwrap();
         moltis_config::sync_people_md_from_identities().unwrap();
 
@@ -365,7 +365,7 @@ mod tests {
     fn people_update_entry_updates_body() {
         let _guard = crate::test_support::TestDirsGuard::new();
 
-        moltis_config::ensure_default_person_seeded().unwrap();
+        moltis_config::ensure_default_agent_seeded().unwrap();
         moltis_config::ensure_people_md_seeded().unwrap();
         moltis_config::sync_people_md_from_identities().unwrap();
 

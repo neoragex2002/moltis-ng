@@ -118,7 +118,8 @@ impl ProcessTool {
     /// Run a tmux command inside the sandbox container.
     async fn run_tmux(
         &self,
-        session_key: &str,
+        session_id: &str,
+        session_key: Option<&str>,
         tmux_args: &str,
         timeout_secs: u64,
     ) -> Result<crate::exec::ExecResult> {
@@ -130,17 +131,17 @@ impl ProcessTool {
         };
 
         if let Some(ref router) = self.sandbox_router {
-            let is_sandboxed = router.is_sandboxed(session_key).await;
+            let is_sandboxed = router.is_sandboxed(session_id).await;
             if is_sandboxed {
-                let _lease = router.acquire_lease(session_key);
-                router.touch(session_key);
-                let image = router.resolve_image(session_key, None).await;
+                let _lease = router.acquire_lease(session_id, session_key)?;
+                router.touch(session_id, session_key)?;
+                let image = router.resolve_image(session_id, None).await;
                 let id = router
-                    .ensure_ready_for_session(session_key, Some(&image))
+                    .ensure_ready_for_session(session_id, session_key, Some(&image))
                     .await?;
                 let backend = router.backend();
                 let res = backend.exec(&id, &command, &opts).await;
-                router.touch(session_key);
+                router.touch(session_id, session_key)?;
                 return res;
             }
         }
@@ -150,15 +151,16 @@ impl ProcessTool {
     }
 
     /// Resolve the sandbox ID for a session key (for logging).
-    fn sandbox_id_for(&self, session_key: &str) -> Option<SandboxId> {
+    fn sandbox_id_for(&self, session_id: &str, session_key: Option<&str>) -> Option<SandboxId> {
         self.sandbox_router
             .as_ref()
-            .map(|r| r.sandbox_id_for(session_key))
+            .and_then(|r| r.sandbox_id_for(session_id, session_key).ok())
     }
 
     async fn handle_start(
         &self,
-        session_key: &str,
+        session_id: &str,
+        session_key: Option<&str>,
         command: &str,
         session_name: Option<&str>,
     ) -> ProcessResult {
@@ -179,7 +181,7 @@ impl ProcessTool {
         let escaped_command = command.replace('\'', "'\\''");
         let tmux_cmd = format!("new-session -d -s '{name}' -x 200 -y 50 '{escaped_command}'");
 
-        match self.run_tmux(session_key, &tmux_cmd, 10).await {
+        match self.run_tmux(session_id, session_key, &tmux_cmd, 10).await {
             Ok(result) if result.exit_code == 0 => {
                 info!(session_name = %name, command, "tmux session started");
                 ProcessResult::ok(Some(name), Some("session started".into()))
@@ -197,7 +199,12 @@ impl ProcessTool {
         }
     }
 
-    async fn handle_poll(&self, session_key: &str, session_name: &str) -> ProcessResult {
+    async fn handle_poll(
+        &self,
+        session_id: &str,
+        session_key: Option<&str>,
+        session_name: &str,
+    ) -> ProcessResult {
         if !is_valid_session_name(session_name) {
             return ProcessResult::err(
                 "invalid session_name: only [a-zA-Z0-9_-] allowed, max 64 chars",
@@ -206,7 +213,7 @@ impl ProcessTool {
 
         let tmux_cmd = format!("capture-pane -t '{session_name}' -p");
 
-        match self.run_tmux(session_key, &tmux_cmd, 10).await {
+        match self.run_tmux(session_id, session_key, &tmux_cmd, 10).await {
             Ok(result) if result.exit_code == 0 => {
                 ProcessResult::ok(Some(session_name.into()), Some(result.stdout))
             },
@@ -224,7 +231,8 @@ impl ProcessTool {
 
     async fn handle_send_keys(
         &self,
-        session_key: &str,
+        session_id: &str,
+        session_key: Option<&str>,
         session_name: &str,
         keys: &str,
     ) -> ProcessResult {
@@ -239,7 +247,7 @@ impl ProcessTool {
         let escaped_keys = keys.replace('\'', "'\\''");
         let tmux_cmd = format!("send-keys -t '{session_name}' '{escaped_keys}'");
 
-        match self.run_tmux(session_key, &tmux_cmd, 10).await {
+        match self.run_tmux(session_id, session_key, &tmux_cmd, 10).await {
             Ok(result) if result.exit_code == 0 => {
                 debug!(session_name, keys, "keys sent");
                 ProcessResult::ok(Some(session_name.into()), Some("keys sent".into()))
@@ -258,7 +266,8 @@ impl ProcessTool {
 
     async fn handle_paste(
         &self,
-        session_key: &str,
+        session_id: &str,
+        session_key: Option<&str>,
         session_name: &str,
         text: &str,
     ) -> ProcessResult {
@@ -272,11 +281,11 @@ impl ProcessTool {
         let escaped_text = text.replace('\'', "'\\''");
         let set_cmd = format!("set-buffer '{escaped_text}'");
 
-        match self.run_tmux(session_key, &set_cmd, 10).await {
+        match self.run_tmux(session_id, session_key, &set_cmd, 10).await {
             Ok(result) if result.exit_code == 0 => {
                 // Now paste the buffer into the target session.
                 let paste_cmd = format!("paste-buffer -t '{session_name}'");
-                match self.run_tmux(session_key, &paste_cmd, 10).await {
+                match self.run_tmux(session_id, session_key, &paste_cmd, 10).await {
                     Ok(r) if r.exit_code == 0 => {
                         debug!(session_name, "text pasted");
                         ProcessResult::ok(Some(session_name.into()), Some("text pasted".into()))
@@ -304,7 +313,12 @@ impl ProcessTool {
         }
     }
 
-    async fn handle_kill(&self, session_key: &str, session_name: &str) -> ProcessResult {
+    async fn handle_kill(
+        &self,
+        session_id: &str,
+        session_key: Option<&str>,
+        session_name: &str,
+    ) -> ProcessResult {
         if !is_valid_session_name(session_name) {
             return ProcessResult::err(
                 "invalid session_name: only [a-zA-Z0-9_-] allowed, max 64 chars",
@@ -313,7 +327,7 @@ impl ProcessTool {
 
         let tmux_cmd = format!("kill-session -t '{session_name}'");
 
-        match self.run_tmux(session_key, &tmux_cmd, 10).await {
+        match self.run_tmux(session_id, session_key, &tmux_cmd, 10).await {
             Ok(result) if result.exit_code == 0 => {
                 info!(session_name, "tmux session killed");
                 ProcessResult::ok(Some(session_name.into()), Some("session killed".into()))
@@ -330,8 +344,11 @@ impl ProcessTool {
         }
     }
 
-    async fn handle_list(&self, session_key: &str) -> ProcessResult {
-        match self.run_tmux(session_key, "list-sessions", 10).await {
+    async fn handle_list(&self, session_id: &str, session_key: Option<&str>) -> ProcessResult {
+        match self
+            .run_tmux(session_id, session_key, "list-sessions", 10)
+            .await
+        {
             Ok(result) if result.exit_code == 0 => ProcessResult::ok(None, Some(result.stdout)),
             Ok(result) => {
                 // "no server running" is normal when there are no sessions.
@@ -403,13 +420,11 @@ impl AgentTool for ProcessTool {
         #[cfg(feature = "metrics")]
         let start = Instant::now();
 
-        // Prefer deterministic channel chat coordinate when available, but fall back
-        // to sessionId for non-channel tool calls.
-        let session_key = params
-            .get("_chanChatKey")
-            .or_else(|| params.get("_sessionId"))
+        let session_id = params
+            .get("_sessionId")
             .and_then(|v| v.as_str())
             .unwrap_or("main");
+        let session_key = params.get("_sessionKey").and_then(|v| v.as_str());
 
         let action: ProcessAction = match serde_json::from_value(params.clone()) {
             Ok(a) => a,
@@ -430,7 +445,7 @@ impl AgentTool for ProcessTool {
 
         debug!(
             action = action_label,
-            sandbox_id = ?self.sandbox_id_for(session_key),
+            sandbox_id = ?self.sandbox_id_for(session_id, session_key),
             "process tool invoked"
         );
 
@@ -439,23 +454,26 @@ impl AgentTool for ProcessTool {
                 command,
                 session_name,
             } => {
-                self.handle_start(session_key, &command, session_name.as_deref())
+                self.handle_start(session_id, session_key, &command, session_name.as_deref())
                     .await
             },
             ProcessAction::Poll { session_name } => {
-                self.handle_poll(session_key, &session_name).await
+                self.handle_poll(session_id, session_key, &session_name)
+                    .await
             },
             ProcessAction::SendKeys { session_name, keys } => {
-                self.handle_send_keys(session_key, &session_name, &keys)
+                self.handle_send_keys(session_id, session_key, &session_name, &keys)
                     .await
             },
             ProcessAction::Paste { session_name, text } => {
-                self.handle_paste(session_key, &session_name, &text).await
+                self.handle_paste(session_id, session_key, &session_name, &text)
+                    .await
             },
             ProcessAction::Kill { session_name } => {
-                self.handle_kill(session_key, &session_name).await
+                self.handle_kill(session_id, session_key, &session_name)
+                    .await
             },
-            ProcessAction::List => self.handle_list(session_key).await,
+            ProcessAction::List => self.handle_list(session_id, session_key).await,
         };
 
         info!(

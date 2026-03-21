@@ -169,6 +169,8 @@ mod tests {
 
         let payload = HookPayload::Command {
             session_id: "test-session-123".into(),
+            session_key: None,
+            channel_target: None,
             action: "new".into(),
             sender_id: None,
         };
@@ -197,6 +199,8 @@ mod tests {
 
         let payload = HookPayload::Command {
             session_id: "test".into(),
+            session_key: None,
+            channel_target: None,
             action: "stop".into(),
             sender_id: None,
         };
@@ -217,6 +221,8 @@ mod tests {
 
         let payload = HookPayload::Command {
             session_id: "empty-session".into(),
+            session_key: None,
+            channel_target: None,
             action: "new".into(),
             sender_id: None,
         };
@@ -246,6 +252,8 @@ mod tests {
 
         let payload = HookPayload::Command {
             session_id: "test".into(),
+            session_key: None,
+            channel_target: None,
             action: "reset".into(),
             sender_id: None,
         };
@@ -277,6 +285,8 @@ mod tests {
         let hook = SessionMemoryHook::new(tmp.path().to_path_buf(), session_store);
         let payload = HookPayload::Command {
             session_id: "unicode-test".into(),
+            session_key: None,
+            channel_target: None,
             action: "reset".into(),
             sender_id: None,
         };

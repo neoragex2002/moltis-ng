@@ -9,7 +9,7 @@ import { render } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { EmojiPicker } from "./emoji-picker.js";
 import { get as getGon, refresh as refreshGon } from "./gon.js";
-import { sendRpc } from "./helpers.js";
+import { sendRpc as sendBaseRpc } from "./helpers.js";
 import { detectPasskeyName } from "./passkey-detect.js";
 import { providerApiKeyHelp } from "./provider-key-help.js";
 import { startProviderOAuth } from "./provider-oauth.js";
@@ -28,6 +28,43 @@ function ensureWsConnected() {
 	if (wsStarted) return;
 	wsStarted = true;
 	connectWs({ backoff: { factor: 2, max: 10000 } });
+}
+
+function sleep(ms) {
+	return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isWsReady() {
+	return !!(S.connected && S.ws && S.ws.readyState === WebSocket.OPEN);
+}
+
+function isWsUnavailable(res) {
+	var message = res?.error?.message || "";
+	return message === "WebSocket not connected" || message === "WebSocket disconnected";
+}
+
+function shouldRetryWsUnavailable(res) {
+	return res?.error?.message === "WebSocket not connected";
+}
+
+async function sendRpc(method, params, options = {}) {
+	var maxAttempts = options.maxAttempts ?? 40;
+	var retryDelayMs = options.retryDelayMs ?? 150;
+
+	for (var attempt = 0; attempt < maxAttempts; attempt++) {
+		ensureWsConnected();
+
+		if (isWsReady()) {
+			var res = await sendBaseRpc(method, params);
+			if (!isWsUnavailable(res) || !shouldRetryWsUnavailable(res)) return res;
+		}
+
+		if (attempt < maxAttempts - 1) {
+			await sleep(retryDelayMs);
+		}
+	}
+
+	return { ok: false, error: { message: "WebSocket not connected" } };
 }
 
 // ── Step indicator ──────────────────────────────────────────
@@ -108,6 +145,11 @@ function AuthStep({ onNext, skippable }) {
 	var isIpAddress = /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname) || location.hostname.startsWith("[");
 	var browserSupportsWebauthn = !!window.PublicKeyCredential;
 	var passkeyEnabled = webauthnAvailable && browserSupportsWebauthn && !isIpAddress;
+
+	function skipAndContinue() {
+		ensureWsConnected();
+		onNext();
+	}
 
 	useEffect(() => {
 		fetch("/api/auth/status")
@@ -387,7 +429,7 @@ function AuthStep({ onNext, skippable }) {
 				<button type="button" class="provider-btn" disabled=${saving} onClick=${onPasskeyRegister}>
 					${saving ? "Registering\u2026" : "Register passkey"}
 				</button>
-				${skippable && html`<button type="button" class="text-xs text-[var(--muted)] cursor-pointer bg-transparent border-none underline" onClick=${onNext}>Skip for now</button>`}
+				${skippable && html`<button type="button" class="text-xs text-[var(--muted)] cursor-pointer bg-transparent border-none underline" onClick=${skipAndContinue}>Skip for now</button>`}
 			</div>
 		</div>`
 		}
@@ -412,7 +454,7 @@ function AuthStep({ onNext, skippable }) {
 				<button type="submit" class="provider-btn" disabled=${saving}>
 					${saving ? "Setting up\u2026" : localhostOnly && !password ? "Skip" : "Set password"}
 				</button>
-				${skippable && html`<button type="button" class="text-xs text-[var(--muted)] cursor-pointer bg-transparent border-none underline" onClick=${onNext}>Skip for now</button>`}
+				${skippable && html`<button type="button" class="text-xs text-[var(--muted)] cursor-pointer bg-transparent border-none underline" onClick=${skipAndContinue}>Skip for now</button>`}
 			</div>
 		</form>`
 		}
@@ -420,7 +462,7 @@ function AuthStep({ onNext, skippable }) {
 		${
 			method === null &&
 			html`<div class="flex items-center gap-3 mt-1">
-			${skippable && html`<button type="button" class="text-xs text-[var(--muted)] cursor-pointer bg-transparent border-none underline" onClick=${onNext}>Skip for now</button>`}
+			${skippable && html`<button type="button" class="text-xs text-[var(--muted)] cursor-pointer bg-transparent border-none underline" onClick=${skipAndContinue}>Skip for now</button>`}
 		</div>`
 		}
 	</div>`;

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     net::TcpListener,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -262,19 +263,19 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".moltis"))
 }
 
-/// Path to the default persona's soul file.
+/// Path to the default agent's soul file.
 pub fn soul_path() -> PathBuf {
-    data_dir().join("people/default/SOUL.md")
+    data_dir().join("agents/default/SOUL.md")
 }
 
-/// Path to the default persona's AGENTS markdown.
+/// Path to the default agent's AGENTS markdown.
 pub fn agents_path() -> PathBuf {
-    data_dir().join("people/default/AGENTS.md")
+    data_dir().join("agents/default/AGENTS.md")
 }
 
-/// Path to the default persona's identity file.
+/// Path to the default agent's identity file.
 pub fn identity_path() -> PathBuf {
-    data_dir().join("people/default/IDENTITY.md")
+    data_dir().join("agents/default/IDENTITY.md")
 }
 
 /// Path to the workspace user profile file.
@@ -282,9 +283,9 @@ pub fn user_path() -> PathBuf {
     data_dir().join("USER.md")
 }
 
-/// Path to the default persona's tool-guidance markdown.
+/// Path to the default agent's tool-guidance markdown.
 pub fn tools_path() -> PathBuf {
-    data_dir().join("people/default/TOOLS.md")
+    data_dir().join("agents/default/TOOLS.md")
 }
 
 /// Path to the workspace PEOPLE roster markdown.
@@ -292,14 +293,14 @@ pub fn people_path() -> PathBuf {
     data_dir().join("PEOPLE.md")
 }
 
-/// Ensure the default agent workspace exists under `people/default/`.
+/// Ensure the default agent workspace exists under `agents/default/`.
 ///
 /// This seeds empty files when missing:
 /// - `IDENTITY.md` (frontmatter + starter body)
 /// - `SOUL.md` (default soul text, via `load_soul()` seed behavior)
 /// - `TOOLS.md` (empty)
 /// - `AGENTS.md` (empty)
-pub fn ensure_default_person_seeded() -> anyhow::Result<()> {
+pub fn ensure_default_agent_seeded() -> anyhow::Result<()> {
     let identity = identity_path();
     if let Some(parent) = identity.parent() {
         std::fs::create_dir_all(parent)?;
@@ -337,12 +338,12 @@ pub fn ensure_people_md_seeded() -> anyhow::Result<()> {
     }
     std::fs::write(
         &path,
-        "---\nschema_version: 1\npeople:\n  - name: default\n    display_name: Default\n---\n\n# PEOPLE.md\n\nPublic directory.\n\n- Edit display/contact fields here.\n- emoji/creature are synced from people/<name>/IDENTITY.md.\n",
+        "---\nschema_version: 1\npeople:\n  - name: default\n    display_name: Default\n---\n\n# PEOPLE.md\n\nPublic directory.\n\n- Edit display/contact fields here.\n- emoji/creature are synced from agents/<agent_id>/IDENTITY.md.\n",
     )?;
     Ok(())
 }
 
-/// Sync `PEOPLE.md` frontmatter fields (`emoji`/`creature`) from `people/<name>/IDENTITY.md`.
+/// Sync `PEOPLE.md` frontmatter fields (`emoji`/`creature`) from `agents/<agent_id>/IDENTITY.md`.
 ///
 /// - Only updates YAML frontmatter; body is preserved byte-for-byte.
 /// - Preserves `people[]` ordering and all other per-entry keys.
@@ -391,9 +392,9 @@ pub fn sync_people_md_from_identities() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    // Build set of existing directories under people/.
-    let mut people_dirs = std::collections::HashSet::<String>::new();
-    let root_dir = people_dir();
+    // Build set of existing directories under agents/.
+    let mut agent_ids = std::collections::HashSet::<String>::new();
+    let root_dir = agents_dir();
     if let Ok(rd) = std::fs::read_dir(&root_dir) {
         for entry in rd.flatten() {
             let Ok(ft) = entry.file_type() else {
@@ -403,8 +404,8 @@ pub fn sync_people_md_from_identities() -> anyhow::Result<()> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if is_valid_person_name(&name) {
-                people_dirs.insert(name);
+            if is_valid_agent_id(&name) {
+                agent_ids.insert(name);
             }
         }
     }
@@ -427,7 +428,7 @@ pub fn sync_people_md_from_identities() -> anyhow::Result<()> {
         }
         listed_names.insert(name.clone());
 
-        if !is_valid_person_name(&name) {
+        if !is_valid_agent_id(&name) {
             warn!(name = %name, "PEOPLE.md entry has invalid name; skipping sync");
             continue;
         }
@@ -436,13 +437,13 @@ pub fn sync_people_md_from_identities() -> anyhow::Result<()> {
             continue;
         }
 
-        if !people_dirs.contains(&name) {
-            warn!(name = %name, "PEOPLE.md entry has no corresponding people/<name>/ directory; skipping sync");
+        if !agent_ids.contains(&name) {
+            warn!(name = %name, "PEOPLE.md entry has no corresponding agents/<agent_id>/ directory; skipping sync");
             continue;
         }
 
-        let Some(identity) = load_persona_identity(&name) else {
-            warn!(name = %name, "people/<name>/IDENTITY.md missing or invalid; skipping sync");
+        let Some(identity) = load_agent_identity(&name) else {
+            warn!(name = %name, "agents/<agent_id>/IDENTITY.md missing or invalid; skipping sync");
             continue;
         };
 
@@ -481,9 +482,9 @@ pub fn sync_people_md_from_identities() -> anyhow::Result<()> {
     }
 
     // Warn if a directory exists but isn't discoverable in PEOPLE.md.
-    for dir_name in people_dirs {
-        if !listed_names.contains(&dir_name) {
-            warn!(name = %dir_name, "people/<name>/ exists but is missing from PEOPLE.md");
+    for agent_id in agent_ids {
+        if !listed_names.contains(&agent_id) {
+            warn!(name = %agent_id, "agents/<agent_id>/ exists but is missing from PEOPLE.md");
         }
     }
 
@@ -527,17 +528,16 @@ fn atomic_write_if_changed(path: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Directory containing per-agent private workspace docs (`people/<name>/...`).
-pub fn people_dir() -> PathBuf {
-    data_dir().join("people")
+/// Directory containing per-agent private workspace docs (`agents/<agent_id>/...`).
+pub fn agents_dir() -> PathBuf {
+    data_dir().join("agents")
 }
 
-/// Validate the stable agent directory name (the `<name>` in `people/<name>/...`).
+/// Validate the stable agent directory name (the `<agent_id>` in `agents/<agent_id>/...`).
 ///
 /// The name must be ASCII and match: `^[a-z0-9][a-z0-9_-]{0,63}$`.
-pub fn is_valid_person_name(name: &str) -> bool {
-    let name = name;
-    let bytes = name.as_bytes();
+pub fn is_valid_agent_id(agent_id: &str) -> bool {
+    let bytes = agent_id.as_bytes();
     if bytes.is_empty() || bytes.len() > 64 {
         return false;
     }
@@ -550,14 +550,62 @@ pub fn is_valid_person_name(name: &str) -> bool {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-')
 }
 
-fn person_dir(person_name: &str) -> Option<PathBuf> {
-    is_valid_person_name(person_name).then(|| people_dir().join(person_name))
+fn agent_dir(agent_id: &str) -> Option<PathBuf> {
+    is_valid_agent_id(agent_id).then(|| agents_dir().join(agent_id))
 }
 
-fn load_markdown_raw(path: PathBuf) -> Option<String> {
+fn legacy_people_dir() -> PathBuf {
+    data_dir().join("people")
+}
+
+fn legacy_people_equivalent(path: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(agents_dir()).ok()?;
+    Some(legacy_people_dir().join(relative))
+}
+
+fn warned_legacy_people_paths() -> &'static Mutex<HashSet<PathBuf>> {
+    static WARNED: std::sync::OnceLock<Mutex<HashSet<PathBuf>>> = std::sync::OnceLock::new();
+    WARNED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn warn_legacy_people_doc_fallback(path: &Path, legacy_path: &Path) {
+    let warned = warned_legacy_people_paths();
+    let mut guard = warned.lock().unwrap_or_else(|e| e.into_inner());
+    if !guard.insert(legacy_path.to_path_buf()) {
+        return;
+    }
+
+    warn!(
+        reason_code = "legacy_people_dir_fallback",
+        expected_path = %path.display(),
+        legacy_path = %legacy_path.display(),
+        "reading legacy people/ agent doc via migration fallback; move the file to agents/<agent_id>/"
+    );
+}
+
+fn resolve_agent_doc_path(path: &Path) -> PathBuf {
+    if path.exists() {
+        return path.to_path_buf();
+    }
+    let Some(legacy_path) = legacy_people_equivalent(path) else {
+        return path.to_path_buf();
+    };
+    if !legacy_path.exists() {
+        return path.to_path_buf();
+    }
+    warn_legacy_people_doc_fallback(path, &legacy_path);
+    legacy_path
+}
+
+fn read_markdown_raw(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     let trimmed = strip_leading_html_comments(&content).trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn load_markdown_raw(path: PathBuf) -> Option<String> {
+    let resolved = resolve_agent_doc_path(&path);
+    read_markdown_raw(&resolved)
 }
 
 /// Path to workspace heartbeat markdown.
@@ -571,7 +619,8 @@ pub fn load_identity() -> Option<AgentIdentity> {
 }
 
 fn load_identity_from_path(path: PathBuf) -> Option<AgentIdentity> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let resolved = resolve_agent_doc_path(&path);
+    let content = std::fs::read_to_string(resolved).ok()?;
     let frontmatter = extract_yaml_frontmatter(&content)?;
     let identity = parse_identity_frontmatter(frontmatter);
     if identity.name.is_none()
@@ -585,21 +634,21 @@ fn load_identity_from_path(path: PathBuf) -> Option<AgentIdentity> {
     }
 }
 
-/// Load identity values from a named persona's `IDENTITY.md` frontmatter if present.
-pub fn load_persona_identity(persona_id: &str) -> Option<AgentIdentity> {
-    let dir = person_dir(persona_id)?;
+/// Load identity values from a named agent's `IDENTITY.md` frontmatter if present.
+pub fn load_agent_identity(agent_id: &str) -> Option<AgentIdentity> {
+    let dir = agent_dir(agent_id)?;
     load_identity_from_path(dir.join("IDENTITY.md"))
 }
 
 /// Load IDENTITY.md raw markdown for the default agent
-/// (`<data_dir>/people/default/IDENTITY.md`) if present and non-empty.
+/// (`<data_dir>/agents/default/IDENTITY.md`) if present and non-empty.
 pub fn load_identity_md_raw() -> Option<String> {
     load_markdown_raw(identity_path())
 }
 
-/// Load IDENTITY.md raw markdown from a named persona directory if present and non-empty.
-pub fn load_persona_identity_md_raw(persona_id: &str) -> Option<String> {
-    let dir = person_dir(persona_id)?;
+/// Load IDENTITY.md raw markdown from a named agent directory if present and non-empty.
+pub fn load_agent_identity_md_raw(agent_id: &str) -> Option<String> {
+    let dir = agent_dir(agent_id)?;
     load_markdown_raw(dir.join("IDENTITY.md"))
 }
 
@@ -667,40 +716,33 @@ If you change this file, tell the user — it's your soul, and they should know.
 \n\
 _This file is yours to evolve. As you learn who you are, update it._";
 
-/// Load SOUL.md for the default agent (`<data_dir>/people/default/SOUL.md`)
+/// Load SOUL.md for the default agent (`<data_dir>/agents/default/SOUL.md`)
 /// if present and non-empty.
 ///
 /// When the file does not exist, it is seeded with [`DEFAULT_SOUL`] (mirroring
 /// how `discover_and_load()` writes `moltis.toml` on first run).
 pub fn load_soul() -> Option<String> {
     let path = soul_path();
-    match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        },
-        Err(_) => {
-            // File doesn't exist — seed it with the default soul.
-            if let Err(e) = write_default_soul() {
-                debug!("failed to write default SOUL.md: {e}");
-                return None;
-            }
-            Some(DEFAULT_SOUL.to_string())
-        },
+    let resolved = resolve_agent_doc_path(&path);
+    if let Some(content) = read_markdown_raw(&resolved) {
+        return Some(content);
     }
+
+    // File doesn't exist — seed it with the default soul.
+    if let Err(e) = write_default_soul() {
+        debug!("failed to write default SOUL.md: {e}");
+        return None;
+    }
+    Some(DEFAULT_SOUL.to_string())
 }
 
-/// Load SOUL.md from a named persona directory if present and non-empty.
-pub fn load_persona_soul(persona_id: &str) -> Option<String> {
-    let dir = person_dir(persona_id)?;
+/// Load SOUL.md from a named agent directory if present and non-empty.
+pub fn load_agent_soul(agent_id: &str) -> Option<String> {
+    let dir = agent_dir(agent_id)?;
     load_markdown_raw(dir.join("SOUL.md"))
 }
 
-/// Write `DEFAULT_SOUL` to the default persona's `SOUL.md` when the file doesn't
+/// Write `DEFAULT_SOUL` to the default agent's `SOUL.md` when the file doesn't
 /// already exist.
 fn write_default_soul() -> anyhow::Result<()> {
     let path = soul_path();
@@ -715,27 +757,27 @@ fn write_default_soul() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Load AGENTS.md for the default agent (`<data_dir>/people/default/AGENTS.md`)
+/// Load AGENTS.md for the default agent (`<data_dir>/agents/default/AGENTS.md`)
 /// if present and non-empty.
 pub fn load_agents_md() -> Option<String> {
     load_workspace_markdown(agents_path())
 }
 
-/// Load AGENTS.md from a named persona directory if present and non-empty.
-pub fn load_persona_agents_md(persona_id: &str) -> Option<String> {
-    let dir = person_dir(persona_id)?;
+/// Load AGENTS.md from a named agent directory if present and non-empty.
+pub fn load_agent_agents_md(agent_id: &str) -> Option<String> {
+    let dir = agent_dir(agent_id)?;
     load_workspace_markdown(dir.join("AGENTS.md"))
 }
 
-/// Load TOOLS.md for the default agent (`<data_dir>/people/default/TOOLS.md`)
+/// Load TOOLS.md for the default agent (`<data_dir>/agents/default/TOOLS.md`)
 /// if present and non-empty.
 pub fn load_tools_md() -> Option<String> {
     load_workspace_markdown(tools_path())
 }
 
-/// Load TOOLS.md from a named persona directory if present and non-empty.
-pub fn load_persona_tools_md(persona_id: &str) -> Option<String> {
-    let dir = person_dir(persona_id)?;
+/// Load TOOLS.md from a named agent directory if present and non-empty.
+pub fn load_agent_tools_md(agent_id: &str) -> Option<String> {
+    let dir = agent_dir(agent_id)?;
     load_workspace_markdown(dir.join("TOOLS.md"))
 }
 
@@ -744,7 +786,7 @@ pub fn load_heartbeat_md() -> Option<String> {
     load_workspace_markdown(heartbeat_path())
 }
 
-/// Persist SOUL.md for the default agent (`<data_dir>/people/default/SOUL.md`).
+/// Persist SOUL.md for the default agent (`<data_dir>/agents/default/SOUL.md`).
 ///
 /// - `Some(non-empty)` writes `SOUL.md` with the given content
 /// - `None` or empty writes an empty `SOUL.md` so that `load_soul()`
@@ -1044,13 +1086,8 @@ fn yaml_scalar(value: &str) -> String {
 }
 
 fn load_workspace_markdown(path: PathBuf) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let trimmed = strip_leading_html_comments(&content).trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    let resolved = resolve_agent_doc_path(&path);
+    read_markdown_raw(&resolved)
 }
 
 fn strip_leading_html_comments(content: &str) -> &str {
@@ -1642,16 +1679,16 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
     }
 
     #[test]
-    fn default_person_paths_live_under_people_default() {
+    fn default_agent_paths_live_under_agents_default() {
         let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
         let data = data_dir();
-        assert_eq!(identity_path(), data.join("people/default/IDENTITY.md"));
-        assert_eq!(soul_path(), data.join("people/default/SOUL.md"));
-        assert_eq!(tools_path(), data.join("people/default/TOOLS.md"));
-        assert_eq!(agents_path(), data.join("people/default/AGENTS.md"));
+        assert_eq!(identity_path(), data.join("agents/default/IDENTITY.md"));
+        assert_eq!(soul_path(), data.join("agents/default/SOUL.md"));
+        assert_eq!(tools_path(), data.join("agents/default/TOOLS.md"));
+        assert_eq!(agents_path(), data.join("agents/default/AGENTS.md"));
 
         clear_data_dir();
     }
@@ -1924,7 +1961,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
         set_data_dir(dir.path().to_path_buf());
 
         // Seed identity (SOT for emoji/creature).
-        let identity_path = data_dir().join("people/default/IDENTITY.md");
+        let identity_path = data_dir().join("agents/default/IDENTITY.md");
         std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
         std::fs::write(
             &identity_path,
@@ -1986,7 +2023,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
-        let identity_path = data_dir().join("people/default/IDENTITY.md");
+        let identity_path = data_dir().join("agents/default/IDENTITY.md");
         std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
         std::fs::write(
             &identity_path,
@@ -2076,6 +2113,44 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
         let on_disk = std::fs::read_to_string(soul_path()).unwrap();
         assert_eq!(on_disk, custom);
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn load_soul_falls_back_to_legacy_people_default_path() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        let legacy_path = data_dir().join("people/default/SOUL.md");
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "LEGACY SOUL").unwrap();
+
+        let content = load_soul();
+        assert_eq!(content.as_deref(), Some("LEGACY SOUL"));
+        assert!(
+            !soul_path().exists(),
+            "legacy fallback should not seed a new file"
+        );
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn load_agent_identity_md_raw_falls_back_to_legacy_people_path() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        let legacy_path = data_dir().join("people/ops/IDENTITY.md");
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "# legacy identity").unwrap();
+
+        assert_eq!(
+            load_agent_identity_md_raw("ops").as_deref(),
+            Some("# legacy identity")
+        );
 
         clear_data_dir();
     }

@@ -430,32 +430,25 @@ impl std::fmt::Display for SandboxMode {
     }
 }
 
-/// Scope determines sandbox container reuse boundaries.
+/// Scope key determines sandbox container reuse boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SandboxScope {
-    Session,
-    /// Reuse sandbox per chat (e.g. a Telegram group).
-    Chat,
-    /// Reuse sandbox per bot/account.
-    Bot,
-    /// Single shared sandbox for the whole instance.
-    Global,
+#[serde(rename_all = "snake_case")]
+pub enum SandboxScopeKey {
+    SessionId,
+    SessionKey,
 }
 
-impl Default for SandboxScope {
+impl Default for SandboxScopeKey {
     fn default() -> Self {
-        Self::Chat
+        Self::SessionId
     }
 }
 
-impl std::fmt::Display for SandboxScope {
+impl std::fmt::Display for SandboxScopeKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Session => f.write_str("session"),
-            Self::Chat => f.write_str("chat"),
-            Self::Bot => f.write_str("bot"),
-            Self::Global => f.write_str("global"),
+            Self::SessionId => f.write_str("session_id"),
+            Self::SessionKey => f.write_str("session_key"),
         }
     }
 }
@@ -515,7 +508,7 @@ pub struct ResourceLimits {
 #[serde(default)]
 pub struct SandboxConfig {
     pub mode: SandboxMode,
-    pub scope: SandboxScope,
+    pub scope_key: SandboxScopeKey,
     /// Idle TTL for sandbox containers (seconds).
     ///
     /// - `>0`: idle containers may be reclaimed after TTL.
@@ -576,7 +569,7 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             mode: SandboxMode::default(),
-            scope: SandboxScope::default(),
+            scope_key: SandboxScopeKey::default(),
             idle_ttl_secs: 0,
             data_mount: WorkspaceMount::default(),
             data_mount_type: None,
@@ -596,24 +589,39 @@ impl Default for SandboxConfig {
 
 impl From<&moltis_config::schema::SandboxConfig> for SandboxConfig {
     fn from(cfg: &moltis_config::schema::SandboxConfig) -> Self {
-        let scope_raw = cfg.scope.as_str();
+        let scope_key_raw = if cfg.scope_key != "session_id" {
+            cfg.scope_key.as_str()
+        } else if let Some(legacy_scope) = cfg.scope.as_deref() {
+            if let Some(mapped_scope_key) =
+                moltis_config::schema::legacy_sandbox_scope_to_scope_key(legacy_scope)
+            {
+                warn!(
+                    legacy_scope,
+                    mapped_scope_key,
+                    "using deprecated tools.exec.sandbox.scope compatibility alias"
+                );
+                mapped_scope_key
+            } else {
+                cfg.scope_key.as_str()
+            }
+        } else {
+            cfg.scope_key.as_str()
+        };
         Self {
             mode: match cfg.mode.as_str() {
                 "all" => SandboxMode::All,
                 "non-main" | "nonmain" => SandboxMode::NonMain,
                 _ => SandboxMode::Off,
             },
-            scope: match scope_raw {
-                "session" => SandboxScope::Session,
-                "chat" => SandboxScope::Chat,
-                "bot" => SandboxScope::Bot,
-                "global" => SandboxScope::Global,
+            scope_key: match scope_key_raw {
+                "session_id" => SandboxScopeKey::SessionId,
+                "session_key" => SandboxScopeKey::SessionKey,
                 _ => {
                     warn!(
-                        scope = scope_raw,
-                        "unknown tools.exec.sandbox.scope; falling back to session"
+                        scope_key = scope_key_raw,
+                        "unknown tools.exec.sandbox.scope_key; falling back to session_id"
                     );
-                    SandboxScope::Session
+                    SandboxScopeKey::SessionId
                 },
             },
             idle_ttl_secs: cfg.idle_ttl_secs,
@@ -663,13 +671,13 @@ impl From<&moltis_config::schema::SandboxConfig> for SandboxConfig {
 /// Sandbox identifier — session or agent scoped.
 #[derive(Debug, Clone)]
 pub struct SandboxId {
-    pub scope: SandboxScope,
+    pub scope_key: SandboxScopeKey,
     pub key: String,
 }
 
 impl std::fmt::Display for SandboxId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}/{}", self.scope, self.key)
+        write!(f, "{:?}/{}", self.scope_key, self.key)
     }
 }
 
@@ -2271,20 +2279,6 @@ fn sanitize_sandbox_key(key: &str) -> String {
         .collect()
 }
 
-/// Parse a channel session key into `(channel_type, account_id, chat_id)` if possible.
-///
-/// V1: best-effort, relies on `channel:<account_id>:<chat_id...>` shape.
-fn parse_channel_session_key(session_key: &str) -> Option<(String, String, String)> {
-    let mut it = session_key.split(':');
-    let channel = it.next()?.to_string();
-    let account = it.next()?.to_string();
-    let rest: Vec<&str> = it.collect();
-    if rest.is_empty() {
-        return None;
-    }
-    Some((channel, account, rest.join(":")))
-}
-
 /// In-process lease guard for a sandbox key.
 ///
 /// Prevents TTL pruning from removing a sandbox while it is actively used.
@@ -2311,7 +2305,7 @@ pub struct SandboxRouter {
     backend: Arc<dyn Sandbox>,
     /// Serialize `ensure_ready` per effective sandbox key to avoid concurrent
     /// container creation races when multiple sessions share the same sandbox
-    /// (e.g. multiple bots in one Telegram group with `scope=chat`).
+    /// (e.g. `scope_key=session_key`).
     ensure_ready_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-session overrides: true = sandboxed, false = direct execution.
     overrides: RwLock<HashMap<String, bool>>,
@@ -2374,39 +2368,39 @@ impl SandboxRouter {
 
     /// Check whether a session should run sandboxed.
     /// Per-session override takes priority, then falls back to global mode.
-    pub async fn is_sandboxed(&self, session_key: &str) -> bool {
-        if let Some(&override_val) = self.overrides.read().await.get(session_key) {
+    pub async fn is_sandboxed(&self, session_id: &str) -> bool {
+        if let Some(&override_val) = self.overrides.read().await.get(session_id) {
             return override_val;
         }
         match self.config.mode {
             SandboxMode::Off => false,
             SandboxMode::All => true,
-            SandboxMode::NonMain => session_key != "main",
+            SandboxMode::NonMain => session_id != "main",
         }
     }
 
     /// Set a per-session sandbox override.
-    pub async fn set_override(&self, session_key: &str, enabled: bool) {
+    pub async fn set_override(&self, session_id: &str, enabled: bool) {
         self.overrides
             .write()
             .await
-            .insert(session_key.to_string(), enabled);
+            .insert(session_id.to_string(), enabled);
     }
 
     /// Remove a per-session override (revert to global mode).
-    pub async fn remove_override(&self, session_key: &str) {
-        self.overrides.write().await.remove(session_key);
+    pub async fn remove_override(&self, session_id: &str) {
+        self.overrides.write().await.remove(session_id);
     }
 
-    /// Derive a SandboxId for a given session key.
+    /// Derive a SandboxId for a given session.
     /// The key is sanitized for use as a container name (only alphanumeric, dash, underscore, dot).
-    pub fn sandbox_id_for(&self, session_key: &str) -> SandboxId {
-        let effective_key = self.effective_sandbox_key(session_key);
+    pub fn sandbox_id_for(&self, session_id: &str, session_key: Option<&str>) -> Result<SandboxId> {
+        let effective_key = self.effective_sandbox_key(session_id, session_key)?;
         let sanitized = sanitize_sandbox_key(&effective_key);
-        SandboxId {
-            scope: self.config.scope.clone(),
+        Ok(SandboxId {
+            scope_key: self.config.scope_key.clone(),
             key: sanitized,
-        }
+        })
     }
 
     /// Ensure the sandbox container for a session is ready.
@@ -2415,10 +2409,11 @@ impl SandboxRouter {
     /// sessions map to the same container (shared scopes like `chat|bot|global`).
     pub async fn ensure_ready_for_session(
         &self,
-        session_key: &str,
+        session_id: &str,
+        session_key: Option<&str>,
         image_override: Option<&str>,
     ) -> Result<SandboxId> {
-        let effective_key = self.effective_sandbox_key(session_key);
+        let effective_key = self.effective_sandbox_key(session_id, session_key)?;
         let lock = {
             let mut locks = self.ensure_ready_locks.lock().await;
             locks
@@ -2427,7 +2422,7 @@ impl SandboxRouter {
                 .clone()
         };
         let _guard = lock.lock().await;
-        let id = self.sandbox_id_for(session_key);
+        let id = self.sandbox_id_for(session_id, session_key)?;
         self.backend.ensure_ready(&id, image_override).await?;
         Ok(id)
     }
@@ -2435,30 +2430,23 @@ impl SandboxRouter {
     /// Compute the effective (unsanitized) sandbox key for a session.
     ///
     /// This is the canonical identifier for sandbox reuse boundaries.
-    pub fn effective_sandbox_key(&self, session_key: &str) -> String {
-        match self.config.scope {
-            SandboxScope::Session => session_key.to_string(),
-            SandboxScope::Global => "global".to_string(),
-            SandboxScope::Bot => {
-                if let Some((channel, account, _chat)) = parse_channel_session_key(session_key) {
-                    format!("{channel}:bot:{account}")
-                } else {
-                    session_key.to_string()
+    pub fn effective_sandbox_key(
+        &self,
+        session_id: &str,
+        session_key: Option<&str>,
+    ) -> Result<String> {
+        match self.config.scope_key {
+            SandboxScopeKey::SessionId => Ok(session_id.to_string()),
+            SandboxScopeKey::SessionKey => {
+                if let Some(key) = session_key.map(str::trim).filter(|s| !s.is_empty()) {
+                    return Ok(key.to_string());
                 }
-            },
-            SandboxScope::Chat => {
-                if let Some((channel, _account, chat)) = parse_channel_session_key(session_key) {
-                    // V1: Keep DM behavior stable — do not apply chat-scope to Telegram DMs.
-                    if channel == "telegram" {
-                        let chat_id = chat.split(':').next().unwrap_or("");
-                        if !chat_id.starts_with('-') {
-                            return session_key.to_string();
-                        }
-                    }
-                    format!("{channel}:chat:{chat}")
-                } else {
-                    session_key.to_string()
-                }
+                tracing::debug!(
+                    reason_code = "missing_session_key_fallback_to_session_id",
+                    session_id,
+                    "scope_key=session_key missing session_key; falling back to session_id"
+                );
+                Ok(session_id.to_string())
             },
         }
     }
@@ -2466,21 +2454,27 @@ impl SandboxRouter {
     /// Acquire an in-process lease for an effective sandbox key.
     ///
     /// Used to prevent TTL pruning from removing a sandbox while it is actively in use.
-    pub fn acquire_lease(&self, session_key: &str) -> SandboxLease {
-        let key = self.effective_sandbox_key(session_key);
+    pub fn acquire_lease(
+        &self,
+        session_id: &str,
+        session_key: Option<&str>,
+    ) -> Result<SandboxLease> {
+        let key = self.effective_sandbox_key(session_id, session_key)?;
         {
             let mut leases = self.lease_counts.lock().unwrap_or_else(|e| e.into_inner());
             *leases.entry(key.clone()).or_insert(0) += 1;
         }
-        SandboxLease {
+        Ok(SandboxLease {
             key,
             lease_counts: std::sync::Arc::clone(&self.lease_counts),
-        }
+        })
     }
 
     /// Record that a sandbox key was used (updates last_used timestamp).
-    pub fn touch(&self, session_key: &str) {
-        self.touch_effective_key(&self.effective_sandbox_key(session_key));
+    pub fn touch(&self, session_id: &str, session_key: Option<&str>) -> Result<()> {
+        let effective = self.effective_sandbox_key(session_id, session_key)?;
+        self.touch_effective_key(&effective);
+        Ok(())
     }
 
     pub fn touch_effective_key(&self, effective_key: &str) {
@@ -2532,7 +2526,7 @@ impl SandboxRouter {
     /// Clean up sandbox resources for an effective sandbox key.
     pub async fn cleanup_effective_key(&self, effective_key: &str) -> Result<()> {
         let id = SandboxId {
-            scope: self.config.scope.clone(),
+            scope_key: self.config.scope_key.clone(),
             key: sanitize_sandbox_key(effective_key),
         };
         self.backend.cleanup(&id).await?;
@@ -2547,24 +2541,31 @@ impl SandboxRouter {
         Ok(())
     }
 
-    /// Clean up sandbox resources for a session.
-    pub async fn cleanup_session(&self, session_key: &str) -> Result<()> {
-        let id = self.sandbox_id_for(session_key);
+    /// Clean up sandbox resources for a session (best-effort).
+    ///
+    /// When `scope_key=session_key`, multiple sessions may share the same
+    /// effective sandbox key, so this only clears per-session overrides.
+    pub async fn cleanup_session(&self, session_id: &str, session_key: Option<&str>) -> Result<()> {
+        self.remove_override(session_id).await;
+        self.remove_image_override(session_id).await;
+
+        if self.config.scope_key != SandboxScopeKey::SessionId {
+            return Ok(());
+        }
+
+        let id = self.sandbox_id_for(session_id, session_key)?;
         self.backend.cleanup(&id).await?;
-        self.remove_override(session_key).await;
-        self.remove_image_override(session_key).await;
         {
-            let effective_key = self.effective_sandbox_key(session_key);
             let mut locks = self.ensure_ready_locks.lock().await;
-            locks.remove(&effective_key);
+            locks.remove(session_id);
         }
         Ok(())
     }
 
     /// Clean up per-session override state (without touching containers).
-    pub async fn cleanup_session_state(&self, session_key: &str) {
-        self.remove_override(session_key).await;
-        self.image_overrides.write().await.remove(session_key);
+    pub async fn cleanup_session_state(&self, session_id: &str) {
+        self.remove_override(session_id).await;
+        self.image_overrides.write().await.remove(session_id);
     }
 
     /// Access the sandbox backend.
@@ -2588,23 +2589,22 @@ impl SandboxRouter {
     }
 
     /// Set a per-session image override.
-    pub async fn set_image_override(&self, session_key: &str, image: String) {
-        if self.config.scope != SandboxScope::Session {
-            // Shared scopes must not allow per-session image overrides.
+    pub async fn set_image_override(&self, session_id: &str, image: String) {
+        if self.config.scope_key != SandboxScopeKey::SessionId {
             return;
         }
         self.image_overrides
             .write()
             .await
-            .insert(session_key.to_string(), image);
+            .insert(session_id.to_string(), image);
     }
 
     /// Remove a per-session image override.
-    pub async fn remove_image_override(&self, session_key: &str) {
-        if self.config.scope != SandboxScope::Session {
+    pub async fn remove_image_override(&self, session_id: &str) {
+        if self.config.scope_key != SandboxScopeKey::SessionId {
             return;
         }
-        self.image_overrides.write().await.remove(session_key);
+        self.image_overrides.write().await.remove(session_id);
     }
 
     /// Set a runtime override for the global default image.
@@ -2632,12 +2632,12 @@ impl SandboxRouter {
     /// 3. Runtime global override (`set_global_image`)
     /// 4. Global config (`config.tools.exec.sandbox.image`)
     /// 5. Default constant (`DEFAULT_SANDBOX_IMAGE`)
-    pub async fn resolve_image(&self, session_key: &str, skill_image: Option<&str>) -> String {
+    pub async fn resolve_image(&self, session_id: &str, skill_image: Option<&str>) -> String {
         if let Some(img) = skill_image {
             return img.to_string();
         }
-        if self.config.scope == SandboxScope::Session {
-            if let Some(img) = self.image_overrides.read().await.get(session_key) {
+        if self.config.scope_key == SandboxScopeKey::SessionId {
+            if let Some(img) = self.image_overrides.read().await.get(session_id) {
                 return img.clone();
             }
         }
@@ -2723,11 +2723,9 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_scope_display() {
-        assert_eq!(SandboxScope::Session.to_string(), "session");
-        assert_eq!(SandboxScope::Chat.to_string(), "chat");
-        assert_eq!(SandboxScope::Bot.to_string(), "bot");
-        assert_eq!(SandboxScope::Global.to_string(), "global");
+    fn test_sandbox_scope_key_display() {
+        assert_eq!(SandboxScopeKey::SessionId.to_string(), "session_id");
+        assert_eq!(SandboxScopeKey::SessionKey.to_string(), "session_key");
     }
 
     #[test]
@@ -2771,7 +2769,7 @@ mod tests {
     fn test_sandbox_config_serde() {
         let json = r#"{
             "mode": "all",
-            "scope": "session",
+            "scope_key": "session_id",
             "data_mount": "rw",
             "data_mount_type": "bind",
             "data_mount_source": "/srv/moltis-data",
@@ -2780,6 +2778,7 @@ mod tests {
         }"#;
         let config: SandboxConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.mode, SandboxMode::All);
+        assert_eq!(config.scope_key, SandboxScopeKey::SessionId);
         assert_eq!(config.data_mount, WorkspaceMount::Rw);
         assert_eq!(config.data_mount_type, Some(DataMountType::Bind));
         assert_eq!(
@@ -2821,7 +2820,7 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "main".into(),
         };
         let view = public_data_view_dir(&dir.path().display().to_string(), &id.key);
@@ -2845,7 +2844,7 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "main".into(),
         };
         let args = docker.data_mount_args(&id).unwrap();
@@ -2863,7 +2862,7 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "main".into(),
         };
         let err = docker.data_mount_args(&id).unwrap_err().to_string();
@@ -2880,7 +2879,7 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "main".into(),
         };
         let err = docker.data_mount_args(&id).unwrap_err().to_string();
@@ -2897,7 +2896,7 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "main".into(),
         };
         let err = docker.data_mount_args(&id).unwrap_err().to_string();
@@ -2914,7 +2913,7 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "main".into(),
         };
         let err = docker.data_mount_args(&id).unwrap_err().to_string();
@@ -2931,7 +2930,7 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "main".into(),
         };
         let err = docker.data_mount_args(&id).unwrap_err().to_string();
@@ -2951,7 +2950,7 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "test".into(),
         };
         let args = docker
@@ -2970,12 +2969,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("USER.md"), "user-public\n").unwrap();
         std::fs::write(dir.path().join("PEOPLE.md"), "people-public\n").unwrap();
-        std::fs::create_dir_all(dir.path().join("people/default")).unwrap();
+        std::fs::create_dir_all(dir.path().join("agents/default")).unwrap();
         std::fs::create_dir_all(dir.path().join("skills/personal-skill/agents")).unwrap();
         std::fs::create_dir_all(dir.path().join(".moltis/skills/project-skill/references"))
             .unwrap();
         std::fs::write(
-            dir.path().join("people/default/IDENTITY.md"),
+            dir.path().join("agents/default/IDENTITY.md"),
             "---\nname: default\n---\nsecret\n",
         )
         .unwrap();
@@ -3141,7 +3140,7 @@ mod tests {
         };
         let sandbox = create_sandbox(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "test".into(),
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -3155,7 +3154,7 @@ mod tests {
     async fn test_no_sandbox_exec() {
         let sandbox = NoSandbox;
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "test".into(),
         };
         let opts = ExecOpts::default();
@@ -3172,7 +3171,7 @@ mod tests {
         };
         let docker = DockerSandbox::new(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "abc123".into(),
         };
         assert_eq!(docker.container_name(&id), "my-prefix-abc123");
@@ -3290,27 +3289,27 @@ mod tests {
     fn test_sandbox_router_config_accessor() {
         let config = SandboxConfig {
             mode: SandboxMode::NonMain,
-            scope: SandboxScope::Bot,
+            scope_key: SandboxScopeKey::SessionId,
             image: Some("alpine:latest".into()),
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
         assert_eq!(*router.mode(), SandboxMode::NonMain);
-        assert_eq!(router.config().scope, SandboxScope::Bot);
+        assert_eq!(router.config().scope_key, SandboxScopeKey::SessionId);
         assert_eq!(router.config().image.as_deref(), Some("alpine:latest"));
     }
 
     #[test]
     fn test_sandbox_router_sandbox_id_for() {
         let config = SandboxConfig {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
-        let id = router.sandbox_id_for("session:abc");
+        let id = router.sandbox_id_for("session:abc", None).unwrap();
         assert_eq!(id.key, "session-abc");
         // Plain alphanumeric keys pass through unchanged.
-        let id2 = router.sandbox_id_for("main");
+        let id2 = router.sandbox_id_for("main", None).unwrap();
         assert_eq!(id2.key, "main");
     }
 
@@ -3368,18 +3367,19 @@ mod tests {
         let backend: Arc<dyn Sandbox> = detect.clone();
 
         let config = SandboxConfig {
-            scope: SandboxScope::Chat,
+            scope_key: SandboxScopeKey::SessionKey,
             ..Default::default()
         };
         let router = SandboxRouter::with_backend(config, backend);
 
-        // Different sessions that map to the same effective key when scope=chat.
-        let s1 = "telegram:bot1:-100";
-        let s2 = "telegram:bot2:-100";
+        // Different sessions that map to the same effective key when scope_key=session_key.
+        let s1 = "session:one";
+        let s2 = "session:two";
+        let bucket = "bucket:shared";
 
         let (r1, r2) = tokio::join!(
-            router.ensure_ready_for_session(s1, Some("ubuntu:25.10")),
-            router.ensure_ready_for_session(s2, Some("ubuntu:25.10")),
+            router.ensure_ready_for_session(s1, Some(bucket), Some("ubuntu:25.10")),
+            router.ensure_ready_for_session(s2, Some(bucket), Some("ubuntu:25.10")),
         );
         r1.unwrap();
         r2.unwrap();
@@ -3389,77 +3389,72 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_sandbox_key_session_scope() {
+    fn test_effective_sandbox_key_scope_key_session_id() {
         let config = SandboxConfig {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
         assert_eq!(
-            router.effective_sandbox_key("telegram:lovely:-1"),
-            "telegram:lovely:-1"
+            router.effective_sandbox_key("session:abc", None).unwrap(),
+            "session:abc"
         );
     }
 
     #[test]
-    fn test_effective_sandbox_key_chat_scope_telegram_group() {
+    fn test_effective_sandbox_key_scope_key_session_key() {
         let config = SandboxConfig {
-            scope: SandboxScope::Chat,
+            scope_key: SandboxScopeKey::SessionKey,
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
         assert_eq!(
-            router.effective_sandbox_key("telegram:lovely:-5288040422"),
-            "telegram:chat:-5288040422"
+            router
+                .effective_sandbox_key("session:abc", Some("bucket:xyz"))
+                .unwrap(),
+            "bucket:xyz"
         );
     }
 
     #[test]
-    fn test_effective_sandbox_key_chat_scope_telegram_dm_falls_back_to_session() {
+    fn test_effective_sandbox_key_scope_key_session_key_missing_falls_back_to_session_id() {
         let config = SandboxConfig {
-            scope: SandboxScope::Chat,
-            ..Default::default()
-        };
-        let router = SandboxRouter::new(config);
-        let sk = "telegram:lovely:dm:8454363355";
-        assert_eq!(router.effective_sandbox_key(sk), sk);
-    }
-
-    #[test]
-    fn test_effective_sandbox_key_bot_scope() {
-        let config = SandboxConfig {
-            scope: SandboxScope::Bot,
+            scope_key: SandboxScopeKey::SessionKey,
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
         assert_eq!(
-            router.effective_sandbox_key("telegram:lovely:-5288040422"),
-            "telegram:bot:lovely"
+            router.effective_sandbox_key("session:abc", None).unwrap(),
+            "session:abc"
         );
     }
 
     #[test]
-    fn test_effective_sandbox_key_global_scope() {
-        let config = SandboxConfig {
-            scope: SandboxScope::Global,
+    fn test_legacy_scope_chat_maps_to_session_key() {
+        let schema_cfg = moltis_config::schema::SandboxConfig {
+            scope: Some("chat".into()),
             ..Default::default()
         };
-        let router = SandboxRouter::new(config);
-        assert_eq!(router.effective_sandbox_key("any:thing"), "global");
+        let runtime_cfg = SandboxConfig::from(&schema_cfg);
+        assert_eq!(runtime_cfg.scope_key, SandboxScopeKey::SessionKey);
     }
 
     #[tokio::test]
     async fn test_prune_idle_respects_leases() {
         let backend = Arc::new(TestSandbox::new("test", None, None));
         let config = SandboxConfig {
-            scope: SandboxScope::Global,
+            scope_key: SandboxScopeKey::SessionKey,
             idle_ttl_secs: 1,
             ..Default::default()
         };
         let backend_dyn: Arc<dyn Sandbox> = backend.clone();
         let router = SandboxRouter::with_backend(config, backend_dyn);
 
-        let effective_key = router.effective_sandbox_key("main");
+        let session_id = "session:abc";
+        let session_key = Some("bucket:lease");
+        let effective_key = router
+            .effective_sandbox_key(session_id, session_key)
+            .unwrap();
         {
             let mut last = router
                 .last_used_ms
@@ -3468,7 +3463,7 @@ mod tests {
             last.insert(effective_key.clone(), 0);
         }
 
-        let lease = router.acquire_lease("main");
+        let lease = router.acquire_lease(session_id, session_key).unwrap();
         router.prune_idle().await;
         assert_eq!(backend.cleanup_calls.load(Ordering::SeqCst), 0);
 
@@ -3498,7 +3493,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_image_session_override() {
         let config = SandboxConfig {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
@@ -3512,7 +3507,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_image_skill_beats_session() {
         let config = SandboxConfig {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
@@ -3621,7 +3616,7 @@ mod tests {
     #[tokio::test]
     async fn test_sandbox_router_global_image_override() {
         let config = SandboxConfig {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
@@ -3675,7 +3670,7 @@ mod tests {
         };
         let backend = select_backend(config);
         let id = SandboxId {
-            scope: SandboxScope::Session,
+            scope_key: SandboxScopeKey::SessionId,
             key: "session-abc".into(),
         };
         let error = backend.ensure_ready(&id, None).await.unwrap_err();
@@ -3762,7 +3757,7 @@ mod tests {
             let config = SandboxConfig::default();
             let cgroup = CgroupSandbox::new(config);
             let id = SandboxId {
-                scope: SandboxScope::Session,
+                scope_key: SandboxScopeKey::SessionId,
                 key: "sess1".into(),
             };
             assert_eq!(cgroup.scope_name(&id), "moltis-sandbox-sess1");

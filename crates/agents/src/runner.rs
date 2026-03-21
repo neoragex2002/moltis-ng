@@ -89,6 +89,13 @@ pub struct AgentRunResult {
     pub usage: Usage,
 }
 
+/// Optional context that the gateway can attach to runner-emitted hook events.
+#[derive(Debug, Clone, Default)]
+pub struct RunnerHookContext {
+    pub session_key: Option<String>,
+    pub channel_target: Option<moltis_common::types::ChannelTarget>,
+}
+
 /// Callback for streaming events out of the runner.
 pub type OnEvent = Box<dyn Fn(RunnerEvent) + Send + Sync>;
 
@@ -653,7 +660,7 @@ pub async fn run_agent_loop_with_context(
     tool_context: Option<serde_json::Value>,
     hook_registry: Option<Arc<HookRegistry>>,
 ) -> Result<AgentRunResult, AgentRunError> {
-    run_agent_loop_with_context_prefix(
+    run_agent_loop_with_context_prefix_and_hook_context(
         provider,
         tools,
         vec![ChatMessage::system(system_prompt)],
@@ -661,6 +668,7 @@ pub async fn run_agent_loop_with_context(
         on_event,
         history,
         tool_context,
+        None,
         hook_registry,
     )
     .await
@@ -678,6 +686,33 @@ pub async fn run_agent_loop_with_context_prefix(
     on_event: Option<&OnEvent>,
     history: Option<Vec<ChatMessage>>,
     tool_context: Option<serde_json::Value>,
+    hook_registry: Option<Arc<HookRegistry>>,
+) -> Result<AgentRunResult, AgentRunError> {
+    run_agent_loop_with_context_prefix_and_hook_context(
+        provider,
+        tools,
+        prefix_messages,
+        user_content,
+        on_event,
+        history,
+        tool_context,
+        None,
+        hook_registry,
+    )
+    .await
+}
+
+/// Like `run_agent_loop_with_context_prefix` but also accepts hook-only context
+/// that should not leak into tool parameters.
+pub async fn run_agent_loop_with_context_prefix_and_hook_context(
+    provider: Arc<dyn LlmProvider>,
+    tools: &ToolRegistry,
+    prefix_messages: Vec<ChatMessage>,
+    user_content: &UserContent,
+    on_event: Option<&OnEvent>,
+    history: Option<Vec<ChatMessage>>,
+    tool_context: Option<serde_json::Value>,
+    hook_context: Option<RunnerHookContext>,
     hook_registry: Option<Arc<HookRegistry>>,
 ) -> Result<AgentRunResult, AgentRunError> {
     let native_tools = provider.supports_tools();
@@ -729,18 +764,19 @@ pub async fn run_agent_loop_with_context_prefix(
         .unwrap_or("")
         .to_string();
 
-    let chan_chat_key_for_hooks = tool_context
+    let session_key_for_hooks = hook_context
         .as_ref()
-        .and_then(|ctx| ctx.get("_chanChatKey"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    let chan_account_key_for_hooks = chan_chat_key_for_hooks
-        .as_deref()
-        .and_then(moltis_common::identity::parse_chan_chat_key)
-        .map(|parts| format!("{}:{}", parts.channel, parts.chan_user_id));
+        .and_then(|ctx| ctx.session_key.clone())
+        .or_else(|| {
+            tool_context
+                .as_ref()
+                .and_then(|ctx| ctx.get("_sessionKey"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    let channel_target_for_hooks = hook_context.and_then(|ctx| ctx.channel_target);
 
     let mut iterations = 0;
     let mut total_tool_calls = 0;
@@ -777,8 +813,8 @@ pub async fn run_agent_loop_with_context_prefix(
             let as_sent_summary = provider.debug_as_sent_summary(&messages, schemas_for_api);
             let payload = HookPayload::BeforeLLMCall {
                 session_id: session_id_for_hooks.clone(),
-                chan_chat_key: chan_chat_key_for_hooks.clone(),
-                chan_account_key: chan_account_key_for_hooks.clone(),
+                session_key: session_key_for_hooks.clone(),
+                channel_target: channel_target_for_hooks.clone(),
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 messages: serde_json::Value::Array(msgs_json),
@@ -922,8 +958,8 @@ pub async fn run_agent_loop_with_context_prefix(
                 .collect();
             let payload = HookPayload::AfterLLMCall {
                 session_id: session_id_for_hooks.clone(),
-                chan_chat_key: chan_chat_key_for_hooks.clone(),
-                chan_account_key: chan_account_key_for_hooks.clone(),
+                session_key: session_key_for_hooks.clone(),
+                channel_target: channel_target_for_hooks.clone(),
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 text: response.text.clone(),
@@ -999,6 +1035,8 @@ pub async fn run_agent_loop_with_context_prefix(
         }
 
         // Build futures for all tool calls (executed concurrently).
+        let tool_hook_session_key = session_key_for_hooks.clone();
+        let tool_hook_channel_target = channel_target_for_hooks.clone();
         let tool_futures: Vec<_> = response
             .tool_calls
             .iter()
@@ -1011,6 +1049,8 @@ pub async fn run_agent_loop_with_context_prefix(
                 let session_id = session_id_for_hooks.clone();
                 let tc_name = tc.name.clone();
                 let _tc_id = tc.id.clone();
+                let session_key_for_hooks = tool_hook_session_key.clone();
+                let channel_target_for_hooks = tool_hook_channel_target.clone();
 
                 if let Some(ref ctx) = tool_context
                     && let (Some(args_obj), Some(ctx_obj)) = (args.as_object_mut(), ctx.as_object())
@@ -1024,6 +1064,8 @@ pub async fn run_agent_loop_with_context_prefix(
                     if let Some(ref hooks) = hook_registry {
                         let payload = HookPayload::BeforeToolCall {
                             session_id: session_id.clone(),
+                            session_key: session_key_for_hooks.clone(),
+                            channel_target: channel_target_for_hooks.clone(),
                             tool_name: tc_name.clone(),
                             arguments: args.clone(),
                         };
@@ -1066,6 +1108,8 @@ pub async fn run_agent_loop_with_context_prefix(
                                 if let Some(ref hooks) = hook_registry {
                                     let payload = HookPayload::AfterToolCall {
                                         session_id: session_id.clone(),
+                                        session_key: session_key_for_hooks.clone(),
+                                        channel_target: channel_target_for_hooks.clone(),
                                         tool_name: tc_name.clone(),
                                         success: !has_error,
                                         result: Some(val.clone()),
@@ -1088,6 +1132,8 @@ pub async fn run_agent_loop_with_context_prefix(
                                 if let Some(ref hooks) = hook_registry {
                                     let payload = HookPayload::AfterToolCall {
                                         session_id: session_id.clone(),
+                                        session_key: session_key_for_hooks.clone(),
+                                        channel_target: channel_target_for_hooks.clone(),
                                         tool_name: tc_name.clone(),
                                         success: false,
                                         result: None,
@@ -1180,7 +1226,7 @@ pub async fn run_agent_loop_streaming(
     tool_context: Option<serde_json::Value>,
     hook_registry: Option<Arc<HookRegistry>>,
 ) -> Result<AgentRunResult, AgentRunError> {
-    run_agent_loop_streaming_with_prefix(
+    run_agent_loop_streaming_with_prefix_and_hook_context(
         provider,
         tools,
         vec![ChatMessage::system(system_prompt)],
@@ -1188,6 +1234,7 @@ pub async fn run_agent_loop_streaming(
         on_event,
         history,
         tool_context,
+        None,
         hook_registry,
     )
     .await
@@ -1202,6 +1249,33 @@ pub async fn run_agent_loop_streaming_with_prefix(
     on_event: Option<&OnEvent>,
     history: Option<Vec<ChatMessage>>,
     tool_context: Option<serde_json::Value>,
+    hook_registry: Option<Arc<HookRegistry>>,
+) -> Result<AgentRunResult, AgentRunError> {
+    run_agent_loop_streaming_with_prefix_and_hook_context(
+        provider,
+        tools,
+        prefix_messages,
+        user_content,
+        on_event,
+        history,
+        tool_context,
+        None,
+        hook_registry,
+    )
+    .await
+}
+
+/// Streaming variant of the agent loop with an explicit prefix message list
+/// and extra hook-only context from the gateway.
+pub async fn run_agent_loop_streaming_with_prefix_and_hook_context(
+    provider: Arc<dyn LlmProvider>,
+    tools: &ToolRegistry,
+    prefix_messages: Vec<ChatMessage>,
+    user_content: &UserContent,
+    on_event: Option<&OnEvent>,
+    history: Option<Vec<ChatMessage>>,
+    tool_context: Option<serde_json::Value>,
+    hook_context: Option<RunnerHookContext>,
     hook_registry: Option<Arc<HookRegistry>>,
 ) -> Result<AgentRunResult, AgentRunError> {
     let native_tools = provider.supports_tools();
@@ -1260,18 +1334,19 @@ pub async fn run_agent_loop_streaming_with_prefix(
         .unwrap_or("")
         .to_string();
 
-    let chan_chat_key_for_hooks = tool_context
+    let session_key_for_hooks = hook_context
         .as_ref()
-        .and_then(|ctx| ctx.get("_chanChatKey"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    let chan_account_key_for_hooks = chan_chat_key_for_hooks
-        .as_deref()
-        .and_then(moltis_common::identity::parse_chan_chat_key)
-        .map(|parts| format!("{}:{}", parts.channel, parts.chan_user_id));
+        .and_then(|ctx| ctx.session_key.clone())
+        .or_else(|| {
+            tool_context
+                .as_ref()
+                .and_then(|ctx| ctx.get("_sessionKey"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    let channel_target_for_hooks = hook_context.and_then(|ctx| ctx.channel_target);
 
     let mut iterations = 0;
     let mut total_tool_calls = 0;
@@ -1311,8 +1386,8 @@ pub async fn run_agent_loop_streaming_with_prefix(
             let as_sent_summary = provider.debug_as_sent_summary(&messages, &schemas_for_api);
             let payload = HookPayload::BeforeLLMCall {
                 session_id: session_id_for_hooks.clone(),
-                chan_chat_key: chan_chat_key_for_hooks.clone(),
-                chan_account_key: chan_account_key_for_hooks.clone(),
+                session_key: session_key_for_hooks.clone(),
+                channel_target: channel_target_for_hooks.clone(),
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 messages: serde_json::Value::Array(msgs_json),
@@ -1564,8 +1639,8 @@ pub async fn run_agent_loop_streaming_with_prefix(
                 .collect();
             let payload = HookPayload::AfterLLMCall {
                 session_id: session_id_for_hooks.clone(),
-                chan_chat_key: chan_chat_key_for_hooks.clone(),
-                chan_account_key: chan_account_key_for_hooks.clone(),
+                session_key: session_key_for_hooks.clone(),
+                channel_target: channel_target_for_hooks.clone(),
                 provider: provider.name().to_string(),
                 model: provider.id().to_string(),
                 text: if accumulated_text.is_empty() {
@@ -1646,6 +1721,8 @@ pub async fn run_agent_loop_streaming_with_prefix(
         }
 
         // Build futures for all tool calls (executed concurrently).
+        let tool_hook_session_key = session_key_for_hooks.clone();
+        let tool_hook_channel_target = channel_target_for_hooks.clone();
         let tool_futures: Vec<_> = tool_calls
             .iter()
             .map(|tc| {
@@ -1655,6 +1732,8 @@ pub async fn run_agent_loop_streaming_with_prefix(
                 let hook_registry = hook_registry.clone();
                 let session_id = session_id_for_hooks.clone();
                 let tc_name = tc.name.clone();
+                let session_key_for_hooks = tool_hook_session_key.clone();
+                let channel_target_for_hooks = tool_hook_channel_target.clone();
 
                 if let Some(ref ctx) = tool_context
                     && let (Some(args_obj), Some(ctx_obj)) = (args.as_object_mut(), ctx.as_object())
@@ -1668,6 +1747,8 @@ pub async fn run_agent_loop_streaming_with_prefix(
                     if let Some(ref hooks) = hook_registry {
                         let payload = HookPayload::BeforeToolCall {
                             session_id: session_id.clone(),
+                            session_key: session_key_for_hooks.clone(),
+                            channel_target: channel_target_for_hooks.clone(),
                             tool_name: tc_name.clone(),
                             arguments: args.clone(),
                         };
@@ -1709,6 +1790,8 @@ pub async fn run_agent_loop_streaming_with_prefix(
                                 if let Some(ref hooks) = hook_registry {
                                     let payload = HookPayload::AfterToolCall {
                                         session_id: session_id.clone(),
+                                        session_key: session_key_for_hooks.clone(),
+                                        channel_target: channel_target_for_hooks.clone(),
                                         tool_name: tc_name.clone(),
                                         success: !has_error,
                                         result: Some(val.clone()),
@@ -1729,6 +1812,8 @@ pub async fn run_agent_loop_streaming_with_prefix(
                                 if let Some(ref hooks) = hook_registry {
                                     let payload = HookPayload::AfterToolCall {
                                         session_id: session_id.clone(),
+                                        session_key: session_key_for_hooks.clone(),
+                                        channel_target: channel_target_for_hooks.clone(),
                                         tool_name: tc_name.clone(),
                                         success: false,
                                         result: None,
@@ -2197,7 +2282,7 @@ mod tests {
             None,
             Some(serde_json::json!({
                 "_sessionId": "session:abc",
-                "_chanChatKey": "telegram:123:-100",
+                "_sessionKey": "telegram:123:-100",
             })),
             Some(Arc::new(registry)),
         )
@@ -2208,10 +2293,13 @@ mod tests {
         let json = captured
             .first()
             .expect("expected BeforeLLMCall hook payload");
-        assert!(json.contains("\"chanChatKey\""));
-        assert!(json.contains("\"chanAccountKey\""));
-        assert!(json.contains("\"chanChatKey\":\"telegram:123:-100\""));
-        assert!(json.contains("\"chanAccountKey\":\"telegram:123\""));
+        assert!(json.contains("\"sessionId\":\"session:abc\""));
+        assert!(json.contains("\"sessionKey\":\"telegram:123:-100\""));
+        assert!(json.contains("\"channelTarget\""));
+        let legacy_chat_key = format!("{}{}", "chan", "ChatKey");
+        let legacy_account_key = format!("{}{}", "chan", "AccountKey");
+        assert!(!json.contains(&format!("\"{legacy_chat_key}\"")));
+        assert!(!json.contains(&format!("\"{legacy_account_key}\"")));
     }
 
     #[tokio::test]
