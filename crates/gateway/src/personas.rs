@@ -12,7 +12,7 @@ pub(crate) struct PersonaFiles {
     pub agents: String,
 }
 
-pub(crate) fn is_valid_persona_id(agent_id: &str) -> bool {
+pub(crate) fn is_valid_agent_id(agent_id: &str) -> bool {
     let id = agent_id;
     if id.is_empty() || id.len() > 64 {
         return false;
@@ -21,8 +21,8 @@ pub(crate) fn is_valid_persona_id(agent_id: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
-pub(crate) fn persona_dir(agent_id: &str) -> anyhow::Result<PathBuf> {
-    if !is_valid_persona_id(agent_id) {
+pub(crate) fn agent_dir(agent_id: &str) -> anyhow::Result<PathBuf> {
+    if !is_valid_agent_id(agent_id) {
         anyhow::bail!("invalid agent_id");
     }
     Ok(moltis_config::personas_dir().join(agent_id))
@@ -44,8 +44,8 @@ fn write_string(path: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn ensure_default_persona_seeded() -> anyhow::Result<()> {
-    let dir = persona_dir(DEFAULT_PERSONA_ID)?;
+pub(crate) fn ensure_default_agent_seeded() -> anyhow::Result<()> {
+    let dir = agent_dir(DEFAULT_PERSONA_ID)?;
     std::fs::create_dir_all(&dir)?;
 
     let identity_path = dir.join("IDENTITY.md");
@@ -78,7 +78,7 @@ pub(crate) fn ensure_default_persona_seeded() -> anyhow::Result<()> {
 }
 
 pub(crate) fn list_personas() -> anyhow::Result<Vec<String>> {
-    ensure_default_persona_seeded()?;
+    ensure_default_agent_seeded()?;
 
     let dir = moltis_config::personas_dir();
     let mut out = Vec::new();
@@ -97,7 +97,7 @@ pub(crate) fn list_personas() -> anyhow::Result<Vec<String>> {
             if id == DEFAULT_PERSONA_ID {
                 continue;
             }
-            if is_valid_persona_id(&id) {
+            if is_valid_agent_id(&id) {
                 out.push(id);
             }
         }
@@ -114,9 +114,9 @@ pub(crate) fn list_personas() -> anyhow::Result<Vec<String>> {
 
 pub(crate) fn get_persona(agent_id: &str) -> anyhow::Result<PersonaFiles> {
     if agent_id == DEFAULT_PERSONA_ID {
-        ensure_default_persona_seeded()?;
+        ensure_default_agent_seeded()?;
     }
-    let dir = persona_dir(agent_id)?;
+    let dir = agent_dir(agent_id)?;
     Ok(PersonaFiles {
         identity: read_optional_string(&dir.join("IDENTITY.md"))?,
         soul: read_optional_string(&dir.join("SOUL.md"))?,
@@ -126,7 +126,7 @@ pub(crate) fn get_persona(agent_id: &str) -> anyhow::Result<PersonaFiles> {
 }
 
 pub(crate) fn save_persona(agent_id: &str, files: &PersonaFiles) -> anyhow::Result<()> {
-    let dir = persona_dir(agent_id)?;
+    let dir = agent_dir(agent_id)?;
     std::fs::create_dir_all(&dir)?;
 
     write_string(&dir.join("IDENTITY.md"), &files.identity)?;
@@ -140,7 +140,7 @@ pub(crate) fn delete_persona(agent_id: &str) -> anyhow::Result<()> {
     if agent_id == DEFAULT_PERSONA_ID {
         anyhow::bail!("cannot delete default persona");
     }
-    let dir = persona_dir(agent_id)?;
+    let dir = agent_dir(agent_id)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }
@@ -152,7 +152,7 @@ pub(crate) fn clone_persona(from_id: &str, to_id: &str) -> anyhow::Result<()> {
         anyhow::bail!("source and destination agent_id must differ");
     }
     let files = get_persona(from_id)?;
-    let dest_dir = persona_dir(to_id)?;
+    let dest_dir = agent_dir(to_id)?;
     if dest_dir.exists() {
         anyhow::bail!("destination persona already exists");
     }
@@ -166,13 +166,13 @@ mod tests {
 
     #[test]
     fn persona_id_validation_matches_loader_rules() {
-        assert!(is_valid_persona_id("default"));
-        assert!(is_valid_persona_id("ops_1"));
-        assert!(is_valid_persona_id("ops-1"));
-        assert!(!is_valid_persona_id(""));
-        assert!(!is_valid_persona_id(" has-space "));
-        assert!(!is_valid_persona_id("a/b"));
-        assert!(!is_valid_persona_id("../x"));
+        assert!(is_valid_agent_id("default"));
+        assert!(is_valid_agent_id("ops_1"));
+        assert!(is_valid_agent_id("ops-1"));
+        assert!(!is_valid_agent_id(""));
+        assert!(!is_valid_agent_id(" has-space "));
+        assert!(!is_valid_agent_id("a/b"));
+        assert!(!is_valid_agent_id("../x"));
     }
 
     #[test]
@@ -184,7 +184,7 @@ mod tests {
             "default persona must always exist"
         );
 
-        let dir = persona_dir(DEFAULT_PERSONA_ID).expect("default dir");
+        let dir = agent_dir(DEFAULT_PERSONA_ID).expect("default dir");
         assert!(dir.exists(), "default persona dir should exist");
         for file in ["IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md"] {
             assert!(

@@ -104,10 +104,10 @@
 
 ## 当前 TOML 已知问题
 
-当前配置口径里，至少有一个建议尽快收敛的旧字段：
+当前配置口径里，有一个必须清除的旧字段：
 
-- `tools.exec.sandbox.scope` 已废弃
-- 建议改为 `tools.exec.sandbox.scope_key`
+- `tools.exec.sandbox.scope` 已删除
+- 必须改为 `tools.exec.sandbox.scope_key`
 
 如果你原来表达的是旧的 `chat` 语义，当前 V3 下通常应改成：
 
@@ -133,7 +133,7 @@ scope_key = "session_key"
 4. 让系统重新生成一套新的空白 V3 目录。
 5. 只恢复 `USER.md`、`PEOPLE.md`、`agents/`、`skills/` 以及你确认需要的 `moltis.toml` 内容。
 6. 把 3 个 Telegram bot 的完整配置显式写进 `moltis.toml`。
-7. 如果仍在使用 `tools.exec.sandbox.scope`，把它收敛为 `scope_key`。
+7. 将任何残留的 `tools.exec.sandbox.scope` 全部改为 `scope_key`。
 8. 运行 `cargo run -q -p moltis -- config check`，直到没有配置错误。
 9. 启动 Moltis，确认 Telegram bot、agent 映射和 allowlist 都按 TOML 生效。
 

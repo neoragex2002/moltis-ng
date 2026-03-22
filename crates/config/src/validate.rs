@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, path::Path};
 
-use crate::schema::{MoltisConfig, legacy_sandbox_scope_to_scope_key};
+use crate::schema::MoltisConfig;
 
 /// Severity level for a diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1021,36 +1021,22 @@ fn check_semantic_warnings(
         }
     }
 
-    // Sandbox scope_key (legacy `tools.exec.sandbox.scope` still maps during migration).
+    // Sandbox scope_key (`tools.exec.sandbox.scope` is no longer supported).
     if let Some(scope) = config.tools.exec.sandbox.scope.as_deref() {
-        if sandbox_scope_present && sandbox_scope_key_present {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Error,
-                category: "breaking-change",
-                path: "tools.exec.sandbox.scope".into(),
-                message:
-                    "tools.exec.sandbox.scope cannot be combined with tools.exec.sandbox.scope_key; keep only scope_key"
-                        .into(),
-            });
-        } else if let Some(mapped_scope_key) = legacy_sandbox_scope_to_scope_key(scope) {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                category: "breaking-change",
-                path: "tools.exec.sandbox.scope".into(),
-                message: format!(
-                    "tools.exec.sandbox.scope is deprecated; use tools.exec.sandbox.scope_key = \"{mapped_scope_key}\""
-                ),
-            });
+        let message = if sandbox_scope_present && sandbox_scope_key_present {
+            "tools.exec.sandbox.scope is no longer supported; remove it and keep only tools.exec.sandbox.scope_key"
+                .into()
         } else {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Error,
-                category: "unknown-field",
-                path: "tools.exec.sandbox.scope".into(),
-                message:
-                    "invalid tools.exec.sandbox.scope; expected one of: session, chat, bot, global"
-                        .into(),
-            });
-        }
+            format!(
+                "tools.exec.sandbox.scope = \"{scope}\" is no longer supported; use tools.exec.sandbox.scope_key = \"session_id\" or \"session_key\""
+            )
+        };
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "breaking-change",
+            path: "tools.exec.sandbox.scope".into(),
+            message,
+        });
     }
     let valid_sandbox_scope_keys = ["session_id", "session_key"];
     let scope_key = config.tools.exec.sandbox.scope_key.as_str();
@@ -1524,7 +1510,7 @@ bnd = "0.0.0.0"
     }
 
     #[test]
-    fn legacy_sandbox_scope_chat_warns_but_does_not_error() {
+    fn legacy_sandbox_scope_chat_is_a_hard_error() {
         let toml = r#"
 [tools.exec.sandbox]
 mode = "off"
@@ -1533,22 +1519,15 @@ scope = "chat"
         let result = validate_toml_str(toml);
         assert!(
             result.diagnostics.iter().any(|d| {
-                d.severity == Severity::Warning && d.path == "tools.exec.sandbox.scope"
+                d.severity == Severity::Error && d.path == "tools.exec.sandbox.scope"
             }),
-            "expected deprecation warning, got: {:?}",
-            result.diagnostics
-        );
-        assert!(
-            result.diagnostics.iter().all(|d| {
-                !(d.severity == Severity::Error && d.path == "tools.exec.sandbox.scope")
-            }),
-            "legacy scope should not hard-fail: {:?}",
+            "legacy scope must hard-fail: {:?}",
             result.diagnostics
         );
     }
 
     #[test]
-    fn sandbox_scope_and_scope_key_conflict_errors() {
+    fn sandbox_scope_and_scope_key_conflict_still_errors() {
         let toml = r#"
 [tools.exec.sandbox]
 mode = "off"

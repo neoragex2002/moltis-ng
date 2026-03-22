@@ -14,7 +14,7 @@
 - 2026-03-20：已补充并对齐实施文档优先级：当前 C 阶段以主单 + `docs/src/refactor/channel-info-exposure-boundary.md` + `docs/src/refactor/telegram-adapter-boundary.md` 为准；`docs/src/refactor/channel-adapter-generic-interfaces.md` 明确降为 future-facing 参考。
 - 2026-03-21：关单复核补齐了两个收尾项：runner hook 上下文已按主单要求由 gateway 显式传入，`docs/src/session-branching.md` 的旧术语残留已清理，主单证据同步更新。
 - 2026-03-21：按当时的 one-cut 设计口径补齐了最后一组可观测性收口：旧 `persona_id` 改为显式拒绝，旧 `people/` 命中时改为结构化告警而非静默读空。
-- 2026-03-22：后续实现根据升级回归 review 做了兼容收口：loader 对 legacy `people/` 保留单点 fallback 读取并记录 `reason_code = legacy_people_dir_fallback`；legacy `tools.exec.sandbox.scope` 在迁移窗口内映射到 `scope_key` 并输出 deprecated warning；`scope_key=session_key` 缺少 `_sessionKey` 时回退 `session_id` 并记录 `reason_code = missing_session_key_fallback_to_session_id`。
+- 2026-03-22：后续实现按 strict one-cut 主单完成最终收口：loader 命中旧 `people/` 直接拒绝并记录 `legacy_people_dir_rejected`；legacy `tools.exec.sandbox.scope` 改为硬错误；`scope_key=session_key` 缺少 `_sessionKey` 改为直接失败并记录 `missing_session_key_for_scope_key_session_key`。本单中的兼容窗口表述已被严格口径取代。
 
 **已覆盖测试（如有）**
 - 无；本单是实施前补缺/收口单，不直接改运行时代码。
@@ -235,7 +235,7 @@
 ## 发布与回滚（Rollout & Rollback）
 - 发布策略：本单无需上线；作为主单实施前的 blocker。
 - 回滚策略：无运行时改动，无需单独回滚。
-- 上线观测：无；但本单关闭后，主单应在上线观测里新增对 `missing_session_id`、`missing_session_key_fallback_to_session_id`、`channel_location_not_supported` 等 reason code 的检查。
+- 上线观测：无；但本单关闭后，主单应在上线观测里新增对 `missing_session_id`、`missing_session_key_for_scope_key_session_key`、`channel_location_not_supported` 等 reason code 的检查。
 
 ## 实施拆分（Implementation Outline）
 - Step 1: 更新主单，补入旧桥内存态、binding/ref 分工、transcript config 去留、inventory 漏网点。

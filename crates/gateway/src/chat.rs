@@ -327,17 +327,39 @@ async fn resolve_session_agent_id(
 fn channel_target_from_session_entry(
     entry: Option<&moltis_sessions::metadata::SessionEntry>,
 ) -> Option<moltis_common::types::ChannelTarget> {
-    entry
-        .and_then(|entry| entry.channel_binding.as_deref())
-        .and_then(moltis_telegram::adapter::channel_target_from_binding)
+    let binding = entry.and_then(|entry| entry.channel_binding.as_deref())?;
+    if moltis_telegram::adapter::telegram_binding_uses_legacy_shape(binding)
+        || moltis_telegram::adapter::telegram_channel_binding_info(binding)
+            .is_some_and(|info| info.bucket_key.is_none())
+    {
+        warn!(
+            event = "telegram.session.reject_legacy_binding",
+            context = "channel_target_from_session_entry",
+            reason_code = "legacy_channel_binding_rejected",
+            "telegram channel_binding is legacy or incomplete; rejecting strict V3 operation"
+        );
+        return None;
+    }
+    moltis_telegram::adapter::channel_target_from_binding(binding)
 }
 
 fn session_key_from_session_entry(
     entry: Option<&moltis_sessions::metadata::SessionEntry>,
 ) -> Option<String> {
-    entry
-        .and_then(|entry| entry.channel_binding.as_deref())
-        .and_then(moltis_telegram::adapter::session_key_from_binding)
+    let binding = entry.and_then(|entry| entry.channel_binding.as_deref())?;
+    if moltis_telegram::adapter::telegram_binding_uses_legacy_shape(binding)
+        || moltis_telegram::adapter::telegram_channel_binding_info(binding)
+            .is_some_and(|info| info.bucket_key.is_none())
+    {
+        warn!(
+            event = "telegram.session.reject_legacy_binding",
+            context = "session_key_from_session_entry",
+            reason_code = "legacy_channel_binding_rejected",
+            "telegram channel_binding is legacy or incomplete; rejecting strict V3 operation"
+        );
+        return None;
+    }
+    moltis_telegram::adapter::session_key_from_binding(binding)
 }
 
 #[allow(dead_code)]
@@ -2335,10 +2357,25 @@ impl ChatService for LiveChatService {
             && let Some(entry) = self.session_metadata.get(&session_key).await
             && let Some(ref binding_json) = entry.channel_binding
         {
-            let session_key_for_turn =
-                moltis_telegram::adapter::session_key_from_binding(binding_json);
-            let reply_target_ref =
-                moltis_telegram::adapter::reply_target_ref_from_binding(binding_json);
+            let binding_rejected = moltis_telegram::adapter::telegram_binding_uses_legacy_shape(
+                binding_json,
+            ) || moltis_telegram::adapter::telegram_channel_binding_info(binding_json)
+                .is_some_and(|info| info.bucket_key.is_none());
+            if binding_rejected {
+                warn!(
+                    event = "telegram.session.reject_legacy_binding",
+                    session_id = %session_key,
+                    context = "web_channel_echo",
+                    reason_code = "legacy_channel_binding_rejected",
+                    "skipping web-originated channel echo for legacy or incomplete binding"
+                );
+            }
+            let session_key_for_turn = (!binding_rejected)
+                .then(|| moltis_telegram::adapter::session_key_from_binding(binding_json))
+                .flatten();
+            let reply_target_ref = (!binding_rejected)
+                .then(|| moltis_telegram::adapter::reply_target_ref_from_binding(binding_json))
+                .flatten();
             if let Some(reply_target_ref) = reply_target_ref {
                 self.state
                     .ensure_channel_turn_context(
@@ -7509,6 +7546,20 @@ async fn ensure_channel_bound_session(
 
     let entry = session_meta.get(session_id).await;
     let stored_binding = entry.as_ref().and_then(|e| e.channel_binding.as_deref());
+    if let Some(stored_binding) = stored_binding
+        && (moltis_telegram::adapter::telegram_binding_uses_legacy_shape(stored_binding)
+            || moltis_telegram::adapter::telegram_channel_binding_info(stored_binding)
+                .is_some_and(|info| info.bucket_key.is_none()))
+    {
+        warn!(
+            event = "telegram.session.reject_legacy_binding",
+            session_id,
+            context = "ensure_channel_bound_session",
+            reason_code = "legacy_channel_binding_rejected",
+            "refusing to refresh legacy or incomplete telegram channel_binding"
+        );
+        return;
+    }
     let needs_binding_update = stored_binding != Some(binding_json.as_str());
     if let Some(bucket_key) = bucket_key {
         session_meta
@@ -7570,17 +7621,16 @@ async fn resolve_telegram_session_id(
     thread_id: Option<&str>,
     sender_account_key: Option<&str>,
 ) -> Option<String> {
-    let legacy_session_id = {
-        let mut legacy = format!("{chan_account_key}:{chat_id}");
-        if let Some(tid) = thread_id.map(str::trim).filter(|s| !s.is_empty()) {
-            legacy.push(':');
-            legacy.push_str(tid);
-        }
-        legacy
-    };
-
     if state.services.session_metadata.is_none() {
-        return Some(legacy_session_id);
+        warn!(
+            event = "telegram.session.reject_missing_metadata",
+            chan_account_key,
+            chat_id,
+            thread_id = ?thread_id,
+            reason_code = "missing_session_metadata",
+            "rejecting telegram session lookup without session metadata"
+        );
+        return None;
     }
 
     let snapshots = state
@@ -7597,7 +7647,16 @@ async fn resolve_telegram_session_id(
         sender_account_key,
     );
     let Some(route) = route else {
-        return Some(legacy_session_id);
+        warn!(
+            event = "telegram.session.reject_missing_bucket_route",
+            chan_account_key,
+            chat_id,
+            thread_id = ?thread_id,
+            sender_account_key = ?sender_account_key,
+            reason_code = "missing_bucket_route",
+            "rejecting telegram session lookup without strict bucket route"
+        );
+        return None;
     };
 
     if let Some(key) = sm
@@ -7619,17 +7678,33 @@ async fn resolve_telegram_session_id(
         .as_ref()
         .and_then(|entry| entry.channel_binding.as_deref())
         .is_none_or(|binding_json| {
+            let binding_rejected =
+                moltis_telegram::adapter::telegram_binding_uses_legacy_shape(binding_json)
+                    || moltis_telegram::adapter::telegram_channel_binding_info(binding_json)
+                        .is_some_and(|info| info.bucket_key.is_none());
+            if binding_rejected {
+                warn!(
+                    event = "telegram.session.reject_legacy_binding",
+                    session_id = %active_session_id,
+                    chan_account_key,
+                    chat_id,
+                    thread_id = ?thread_id,
+                    bucket_key = %route.bucket_key,
+                    context = "resolve_telegram_session_id",
+                    reason_code = "legacy_channel_binding_rejected",
+                    "rejecting active telegram session with legacy or incomplete channel_binding"
+                );
+                return false;
+            }
             let target = moltis_telegram::adapter::channel_target_from_binding(binding_json);
             let binding_bucket_key =
                 moltis_telegram::adapter::session_key_from_binding(binding_json);
-            target.is_none_or(|target| {
+            target.is_some_and(|target| {
                 target.channel_type == "telegram"
                     && target.account_key == chan_account_key
                     && target.chat_id == chat_id
                     && target.thread_id.as_deref() == thread_id
-                    && binding_bucket_key
-                        .as_deref()
-                        .is_none_or(|existing| existing == route.bucket_key)
+                    && binding_bucket_key.as_deref() == Some(route.bucket_key.as_str())
             })
         });
     if !active_binding_matches {
@@ -13933,7 +14008,7 @@ echo @bot2
     }
 
     #[tokio::test]
-    async fn resolve_telegram_session_id_reuses_legacy_active_session_for_matching_bucket() {
+    async fn resolve_telegram_session_id_rejects_legacy_active_session_for_matching_bucket() {
         let metadata = sqlite_metadata().await;
         let legacy_binding = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
             chan_type: moltis_channels::ChannelType::Telegram,
@@ -13978,15 +14053,17 @@ echo @bot2
 
         let resolved =
             resolve_telegram_session_id(&state, "telegram:845", "-100", None, Some("telegram:42"))
-                .await
-                .expect("resolved session id");
-        assert_eq!(resolved, "session:old");
+                .await;
+        assert!(
+            resolved.is_none(),
+            "legacy or incomplete binding must be rejected"
+        );
         assert_eq!(
             metadata
                 .get_bucket_session_id("telegram", "group:account:telegram:845:peer:-100:sender:42")
                 .await
                 .as_deref(),
-            Some("session:old")
+            None
         );
     }
 
@@ -14040,6 +14117,31 @@ echo @bot2
         assert!(
             resolved.is_none(),
             "must not reuse an active session from another bucket"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_telegram_session_id_returns_none_without_bucket_route() {
+        let metadata = sqlite_metadata().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let state = Arc::new(crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop()
+                .with_session_metadata(metadata)
+                .with_session_store(store),
+        ));
+
+        let resolved =
+            resolve_telegram_session_id(&state, "telegram:845", "-100", None, Some("telegram:42"))
+                .await;
+        assert!(
+            resolved.is_none(),
+            "must not synthesize a legacy session id when strict bucket route is missing"
         );
     }
 
@@ -14156,7 +14258,7 @@ echo @bot2
     }
 
     #[tokio::test]
-    async fn ensure_channel_bound_session_refreshes_existing_binding_with_bucket_route() {
+    async fn ensure_channel_bound_session_rejects_existing_binding_without_bucket_route() {
         let metadata = sqlite_metadata().await;
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
@@ -14216,11 +14318,8 @@ echo @bot2
         let binding: moltis_channels::ChannelReplyTarget =
             serde_json::from_str(entry.channel_binding.as_deref().expect("binding json"))
                 .expect("deserialize binding");
-        assert_eq!(binding.thread_id.as_deref(), Some("7"));
-        assert_eq!(
-            binding.bucket_key.as_deref(),
-            Some("group:account:telegram:845:peer:-100:thread:7:sender:1001")
-        );
+        assert_eq!(binding.thread_id.as_deref(), None);
+        assert_eq!(binding.bucket_key.as_deref(), None);
     }
 
     #[tokio::test]

@@ -261,39 +261,26 @@ struct LegacyTelegramChannelBinding {
     account_handle: Option<String>,
     #[serde(default)]
     account_id: Option<String>,
-    chat_id: String,
-    #[serde(default)]
-    message_id: Option<String>,
-    #[serde(default)]
-    thread_id: Option<String>,
-    #[serde(default)]
-    bucket_key: Option<String>,
 }
 
 fn telegram_reply_target_from_binding(
     binding: &str,
 ) -> Option<moltis_channels::ChannelReplyTarget> {
-    if let Ok(target) = serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding) {
-        if target.chan_type == moltis_channels::ChannelType::Telegram {
-            return Some(target);
-        }
-        return None;
+    let target = serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding).ok()?;
+    (target.chan_type == moltis_channels::ChannelType::Telegram).then_some(target)
+}
+
+pub fn telegram_binding_uses_legacy_shape(binding: &str) -> bool {
+    if telegram_reply_target_from_binding(binding).is_some() {
+        return false;
     }
 
-    let legacy: LegacyTelegramChannelBinding = serde_json::from_str(binding).ok()?;
-    if legacy.channel_type != "telegram" {
-        return None;
-    }
-    let account_key = legacy.account_handle.or(legacy.account_id)?;
-    Some(moltis_channels::ChannelReplyTarget {
-        chan_type: moltis_channels::ChannelType::Telegram,
-        chan_account_key: account_key,
-        chan_user_name: None,
-        chat_id: legacy.chat_id,
-        message_id: legacy.message_id,
-        thread_id: legacy.thread_id,
-        bucket_key: legacy.bucket_key,
-    })
+    serde_json::from_str::<LegacyTelegramChannelBinding>(binding)
+        .ok()
+        .is_some_and(|legacy| {
+            legacy.channel_type == "telegram"
+                && (legacy.account_handle.is_some() || legacy.account_id.is_some())
+        })
 }
 
 pub fn reply_target_ref_for_target(
@@ -387,9 +374,7 @@ pub fn telegram_binding_is_compatible_for_bucket(
     {
         return false;
     }
-    info.bucket_key
-        .as_deref()
-        .is_none_or(|existing| existing == bucket_key)
+    info.bucket_key.as_deref() == Some(bucket_key)
 }
 
 pub fn telegram_binding_json_for_bucket(
@@ -628,65 +613,53 @@ mod tests {
     }
 
     #[test]
-    fn binding_helpers_accept_legacy_account_handle_shape() {
+    fn binding_helpers_reject_legacy_account_handle_shape() {
         let binding = legacy_binding_json(
             "account_handle",
             Some("group:account:telegram:test:peer:-1001:branch:7"),
         );
-
-        let info = telegram_channel_binding_info(&binding).expect("legacy binding info");
-        assert_eq!(info.account_key, "telegram:test");
-        assert_eq!(info.chat_id, "-1001");
-        assert_eq!(info.thread_id.as_deref(), Some("7"));
-        assert_eq!(
-            info.bucket_key.as_deref(),
-            Some("group:account:telegram:test:peer:-1001:branch:7")
-        );
-
-        let reply_target_ref =
-            reply_target_ref_from_binding(&binding).expect("reply_target_ref from legacy binding");
-        let inbound = inbound_target_from_reply_target_ref(&reply_target_ref)
-            .expect("decode reply_target_ref");
-        assert_eq!(inbound.chan_account_key, "telegram:test");
-        assert_eq!(inbound.chat_id, "-1001");
-        assert_eq!(inbound.message_id.as_deref(), Some("99"));
-        assert_eq!(inbound.thread_id.as_deref(), Some("7"));
-
-        let channel_target =
-            channel_target_from_binding(&binding).expect("channel_target from legacy binding");
-        assert_eq!(channel_target.channel_type, "telegram");
-        assert_eq!(channel_target.account_key, "telegram:test");
-        assert_eq!(channel_target.chat_id, "-1001");
-        assert_eq!(channel_target.thread_id.as_deref(), Some("7"));
-
-        assert_eq!(
-            session_key_from_binding(&binding).as_deref(),
-            Some("group:account:telegram:test:peer:-1001:branch:7")
-        );
-        assert_eq!(
-            tg_gst_v1_system_prompt_block_for_binding(&binding, &[]),
-            Some(TG_GST_V1_SYSTEM_PROMPT_BLOCK)
-        );
+        assert!(telegram_binding_uses_legacy_shape(&binding));
+        assert!(telegram_channel_binding_info(&binding).is_none());
+        assert!(reply_target_ref_from_binding(&binding).is_none());
+        assert!(channel_target_from_binding(&binding).is_none());
+        assert!(session_key_from_binding(&binding).is_none());
+        assert_eq!(tg_gst_v1_system_prompt_block_for_binding(&binding, &[]), None);
     }
 
     #[test]
-    fn binding_helpers_accept_legacy_account_id_shape() {
+    fn binding_helpers_reject_legacy_account_id_shape() {
         let binding = legacy_binding_json("account_id", None);
 
-        let info = telegram_channel_binding_info(&binding).expect("legacy binding info");
-        assert_eq!(info.account_key, "telegram:test");
-        assert_eq!(info.chat_id, "-1001");
-        assert_eq!(info.thread_id.as_deref(), Some("7"));
-        assert!(info.bucket_key.is_none());
-
-        let reply_target_ref =
-            reply_target_ref_from_binding(&binding).expect("reply_target_ref from legacy binding");
-        let inbound = inbound_target_from_reply_target_ref(&reply_target_ref)
-            .expect("decode reply_target_ref");
-        assert_eq!(inbound.chan_account_key, "telegram:test");
-        assert_eq!(inbound.chat_id, "-1001");
-        assert_eq!(inbound.message_id.as_deref(), Some("99"));
-        assert_eq!(inbound.thread_id.as_deref(), Some("7"));
+        assert!(telegram_binding_uses_legacy_shape(&binding));
+        assert!(telegram_channel_binding_info(&binding).is_none());
+        assert!(reply_target_ref_from_binding(&binding).is_none());
+        assert!(channel_target_from_binding(&binding).is_none());
         assert!(session_key_from_binding(&binding).is_none());
+    }
+
+    #[test]
+    fn binding_without_bucket_key_is_not_compatible_for_bucket() {
+        let binding = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:test".into(),
+            chan_user_name: None,
+            chat_id: "-1001".into(),
+            message_id: Some("99".into()),
+            thread_id: Some("7".into()),
+            bucket_key: None,
+        })
+        .expect("serialize binding");
+        let expected = TelegramChannelBindingInfo {
+            account_key: "telegram:test".into(),
+            chat_id: "-1001".into(),
+            thread_id: Some("7".into()),
+            bucket_key: Some("group:account:telegram:test:peer:-1001:branch:7".into()),
+        };
+
+        assert!(!telegram_binding_is_compatible_for_bucket(
+            &binding,
+            &expected,
+            "group:account:telegram:test:peer:-1001:branch:7"
+        ));
     }
 }

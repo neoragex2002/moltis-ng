@@ -1252,10 +1252,10 @@ pub struct ResourceLimitsConfig {
 #[serde(default)]
 pub struct SandboxConfig {
     pub mode: String,
-    /// Deprecated legacy field. Use `scope_key` instead.
+    /// Legacy field retained only so validation can reject it explicitly.
     ///
     /// This is retained only to allow validation to fail-fast when an old config
-    /// still sets `tools.exec.sandbox.scope`.
+    /// `tools.exec.sandbox.scope` is no longer supported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     /// Sandbox bucketing key source.
@@ -1307,15 +1307,6 @@ pub struct SandboxConfig {
     /// Set to an empty list to skip provisioning.
     #[serde(default = "default_sandbox_packages")]
     pub packages: Vec<String>,
-}
-
-#[must_use]
-pub fn legacy_sandbox_scope_to_scope_key(scope: &str) -> Option<&'static str> {
-    match scope.trim() {
-        "session" => Some("session_id"),
-        "chat" | "bot" | "global" => Some("session_key"),
-        _ => None,
-    }
 }
 
 /// External mount configuration entry for sandbox containers.

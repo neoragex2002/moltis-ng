@@ -648,14 +648,10 @@ impl SqliteSessionMetadata {
         let binding_pattern_handle = format!(
             r#"%"channel_type":"{channel_type}"%"account_handle":"{account_handle}"%"chat_id":"{chat_id}"%"#,
         );
-        let binding_pattern_id = format!(
-            r#"%"channel_type":"{channel_type}"%"account_id":"{account_handle}"%"chat_id":"{chat_id}"%"#,
-        );
         sqlx::query_as::<_, SessionRow>(
-            "SELECT * FROM sessions WHERE channel_binding LIKE ? OR channel_binding LIKE ? ORDER BY created_at ASC",
+            "SELECT * FROM sessions WHERE channel_binding LIKE ? ORDER BY created_at ASC",
         )
         .bind(&binding_pattern_handle)
-        .bind(&binding_pattern_id)
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default()
@@ -670,16 +666,12 @@ impl SqliteSessionMetadata {
         channel_type: &str,
         account_handle: &str,
     ) -> Vec<SessionEntry> {
-        // Legacy rows may use `account_id` instead of `account_handle`.
         let pattern_handle =
             format!(r#"%"channel_type":"{channel_type}"%"account_handle":"{account_handle}"%"#,);
-        let pattern_id =
-            format!(r#"%"channel_type":"{channel_type}"%"account_id":"{account_handle}"%"#,);
         sqlx::query_as::<_, SessionRow>(
-            "SELECT * FROM sessions WHERE channel_binding LIKE ? OR channel_binding LIKE ? ORDER BY created_at ASC",
+            "SELECT * FROM sessions WHERE channel_binding LIKE ? ORDER BY created_at ASC",
         )
         .bind(&pattern_handle)
-        .bind(&pattern_id)
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default()
@@ -1112,7 +1104,7 @@ mod tests {
         meta.set_channel_binding("session:new1", Some(binding.clone()))
             .await;
 
-        // Legacy serialized field name should remain discoverable.
+        // Legacy serialized field name must no longer remain discoverable.
         meta.upsert("session:legacy1", Some("Legacy".into()))
             .await
             .unwrap();
@@ -1122,11 +1114,11 @@ mod tests {
         let sessions = meta
             .list_channel_sessions("telegram", "telegram:bot1", "123")
             .await;
-        assert_eq!(sessions.len(), 3);
+        assert_eq!(sessions.len(), 2);
         let keys: Vec<&str> = sessions.iter().map(|s| s.key.as_str()).collect();
         assert!(keys.contains(&"telegram:bot1:123"));
         assert!(keys.contains(&"session:new1"));
-        assert!(keys.contains(&"session:legacy1"));
+        assert!(!keys.contains(&"session:legacy1"));
 
         // Different chat should return empty.
         let other = meta
@@ -1136,7 +1128,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sqlite_list_account_sessions_includes_legacy_binding() {
+    async fn test_sqlite_list_account_sessions_excludes_legacy_binding() {
         let pool = sqlite_pool().await;
         let meta = SqliteSessionMetadata::new(pool);
 
@@ -1160,7 +1152,7 @@ mod tests {
             .await;
         let keys: Vec<&str> = sessions.iter().map(|s| s.key.as_str()).collect();
         assert!(keys.contains(&"session:acct1"));
-        assert!(keys.contains(&"session:acct_legacy"));
+        assert!(!keys.contains(&"session:acct_legacy"));
     }
 
     #[tokio::test]

@@ -587,42 +587,27 @@ impl Default for SandboxConfig {
     }
 }
 
-impl From<&moltis_config::schema::SandboxConfig> for SandboxConfig {
-    fn from(cfg: &moltis_config::schema::SandboxConfig) -> Self {
-        let scope_key_raw = if cfg.scope_key != "session_id" {
-            cfg.scope_key.as_str()
-        } else if let Some(legacy_scope) = cfg.scope.as_deref() {
-            if let Some(mapped_scope_key) =
-                moltis_config::schema::legacy_sandbox_scope_to_scope_key(legacy_scope)
-            {
-                warn!(
-                    legacy_scope,
-                    mapped_scope_key,
-                    "using deprecated tools.exec.sandbox.scope compatibility alias"
-                );
-                mapped_scope_key
-            } else {
-                cfg.scope_key.as_str()
-            }
-        } else {
-            cfg.scope_key.as_str()
-        };
-        Self {
+impl TryFrom<&moltis_config::schema::SandboxConfig> for SandboxConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(cfg: &moltis_config::schema::SandboxConfig) -> Result<Self> {
+        if let Some(scope) = cfg.scope.as_deref() {
+            anyhow::bail!(
+                "tools.exec.sandbox.scope is no longer supported; remove \"{scope}\" and use tools.exec.sandbox.scope_key"
+            );
+        }
+        Ok(Self {
             mode: match cfg.mode.as_str() {
                 "all" => SandboxMode::All,
                 "non-main" | "nonmain" => SandboxMode::NonMain,
                 _ => SandboxMode::Off,
             },
-            scope_key: match scope_key_raw {
+            scope_key: match cfg.scope_key.as_str() {
                 "session_id" => SandboxScopeKey::SessionId,
                 "session_key" => SandboxScopeKey::SessionKey,
-                _ => {
-                    warn!(
-                        scope_key = scope_key_raw,
-                        "unknown tools.exec.sandbox.scope_key; falling back to session_id"
-                    );
-                    SandboxScopeKey::SessionId
-                },
+                other => anyhow::bail!(
+                    "invalid tools.exec.sandbox.scope_key \"{other}\"; expected \"session_id\" or \"session_key\""
+                ),
             },
             idle_ttl_secs: cfg.idle_ttl_secs,
             data_mount: match cfg.data_mount.as_str() {
@@ -664,7 +649,7 @@ impl From<&moltis_config::schema::SandboxConfig> for SandboxConfig {
             },
             packages: cfg.packages.clone(),
             timezone: None, // Set by gateway from user profile
-        }
+        })
     }
 }
 
@@ -2441,12 +2426,12 @@ impl SandboxRouter {
                 if let Some(key) = session_key.map(str::trim).filter(|s| !s.is_empty()) {
                     return Ok(key.to_string());
                 }
-                tracing::debug!(
-                    reason_code = "missing_session_key_fallback_to_session_id",
+                tracing::warn!(
+                    reason_code = "missing_session_key_for_scope_key_session_key",
                     session_id,
-                    "scope_key=session_key missing session_key; falling back to session_id"
+                    "scope_key=session_key missing session_key; rejecting sandbox lookup"
                 );
-                Ok(session_id.to_string())
+                anyhow::bail!("missing session_key for sandbox scope_key=session_key")
             },
         }
     }
@@ -3417,26 +3402,35 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_sandbox_key_scope_key_session_key_missing_falls_back_to_session_id() {
+    fn test_effective_sandbox_key_scope_key_session_key_missing_errors() {
         let config = SandboxConfig {
             scope_key: SandboxScopeKey::SessionKey,
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
-        assert_eq!(
-            router.effective_sandbox_key("session:abc", None).unwrap(),
-            "session:abc"
+        let err = router
+            .effective_sandbox_key("session:abc", None)
+            .expect_err("missing session_key must error");
+        assert!(
+            err.to_string()
+                .contains("missing session_key for sandbox scope_key=session_key"),
+            "unexpected error: {err:#}"
         );
     }
 
     #[test]
-    fn test_legacy_scope_chat_maps_to_session_key() {
+    fn test_runtime_config_rejects_legacy_scope_field() {
         let schema_cfg = moltis_config::schema::SandboxConfig {
             scope: Some("chat".into()),
             ..Default::default()
         };
-        let runtime_cfg = SandboxConfig::from(&schema_cfg);
-        assert_eq!(runtime_cfg.scope_key, SandboxScopeKey::SessionKey);
+        let err = SandboxConfig::try_from(&schema_cfg)
+            .expect_err("legacy scope field must be rejected");
+        assert!(
+            err.to_string()
+                .contains("tools.exec.sandbox.scope is no longer supported"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[tokio::test]

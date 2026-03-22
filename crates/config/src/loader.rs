@@ -563,12 +563,18 @@ fn legacy_people_equivalent(path: &Path) -> Option<PathBuf> {
     Some(legacy_people_dir().join(relative))
 }
 
+fn legacy_people_doc_exists(path: &Path) -> bool {
+    legacy_people_equivalent(path)
+        .as_ref()
+        .is_some_and(|legacy_path| legacy_path.exists())
+}
+
 fn warned_legacy_people_paths() -> &'static Mutex<HashSet<PathBuf>> {
     static WARNED: std::sync::OnceLock<Mutex<HashSet<PathBuf>>> = std::sync::OnceLock::new();
     WARNED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn warn_legacy_people_doc_fallback(path: &Path, legacy_path: &Path) {
+fn warn_legacy_people_doc_rejected(path: &Path, legacy_path: &Path) {
     let warned = warned_legacy_people_paths();
     let mut guard = warned.lock().unwrap_or_else(|e| e.into_inner());
     if !guard.insert(legacy_path.to_path_buf()) {
@@ -576,10 +582,10 @@ fn warn_legacy_people_doc_fallback(path: &Path, legacy_path: &Path) {
     }
 
     warn!(
-        reason_code = "legacy_people_dir_fallback",
+        reason_code = "legacy_people_dir_rejected",
         expected_path = %path.display(),
         legacy_path = %legacy_path.display(),
-        "reading legacy people/ agent doc via migration fallback; move the file to agents/<agent_id>/"
+        "legacy people/ agent doc is no longer supported; move the file to agents/<agent_id>/"
     );
 }
 
@@ -587,14 +593,12 @@ fn resolve_agent_doc_path(path: &Path) -> PathBuf {
     if path.exists() {
         return path.to_path_buf();
     }
-    let Some(legacy_path) = legacy_people_equivalent(path) else {
-        return path.to_path_buf();
-    };
-    if !legacy_path.exists() {
-        return path.to_path_buf();
+    if let Some(legacy_path) = legacy_people_equivalent(path)
+        && legacy_path.exists()
+    {
+        warn_legacy_people_doc_rejected(path, &legacy_path);
     }
-    warn_legacy_people_doc_fallback(path, &legacy_path);
-    legacy_path
+    path.to_path_buf()
 }
 
 fn read_markdown_raw(path: &Path) -> Option<String> {
@@ -726,6 +730,9 @@ pub fn load_soul() -> Option<String> {
     let resolved = resolve_agent_doc_path(&path);
     if let Some(content) = read_markdown_raw(&resolved) {
         return Some(content);
+    }
+    if !path.exists() && legacy_people_doc_exists(&path) {
+        return None;
     }
 
     // File doesn't exist — seed it with the default soul.
@@ -2118,7 +2125,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
     }
 
     #[test]
-    fn load_soul_falls_back_to_legacy_people_default_path() {
+    fn load_soul_rejects_legacy_people_default_path() {
         let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
@@ -2128,17 +2135,17 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
         std::fs::write(&legacy_path, "LEGACY SOUL").unwrap();
 
         let content = load_soul();
-        assert_eq!(content.as_deref(), Some("LEGACY SOUL"));
+        assert!(content.is_none(), "legacy people/ path must be rejected");
         assert!(
             !soul_path().exists(),
-            "legacy fallback should not seed a new file"
+            "legacy path rejection should not seed a new file"
         );
 
         clear_data_dir();
     }
 
     #[test]
-    fn load_agent_identity_md_raw_falls_back_to_legacy_people_path() {
+    fn load_agent_identity_md_raw_rejects_legacy_people_path() {
         let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
@@ -2147,9 +2154,9 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
         std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
         std::fs::write(&legacy_path, "# legacy identity").unwrap();
 
-        assert_eq!(
-            load_agent_identity_md_raw("ops").as_deref(),
-            Some("# legacy identity")
+        assert!(
+            load_agent_identity_md_raw("ops").is_none(),
+            "legacy people/ path must be rejected"
         );
 
         clear_data_dir();

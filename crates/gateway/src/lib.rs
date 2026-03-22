@@ -85,9 +85,16 @@ pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
     if channels_cols.iter().any(|c| c == "account_id")
         && !channels_cols.iter().any(|c| c == "account_handle")
     {
-        sqlx::query("ALTER TABLE channels RENAME COLUMN account_id TO account_handle")
-            .execute(pool)
-            .await?;
+        tracing::error!(
+            event = "gateway.schema.reject_legacy_column",
+            table = "channels",
+            column = "account_id",
+            reason_code = "legacy_schema_rejected",
+            "legacy schema is no longer supported; rename channels.account_id to account_handle before startup"
+        );
+        anyhow::bail!(
+            "legacy schema rejected: channels.account_id is no longer supported; rename it to account_handle before startup"
+        );
     }
 
     let message_log_cols: Vec<String> =
@@ -98,9 +105,16 @@ pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
     if message_log_cols.iter().any(|c| c == "account_id")
         && !message_log_cols.iter().any(|c| c == "account_handle")
     {
-        sqlx::query("ALTER TABLE message_log RENAME COLUMN account_id TO account_handle")
-            .execute(pool)
-            .await?;
+        tracing::error!(
+            event = "gateway.schema.reject_legacy_column",
+            table = "message_log",
+            column = "account_id",
+            reason_code = "legacy_schema_rejected",
+            "legacy schema is no longer supported; rename message_log.account_id to account_handle before startup"
+        );
+        anyhow::bail!(
+            "legacy schema rejected: message_log.account_id is no longer supported; rename it to account_handle before startup"
+        );
     }
 
     sqlx::migrate!("./migrations")
@@ -108,4 +122,32 @@ pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
         .run(pool)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn run_migrations_rejects_legacy_channels_account_id_column() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool");
+        sqlx::query("CREATE TABLE channels (account_id TEXT NOT NULL, chat_id TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create channels table");
+        sqlx::query("CREATE TABLE message_log (account_handle TEXT, chat_id TEXT)")
+            .execute(&pool)
+            .await
+            .expect("create message_log table");
+
+        let err = super::run_migrations(&pool)
+            .await
+            .expect_err("legacy schema must be rejected");
+        assert!(
+            err.to_string().contains("channels.account_id"),
+            "unexpected error: {err:#}"
+        );
+    }
 }

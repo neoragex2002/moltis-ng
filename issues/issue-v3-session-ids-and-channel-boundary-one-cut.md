@@ -15,12 +15,12 @@
 4) 最后收敛 legacy parse：`channel_binding` 的 JSON 解析归口到 adapter/helper 单点；全仓兜底 `rg` 清扫 + 打勾验收项。
 
 **已决策（Decision log）**
-- 2026-03-20：V3 一刀切删除 `persona*` 术语与字段，统一收敛为 `agent_id`（对外字段 `agentId`），并将 Type4 模板目录从 `people/<id>/...` 改为 `agents/<agent_id>/...`；运行时与有效文档统一切到 `agents/`，但 loader 在迁移窗口内对既有 `people/` 保留单点 fallback 读取，并记录 `reason_code = legacy_people_dir_fallback`。
+- 2026-03-20：V3 一刀切删除 `persona*` 术语与字段，统一收敛为 `agent_id`（对外字段 `agentId`），并将 Type4 模板目录从 `people/<id>/...` 改为 `agents/<agent_id>/...`；运行时与有效文档统一切到 `agents/`，命中 legacy `people/` 目录直接结构化拒绝并记录 `reason_code = legacy_people_dir_rejected`。
 - 2026-03-20：Q6（Legacy 模块）决策：保留 `crates/auto-reply` 与 `crates/routing` 作为 V3 占位子系统（接口保留、功能后补），输入统一改为 `InboundContextV3`；不保留/不兼容 V2 `MsgContext/chan_chat_key` 路径（breaking）。
-- 2026-03-20：Q5（Sandbox 分桶）决策：正式口径切到 `tools.exec.sandbox.scope_key=session_id|session_key`，默认模板与文档只写 `scope_key`；迁移窗口内 legacy `tools.exec.sandbox.scope` 仅作为兼容别名保留：
+- 2026-03-20：Q5（Sandbox 分桶）决策：正式口径切到 `tools.exec.sandbox.scope_key=session_id|session_key`，默认模板与文档只写 `scope_key`；legacy `tools.exec.sandbox.scope` 不再保留兼容别名，命中即硬错误：
   - `session_id`：沙盒与会话实例绑定（推荐默认）
   - `session_key`：沙盒与逻辑桶绑定（按 dm/group scope 分桶口径共享）
-  - legacy `scope=chat`：映射到 `scope_key=session_key` 并输出 deprecated warning；若同时配置 `scope` 与 `scope_key` 则显式报错
+  - legacy `scope=chat`：不再映射；若出现 `scope`（无论是否同时配置 `scope_key`）都显式报错
 - 2026-03-20：渠道信息暴露边界决策：TG 适配层之外默认不暴露投递细节（`chat_id/thread_id/message_id/account_key/...`），任何渠道交互能力与回投统一走 `session_id -> channel_binding -> adapter`；UI 只拿展示字段，hooks 默认只拿跨渠道语义，必要时可选展开 `channelTarget`（可空、来源仅 `channel_binding`）。实施口径见：`docs/src/refactor/channel-info-exposure-boundary.md`。
 - 2026-03-20：Q2（Inbound meta）决策：删除跨层 `ChannelMessageMeta.telegram`（以及 `ChannelTelegramMeta/TelegramChatKind/ChannelTranscriptFormat` 这类 TG 私有 meta），gateway/core 不再依赖 Telegram 私有字段拼装群聊入站文本；群聊入站文本（TG-GST v1/现有格式）由 TG adapter 产出。跨层仅保留/新增通用字段：`chat_kind/addressed/mode/message_kind/text`（以及 `session_id/session_key`），并在 hooks/UI 中按“channel-info exposure boundary”口径分别提供必要的最小集合。
 - 2026-03-20：Q1（Reply 投递契约）决策：回投/回复 threading 走 adapter opaque 引用，不再把渠道投递细节暴露为跨层结构体字段：
@@ -48,18 +48,18 @@
 - 2026-03-21：gateway 已把 `session_key/channelTarget` 作为 hook-only 上下文显式传入 runner，`BeforeLLMCall/AfterLLMCall/BeforeToolCall/AfterToolCall` 不再退化为 `None`：`crates/gateway/src/chat.rs`、`crates/agents/src/runner.rs`
 - 2026-03-21：`docs/src/session-branching.md` 已完成 `chanChatKey/chanReplyTarget` → `sessionKey/channel binding / reply target state` 的文档口径收敛，`docs/src`（排除冻结历史文档）关键词清扫归零：`docs/src/session-branching.md`
 - 2026-03-21：Telegram 旧配置字段 `persona_id` 已改为显式拒绝，不再静默丢失 bot 绑定并回退 default agent：`crates/telegram/src/config.rs`
-- 2026-03-22：loader 在命中新 `agents/` 路径缺失但旧 `people/` 路径存在时，会 fallback 读取 legacy 文档并记录 `reason_code=legacy_people_dir_fallback`，避免升级后自定义 agent 文档静默失效：`crates/config/src/loader.rs:586`
-- 2026-03-22：sandbox 配置校验与模板已收口到 `scope_key`：默认模板输出 `scope_key = "session_key"`，legacy `tools.exec.sandbox.scope` 在迁移窗口内映射为 `scope_key` 并输出 deprecated warning；若 `scope` 与 `scope_key` 同时存在则显式报错：`crates/config/src/template.rs:227`、`crates/config/src/validate.rs:1024`
-- 2026-03-22：`scope_key=session_key` 在普通 web/main session 缺少 `_sessionKey` 时，会回退到 `session_id` 并记录 `reason_code=missing_session_key_fallback_to_session_id`，避免非 channel session 的 exec/process 整体失效：`crates/tools/src/sandbox.rs:2433`
+- 2026-03-22：loader 在命中新 `agents/` 路径缺失但旧 `people/` 路径存在时，会直接拒绝读取并记录 `reason_code=legacy_people_dir_rejected`：`crates/config/src/loader.rs:586`
+- 2026-03-22：sandbox 配置校验与模板已收口到 `scope_key`：默认模板仅输出 `scope_key`，legacy `tools.exec.sandbox.scope` 为硬错误，不再映射：`crates/config/src/template.rs:227`、`crates/config/src/validate.rs:1024`
+- 2026-03-22：`scope_key=session_key` 在普通 web/main session 缺少 `_sessionKey` 时直接失败，并记录 `reason_code=missing_session_key_for_scope_key_session_key`；不再回退 `session_id`：`crates/tools/src/sandbox.rs:2433`
 
 **已覆盖测试（如有）**
 - `prompt_cache_key` 在 debug overrides 里会标注来源 `sessionId`：`crates/agents/src/providers/openai_responses.rs:1641`
 - runner hook payload 回归：`_sessionKey` 会透传到 `BeforeLLMCall`，且不再出现 legacy `chanChatKey/chanAccountKey`：`crates/agents/src/runner.rs`
 - gateway ↔ runner hooks 端到端回归：有 `channel_binding` 的会话会把 `sessionKey/channelTarget` 贯穿到 `BeforeLLMCall/BeforeToolCall/AfterToolCall`：`crates/gateway/src/chat.rs`
 - Telegram config 回归：旧 `persona_id` 会被显式拒绝：`crates/telegram/src/config.rs`
-- loader 回归：默认与 named agent 会 fallback 读取 legacy `people/` 文档：`load_soul_falls_back_to_legacy_people_default_path`、`load_agent_identity_md_raw_falls_back_to_legacy_people_path`（`crates/config/src/loader.rs:2121`、`crates/config/src/loader.rs:2141`）
-- sandbox config 回归：legacy `scope=chat` 会输出 warning 但不报错，`scope` 与 `scope_key` 同时配置会显式报错，默认模板只输出 `scope_key`：`legacy_sandbox_scope_chat_warns_but_does_not_error`、`sandbox_scope_and_scope_key_conflict_errors`、`default_config_template_uses_scope_key`（`crates/config/src/validate.rs:1527`、`crates/config/src/validate.rs:1551`、`crates/config/src/validate.rs:1570`）
-- sandbox runtime 回归：`scope_key=session_key` 且缺少 `_sessionKey` 时，会回退到 `session_id`；legacy `scope=chat` 仍能映射到 `session_key`：`test_effective_sandbox_key_scope_key_session_key_missing_falls_back_to_session_id`、`test_legacy_scope_chat_maps_to_session_key`（`crates/tools/src/sandbox.rs:3420`、`crates/tools/src/sandbox.rs:3433`）
+- loader 回归：默认与 named agent 命中 legacy `people/` 文档时直接拒绝：`load_soul_rejects_legacy_people_default_path`、`load_agent_identity_md_raw_rejects_legacy_people_path`（`crates/config/src/loader.rs`）
+- sandbox config 回归：legacy `scope=chat` 为硬错误，`scope` 与 `scope_key` 同时配置仍显式报错，默认模板只输出 `scope_key`：`legacy_sandbox_scope_chat_is_a_hard_error`、`sandbox_scope_and_scope_key_conflict_still_errors`、`default_config_template_uses_scope_key`（`crates/config/src/validate.rs`）
+- sandbox runtime 回归：`scope_key=session_key` 且缺少 `_sessionKey` 时直接失败；legacy `scope=chat` 不再映射：`test_effective_sandbox_key_scope_key_session_key_missing_errors`（`crates/tools/src/sandbox.rs`）
 
 **已知差异/后续优化（非阻塞）**
 - 本单目标是“切干净”，不接受保留 V2 尾巴；在清理 `chan_chat_key` 的同时，也确认了一组“概念/命名”层面的额外收敛项需要一并收口：
@@ -132,8 +132,8 @@
 - [x] prompt cache 分桶与 worktree 绑定统一使用 `session_id`（不使用 `session_key`）。
 - [x] hooks 载荷必须同时能表达 `session_id` 与 `session_key`（如需要跨域桥），且字段语义不混用。
 - [x] 删除 `persona*` 术语与字段：统一到 `agent_id`；对外 JSON/RPC/WS 字段统一为 `agentId`（仅边界处显式映射）。
-- [x] Type4 模板目录从 `people/<id>/...` 迁移为 `agents/<agent_id>/...`，并更新所有 loader / docs / UI 引用；运行时统一以 `agents/` 为主，但 loader 在迁移窗口内保留对旧 `people/` 的单点 fallback 读取与结构化告警。
-- [x] Sandbox 分桶口径改为 `tools.exec.sandbox.scope_key=session_id|session_key`；默认模板与文档统一输出 `scope_key`，legacy `tools.exec.sandbox.scope` 在迁移窗口内仅作为 deprecated alias 保留。
+- [x] Type4 模板目录从 `people/<id>/...` 迁移为 `agents/<agent_id>/...`，并更新所有 loader / docs / UI 引用；运行时统一以 `agents/` 为主，命中旧 `people/` 目录直接拒绝。
+- [x] Sandbox 分桶口径改为 `tools.exec.sandbox.scope_key=session_id|session_key`；默认模板与文档统一输出 `scope_key`，legacy `tools.exec.sandbox.scope` 不再保留 alias，命中即报错。
 - [x] Tools 不再识别渠道（删除 `_chanChatKey` 依赖与 `_sessionKey` 前缀判断）；渠道交互能力下放 adapter（以 `location` 为首个落点）：`crates/tools/src/location.rs`、`crates/gateway/src/server.rs`、`crates/telegram/src/outbound.rs`
 - [x] Hooks payload 删除 V2 `chanChatKey/chanAccountKey`，改为结构化 `channelTarget`（来源于 `channel_binding`），能力不弱于现状：`crates/common/src/hooks.rs`、`crates/agents/src/runner.rs`、`crates/gateway/src/chat.rs`
 - [x] 运行时 turn bridge 也必须一刀切：`ChannelTurnContext`、pending reply/status、WS/status payload 不再保存或广播 `chan_chat_key/ChannelReplyTarget` 这类旧桥字段，统一改为 `session_id/session_key + reply_target_ref/channelTarget` 口径：`crates/gateway/src/state.rs`、`crates/gateway/src/channel_events.rs`、`crates/gateway/src/chat.rs`
@@ -147,7 +147,7 @@
   - 不得：保留任何 V2 `chan_chat_key` 的“兼容输入解析”尾巴；一律切到 V3 术语体系。
   - 必须：core 不需要知道的渠道投递细节，后续应继续向 adapter 私有对象（opaque ref）收敛（本单优先清 `chan_chat_key` 坐标系）。
 - 兼容性：本单为“切干净”任务，允许 breaking change（但必须写清升级说明与回滚策略）。
-- 可观测性：任何降级/缺失上下文导致的 fallback 必须结构化日志 + `reason_code`（不打印敏感正文）。
+- 可观测性：任何 strict reject / policy block 必须结构化日志 + `reason_code`（不打印敏感正文）。
 
 ## 问题陈述（Problem Statement）
 ### 现象（Symptoms）
@@ -199,11 +199,11 @@
 ## 实施完成证据（Post-fix / Evidence）【2026-03-21】
 - `rg -n \"_chanChatKey|chanChatKey|chan_chat_key\" crates docs/src/refactor` 结果为 0
 - `rg -n \"\\bpersona_id\\b|\\bpersonaId\\b\" crates docs/src` 的命中仅剩“显式拒绝旧字段”的测试断言；运行时代码与有效文档已清零：`crates/telegram/src/config.rs`
-- `rg -n \"people/\" crates docs/src` 的命中仅剩“legacy fallback / 结构化告警 / 历史说明”的 loader 文案与测试；运行时代码与有效文档已清零：`crates/config/src/loader.rs`
+- `rg -n \"people/\" crates docs/src` 的命中仅剩“legacy 拒绝日志 / 历史说明”的 loader 文案与测试；运行时代码与有效文档已清零：`crates/config/src/loader.rs`
 - `rg -n \"group_session_transcript_format\" crates docs/src/refactor` 结果为 0
 - runner 触发的 hooks 已携带 gateway 预解析的 `sessionKey/channelTarget`，不再退化为 `None`：`crates/gateway/src/chat.rs`、`crates/agents/src/runner.rs`
 - `TelegramAccountConfig` 使用严格反序列化，旧 `persona_id` 输入会直接报错而不是静默掉字段：`crates/telegram/src/config.rs`
-- `agents/` 缺失但旧 `people/` 文档存在时，loader 会 fallback 读取旧文档并给出 `reason_code=legacy_people_dir_fallback` 的结构化告警：`crates/config/src/loader.rs`
+- `agents/` 缺失但旧 `people/` 文档存在时，loader 会直接拒绝读取并给出 `reason_code=legacy_people_dir_rejected` 的结构化告警：`crates/config/src/loader.rs`
 - Telegram 私有 meta 跨层字段已删除：`crates/channels/src/plugin.rs` 不再含 `ChannelMessageMeta.telegram` / `ChannelTelegramMeta` / `ChannelTranscriptFormat` / `TelegramChatKind`
 - TG-GST v1 入站文本由 adapter 产出（gateway 不再二次拼装）：`crates/telegram/src/handlers.rs`、`crates/telegram/src/adapter.rs`
 - gateway 不再散点解析 `channel_binding`：解析/兼容性判断集中在 adapter helper：`crates/telegram/src/adapter.rs`
@@ -290,9 +290,9 @@
 - [x] OpenAI Responses 的 `prompt_cache_key` 在“同一 `session_key` 但不同 `session_id`”场景下不会共享 bucket（以自动化测试证明）。
 - [x] tool context 只包含 `_sessionId`/`_sessionKey`，且所有 tools 能正确读取并通过测试。
 - [x] `rg -n \"\\bpersona_id\\b|\\bpersonaId\\b\" crates docs/src` 的命中仅允许出现在“显式拒绝旧字段”的测试断言中；运行时代码与有效文档不再保留该字段。
-- [x] `rg -n \"people/\" crates docs/src` 的命中仅允许出现在“legacy fallback / 结构化告警 / 历史说明”的 loader 文案与测试中；运行时代码与有效文档已切到 `agents/<agent_id>/...`。
+- [x] `rg -n \"people/\" crates docs/src` 的命中仅允许出现在“legacy 拒绝日志 / 历史说明”的 loader 文案与测试中；运行时代码与有效文档已切到 `agents/<agent_id>/...`。
 - [x] `rg -n \"group_session_transcript_format\" crates docs/src/refactor` 结果为 0（template/历史说明除外）。
-- [x] Config schema/validate 的正式口径已切到 `tools.exec.sandbox.scope_key=session_id|session_key`，同时在迁移窗口内兼容 legacy `tools.exec.sandbox.scope` 并输出 deprecated warning：`crates/config/src/schema.rs`、`crates/config/src/validate.rs`
+- [x] Config schema/validate 的正式口径已切到 `tools.exec.sandbox.scope_key=session_id|session_key`，legacy `tools.exec.sandbox.scope` 直接报错，不再兼容：`crates/config/src/schema.rs`、`crates/config/src/validate.rs`
 - [x] 所有 sandbox router 调用点使用“同一条 key 口径”（不再读取 `_chanChatKey`，也不再从 channel_binding 推导 router_key）：`crates/gateway/src/session.rs`、`crates/tools/src/exec.rs`
 - [x] `location` tool 不再读取 `_chanChatKey`/不再判断 `telegram:` 前缀；无 `_connId` 时仅用 `_sessionId` 调用 channel location 请求：`crates/tools/src/location.rs`
 - [x] gateway 对“无 channel_binding / 渠道不支持定位”的情况立即返回 `NotSupported`，并记录结构化日志 `reason_code`（不等待 60s timeout）：`crates/gateway/src/server.rs`
@@ -310,9 +310,9 @@
 - [x] WS/status payload：chat 事件、ingest-only 事件、状态卡序列化结果中不再含 `chanChatKey/ChanChatKey`：`crates/gateway/src/channel_events.rs`
 - [x] hooks payload：BeforeAgentStart 等 hook 的 `sessionId/sessionKey` 语义正确：`crates/agents/src/runner.rs`
 - [x] agentId 替换：gateway/tools/telegram config 运行时解析后不再出现 `persona_id` 字段；旧 `persona_id` 输入会被显式拒绝，且 UI settings/schema 显示 `agentId`：`crates/gateway/src/channel.rs`、`crates/telegram/src/config.rs`、`crates/tools/src/spawn_agent.rs`
-- [x] Type4 loader：优先从 `agents/<agent_id>/...` 读取并渲染；若只存在 legacy `people/<id>/...`，则 fallback 读取并记录结构化告警：`crates/config/src/loader.rs`、`crates/gateway/src/chat.rs`
+- [x] Type4 loader：优先从 `agents/<agent_id>/...` 读取并渲染；若只存在 legacy `people/<id>/...`，则直接拒绝并记录结构化告警：`crates/config/src/loader.rs`、`crates/gateway/src/chat.rs`
 - [x] Sandbox scope_key：当 `scope_key=session_id` 时 sandbox 以 `_sessionId` 分桶；当 `scope_key=session_key` 时以 `_sessionKey` 分桶：`crates/tools/src/sandbox.rs`、`crates/tools/src/exec.rs`
-- [x] sandbox config/UI：UI 文案与 override 限制改为 `scope_key` 口径；legacy `tools.exec.sandbox.scope` 在迁移窗口内仅输出 deprecated warning，冲突配置仍显式报错：`crates/config/src/validate.rs`、`crates/gateway/src/session.rs`、`crates/gateway/src/assets/js/sandbox.js`
+- [x] sandbox config/UI：UI 文案与 override 限制改为 `scope_key` 口径；legacy `tools.exec.sandbox.scope` 直接报错，冲突配置仍显式报错：`crates/config/src/validate.rs`、`crates/gateway/src/session.rs`、`crates/gateway/src/assets/js/sandbox.js`
 - [x] `location` tool：当没有 `_connId` 时，不需要 `_chanChatKey` 也能发起 channel location 请求（参数仅 `_sessionId`）；当 session 未绑定 channel 时返回 `NotSupported`：`crates/tools/src/location.rs`、`crates/gateway/src/server.rs`
 - [x] hooks payload：所有带 `sessionId` 的事件均使用 `channelTarget` 结构化字段（可空），且 `chanChatKey/chanAccountKey` 不再序列化：`crates/common/src/hooks.rs`、`crates/agents/src/runner.rs`
 - [x] reply 投递：gateway/outbound 只转交 `reply_target_ref`，并且在“同 chat 多桶/多会话实例”下不会串线（最少用 mock adapter 断言目标一致性）：`crates/gateway/src/channel_events.rs`、`crates/telegram/src/outbound.rs`
@@ -331,12 +331,12 @@
   3. 检查 prompt cache debug 面板（或 provider debug overrides）显示来源 `sessionId` 且不同会话实例不共享
 
 ## 发布与回滚（Rollout & Rollback）
-- 发布策略：一次性切换 V3 主口径（`session_id/session_key`、`agent_id`、`scope_key`）；同时保留受控的升级兼容兜底（legacy `people/` 单点 fallback、legacy sandbox `scope` deprecated alias、缺失 `_sessionKey` 时回退 `session_id`）。
+- 发布策略：一次性切换 V3 主口径（`session_id/session_key`、`agent_id`、`scope_key`）；不保留 legacy `people/`、legacy sandbox `scope`、缺失 `_sessionKey` 回退等兼容尾巴。
 - 回滚策略：回滚到上一版本二进制；本版本不保留 `_chanChatKey` 兼容路径。
-- 上线观测：新增/复用日志关键词 `reason_code`，重点关注 `missing_session_id`、`missing_session_key_fallback_to_session_id`、`legacy_people_dir_fallback`。
-- 迁移提示：建议将本地 `data_dir/people/<id>/...` 迁移为 `data_dir/agents/<agent_id>/...`；迁移窗口内 loader 仍会 fallback 读取旧目录，但会记录结构化告警。
+- 上线观测：新增/复用日志关键词 `reason_code`，重点关注 `missing_session_id`、`missing_session_key_for_scope_key_session_key`、`legacy_people_dir_rejected`。
+- 迁移提示：建议将本地 `data_dir/people/<id>/...` 手工迁移为 `data_dir/agents/<agent_id>/...`；当前版本不会读取旧目录。
 - 迁移提示（breaking）：Telegram account config 中旧 `persona_id` 已删除；必须改为 `agent_id`，否则配置会被显式拒绝。
-- 迁移提示：`tools.exec.sandbox.scope` 已废弃；请改用 `tools.exec.sandbox.scope_key=session_id|session_key`。迁移窗口内旧字段仍可读取并映射，但会输出 warning。
+- 迁移提示：`tools.exec.sandbox.scope` 已删除；请改用 `tools.exec.sandbox.scope_key=session_id|session_key`。
 - 说明：`tools.exec.sandbox.scope_key` 仅在“exec 处于沙盒模式”时生效；若 exec 运行在主机模式（非沙盒），该分桶配置不产生实际隔离效果。
 
 ## 实施拆分（Implementation Outline）
@@ -354,12 +354,12 @@
   - TG adapter 直接产出固定群聊文本；gateway/core 不再保留“最终文本格式切换器”
 - Step 8: 删除 persona 口径（已决策）：
   - 全仓库字段/变量/文档从 `persona*` → `agent*`
-  - Type4 模板目录从 `people/<id>/...` → `agents/<agent_id>/...`，loader 在迁移窗口内保留 legacy `people/` fallback
+  - Type4 模板目录从 `people/<id>/...` → `agents/<agent_id>/...`，loader 不再读取 legacy `people/`
   - 更新 UI/settings schema、工具 schema（spawn_agent 等）、TG config 字段、page-settings/onboarding、prompt 装配与 loader
 - Step 9: Sandbox scope_key（已决策）：
   - 正式口径切到 `tools.exec.sandbox.scope_key=session_id|session_key`（默认 `session_id`）
-  - legacy `tools.exec.sandbox.scope` 仅保留为迁移窗口内的 deprecated alias
-  - gateway/tools 一律从 `_sessionId/_sessionKey` 注入与读取，不再使用 `_chanChatKey`，也不从 channel_binding 推导 router key；若 `scope_key=session_key` 但缺少 `_sessionKey`，则回退 `session_id` 并记日志
+  - legacy `tools.exec.sandbox.scope` 已删除，命中即报错
+  - gateway/tools 一律从 `_sessionId/_sessionKey` 注入与读取，不再使用 `_chanChatKey`，也不从 channel_binding 推导 router key；若 `scope_key=session_key` 但缺少 `_sessionKey`，则直接失败并记录 `missing_session_key_for_scope_key_session_key`
 - Step 10: Tools 渠道交互下放（已决策）：
   - `location`：删除 tool 内渠道判断；无 `_connId` 时仅用 `_sessionId` 走 gateway→adapter
   - gateway：基于 `session_id -> channel_binding` 判定支持/不支持，并将 TG 交互下放到 adapter/outbound
@@ -401,7 +401,7 @@
   - tools 读取：根据配置选择从 `_sessionId` 或 `_sessionKey` 取 sandbox key
   - 禁止：读取 `_chanChatKey`；禁止：从 `channel_binding` 推导确定性 key（否则又回到 V2 坐标）
 - observability：
-  - 若 scope_key 需要的上下文字段缺失（例如缺 `_sessionKey`），必须 fail-fast + 结构化日志 `reason_code`（例如 `missing_session_key_for_sandbox`），不得 fallback 到 `"main"`。
+  - 若 scope_key 需要的上下文字段缺失（例如缺 `_sessionKey`），必须 fail-fast + 结构化日志 `reason_code`（例如 `missing_session_key_for_scope_key_session_key`），不得退化到任何其他 key。
 
 ### Q4：`location` 工具（渠道识别下放 adapter）
 **目标（人话）**

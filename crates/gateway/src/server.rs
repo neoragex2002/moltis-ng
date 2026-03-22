@@ -1517,7 +1517,8 @@ pub async fn start_gateway(
     services = services.with_cron(live_cron);
 
     // Build sandbox router from config (shared across sessions).
-    let mut sandbox_config = moltis_tools::sandbox::SandboxConfig::from(&config.tools.exec.sandbox);
+    let mut sandbox_config =
+        moltis_tools::sandbox::SandboxConfig::try_from(&config.tools.exec.sandbox)?;
     sandbox_config.container_prefix = Some(sandbox_container_prefix);
     sandbox_config.timezone = moltis_config::load_user()
         .and_then(|u| u.timezone)

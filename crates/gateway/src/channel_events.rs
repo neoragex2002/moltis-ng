@@ -75,6 +75,24 @@ fn tg_private_target_from_reply_target_ref(reply_target_ref: &str) -> Option<TgP
     })
 }
 
+fn reject_legacy_telegram_binding(
+    ctx: &ChannelInboundContext,
+    session_id: &str,
+    expected: &moltis_telegram::adapter::TelegramChannelBindingInfo,
+) -> anyhow::Error {
+    warn!(
+        event = "telegram.session.reject_legacy_binding",
+        session_id,
+        chan_account_key = %expected.account_key,
+        chat_id = %expected.chat_id,
+        thread_id = ?expected.thread_id,
+        bucket_key = %ctx.session_key,
+        reason_code = "legacy_channel_binding_rejected",
+        "rejecting telegram session with legacy or incomplete channel_binding"
+    );
+    anyhow!("legacy telegram channel_binding rejected for session {session_id}")
+}
+
 fn channel_message_meta_from_tg(request: &TgInboundRequest) -> ChannelMessageMeta {
     ChannelMessageMeta {
         chan_type: ChannelType::Telegram,
@@ -98,47 +116,64 @@ fn channel_attachments_from_tg(attachments: &[TgAttachment]) -> Vec<ChannelAttac
 async fn resolve_channel_session_id(
     ctx: &ChannelInboundContext,
     metadata: &SqliteSessionMetadata,
-) -> Option<String> {
+) -> Result<Option<String>> {
     if ctx.session_key.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
     if let Some(session_id) = metadata
         .get_bucket_session_id(ctx.chan_type.as_str(), &ctx.session_key)
         .await
     {
-        return Some(session_id);
+        return Ok(Some(session_id));
     }
 
     if ctx.chan_type != ChannelType::Telegram {
-        return None;
+        return Ok(None);
     }
 
     let Some(binding_json) = ctx.channel_binding.as_deref() else {
-        return None;
+        return Ok(None);
     };
     let Some(expected) = moltis_telegram::adapter::telegram_channel_binding_info(binding_json)
     else {
-        return None;
+        return Ok(None);
     };
 
-    let active_session_id = metadata
+    let Some(active_session_id) = metadata
         .get_active_session_id(
             ctx.chan_type.as_str(),
             &expected.account_key,
             &expected.chat_id,
         )
-        .await?;
+        .await
+    else {
+        return Ok(None);
+    };
     let active_entry = metadata.get(&active_session_id).await;
     if let Some(existing_binding) = active_entry
         .as_ref()
         .and_then(|entry| entry.channel_binding.as_deref())
-        && !moltis_telegram::adapter::telegram_binding_is_compatible_for_bucket(
+    {
+        let strict_binding_missing_bucket = moltis_telegram::adapter::telegram_channel_binding_info(
+            existing_binding,
+        )
+        .is_some_and(|info| info.bucket_key.is_none());
+        if moltis_telegram::adapter::telegram_binding_uses_legacy_shape(existing_binding)
+            || strict_binding_missing_bucket
+        {
+            return Err(reject_legacy_telegram_binding(
+                ctx,
+                &active_session_id,
+                &expected,
+            ));
+        }
+        if !moltis_telegram::adapter::telegram_binding_is_compatible_for_bucket(
             existing_binding,
             &expected,
             &ctx.session_key,
-        )
-    {
-        return None;
+        ) {
+            return Ok(None);
+        }
     }
 
     metadata
@@ -154,15 +189,15 @@ async fn resolve_channel_session_id(
         reason_code = "legacy_active_session_without_bucket_mapping",
         "reused active telegram session and backfilled bucket mapping"
     );
-    Some(active_session_id)
+    Ok(Some(active_session_id))
 }
 
 async fn ensure_channel_session_id(
     ctx: &ChannelInboundContext,
     metadata: &SqliteSessionMetadata,
-) -> String {
-    if let Some(id) = resolve_channel_session_id(ctx, metadata).await {
-        return id;
+) -> Result<String> {
+    if let Some(id) = resolve_channel_session_id(ctx, metadata).await? {
+        return Ok(id);
     }
     let new_id = format!("session:{}", uuid::Uuid::new_v4());
     metadata
@@ -183,9 +218,10 @@ async fn ensure_channel_session_id(
             .await;
     }
 
-    new_id
+    Ok(new_id)
 }
 
+#[derive(Debug)]
 struct ChannelBridgeSession {
     session_key: String,
     session_id: String,
@@ -194,32 +230,30 @@ struct ChannelBridgeSession {
 async fn resolve_channel_bridge_session(
     state: &GatewayState,
     ctx: &ChannelInboundContext,
-) -> ChannelBridgeSession {
+) -> Result<ChannelBridgeSession> {
     let session_key = if ctx.session_key.trim().is_empty() {
-        let generated = format!("missing_bucket_key:{}", uuid::Uuid::new_v4());
         warn!(
-            event = "channel.session_key.missing_bucket_key",
+            event = "channel.session.reject_missing_session_key",
             chan_type = ctx.chan_type.as_str(),
-            session_key = generated,
             reason_code = "missing_bucket_key",
-            "channel inbound context missing session_key; generated a fallback session_key"
+            "rejecting channel inbound context without session_key"
         );
-        generated
+        return Err(anyhow!("missing channel session_key"));
     } else {
         ctx.session_key.clone()
     };
     let session_id = if let Some(ref sm) = state.services.session_metadata {
         let mut ctx_for_lookup = ctx.clone();
         ctx_for_lookup.session_key = session_key.clone();
-        ensure_channel_session_id(&ctx_for_lookup, sm).await
+        ensure_channel_session_id(&ctx_for_lookup, sm).await?
     } else {
         session_key.clone()
     };
 
-    ChannelBridgeSession {
+    Ok(ChannelBridgeSession {
         session_key,
         session_id,
-    }
+    })
 }
 
 async fn persist_channel_bridge_binding(
@@ -324,7 +358,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
     ) {
         if let Some(state) = self.state.get() {
             let mut ctx = ctx;
-            let bridge = resolve_channel_bridge_session(state, &ctx).await;
+            let Ok(bridge) = resolve_channel_bridge_session(state, &ctx).await else {
+                return;
+            };
             let session_key = bridge.session_key;
             let session_id = bridge.session_id;
             ctx.session_key = session_key.clone();
@@ -586,7 +622,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
         };
 
         let mut ctx = ctx;
-        let bridge = resolve_channel_bridge_session(state, &ctx).await;
+        let Ok(bridge) = resolve_channel_bridge_session(state, &ctx).await else {
+            return;
+        };
         let session_key = bridge.session_key;
         let session_id = bridge.session_id;
         ctx.session_key = session_key.clone();
@@ -812,7 +850,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
         };
 
         let mut ctx = ctx;
-        let bridge = resolve_channel_bridge_session(state, &ctx).await;
+        let Ok(bridge) = resolve_channel_bridge_session(state, &ctx).await else {
+            return false;
+        };
         let session_id = bridge.session_id;
         ctx.session_key = bridge.session_key;
         persist_channel_bridge_binding(state, &ctx, &session_id).await;
@@ -905,7 +945,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
             return;
         };
 
-        let bridge = resolve_channel_bridge_session(state, &ctx).await;
+        let Ok(bridge) = resolve_channel_bridge_session(state, &ctx).await else {
+            return;
+        };
         let session_key = bridge.session_key;
         let session_id = bridge.session_id;
         ctx.session_key = session_key.clone();
@@ -1192,7 +1234,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             .as_ref()
             .ok_or_else(|| anyhow!("session metadata not available"))?;
         let mut ctx = ctx;
-        let bridge = resolve_channel_bridge_session(state, &ctx).await;
+        let bridge = resolve_channel_bridge_session(state, &ctx).await?;
         let session_key = bridge.session_key;
         let session_id = bridge.session_id;
         ctx.session_key = session_key.clone();
@@ -2177,7 +2219,9 @@ mod tests {
             Some("group:peer:-100999"),
         );
 
-        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref()).await;
+        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref())
+            .await
+            .expect("lookup should succeed");
         assert_eq!(session_id.as_deref(), Some("session:new"));
     }
 
@@ -2190,12 +2234,14 @@ mod tests {
 
         let ctx = telegram_inbound_ctx("telegram:bot1", "-100999", None, None, None);
 
-        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref()).await;
+        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref())
+            .await
+            .expect("lookup should succeed");
         assert!(session_id.is_none());
     }
 
     #[tokio::test]
-    async fn resolve_channel_session_id_reuses_legacy_active_session_for_matching_bucket() {
+    async fn resolve_channel_session_id_rejects_legacy_active_session_for_matching_bucket() {
         let metadata = sqlite_metadata().await;
         let legacy_binding = serde_json::to_string(&ChannelReplyTarget {
             chan_type: ChannelType::Telegram,
@@ -2223,8 +2269,14 @@ mod tests {
             Some("group:account:telegram:bot1:peer:-100999:branch:77"),
         );
 
-        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref()).await;
-        assert_eq!(session_id.as_deref(), Some("session:old"));
+        let err = ensure_channel_session_id(&ctx, metadata.as_ref())
+            .await
+            .expect_err("incomplete binding must be rejected");
+        assert!(
+            err.to_string()
+                .contains("legacy telegram channel_binding rejected"),
+            "unexpected error: {err:#}"
+        );
         assert_eq!(
             metadata
                 .get_bucket_session_id(
@@ -2233,12 +2285,12 @@ mod tests {
                 )
                 .await
                 .as_deref(),
-            Some("session:old")
+            None
         );
     }
 
     #[tokio::test]
-    async fn resolve_channel_session_id_reuses_active_session_with_legacy_binding_blob_shape() {
+    async fn resolve_channel_session_id_rejects_active_session_with_legacy_binding_blob_shape() {
         let metadata = sqlite_metadata().await;
         let legacy_binding = r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"-100999","thread_id":"77"}"#.to_string();
         let _ = metadata.upsert("session:old", Some("legacy".into())).await;
@@ -2257,8 +2309,14 @@ mod tests {
             Some("group:account:telegram:bot1:peer:-100999:branch:77"),
         );
 
-        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref()).await;
-        assert_eq!(session_id.as_deref(), Some("session:old"));
+        let err = ensure_channel_session_id(&ctx, metadata.as_ref())
+            .await
+            .expect_err("legacy binding blob must be rejected");
+        assert!(
+            err.to_string()
+                .contains("legacy telegram channel_binding rejected"),
+            "unexpected error: {err:#}"
+        );
         assert_eq!(
             metadata
                 .get_bucket_session_id(
@@ -2267,7 +2325,7 @@ mod tests {
                 )
                 .await
                 .as_deref(),
-            Some("session:old")
+            None
         );
     }
 
@@ -2300,8 +2358,38 @@ mod tests {
             Some("group:account:telegram:bot1:peer:-100999:sender:bob"),
         );
 
-        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref()).await;
+        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref())
+            .await
+            .expect("lookup should succeed");
         assert!(session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_channel_bridge_session_rejects_missing_session_key() {
+        let metadata = sqlite_metadata().await;
+        let services = crate::services::GatewayServices::noop().with_session_metadata(metadata);
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        );
+        let ctx = ChannelInboundContext {
+            chan_type: ChannelType::Telegram,
+            session_key: String::new(),
+            reply_target_ref: "reply-target".into(),
+            channel_binding: None,
+        };
+
+        let err = resolve_channel_bridge_session(&state, &ctx)
+            .await
+            .expect_err("missing session_key must be rejected");
+        assert!(
+            err.to_string().contains("missing channel session_key"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
