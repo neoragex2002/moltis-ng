@@ -108,7 +108,7 @@ async fn list() -> Result<()> {
 
 async fn build() -> Result<()> {
     let config = moltis_config::discover_and_load();
-    let mut sandbox_config = sandbox::SandboxConfig::from(&config.tools.exec.sandbox);
+    let mut sandbox_config = sandbox::SandboxConfig::try_from(&config.tools.exec.sandbox)?;
     sandbox_config.container_prefix = Some(instance_sandbox_prefix(&config));
 
     let packages = sandbox_config.packages.clone();
