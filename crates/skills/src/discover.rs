@@ -29,17 +29,23 @@ impl FsSkillDiscoverer {
 
     /// Build the default search paths for skill discovery.
     ///
-    /// Workspace root is always the configured data directory.
+    /// Project-local skills live under `<cwd>/.moltis/skills`; user-global
+    /// skills live under the configured data directory.
     pub fn default_paths() -> Vec<(PathBuf, SkillSource)> {
-        let workspace_root = moltis_config::data_dir();
-        let data = workspace_root.clone();
-        vec![
-            (workspace_root.join(".moltis/skills"), SkillSource::Project),
-            (data.join("skills"), SkillSource::Personal),
-            (data.join("installed-skills"), SkillSource::Registry),
-            (data.join("installed-plugins"), SkillSource::Plugin),
-        ]
+        default_paths_with(
+            moltis_config::project_local_dir(),
+            moltis_config::data_dir(),
+        )
     }
+}
+
+fn default_paths_with(project_root: PathBuf, data_dir: PathBuf) -> Vec<(PathBuf, SkillSource)> {
+    vec![
+        (project_root.join("skills"), SkillSource::Project),
+        (data_dir.join("skills"), SkillSource::Personal),
+        (data_dir.join("installed-skills"), SkillSource::Registry),
+        (data_dir.join("installed-plugins"), SkillSource::Plugin),
+    ]
 }
 
 #[async_trait]
@@ -285,6 +291,27 @@ mod tests {
         let discoverer = FsSkillDiscoverer::new(vec![(skills_dir, SkillSource::Project)]);
         let skills = discoverer.discover().await.unwrap();
         assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn default_paths_use_project_local_and_data_roots() {
+        let project_root = PathBuf::from("/tmp/workspace/.moltis");
+        let data_dir = PathBuf::from("/tmp/home/.moltis/data");
+        let paths = default_paths_with(project_root.clone(), data_dir.clone());
+
+        assert_eq!(
+            paths[0],
+            (project_root.join("skills"), SkillSource::Project)
+        );
+        assert_eq!(paths[1], (data_dir.join("skills"), SkillSource::Personal));
+        assert_eq!(
+            paths[2],
+            (data_dir.join("installed-skills"), SkillSource::Registry)
+        );
+        assert_eq!(
+            paths[3],
+            (data_dir.join("installed-plugins"), SkillSource::Plugin)
+        );
     }
 
     #[tokio::test]

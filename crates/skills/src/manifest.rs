@@ -12,7 +12,7 @@ impl ManifestStore {
         Self { path }
     }
 
-    /// Default manifest path: `~/.moltis/skills-manifest.json`.
+    /// Default manifest path: `~/.moltis/data/skills-manifest.json`.
     pub fn default_path() -> anyhow::Result<PathBuf> {
         Ok(moltis_config::data_dir().join("skills-manifest.json"))
     }

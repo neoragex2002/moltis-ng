@@ -7,7 +7,7 @@ use {
 
 use crate::{config_dir::moltis_config_dir, types::OAuthTokens};
 
-/// File-based token storage at `~/.config/moltis/oauth_tokens.json`.
+/// File-based token storage at `~/.moltis/config/oauth_tokens.json`.
 #[derive(Debug, Clone)]
 pub struct TokenStore {
     path: PathBuf,

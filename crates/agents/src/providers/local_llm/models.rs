@@ -1,7 +1,8 @@
 //! Model registry for local LLM models.
 //!
 //! Supports both GGUF and MLX model formats with automatic format selection
-//! based on the current platform.
+//! based on the current platform. Downloaded models default to
+//! `~/.moltis/data/models`.
 
 use std::path::PathBuf;
 
@@ -286,7 +287,7 @@ pub fn models_for_backend(backend: BackendType) -> Vec<&'static LocalModelDef> {
 
 /// Default cache directory for downloaded models.
 ///
-/// Returns `~/.moltis/models` (same base as config/data directories).
+/// Returns `~/.moltis/data/models` (same base as the default data directory).
 #[must_use]
 pub fn default_models_dir() -> PathBuf {
     moltis_config::data_dir().join("models")

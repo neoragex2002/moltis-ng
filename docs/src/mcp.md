@@ -192,7 +192,7 @@ MCP server stderr is captured in Moltis logs:
 
 ```bash
 # View gateway logs
-tail -f ~/.moltis/logs/gateway.log | grep mcp
+tail -f ~/.moltis/data/logs/gateway.log | grep mcp
 ```
 
 ### Test Locally

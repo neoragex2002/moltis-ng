@@ -49,7 +49,11 @@ use crate::{
 async fn refresh_telegram_identity_links(state: &Arc<GatewayState>) {
     match crate::people::telegram_identity_links() {
         Ok(links) => {
-            state.services.channel.set_telegram_identity_links(links).await;
+            state
+                .services
+                .channel
+                .set_telegram_identity_links(links)
+                .await;
         },
         Err(error) => warn!(
             event = "telegram.identity_link.refresh_failed",

@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::config::{
-    DmScope, GroupScope, TelegramAccountConfig, TelegramBusAccountSnapshot,
-    TelegramIdentityLink,
+    DmScope, GroupScope, TelegramAccountConfig, TelegramBusAccountSnapshot, TelegramIdentityLink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,9 +227,7 @@ fn tg_gst_v1_find_identity_link_by_agent_id<'a>(
     agent_id: Option<&str>,
 ) -> Option<&'a TelegramIdentityLink> {
     let agent_id = agent_id?;
-    identity_links
-        .iter()
-        .find(|link| link.agent_id == agent_id)
+    identity_links.iter().find(|link| link.agent_id == agent_id)
 }
 
 fn tg_gst_v1_find_identity_link<'a>(
@@ -312,8 +309,8 @@ fn tg_gst_v1_known_speaker_for_snapshot(
     if let Some(chan_nickname) = tg_gst_v1_display_value(snapshot.chan_nickname.as_deref()) {
         return format!("{chan_nickname}(bot)");
     }
-    if let Some(link_display) =
-        identity_link.and_then(|link| tg_gst_v1_display_value(link.telegram_display_name.as_deref()))
+    if let Some(link_display) = identity_link
+        .and_then(|link| tg_gst_v1_display_value(link.telegram_display_name.as_deref()))
     {
         return format!("{link_display}(bot)");
     }
@@ -323,19 +320,32 @@ fn tg_gst_v1_known_speaker_for_snapshot(
     format!("tg-bot-{}(bot)", tg_gst_v1_short_id(snapshot.chan_user_id))
 }
 
-fn tg_gst_v1_known_speaker_for_identity_link(link: &TelegramIdentityLink) -> Option<String> {
+fn tg_gst_v1_format_speaker_name(base_name: String, sender_is_bot: bool) -> String {
+    if sender_is_bot {
+        format!("{base_name}(bot)")
+    } else {
+        base_name
+    }
+}
+
+fn tg_gst_v1_known_speaker_for_identity_link(
+    link: &TelegramIdentityLink,
+    sender_is_bot: bool,
+) -> Option<String> {
     if let Some(display_name) = tg_gst_v1_display_value(link.display_name.as_deref()) {
-        return Some(display_name);
+        return Some(tg_gst_v1_format_speaker_name(display_name, sender_is_bot));
     }
     if let Some(link_display) = tg_gst_v1_display_value(link.telegram_display_name.as_deref()) {
-        return Some(link_display);
+        return Some(tg_gst_v1_format_speaker_name(link_display, sender_is_bot));
     }
     tg_gst_v1_display_value(link.telegram_user_name.as_deref())
+        .map(|username| tg_gst_v1_format_speaker_name(username, sender_is_bot))
 }
 
 fn tg_gst_v1_has_speaker_collision(
     speaker: &str,
     actor_key: Option<&str>,
+    sender_is_bot: bool,
     managed_snapshots: &[TelegramBusAccountSnapshot],
     identity_links: &[TelegramIdentityLink],
 ) -> bool {
@@ -353,7 +363,7 @@ fn tg_gst_v1_has_speaker_collision(
     identity_links.iter().any(|link| {
         tg_gst_v1_actor_key_from_identity_link(link)
             .filter(|key| key != actor_key)
-            .and_then(|_| tg_gst_v1_known_speaker_for_identity_link(link))
+            .and_then(|_| tg_gst_v1_known_speaker_for_identity_link(link, sender_is_bot))
             .is_some_and(|candidate| candidate == speaker)
     })
 }
@@ -363,10 +373,17 @@ fn tg_gst_v1_apply_speaker_disambiguation(
     actor_key: Option<&str>,
     username_hint: Option<&str>,
     user_id: Option<u64>,
+    sender_is_bot: bool,
     managed_snapshots: &[TelegramBusAccountSnapshot],
     identity_links: &[TelegramIdentityLink],
 ) -> String {
-    if !tg_gst_v1_has_speaker_collision(speaker, actor_key, managed_snapshots, identity_links) {
+    if !tg_gst_v1_has_speaker_collision(
+        speaker,
+        actor_key,
+        sender_is_bot,
+        managed_snapshots,
+        identity_links,
+    ) {
         return speaker.to_string();
     }
 
@@ -403,7 +420,10 @@ fn tg_gst_v1_resolve_speaker(
             return TgSpeakerResolution {
                 speaker: format!("{display_name}(bot)"),
                 actor_key: Some(tg_gst_v1_actor_key_from_snapshot(snapshot)),
-                username_hint: snapshot.chan_user_name.clone().or_else(|| username.map(str::to_string)),
+                username_hint: snapshot
+                    .chan_user_name
+                    .clone()
+                    .or_else(|| username.map(str::to_string)),
                 user_id,
                 match_method: "managed_bot_agent_id",
                 reason_code: "speaker_link_display_name",
@@ -415,7 +435,10 @@ fn tg_gst_v1_resolve_speaker(
             return TgSpeakerResolution {
                 speaker: format!("{chan_nickname}(bot)"),
                 actor_key: Some(tg_gst_v1_actor_key_from_snapshot(snapshot)),
-                username_hint: snapshot.chan_user_name.clone().or_else(|| username.map(str::to_string)),
+                username_hint: snapshot
+                    .chan_user_name
+                    .clone()
+                    .or_else(|| username.map(str::to_string)),
                 user_id,
                 match_method: "managed_bot_chan_nickname",
                 reason_code: "speaker_managed_bot_nickname",
@@ -429,7 +452,10 @@ fn tg_gst_v1_resolve_speaker(
             return TgSpeakerResolution {
                 speaker: format!("{link_display}(bot)"),
                 actor_key: Some(tg_gst_v1_actor_key_from_snapshot(snapshot)),
-                username_hint: snapshot.chan_user_name.clone().or_else(|| username.map(str::to_string)),
+                username_hint: snapshot
+                    .chan_user_name
+                    .clone()
+                    .or_else(|| username.map(str::to_string)),
                 user_id,
                 match_method: "managed_bot_link_telegram_display_name",
                 reason_code: "speaker_link_telegram_display_name",
@@ -443,13 +469,10 @@ fn tg_gst_v1_resolve_speaker(
     {
         if let Some(display_name) = tg_gst_v1_display_value(identity_link.display_name.as_deref()) {
             return TgSpeakerResolution {
-                speaker: if sender_is_bot {
-                    format!("{display_name}(bot)")
-                } else {
-                    display_name
-                },
+                speaker: tg_gst_v1_format_speaker_name(display_name, sender_is_bot),
                 actor_key: tg_gst_v1_actor_key_from_identity_link(identity_link),
-                username_hint: username.map(str::to_string)
+                username_hint: username
+                    .map(str::to_string)
                     .or_else(|| identity_link.telegram_user_name.clone()),
                 user_id,
                 match_method,
@@ -461,13 +484,10 @@ fn tg_gst_v1_resolve_speaker(
             tg_gst_v1_display_value(identity_link.telegram_display_name.as_deref())
         {
             return TgSpeakerResolution {
-                speaker: if sender_is_bot {
-                    format!("{link_display}(bot)")
-                } else {
-                    link_display
-                },
+                speaker: tg_gst_v1_format_speaker_name(link_display, sender_is_bot),
                 actor_key: tg_gst_v1_actor_key_from_identity_link(identity_link),
-                username_hint: username.map(str::to_string)
+                username_hint: username
+                    .map(str::to_string)
                     .or_else(|| identity_link.telegram_user_name.clone()),
                 user_id,
                 match_method,
@@ -479,14 +499,12 @@ fn tg_gst_v1_resolve_speaker(
 
     if let Some(sender_name) = tg_gst_v1_display_value(sender_name) {
         return TgSpeakerResolution {
-            speaker: if sender_is_bot {
-                format!("{sender_name}(bot)")
-            } else {
-                sender_name
-            },
-            actor_key: user_id
-                .map(|value| format!("uid:{value}"))
-                .or_else(|| username.map(tg_gst_v1_normalize_username).map(|value| format!("uname:{value}"))),
+            speaker: tg_gst_v1_format_speaker_name(sender_name, sender_is_bot),
+            actor_key: user_id.map(|value| format!("uid:{value}")).or_else(|| {
+                username
+                    .map(tg_gst_v1_normalize_username)
+                    .map(|value| format!("uname:{value}"))
+            }),
             username_hint: username.map(str::to_string),
             user_id,
             match_method: "telegram_sender_name",
@@ -497,11 +515,7 @@ fn tg_gst_v1_resolve_speaker(
 
     if let Some(username) = tg_gst_v1_display_value(username) {
         let username_hint = username.clone();
-        let speaker = if sender_is_bot {
-            format!("{username}(bot)")
-        } else {
-            username.clone()
-        };
+        let speaker = tg_gst_v1_format_speaker_name(username.clone(), sender_is_bot);
         return TgSpeakerResolution {
             speaker,
             actor_key: user_id
@@ -515,9 +529,21 @@ fn tg_gst_v1_resolve_speaker(
         };
     }
 
-    let prefix = if sender_is_bot { "tg-bot" } else { "tg-user" };
+    let prefix = if sender_is_bot {
+        "tg-bot"
+    } else {
+        "tg-user"
+    };
     TgSpeakerResolution {
-        speaker: format!("{prefix}-{}{}", tg_gst_v1_short_id(user_id), if sender_is_bot { "(bot)" } else { "" }),
+        speaker: format!(
+            "{prefix}-{}{}",
+            tg_gst_v1_short_id(user_id),
+            if sender_is_bot {
+                "(bot)"
+            } else {
+                ""
+            }
+        ),
         actor_key: user_id.map(|value| format!("uid:{value}")),
         username_hint: None,
         user_id,
@@ -561,6 +587,7 @@ pub(crate) fn tg_gst_v1_render_text(
         resolution.actor_key.as_deref(),
         resolution.username_hint.as_deref(),
         resolution.user_id,
+        sender_is_bot,
         managed_snapshots,
         identity_links,
     );
@@ -747,7 +774,16 @@ fn trim_trailing_connectors(s: &str) -> &str {
                 c.is_whitespace()
                     || matches!(
                         c,
-                        ',' | '，' | '、' | ';' | '；' | ':' | '：' | '!' | '！' | '?' | '？'
+                        ',' | '，'
+                            | '、'
+                            | ';'
+                            | '；'
+                            | ':'
+                            | '：'
+                            | '!'
+                            | '！'
+                            | '?'
+                            | '？'
                             | '。'
                     )
             });
@@ -770,7 +806,10 @@ fn extract_line_start_mention_groups(
     let mut username_to_account = HashMap::<String, String>::new();
     for account in accounts {
         if let Some(username) = account.chan_user_name.as_deref() {
-            username_to_account.insert(username.to_ascii_lowercase(), account.account_handle.clone());
+            username_to_account.insert(
+                username.to_ascii_lowercase(),
+                account.account_handle.clone(),
+            );
         }
     }
 
@@ -781,7 +820,8 @@ fn extract_line_start_mention_groups(
         let mut group_end = mentions[i].end;
         let mut group_mentions = vec![mentions[i].clone()];
         let mut j = i + 1;
-        while j < mentions.len() && only_whitespace_or_punct(&sanitized[group_end..mentions[j].start])
+        while j < mentions.len()
+            && only_whitespace_or_punct(&sanitized[group_end..mentions[j].start])
         {
             group_mentions.push(mentions[j].clone());
             group_end = mentions[j].end;
@@ -1276,7 +1316,10 @@ mod tests {
         assert!(reply_target_ref_from_binding(&binding).is_none());
         assert!(channel_target_from_binding(&binding).is_none());
         assert!(session_key_from_binding(&binding).is_none());
-        assert_eq!(tg_gst_v1_system_prompt_block_for_binding(&binding, &[]), None);
+        assert_eq!(
+            tg_gst_v1_system_prompt_block_for_binding(&binding, &[]),
+            None
+        );
     }
 
     #[test]
@@ -1348,7 +1391,10 @@ mod tests {
     fn group_target_plan_merges_line_start_tasks_once_per_target() {
         let plan = plan_group_target_action(
             "@bot_a 做A\n\n@bot_b 做B\n\n@bot_a 补A2",
-            &[snapshot("telegram:bot_a", "bot_a"), snapshot("telegram:bot_b", "bot_b")],
+            &[
+                snapshot("telegram:bot_a", "bot_a"),
+                snapshot("telegram:bot_b", "bot_b"),
+            ],
             "telegram:bot_a",
             Some("bot_a"),
             None,
@@ -1607,14 +1653,61 @@ mod tests {
     }
 
     #[test]
+    fn tg_gst_v1_render_text_disambiguates_same_display_name_identity_link_bots_by_username() {
+        let rendered = tg_gst_v1_render_text(
+            "已处理",
+            Some(moltis_channels::ChannelMessageKind::Text),
+            &[],
+            &[
+                identity_link(
+                    "risk-a",
+                    Some("风险助手"),
+                    Some(100),
+                    Some("risk_bot_cn"),
+                    Some("风险助手中文"),
+                ),
+                identity_link(
+                    "risk-b",
+                    Some("风险助手"),
+                    Some(200),
+                    Some("risk_helper_backup"),
+                    Some("风险助手中文备用"),
+                ),
+            ],
+            Some("risk_bot_cn"),
+            Some(100),
+            Some("风险助手中文"),
+            true,
+            false,
+        );
+
+        assert_eq!(rendered.text, "风险助手(bot)[risk_bot_cn]: 已处理");
+        assert_eq!(rendered.match_method, "identity_link_user_id");
+        assert!(!rendered.degraded);
+        assert!(rendered.disambiguated);
+    }
+
+    #[test]
     fn tg_gst_v1_render_text_disambiguates_same_display_name_humans_by_short_id() {
         let rendered = tg_gst_v1_render_text(
             "hello everyone",
             Some(moltis_channels::ChannelMessageKind::Text),
             &[],
             &[
-                identity_link("alice-a", Some("Alice Zhang"), Some(12345), None, Some("Alice A")),
-                identity_link("alice-b", Some("Alice Zhang"), Some(54321), None, Some("Alice B")),
+                identity_link(
+                    "alice-a",
+                    Some("Alice Zhang"),
+                    Some(12345),
+                    None,
+                    Some("Alice A"),
+                ),
+                identity_link(
+                    "alice-b",
+                    Some("Alice Zhang"),
+                    Some(54321),
+                    None,
+                    Some("Alice B"),
+                ),
             ],
             None,
             Some(12345),

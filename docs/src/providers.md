@@ -25,7 +25,7 @@ Configure providers through the web UI or directly in configuration files.
 
 ### Via Configuration Files
 
-Provider credentials are stored in `~/.config/moltis/provider_keys.json`:
+Provider credentials are stored in `~/.moltis/config/provider_keys.json`:
 
 ```json
 {

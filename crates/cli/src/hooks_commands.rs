@@ -7,6 +7,14 @@ use moltis_plugins::{
     hook_eligibility::check_hook_eligibility,
 };
 
+fn no_hooks_hint(data_dir: &std::path::Path, project_dir: &std::path::Path) -> String {
+    format!(
+        "Place hooks in {}/hooks/<name>/HOOK.md or {}/hooks/<name>/HOOK.md",
+        data_dir.display(),
+        project_dir.display(),
+    )
+}
+
 #[derive(Subcommand)]
 pub enum HookAction {
     /// List all discovered hooks.
@@ -83,11 +91,8 @@ pub async fn handle_hooks(action: HookAction) -> anyhow::Result<()> {
             } else if hooks.is_empty() {
                 println!("No hooks found.");
                 let data_dir = moltis_config::data_dir();
-                println!(
-                    "Place hooks in {}/hooks/<name>/HOOK.md or {}/.moltis/hooks/<name>/HOOK.md",
-                    data_dir.display(),
-                    data_dir.display(),
-                );
+                let project_dir = moltis_config::project_local_dir();
+                println!("{}", no_hooks_hint(&data_dir, &project_dir));
             }
         },
         HookAction::Info { name } => {
@@ -142,4 +147,19 @@ pub async fn handle_hooks(action: HookAction) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_hooks_hint_does_not_double_moltis() {
+        let data_dir = std::path::PathBuf::from("/tmp/.moltis/data");
+        let project_dir = std::path::PathBuf::from("/tmp/my-proj/.moltis");
+        let hint = no_hooks_hint(&data_dir, &project_dir);
+        assert!(hint.contains("/tmp/.moltis/data/hooks/<name>/HOOK.md"));
+        assert!(hint.contains("/tmp/my-proj/.moltis/hooks/<name>/HOOK.md"));
+        assert!(!hint.contains("/.moltis/.moltis/"));
+    }
 }

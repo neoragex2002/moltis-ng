@@ -37,14 +37,21 @@ impl FsHookDiscoverer {
 
     /// Build the default search paths for hook discovery.
     ///
-    /// Workspace root is always the configured data directory.
+    /// Project-local hooks live under `<cwd>/.moltis/hooks`; user-global hooks
+    /// live under the configured data directory.
     pub fn default_paths() -> Vec<(PathBuf, HookSource)> {
-        let workspace_root = moltis_config::data_dir();
-        vec![
-            (workspace_root.join(".moltis/hooks"), HookSource::Project),
-            (moltis_config::data_dir().join("hooks"), HookSource::User),
-        ]
+        default_paths_with(
+            moltis_config::project_local_dir(),
+            moltis_config::data_dir(),
+        )
     }
+}
+
+fn default_paths_with(project_root: PathBuf, data_dir: PathBuf) -> Vec<(PathBuf, HookSource)> {
+    vec![
+        (project_root.join("hooks"), HookSource::Project),
+        (data_dir.join("hooks"), HookSource::User),
+    ]
 }
 
 #[async_trait]
@@ -152,5 +159,15 @@ body
         let discoverer = FsHookDiscoverer::new(vec![(hooks_dir, HookSource::Project)]);
         let hooks = discoverer.discover().await.unwrap();
         assert!(hooks.is_empty());
+    }
+
+    #[test]
+    fn default_paths_use_project_local_and_data_roots() {
+        let project_root = PathBuf::from("/tmp/workspace/.moltis");
+        let data_dir = PathBuf::from("/tmp/home/.moltis/data");
+        let paths = default_paths_with(project_root.clone(), data_dir.clone());
+
+        assert_eq!(paths[0], (project_root.join("hooks"), HookSource::Project));
+        assert_eq!(paths[1], (data_dir.join("hooks"), HookSource::User));
     }
 }

@@ -3424,8 +3424,8 @@ mod tests {
             scope: Some("chat".into()),
             ..Default::default()
         };
-        let err = SandboxConfig::try_from(&schema_cfg)
-            .expect_err("legacy scope field must be rejected");
+        let err =
+            SandboxConfig::try_from(&schema_cfg).expect_err("legacy scope field must be rejected");
         assert!(
             err.to_string()
                 .contains("tools.exec.sandbox.scope is no longer supported"),

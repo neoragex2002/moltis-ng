@@ -21,7 +21,7 @@ impl CommandLoggerHook {
         }
     }
 
-    /// Default log path: `~/.moltis/logs/commands.log`
+    /// Default log path: `~/.moltis/data/logs/commands.log`
     pub fn default_path() -> Option<PathBuf> {
         Some(moltis_config::data_dir().join("logs/commands.log"))
     }

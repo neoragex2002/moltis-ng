@@ -58,7 +58,7 @@ A single sentence that sets the assistant role:
 
 ### Agent Identity (`IDENTITY.md`)
 
-Loaded from `~/.moltis/IDENTITY.md` using YAML frontmatter. Fields:
+Loaded from `~/.moltis/data/agents/default/IDENTITY.md` using YAML frontmatter. Fields:
 
 | Field | Prompt output |
 |-------|---------------|
@@ -71,7 +71,7 @@ included.
 
 ### Soul (`SOUL.md`)
 
-Loaded from `~/.moltis/SOUL.md`. When the file is absent or empty, the
+Loaded from `~/.moltis/data/agents/default/SOUL.md`. When the file is absent or empty, the
 built-in `DEFAULT_SOUL` is used. The default is sourced from
 [OpenClaw's SOUL.md template](https://github.com/openclaw/openclaw/blob/main/docs/reference/templates/SOUL.md):
 
@@ -117,7 +117,7 @@ The default soul is ~1,500 characters (~400 tokens).
 
 ### User Profile (`USER.md`)
 
-Loaded from `~/.moltis/USER.md` using YAML frontmatter. Currently only the
+Loaded from `~/.moltis/data/USER.md` using YAML frontmatter. Currently only the
 `name` field is injected: *"The user's name is {name}."*
 
 ### Project Context
@@ -171,7 +171,7 @@ Create git commits
 
 ### Workspace Files
 
-Optional markdown files from the data directory (`~/.moltis/`):
+Optional markdown files from the default data directory (`~/.moltis/data/`):
 
 - **AGENTS.md** — workspace-level agent instructions
 - **TOOLS.md** — tool preferences and guidance
@@ -229,12 +229,13 @@ concern.
 ## File Locations
 
 ```
-~/.moltis/
-├── IDENTITY.md          # Agent identity (name, emoji, creature, vibe)
-├── SOUL.md              # Personality directives
-├── USER.md              # User profile (name, timezone, location)
-├── AGENTS.md            # Workspace agent instructions
-└── TOOLS.md             # Tool preferences
+~/.moltis/data/
+├── USER.md             # User profile (name, timezone, location)
+└── agents/default/
+    ├── IDENTITY.md     # Agent identity (name, emoji, creature, vibe)
+    ├── SOUL.md         # Personality directives
+    ├── AGENTS.md       # Agent instructions
+    └── TOOLS.md        # Tool preferences
 
 <project>/
 ├── CLAUDE.md            # Project instructions

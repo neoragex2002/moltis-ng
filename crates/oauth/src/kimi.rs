@@ -27,7 +27,7 @@ fn get_or_create_device_id_at(path: &std::path::Path) -> String {
 }
 
 /// Get or generate a persistent device ID for Kimi API headers.
-/// Stored at `~/.config/moltis/kimi_device_id`.
+/// Stored at `~/.moltis/config/kimi_device_id`.
 pub fn get_or_create_device_id() -> String {
     let path = moltis_config_dir().join("kimi_device_id");
     get_or_create_device_id_at(&path)

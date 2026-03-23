@@ -156,13 +156,10 @@ brew uninstall moltis
 
 ### Remove Data
 
-Moltis stores data in two directories:
+Moltis stores everything under one home root:
 
 ```bash
-# Configuration
-rm -rf ~/.config/moltis
-
-# Data (sessions, databases, memory)
+# Configuration and data
 rm -rf ~/.moltis
 ```
 

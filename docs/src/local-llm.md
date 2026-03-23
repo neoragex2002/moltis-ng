@@ -65,7 +65,7 @@ in the UI.
 
 ### Via Configuration File
 
-Add to `~/.moltis/moltis.toml`:
+Add to `~/.moltis/config/moltis.toml`:
 
 ```toml
 [providers.local]
@@ -82,7 +82,7 @@ model_path = "/path/to/model.gguf"
 
 ## Model Storage
 
-Downloaded models are cached in `~/.cache/moltis/models/` by default. This
+Downloaded models are cached in `~/.moltis/data/models/` by default. This
 directory can grow large (several GB per model).
 
 To change the cache location:

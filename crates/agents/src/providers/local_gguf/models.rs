@@ -361,7 +361,7 @@ pub fn suggest_model_for_backend(
 
 /// Default cache directory for downloaded models.
 ///
-/// Returns `~/.moltis/models` (same base as config/data directories).
+/// Returns `~/.moltis/data/models` (same base as the default data directory).
 #[must_use]
 pub fn default_models_dir() -> PathBuf {
     moltis_config::data_dir().join("models")

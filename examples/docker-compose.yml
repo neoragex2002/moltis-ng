@@ -23,10 +23,10 @@ services:
       - "13132:13132"
     volumes:
       # Configuration files (editable from host)
-      - ./config:/home/moltis/.config/moltis
+      - ./config:/home/moltis/.moltis/config
 
       # Data directory (databases, sessions, memory)
-      - ./data:/home/moltis/.moltis
+      - ./data:/home/moltis/.moltis/data
 
       # Docker socket for sandbox command execution
       # Without this, the agent cannot run shell commands in isolated containers

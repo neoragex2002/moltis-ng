@@ -117,8 +117,8 @@ speaking_rate = 1.0
 
 [voice.tts.piper]
 # binary_path = "/usr/local/bin/piper"  # optional, searches PATH
-model_path = "~/.moltis/models/en_US-lessac-medium.onnx"  # required
-# config_path = "~/.moltis/models/en_US-lessac-medium.onnx.json"  # optional
+model_path = "~/.moltis/data/models/en_US-lessac-medium.onnx"  # required
+# config_path = "~/.moltis/data/models/en_US-lessac-medium.onnx.json"  # optional
 # speaker_id = 0  # for multi-speaker models
 # length_scale = 1.0  # speaking rate (lower = faster)
 
@@ -144,8 +144,8 @@ Piper is a fast, local neural text-to-speech system that runs entirely offline.
 
 2. Download a voice model from [Piper Voices](https://github.com/rhasspy/piper#voices):
    ```bash
-   mkdir -p ~/.moltis/models
-   curl -L -o ~/.moltis/models/en_US-lessac-medium.onnx \
+   mkdir -p ~/.moltis/data/models
+   curl -L -o ~/.moltis/data/models/en_US-lessac-medium.onnx \
      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
    ```
 
@@ -155,7 +155,7 @@ Piper is a fast, local neural text-to-speech system that runs entirely offline.
    provider = "piper"
 
    [voice.tts.piper]
-   model_path = "~/.moltis/models/en_US-lessac-medium.onnx"
+   model_path = "~/.moltis/data/models/en_US-lessac-medium.onnx"
    ```
 
 #### Coqui TTS
@@ -346,12 +346,12 @@ language = "en"
 
 [voice.stt.whisper_cli]
 # binary_path = "/usr/local/bin/whisper-cli"  # optional, searches PATH
-model_path = "~/.moltis/models/ggml-base.en.bin"  # required
+model_path = "~/.moltis/data/models/ggml-base.en.bin"  # required
 language = "en"
 
 [voice.stt.sherpa_onnx]
 # binary_path = "/usr/local/bin/sherpa-onnx-offline"  # optional
-model_dir = "~/.moltis/models/sherpa-onnx-whisper-tiny.en"  # required
+model_dir = "~/.moltis/data/models/sherpa-onnx-whisper-tiny.en"  # required
 language = "en"
 ```
 
@@ -414,8 +414,8 @@ automatically on first vLLM startup.
 
 2. Download a model from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp):
    ```bash
-   mkdir -p ~/.moltis/models
-   curl -L -o ~/.moltis/models/ggml-base.en.bin \
+   mkdir -p ~/.moltis/data/models
+   curl -L -o ~/.moltis/data/models/ggml-base.en.bin \
      https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
    ```
 
@@ -425,7 +425,7 @@ automatically on first vLLM startup.
    provider = "whisper-cli"
 
    [voice.stt.whisper_cli]
-   model_path = "~/.moltis/models/ggml-base.en.bin"
+   model_path = "~/.moltis/data/models/ggml-base.en.bin"
    ```
 
 #### sherpa-onnx
@@ -440,7 +440,7 @@ automatically on first vLLM startup.
    provider = "sherpa-onnx"
 
    [voice.stt.sherpa_onnx]
-   model_dir = "~/.moltis/models/sherpa-onnx-whisper-tiny.en"
+   model_dir = "~/.moltis/data/models/sherpa-onnx-whisper-tiny.en"
    ```
 
 ### RPC Methods

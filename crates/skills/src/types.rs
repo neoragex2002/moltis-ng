@@ -111,7 +111,7 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SkillSource {
-    /// Project-local: `<data_dir>/.moltis/skills/`
+    /// Project-local: `<workspace>/.moltis/skills/`
     Project,
     /// Personal: `<data_dir>/skills/`
     Personal,

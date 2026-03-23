@@ -125,9 +125,9 @@ The system auto-detects available providers and creates a fallback chain:
 
 By default, moltis indexes markdown files from:
 
-- `~/.moltis/MEMORY.md` - Main long-term memory file
-- `~/.moltis/memory/*.md` - Additional memory files
-- `~/.moltis/memory/sessions/*.md` - Exported session transcripts
+- `~/.moltis/data/MEMORY.md` - Main long-term memory file
+- `~/.moltis/data/memory/*.md` - Additional memory files
+- `~/.moltis/data/memory/sessions/*.md` - Exported session transcripts
 
 ## Tools
 

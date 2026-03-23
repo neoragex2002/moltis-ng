@@ -120,7 +120,7 @@ pub fn load_config_value(path: &Path) -> anyhow::Result<serde_json::Value> {
 ///
 /// Search order:
 /// 1. `./moltis.{toml,yaml,yml,json}` (project-local)
-/// 2. `~/.config/moltis/moltis.{toml,yaml,yml,json}` (user-global)
+/// 2. `~/.moltis/config/moltis.{toml,yaml,yml,json}` (user-global)
 ///
 /// Returns `MoltisConfig::default()` if no config file is found.
 ///
@@ -189,8 +189,8 @@ pub fn find_config_file() -> Option<PathBuf> {
         }
     }
 
-    // User-global: ~/.config/moltis/
-    if let Some(dir) = home_dir().map(|h| h.join(".config").join("moltis")) {
+    // User-global: ~/.moltis/config/
+    if let Some(dir) = user_global_config_dir() {
         for name in CONFIG_FILENAMES {
             let p = dir.join(name);
             if p.exists() {
@@ -203,7 +203,7 @@ pub fn find_config_file() -> Option<PathBuf> {
 }
 
 /// Returns the config directory: programmatic override → `MOLTIS_CONFIG_DIR` env →
-/// `~/.config/moltis/`.
+/// `~/.moltis/config/`.
 pub fn config_dir() -> Option<PathBuf> {
     if let Some(dir) = config_dir_override() {
         return Some(dir);
@@ -213,13 +213,13 @@ pub fn config_dir() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(dir));
     }
-    home_dir().map(|h| h.join(".config").join("moltis"))
+    Some(default_config_dir())
 }
 
-/// Returns the user-global config directory (`~/.config/moltis`) without
+/// Returns the user-global config directory (`~/.moltis/config`) without
 /// considering overrides like `MOLTIS_CONFIG_DIR`.
 pub fn user_global_config_dir() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".config").join("moltis"))
+    Some(default_config_dir())
 }
 
 /// Returns the user-global config directory only when it differs from the
@@ -248,7 +248,7 @@ pub fn find_user_global_config_file() -> Option<PathBuf> {
 }
 
 /// Returns the data directory: programmatic override → `MOLTIS_DATA_DIR` env →
-/// `~/.moltis/`.
+/// `~/.moltis/data/`.
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = data_dir_override() {
         return dir;
@@ -258,9 +258,12 @@ pub fn data_dir() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    home_dir()
-        .map(|h| h.join(".moltis"))
-        .unwrap_or_else(|| PathBuf::from(".moltis"))
+    default_data_dir()
+}
+
+/// Returns the project-local Moltis directory (`<cwd>/.moltis`).
+pub fn project_local_dir() -> PathBuf {
+    project_local_dir_from(std::env::current_dir().ok())
 }
 
 /// Path to the default agent's soul file.
@@ -727,11 +730,21 @@ _This file is yours to evolve. As you learn who you are, update it._";
 /// how `discover_and_load()` writes `moltis.toml` on first run).
 pub fn load_soul() -> Option<String> {
     let path = soul_path();
+    let canonical_exists = path.exists();
     let resolved = resolve_agent_doc_path(&path);
     if let Some(content) = read_markdown_raw(&resolved) {
         return Some(content);
     }
-    if !path.exists() && legacy_people_doc_exists(&path) {
+
+    // Canonical file exists but is empty (or comment-only). This is an explicit
+    // user clear, and must not be treated as "missing".
+    if canonical_exists {
+        return None;
+    }
+
+    // Canonical file is missing. If legacy people/ exists, strict reject and do
+    // not seed a new canonical file.
+    if legacy_people_doc_exists(&path) {
         return None;
     }
 
@@ -1112,7 +1125,43 @@ fn strip_leading_html_comments(content: &str) -> &str {
 }
 
 fn home_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        if let Some(dir) = TEST_HOME_DIR_OVERRIDE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Some(dir);
+        }
+    }
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
+}
+
+#[cfg(test)]
+static TEST_HOME_DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn default_home_root() -> PathBuf {
+    default_home_root_from(home_dir())
+}
+
+fn default_home_root_from(home: Option<PathBuf>) -> PathBuf {
+    home.map(|path| path.join(".moltis"))
+        .unwrap_or_else(|| PathBuf::from(".moltis"))
+}
+
+fn default_config_dir() -> PathBuf {
+    default_home_root().join("config")
+}
+
+fn default_data_dir() -> PathBuf {
+    default_home_root().join("data")
+}
+
+fn project_local_dir_from(current_dir: Option<PathBuf>) -> PathBuf {
+    current_dir
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".moltis")
 }
 
 /// Returns the path of an existing config file, or the default TOML path.
@@ -1652,7 +1701,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn data_dir_override_works() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = PathBuf::from("/tmp/test-data-dir-override");
         set_data_dir(path.clone());
         assert_eq!(data_dir(), path);
@@ -1660,8 +1709,106 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
     }
 
     #[test]
+    fn default_home_layout_uses_single_moltis_root() {
+        let home = PathBuf::from("/tmp/moltis-home");
+        assert_eq!(
+            default_home_root_from(Some(home.clone())),
+            home.join(".moltis")
+        );
+        assert_eq!(default_config_dir(), default_home_root().join("config"));
+        assert_eq!(default_data_dir(), default_home_root().join("data"));
+        assert_eq!(
+            default_home_root_from(None),
+            PathBuf::from(".moltis"),
+            "home-less fallback should still use the same root name"
+        );
+    }
+
+    #[test]
+    fn derived_default_dirs_live_under_single_home_root() {
+        let home = PathBuf::from("/tmp/moltis-home");
+        let root = home.join(".moltis");
+        assert_eq!(default_home_root_from(Some(home.clone())), root);
+        assert_eq!(
+            root.join("config"),
+            default_home_root_from(Some(home.clone())).join("config")
+        );
+        assert_eq!(
+            root.join("data"),
+            default_home_root_from(Some(home)).join("data")
+        );
+    }
+
+    #[test]
+    fn find_config_file_prefers_project_root_over_user_global() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        clear_config_dir();
+
+        let old_cwd = std::env::current_dir().expect("current_dir");
+
+        let home = tempfile::tempdir().expect("temp home");
+        *TEST_HOME_DIR_OVERRIDE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(home.path().to_path_buf());
+
+        let user_global_dir = home.path().join(".moltis/config");
+        std::fs::create_dir_all(&user_global_dir).expect("create user-global config dir");
+        std::fs::write(user_global_dir.join("moltis.toml"), "server = {}\n")
+            .expect("write user-global config");
+
+        let cwd = tempfile::tempdir().expect("temp cwd");
+        std::env::set_current_dir(cwd.path()).expect("set cwd");
+        std::fs::write(cwd.path().join("moltis.toml"), "server = {}\n").expect("write project");
+
+        let found = find_config_file().expect("find config file");
+
+        std::env::set_current_dir(old_cwd).expect("restore cwd");
+        *TEST_HOME_DIR_OVERRIDE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+
+        assert_eq!(found, PathBuf::from("moltis.toml"));
+    }
+
+    #[test]
+    fn config_dir_override_isolation_works_for_find_config_file() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let old_cwd = std::env::current_dir().expect("current_dir");
+        let cwd = tempfile::tempdir().expect("temp cwd");
+        std::env::set_current_dir(cwd.path()).expect("set cwd");
+
+        // Project-local file exists, but should be ignored when override is set.
+        std::fs::write(cwd.path().join("moltis.toml"), "server = {}\n").expect("write project");
+
+        let override_dir = tempfile::tempdir().expect("temp override");
+        std::fs::write(override_dir.path().join("moltis.toml"), "server = {}\n")
+            .expect("write override");
+
+        set_config_dir(override_dir.path().to_path_buf());
+
+        let found = find_config_file().expect("find config file");
+
+        clear_config_dir();
+        std::env::set_current_dir(old_cwd).expect("restore cwd");
+
+        assert_eq!(found, override_dir.path().join("moltis.toml"));
+    }
+
+    #[test]
+    fn project_local_dir_uses_workspace_moltis_dir() {
+        let cwd = PathBuf::from("/tmp/my-workspace");
+        assert_eq!(
+            project_local_dir_from(Some(cwd.clone())),
+            cwd.join(".moltis")
+        );
+        assert_eq!(project_local_dir_from(None), PathBuf::from("./.moltis"));
+    }
+
+    #[test]
     fn save_and_load_identity_frontmatter() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1687,7 +1834,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn default_agent_paths_live_under_agents_default() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1702,7 +1849,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn save_identity_does_not_delete_file_when_empty_and_preserves_body() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1735,7 +1882,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn save_and_load_user_frontmatter() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1760,7 +1907,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn save_and_load_user_with_location() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1793,7 +1940,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn save_user_does_not_delete_file_when_empty_and_preserves_body() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1825,7 +1972,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn load_tools_md_reads_trimmed_content() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1838,7 +1985,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn load_agents_md_reads_trimmed_content() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1854,7 +2001,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn load_heartbeat_md_reads_trimmed_content() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1866,7 +2013,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn workspace_markdown_ignores_leading_html_comments() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1886,7 +2033,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn workspace_markdown_comment_only_is_treated_as_empty() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1898,7 +2045,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn load_soul_creates_default_when_missing() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1921,7 +2068,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn load_soul_does_not_overwrite_existing() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1940,7 +2087,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn load_soul_reseeds_after_deletion() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -1963,7 +2110,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn sync_people_md_preserves_body_and_other_fields() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -2026,7 +2173,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn sync_people_md_removes_emoji_when_identity_clears_it() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -2072,7 +2219,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn save_soul_none_prevents_reseed() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -2104,7 +2251,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn save_soul_some_overwrites_default() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -2126,7 +2273,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn load_soul_rejects_legacy_people_default_path() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 
@@ -2146,7 +2293,7 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
 
     #[test]
     fn load_agent_identity_md_raw_rejects_legacy_people_path() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         set_data_dir(dir.path().to_path_buf());
 

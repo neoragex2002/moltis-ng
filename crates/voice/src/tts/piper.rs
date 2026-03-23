@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn test_piper_configured_with_model() {
         let config = PiperTtsConfig {
-            model_path: Some("~/.moltis/models/en_US-lessac-medium.onnx".into()),
+            model_path: Some("~/.moltis/data/models/en_US-lessac-medium.onnx".into()),
             ..Default::default()
         };
         let tts = PiperTts::new(&config);

@@ -545,7 +545,7 @@ pub struct WhisperCliConfig {
     /// Path to whisper-cli binary. If not set, looks in PATH.
     pub binary_path: Option<String>,
 
-    /// Path to the GGML model file (e.g., "~/.moltis/models/ggml-base.en.bin").
+    /// Path to the GGML model file (e.g., "~/.moltis/data/models/ggml-base.en.bin").
     pub model_path: Option<String>,
 
     /// Language hint (ISO 639-1 code).

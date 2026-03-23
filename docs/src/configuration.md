@@ -1,6 +1,6 @@
 # Configuration
 
-Moltis is configured through `moltis.toml`, located in `~/.config/moltis/` by default.
+Moltis is configured through `moltis.toml`, located in `~/.moltis/config/` by default.
 
 On first run, a complete configuration file is generated with sensible defaults. You can edit it to customize behavior.
 
@@ -8,7 +8,7 @@ On first run, a complete configuration file is generated with sensible defaults.
 
 | Platform | Default Path |
 |----------|--------------|
-| macOS/Linux | `~/.config/moltis/moltis.toml` |
+| macOS/Linux | `~/.moltis/config/moltis.toml` |
 | Custom | Set via `--config-dir` or `MOLTIS_CONFIG_DIR` |
 
 ## Basic Settings
@@ -27,7 +27,7 @@ max_iterations = 25             # Max tool call iterations per run
 
 ## LLM Providers
 
-Provider API keys are stored separately in `~/.config/moltis/provider_keys.json` for security. Configure them through the web UI or directly in the JSON file.
+Provider API keys are stored separately in `~/.moltis/config/provider_keys.json` for security. Configure them through the web UI or directly in the JSON file.
 
 ```toml
 [providers]
@@ -97,7 +97,7 @@ chunk_overlap = 50              # Overlap between chunks
 
 # Directories to watch for memory files
 watch_dirs = [
-    "~/.moltis/memory",
+    "~/.moltis/data/memory",
 ]
 ```
 
@@ -167,8 +167,8 @@ allowed_users = [123456789]     # Telegram user IDs allowed to chat
 ```toml
 [tls]
 enabled = true
-cert_path = "~/.config/moltis/cert.pem"
-key_path = "~/.config/moltis/key.pem"
+cert_path = "~/.moltis/config/cert.pem"
+key_path = "~/.moltis/config/key.pem"
 # If paths don't exist, a self-signed certificate is generated
 
 # Port for the plain-HTTP redirect / CA-download server.

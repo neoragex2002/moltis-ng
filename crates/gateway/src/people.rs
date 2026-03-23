@@ -136,8 +136,8 @@ fn yaml_scalar_to_string(v: &serde_yaml::Value) -> Option<String> {
     }
 }
 
-pub(crate) fn telegram_identity_links(
-) -> anyhow::Result<Vec<moltis_telegram::config::TelegramIdentityLink>> {
+pub(crate) fn telegram_identity_links()
+-> anyhow::Result<Vec<moltis_telegram::config::TelegramIdentityLink>> {
     let doc = load_people_md()?;
     let Some(map) = doc.frontmatter.as_mapping() else {
         return Ok(Vec::new());
@@ -199,7 +199,9 @@ pub(crate) fn telegram_identity_links(
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
             telegram_display_name: entry
-                .get(&serde_yaml::Value::String("telegram_display_name".to_string()))
+                .get(&serde_yaml::Value::String(
+                    "telegram_display_name".to_string(),
+                ))
                 .and_then(|value| value.as_str())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())

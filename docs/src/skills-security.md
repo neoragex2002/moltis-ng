@@ -56,7 +56,7 @@ plugins immediately.
 
 Security-sensitive skill/plugin actions are appended to:
 
-`~/.moltis/logs/security-audit.jsonl`
+`~/.moltis/data/logs/security-audit.jsonl`
 
 Logged events include installs, removals, trust changes, enable/disable,
 dependency install attempts, and source drift detection.

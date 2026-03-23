@@ -102,7 +102,7 @@ fn parse_models_param(params: &Value) -> Vec<String> {
     models
 }
 
-/// File-based provider config storage at `~/.config/moltis/provider_keys.json`.
+/// File-based provider config storage at `~/.moltis/config/provider_keys.json`.
 /// Stores per-provider configuration including API keys, base URLs, and models.
 #[derive(Debug, Clone)]
 pub(crate) struct KeyStore {
@@ -116,9 +116,10 @@ struct KeyStoreInner {
 
 impl KeyStore {
     pub(crate) fn new() -> Self {
-        let path = moltis_config::config_dir()
-            .unwrap_or_else(|| PathBuf::from(".config/moltis"))
-            .join("provider_keys.json");
+        let Some(dir) = moltis_config::config_dir() else {
+            panic!("failed to resolve config dir; set --config-dir or MOLTIS_CONFIG_DIR");
+        };
+        let path = dir.join("provider_keys.json");
         Self {
             inner: Arc::new(Mutex::new(KeyStoreInner { path })),
         }
@@ -661,7 +662,9 @@ pub(crate) struct AutoDetectedProviderSource {
 }
 
 fn current_config_dir() -> PathBuf {
-    moltis_config::config_dir().unwrap_or_else(|| PathBuf::from(".config/moltis"))
+    moltis_config::config_dir().unwrap_or_else(|| {
+        panic!("failed to resolve config dir; set --config-dir or MOLTIS_CONFIG_DIR")
+    })
 }
 
 fn home_config_dir_if_different() -> Option<PathBuf> {

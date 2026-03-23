@@ -232,9 +232,7 @@ pub fn effective_bot_username(state: &AccountState) -> Option<String> {
         .or_else(|| state.config.chan_user_name.clone())
 }
 
-pub fn shared_identity_links(
-    accounts: &AccountStateMap,
-) -> Arc<RwLock<Vec<TelegramIdentityLink>>> {
+pub fn shared_identity_links(accounts: &AccountStateMap) -> Arc<RwLock<Vec<TelegramIdentityLink>>> {
     static STORE: OnceLock<Mutex<HashMap<usize, Arc<RwLock<Vec<TelegramIdentityLink>>>>>> =
         OnceLock::new();
     let store = STORE.get_or_init(|| Mutex::new(HashMap::new()));

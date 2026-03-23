@@ -311,7 +311,7 @@ impl AgentTool for ExecTool {
         });
 
         // Ensure default host working directory exists so command spawning does
-        // not fail on fresh machines where ~/.moltis has not been created yet.
+        // not fail on fresh machines where ~/.moltis/data has not been created yet.
         if !(is_sandboxed && has_container_backend)
             && using_default_working_dir
             && let Some(dir) = working_dir.as_ref()

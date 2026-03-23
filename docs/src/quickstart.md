@@ -113,7 +113,7 @@ Enable long-term memory for context across sessions:
 enabled = true
 ```
 
-Add knowledge by placing Markdown files in `~/.moltis/memory/`.
+Add knowledge by placing Markdown files in `~/.moltis/data/memory/`.
 
 ## Useful Commands
 
@@ -128,9 +128,9 @@ Add knowledge by placing Markdown files in `~/.moltis/memory/`.
 
 | Path | Contents |
 |------|----------|
-| `~/.config/moltis/moltis.toml` | Configuration |
-| `~/.config/moltis/provider_keys.json` | API keys |
-| `~/.moltis/` | Data (sessions, memory, logs) |
+| `~/.moltis/config/moltis.toml` | Configuration |
+| `~/.moltis/config/provider_keys.json` | API keys |
+| `~/.moltis/data/` | Data (sessions, memory, logs) |
 
 ## Getting Help
 

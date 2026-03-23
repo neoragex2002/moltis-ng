@@ -1518,9 +1518,10 @@ scope = "chat"
 "#;
         let result = validate_toml_str(toml);
         assert!(
-            result.diagnostics.iter().any(|d| {
-                d.severity == Severity::Error && d.path == "tools.exec.sandbox.scope"
-            }),
+            result
+                .diagnostics
+                .iter()
+                .any(|d| { d.severity == Severity::Error && d.path == "tools.exec.sandbox.scope" }),
             "legacy scope must hard-fail: {:?}",
             result.diagnostics
         );

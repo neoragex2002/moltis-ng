@@ -511,7 +511,7 @@ pub async fn start_polling(
                 },
                 PollingAttemptOutcome::Retryable {
                     reason_code,
-                    backoff_secs,
+                    backoff_secs: _,
                 } if reason_code == "connected" => {
                     if consecutive_failures > 0 {
                         let downtime_secs =

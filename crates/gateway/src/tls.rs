@@ -54,10 +54,10 @@ impl FsCertManager {
     }
 }
 
-/// Returns the certificate storage directory (`~/.config/moltis/certs/`).
+/// Returns the certificate storage directory (`~/.moltis/config/certs/`).
 pub fn cert_dir() -> Result<PathBuf> {
     let dir = moltis_config::config_dir()
-        .unwrap_or_else(|| PathBuf::from(".moltis"))
+        .context("failed to resolve config dir")?
         .join("certs");
     std::fs::create_dir_all(&dir).context("failed to create certs directory")?;
     Ok(dir)

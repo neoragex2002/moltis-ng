@@ -164,7 +164,7 @@ exit 0
 ### 1. Create the Hook Directory
 
 ```bash
-mkdir -p ~/.moltis/hooks/my-hook
+mkdir -p ~/.moltis/data/hooks/my-hook
 ```
 
 ### 2. Create HOOK.md
@@ -210,7 +210,7 @@ exit 0
 ### 4. Make it Executable
 
 ```bash
-chmod +x ~/.moltis/hooks/my-hook/handler.sh
+chmod +x ~/.moltis/data/hooks/my-hook/handler.sh
 ```
 
 ## Shell Hook Protocol
@@ -287,7 +287,7 @@ exit 0
 Hooks are discovered from `HOOK.md` files in these locations (priority order):
 
 1. **Project-local**: `<workspace>/.moltis/hooks/<name>/HOOK.md`
-2. **User-global**: `~/.moltis/hooks/<name>/HOOK.md`
+2. **User-global**: `~/.moltis/data/hooks/<name>/HOOK.md`
 
 Project-local hooks take precedence over global hooks with the same name.
 

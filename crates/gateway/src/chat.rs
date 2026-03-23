@@ -2357,10 +2357,10 @@ impl ChatService for LiveChatService {
             && let Some(entry) = self.session_metadata.get(&session_key).await
             && let Some(ref binding_json) = entry.channel_binding
         {
-            let binding_rejected = moltis_telegram::adapter::telegram_binding_uses_legacy_shape(
-                binding_json,
-            ) || moltis_telegram::adapter::telegram_channel_binding_info(binding_json)
-                .is_some_and(|info| info.bucket_key.is_none());
+            let binding_rejected =
+                moltis_telegram::adapter::telegram_binding_uses_legacy_shape(binding_json)
+                    || moltis_telegram::adapter::telegram_channel_binding_info(binding_json)
+                        .is_some_and(|info| info.bucket_key.is_none());
             if binding_rejected {
                 warn!(
                     event = "telegram.session.reject_legacy_binding",
@@ -6622,7 +6622,6 @@ fn sanitize_reason_preview(reason: &str) -> String {
     preview
 }
 
-
 #[cfg(test)]
 async fn ensure_channel_bound_session(
     state: &Arc<GatewayState>,
@@ -6692,7 +6691,6 @@ async fn ensure_channel_bound_session(
             .await;
     }
 }
-
 
 #[cfg(test)]
 async fn resolve_telegram_session_id(
@@ -6807,7 +6805,6 @@ async fn resolve_telegram_session_id(
     Some(active_session_id)
 }
 
-
 #[derive(Debug, Clone, Default)]
 struct ChannelDeliveryDiag {
     run_id: Option<String>,
@@ -6905,9 +6902,7 @@ async fn deliver_channel_replies_to_targets(
                                 );
                             }
                             let text_result = if logbook_html.is_empty() {
-                                outbound
-                                    .send_text_to_target(&target, &transcript)
-                                    .await
+                                outbound.send_text_to_target(&target, &transcript).await
                             } else {
                                 outbound
                                     .send_text_with_suffix_to_target(
@@ -6937,9 +6932,7 @@ async fn deliver_channel_replies_to_targets(
                     },
                     None => {
                         let result = if logbook_html.is_empty() {
-                            outbound
-                                .send_text_to_target_with_ref(&target, &text)
-                                .await
+                            outbound.send_text_to_target_with_ref(&target, &text).await
                         } else {
                             outbound
                                 .send_text_with_suffix_to_target_with_ref(
@@ -7017,9 +7010,13 @@ async fn deliver_channel_replies_to_reply_target_refs(
         tasks.push(tokio::spawn(async move {
             let reply_target_ref_hash = sha256_hex(&reply_target_ref);
             if matches!(desired_reply_medium, ReplyMedium::Voice) {
-                if let Some(mut payload) =
-                    build_tts_payload_for_channel_key(&state, &session_id, channel_key.as_deref(), &text)
-                        .await
+                if let Some(mut payload) = build_tts_payload_for_channel_key(
+                    &state,
+                    &session_id,
+                    channel_key.as_deref(),
+                    &text,
+                )
+                .await
                 {
                     let transcript = std::mem::take(&mut payload.text);
                     let (voice_payload, follow_up_text) =
@@ -7050,7 +7047,10 @@ async fn deliver_channel_replies_to_reply_target_refs(
                     if let Some(follow_up) = follow_up_text {
                         let result = if logbook_html.is_empty() {
                             outbound
-                                .send_text_by_reply_target_ref_with_ref(&reply_target_ref, &follow_up)
+                                .send_text_by_reply_target_ref_with_ref(
+                                    &reply_target_ref,
+                                    &follow_up,
+                                )
                                 .await
                         } else {
                             outbound
@@ -7490,7 +7490,6 @@ async fn send_screenshot_to_channels(
                 reply_target_ref_hash = %reply_target_ref_hash,
                 "sent screenshot to channel"
             );
-
         }));
     }
 
@@ -8347,7 +8346,6 @@ mod tests {
             Ok(())
         }
     }
-
 
     struct ErrorStreamProvider;
 

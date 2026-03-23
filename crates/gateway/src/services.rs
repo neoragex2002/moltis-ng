@@ -1510,11 +1510,7 @@ fn delete_discovered_skill(source_type: &str, params: &Value) -> ServiceResult {
         return Err(format!("invalid skill name '{skill_name}'"));
     }
 
-    let search_dir = if source_type == "personal" {
-        moltis_config::data_dir().join("skills")
-    } else {
-        moltis_config::data_dir().join(".moltis/skills")
-    };
+    let search_dir = discovered_skill_search_dir(source_type)?;
 
     let skill_dir = search_dir.join(skill_name);
     if !skill_dir.exists() {
@@ -1540,11 +1536,7 @@ fn skill_detail_discovered(source_type: &str, skill_name: &str) -> ServiceResult
     use moltis_skills::requirements::check_requirements;
 
     // Build search paths for the requested source type.
-    let search_dir = if source_type == "personal" {
-        moltis_config::data_dir().join("skills")
-    } else {
-        moltis_config::data_dir().join(".moltis/skills")
-    };
+    let search_dir = discovered_skill_search_dir(source_type)?;
 
     let skill_dir = search_dir.join(skill_name);
     let skill_md = skill_dir.join("SKILL.md");
@@ -1575,6 +1567,14 @@ fn skill_detail_discovered(source_type: &str, skill_name: &str) -> ServiceResult
         "source": source_type,
         "path": skill_dir.to_string_lossy(),
     }))
+}
+
+fn discovered_skill_search_dir(source_type: &str) -> Result<std::path::PathBuf, String> {
+    match source_type {
+        "personal" => Ok(moltis_config::data_dir().join("skills")),
+        "project" => Ok(moltis_config::project_local_dir().join("skills")),
+        other => Err(format!("unsupported discovered skill source '{other}'")),
+    }
 }
 
 fn toggle_skill(params: &Value, enabled: bool) -> ServiceResult {

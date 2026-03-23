@@ -63,7 +63,7 @@ fn config_path() -> std::path::PathBuf {
 /// Load the OAuth config for a provider.
 ///
 /// Priority:
-/// 1. User config file (`~/.config/moltis/oauth_providers.json`)
+/// 1. User config file (`~/.moltis/config/oauth_providers.json`)
 /// 2. Environment variables (`MOLTIS_OAUTH_{PROVIDER}_CLIENT_ID`, etc.)
 /// 3. Built-in defaults
 pub fn load_oauth_config(provider: &str) -> Option<OAuthConfig> {

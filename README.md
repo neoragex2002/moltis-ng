@@ -135,8 +135,8 @@ docker run -d \
   --name moltis \
   -p 13131:13131 \
   -p 13132:13132 \
-  -v moltis-config:/home/moltis/.config/moltis \
-  -v moltis-data:/home/moltis/.moltis \
+  -v moltis-config:/home/moltis/.moltis/config \
+  -v moltis-data:/home/moltis/.moltis/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/moltis-org/moltis:latest
 
@@ -145,8 +145,8 @@ podman run -d \
   --name moltis \
   -p 13131:13131 \
   -p 13132:13132 \
-  -v moltis-config:/home/moltis/.config/moltis \
-  -v moltis-data:/home/moltis/.moltis \
+  -v moltis-config:/home/moltis/.moltis/config \
+  -v moltis-data:/home/moltis/.moltis/data \
   -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock \
   ghcr.io/moltis-org/moltis:latest
 
@@ -155,8 +155,8 @@ podman run -d \
   --name moltis \
   -p 13131:13131 \
   -p 13132:13132 \
-  -v moltis-config:/home/moltis/.config/moltis \
-  -v moltis-data:/home/moltis/.moltis \
+  -v moltis-config:/home/moltis/.moltis/config \
+  -v moltis-data:/home/moltis/.moltis/data \
   -v /run/podman/podman.sock:/var/run/docker.sock \
   ghcr.io/moltis-org/moltis:latest
 ```
@@ -184,8 +184,8 @@ remove browser warnings, download the CA certificate from
   (`/run/podman/podman.sock`) depending on your setup. You may need to enable
   the Podman socket service: `systemctl --user enable --now podman.socket`
 - **Persistence** — Mount volumes to preserve data across container restarts:
-  - `/home/moltis/.config/moltis` — configuration (moltis.toml, mcp-servers.json)
-  - `/home/moltis/.moltis` — data (databases, sessions, memory)
+  - `/home/moltis/.moltis/config` — configuration (`moltis.toml`, `mcp-servers.json`)
+  - `/home/moltis/.moltis/data` — data (databases, sessions, memory)
 
 ## Cloud Deployment
 
@@ -284,7 +284,7 @@ WebSocket and REST connections.
 ### Sessions and memory
 
 Conversations are stored as append-only JSONL files under
-`~/.moltis/agents/<agent>/sessions/`. A SQLite database tracks metadata
+`~/.moltis/data/agents/<agent>/sessions/`. A SQLite database tracks metadata
 (message counts, model selection, project bindings, channel reply targets).
 When token usage approaches 95% of the context window, the session is
 auto-compacted: history is summarized and important facts are persisted to the
@@ -394,7 +394,7 @@ or block actions.
 Hooks are discovered from `HOOK.md` files in these directories (priority order):
 
 1. `<workspace>/.moltis/hooks/<name>/HOOK.md` — project-local
-2. `~/.moltis/hooks/<name>/HOOK.md` — user-global
+2. `~/.moltis/data/hooks/<name>/HOOK.md` — user-global
 
 Each `HOOK.md` uses TOML frontmatter:
 

@@ -120,7 +120,7 @@ time-series charts:
 ## Metrics Persistence
 
 Metrics history is persisted to SQLite, so historical data survives server
-restarts. The database is stored at `~/.moltis/metrics.db` (or the configured
+restarts. The database is stored at `~/.moltis/data/metrics.db` (or the configured
 data directory).
 
 Key features:

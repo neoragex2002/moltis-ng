@@ -38,7 +38,7 @@ struct Cli {
     /// Port to listen on (overrides config value).
     #[arg(long, global = true)]
     port: Option<u16>,
-    /// Custom config directory (overrides default ~/.config/moltis/).
+    /// Custom config directory (overrides default ~/.moltis/config/).
     #[arg(long, global = true, env = "MOLTIS_CONFIG_DIR")]
     config_dir: Option<std::path::PathBuf>,
     /// Custom data directory (overrides default data dir).
@@ -463,4 +463,31 @@ async fn handle_skills(action: SkillAction) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_config_and_data_dir_flags() {
+        let cli = Cli::parse_from([
+            "moltis",
+            "--config-dir",
+            "/tmp/cfg",
+            "--data-dir",
+            "/tmp/data",
+            "config",
+            "check",
+        ]);
+
+        assert_eq!(cli.config_dir, Some(std::path::PathBuf::from("/tmp/cfg")));
+        assert_eq!(cli.data_dir, Some(std::path::PathBuf::from("/tmp/data")));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Config {
+                action: config_commands::ConfigAction::Check { verbose: false }
+            })
+        ));
+    }
 }

@@ -78,8 +78,8 @@ must be globally unique across all crates.
 
 | Database | Location | Crates |
 |----------|----------|--------|
-| `moltis.db` | `~/.moltis/moltis.db` | projects, sessions, cron, gateway |
-| `memory.db` | `~/.moltis/memory.db` | memory (separate, managed internally) |
+| `moltis.db` | `~/.moltis/data/moltis.db` | projects, sessions, cron, gateway |
+| `memory.db` | `~/.moltis/data/memory.db` | memory (separate, managed internally) |
 
 ## Adding New Migrations
 
@@ -229,7 +229,7 @@ In production, migrations handle schema creation.
 
 ### "failed to run migrations"
 
-1. Check file permissions on `~/.moltis/`
+1. Check file permissions on `~/.moltis/data/`
 2. Ensure the database file isn't locked by another process
 3. Check for syntax errors in migration SQL files
 
@@ -241,14 +241,14 @@ tables must be created before child tables with FK references.
 ### Checking Migration Status
 
 ```bash
-sqlite3 ~/.moltis/moltis.db "SELECT version, description, success FROM _sqlx_migrations ORDER BY version"
+sqlite3 ~/.moltis/data/moltis.db "SELECT version, description, success FROM _sqlx_migrations ORDER BY version"
 ```
 
 ### Resetting Migrations (Development Only)
 
 ```bash
 # Backup first!
-rm ~/.moltis/moltis.db
+rm ~/.moltis/data/moltis.db
 cargo run  # Creates fresh database with all migrations
 ```
 

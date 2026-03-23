@@ -1140,8 +1140,9 @@ pub async fn start_gateway(
         )
     });
 
-    let config_dir =
-        moltis_config::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".moltis"));
+    let Some(config_dir) = moltis_config::config_dir() else {
+        panic!("failed to resolve config dir; set --config-dir or MOLTIS_CONFIG_DIR");
+    };
     std::fs::create_dir_all(&config_dir).unwrap_or_else(|e| {
         panic!(
             "failed to create config directory {}: {e}",
@@ -1276,8 +1277,9 @@ pub async fn start_gateway(
     );
 
     // Migrate from projects.toml if it exists.
-    let config_dir =
-        moltis_config::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".moltis"));
+    let Some(config_dir) = moltis_config::config_dir() else {
+        panic!("failed to resolve config dir; set --config-dir or MOLTIS_CONFIG_DIR");
+    };
     let projects_toml_path = config_dir.join("projects.toml");
     if projects_toml_path.exists() {
         info!("migrating projects.toml to SQLite");
@@ -4516,18 +4518,7 @@ async fn api_skills_handler(State(state): State<AppState>) -> impl IntoResponse 
     // Also include discovered Personal and Project skills (not in the manifest).
     {
         use moltis_skills::discover::{FsSkillDiscoverer, SkillDiscoverer};
-        let data_dir = moltis_config::data_dir();
-        let search_paths = vec![
-            (
-                data_dir.join("skills"),
-                moltis_skills::types::SkillSource::Personal,
-            ),
-            (
-                data_dir.join(".moltis/skills"),
-                moltis_skills::types::SkillSource::Project,
-            ),
-        ];
-        let discoverer = FsSkillDiscoverer::new(search_paths);
+        let discoverer = FsSkillDiscoverer::new(FsSkillDiscoverer::default_paths());
         if let Ok(discovered) = discoverer.discover().await {
             for s in discovered {
                 skills.push(serde_json::json!({
@@ -5078,7 +5069,7 @@ fn builtin_hook_metadata() -> Vec<(
         ),
         (
             "command-logger",
-            "Logs all slash-command invocations to a JSONL audit file at ~/.moltis/logs/commands.log.",
+            "Logs all slash-command invocations to a JSONL audit file at ~/.moltis/data/logs/commands.log.",
             vec![HookEvent::Command],
             "crates/plugins/src/bundled/command_logger.rs",
         ),
@@ -5091,7 +5082,7 @@ fn builtin_hook_metadata() -> Vec<(
     ]
 }
 
-/// Seed a skeleton example hook into `~/.moltis/hooks/example/` on first run.
+/// Seed a skeleton example hook into `~/.moltis/data/hooks/example/` on first run.
 ///
 /// The hook has no command, so it won't execute — it's a template showing
 /// users what's possible. If the directory already exists it's a no-op.
@@ -5110,7 +5101,7 @@ fn seed_example_hook() {
     }
 }
 
-/// Seed built-in personal skills into `~/.moltis/skills/`.
+/// Seed built-in personal skills into `~/.moltis/data/skills/`.
 ///
 /// These are safe defaults shipped with the binary. Existing user content
 /// is never overwritten.

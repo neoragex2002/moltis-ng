@@ -32,7 +32,8 @@ use crate::{
     adapter::{
         TgAttachment, TgContent, TgFollowUpTarget, TgInbound, TgInboundKind, TgInboundMode,
         TgInboundRequest, TgPrivateSource, TgPrivateTarget, TgRoute, TgTranscriptFormat,
-        plan_group_target_action, resolve_dm_bucket_key, resolve_group_bucket_key, resolve_tg_route,
+        plan_group_target_action, resolve_dm_bucket_key, resolve_group_bucket_key,
+        resolve_tg_route,
     },
     config::TelegramBusAccountSnapshot,
     otp::{OtpInitResult, OtpVerifyResult},
@@ -854,7 +855,12 @@ pub async fn handle_message_direct(
                 reason_code: "tg_dispatch_dm",
             },
             ChatType::Group | ChatType::Channel => {
-                register_group_runtime_native_context(accounts, outbound.as_ref(), account_handle, &msg);
+                register_group_runtime_native_context(
+                    accounts,
+                    outbound.as_ref(),
+                    account_handle,
+                    &msg,
+                );
                 let reply_to_target_account_handle =
                     resolve_reply_to_target_account_handle(accounts, outbound.as_ref(), &msg);
                 let Some(action) = plan_group_target_action(
@@ -865,7 +871,8 @@ pub async fn handle_message_direct(
                     reply_to_target_account_handle.as_deref(),
                     config.group_line_start_mention_dispatch,
                     config.group_reply_to_dispatch,
-                    !attachments.is_empty() || inbound_kind.is_some_and(|kind| kind != ChannelMessageKind::Text),
+                    !attachments.is_empty()
+                        || inbound_kind.is_some_and(|kind| kind != ChannelMessageKind::Text),
                 ) else {
                     info!(
                         event = "telegram.group.plan",
@@ -3697,13 +3704,8 @@ fn resolve_reply_to_target_account_handle(
         return resolved;
     }
     let binding = crate::outbound::shared_group_runtime(accounts);
-    let mut runtime = binding
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    runtime.message_author(
-        &msg.chat.id.0.to_string(),
-        &reply.id.0.to_string(),
-    )
+    let mut runtime = binding.lock().unwrap_or_else(|e| e.into_inner());
+    runtime.message_author(&msg.chat.id.0.to_string(), &reply.id.0.to_string())
 }
 
 fn register_group_runtime_native_context(
@@ -3720,9 +3722,7 @@ fn register_group_runtime_native_context(
         msg.from.as_ref().and_then(|user| user.username.as_deref()),
     );
     let binding = crate::outbound::shared_group_runtime(accounts);
-    let mut runtime = binding
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut runtime = binding.lock().unwrap_or_else(|e| e.into_inner());
     runtime.register_participant(&chat_id, account_handle);
     if let Some(sender_account_handle) = sender_account_handle {
         runtime.register_participant(&chat_id, &sender_account_handle);

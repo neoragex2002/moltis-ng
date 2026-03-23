@@ -337,7 +337,7 @@ function HooksPage() {
 				hooks.value.length === 0 && !loading.value
 					? html`
         <div class="max-w-[600px] text-sm text-[var(--muted)] px-1">
-          No hooks discovered. Create a <code class="font-mono text-xs">HOOK.md</code> file in <code class="font-mono text-xs">.moltis/hooks/my-hook/</code> or <code class="font-mono text-xs">~/.moltis/hooks/my-hook/</code> to get started.
+          No hooks discovered. Create a <code class="font-mono text-xs">HOOK.md</code> file in <code class="font-mono text-xs">.moltis/hooks/my-hook/</code> or <code class="font-mono text-xs">~/.moltis/data/hooks/my-hook/</code> to get started.
         </div>
       `
 					: null

@@ -25,7 +25,10 @@ use {
 };
 
 use crate::{
-    adapter::{TgContent, TgInbound, TgInboundKind, TgInboundMode, TgInboundRequest, TgPrivateSource, TgPrivateTarget, plan_group_target_action, resolve_tg_route},
+    adapter::{
+        TgContent, TgInbound, TgInboundKind, TgInboundMode, TgInboundRequest, TgPrivateSource,
+        TgPrivateTarget, plan_group_target_action, resolve_tg_route,
+    },
     markdown::{self, TELEGRAM_MAX_MESSAGE_LEN},
     state::{AccountStateMap, TelegramGroupRuntime},
 };
@@ -46,8 +49,9 @@ pub struct TelegramOutbound {
 }
 
 pub(crate) fn shared_group_runtime(accounts: &AccountStateMap) -> Arc<Mutex<TelegramGroupRuntime>> {
-    static STORE: OnceLock<Mutex<std::collections::HashMap<usize, Arc<Mutex<TelegramGroupRuntime>>>>> =
-        OnceLock::new();
+    static STORE: OnceLock<
+        Mutex<std::collections::HashMap<usize, Arc<Mutex<TelegramGroupRuntime>>>>,
+    > = OnceLock::new();
     let store = STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let key = Arc::as_ptr(accounts) as usize;
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
@@ -698,7 +702,9 @@ impl TelegramOutbound {
     }
 
     fn group_action_dedupe_key(account_handle: &str, chat_id: &str, message_id: &str) -> String {
-        format!("telegram.group.action|account:{account_handle}|chat:{chat_id}|message:{message_id}")
+        format!(
+            "telegram.group.action|account:{account_handle}|chat:{chat_id}|message:{message_id}"
+        )
     }
 
     async fn emit_group_visible_outbound_event(
@@ -713,7 +719,8 @@ impl TelegramOutbound {
     ) {
         if !Self::is_group_chat(chat_id)
             || (text.trim().is_empty()
-                && !message_kind.is_some_and(|kind| kind != moltis_channels::ChannelMessageKind::Text))
+                && !message_kind
+                    .is_some_and(|kind| kind != moltis_channels::ChannelMessageKind::Text))
         {
             return;
         }
@@ -736,15 +743,17 @@ impl TelegramOutbound {
                 .or_else(|| crate::state::effective_bot_username(source_state));
             let snapshots = accounts
                 .iter()
-                .map(|(account_handle, state)| crate::config::TelegramBusAccountSnapshot {
-                    account_handle: account_handle.clone(),
-                    agent_id: state.config.agent_id.clone(),
-                    chan_user_id: crate::state::effective_bot_user_id(state),
-                    chan_user_name: crate::state::effective_bot_username(state),
-                    chan_nickname: state.config.chan_nickname.clone(),
-                    dm_scope: state.config.dm_scope.clone(),
-                    group_scope: state.config.group_scope.clone(),
-                })
+                .map(
+                    |(account_handle, state)| crate::config::TelegramBusAccountSnapshot {
+                        account_handle: account_handle.clone(),
+                        agent_id: state.config.agent_id.clone(),
+                        chan_user_id: crate::state::effective_bot_user_id(state),
+                        chan_user_name: crate::state::effective_bot_username(state),
+                        chan_nickname: state.config.chan_nickname.clone(),
+                        dm_scope: state.config.dm_scope.clone(),
+                        group_scope: state.config.group_scope.clone(),
+                    },
+                )
                 .collect::<Vec<_>>();
             let identity_links = crate::state::telegram_identity_links_snapshot(&self.accounts);
             let group_runtime = shared_group_runtime(&self.accounts);
@@ -812,11 +821,8 @@ impl TelegramOutbound {
                 continue;
             };
 
-            let dedupe_key = Self::group_action_dedupe_key(
-                &target_account_handle,
-                chat_id,
-                sent_message_id,
-            );
+            let dedupe_key =
+                Self::group_action_dedupe_key(&target_account_handle, chat_id, sent_message_id);
             let is_dup = shared_group_runtime(&self.accounts)
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -842,7 +848,10 @@ impl TelegramOutbound {
                 body: TgContent {
                     text: action.body,
                     has_attachments: false,
-                    has_location: matches!(message_kind, Some(moltis_channels::ChannelMessageKind::Location)),
+                    has_location: matches!(
+                        message_kind,
+                        Some(moltis_channels::ChannelMessageKind::Location)
+                    ),
                 },
                 private_source: TgPrivateSource {
                     account_handle: target_account_handle.clone(),
@@ -2776,8 +2785,8 @@ impl TelegramOutbound {
 #[cfg(test)]
 mod tests {
     use {
-        async_trait::async_trait,
         super::*,
+        async_trait::async_trait,
         axum::{Json, Router, body::Bytes, extract::State, routing::post},
         moltis_channels::ChannelReplyTarget,
         std::{
@@ -3088,7 +3097,9 @@ mod tests {
                     supervisor: Arc::new(std::sync::Mutex::new(None)),
                     message_log: None,
                     event_sink: None,
-                    core_bridge: Some(Arc::clone(&bridge) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    core_bridge: Some(
+                        Arc::clone(&bridge) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
                     polling: Arc::new(std::sync::Mutex::new(
                         crate::state::PollingRuntimeState::new(90),
                     )),

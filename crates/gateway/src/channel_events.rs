@@ -154,10 +154,9 @@ async fn resolve_channel_session_id(
         .as_ref()
         .and_then(|entry| entry.channel_binding.as_deref())
     {
-        let strict_binding_missing_bucket = moltis_telegram::adapter::telegram_channel_binding_info(
-            existing_binding,
-        )
-        .is_some_and(|info| info.bucket_key.is_none());
+        let strict_binding_missing_bucket =
+            moltis_telegram::adapter::telegram_channel_binding_info(existing_binding)
+                .is_some_and(|info| info.bucket_key.is_none());
         if moltis_telegram::adapter::telegram_binding_uses_legacy_shape(existing_binding)
             || strict_binding_missing_bucket
         {
@@ -3506,7 +3505,13 @@ mod tests {
 
         sink.dispatch_to_chat(
             "hi",
-            telegram_inbound_ctx("telegram:845", "-100", None, None, Some(bucket_key.as_str())),
+            telegram_inbound_ctx(
+                "telegram:845",
+                "-100",
+                None,
+                None,
+                Some(bucket_key.as_str()),
+            ),
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
                 sender_name: None,

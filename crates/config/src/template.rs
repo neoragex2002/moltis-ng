@@ -415,7 +415,7 @@ allowed_domains = []              # Empty = all domains allowed
 [skills]
 enabled = true                    # Enable skills system
 search_paths = []                 # Additional directories to search for skills
-                                  # Default locations: ~/.config/moltis/skills/, ./skills/
+                                  # Default locations: ~/.moltis/data/skills/, ./.moltis/skills/
 auto_load = []                    # Skills to always load without explicit activation
                                   # Example: ["code-review", "commit"]
 

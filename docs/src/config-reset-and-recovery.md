@@ -11,29 +11,29 @@
 
 默认情况下：
 
-- 配置目录：`~/.config/moltis`
-- 数据目录：`~/.moltis`
+- 配置目录：`~/.moltis/config`
+- 数据目录：`~/.moltis/data`
 
 对当前这套环境，真正有价值的数据主要分成四类：
 
-- `~/.config/moltis/moltis.toml`
-- `~/.moltis/USER.md`
-- `~/.moltis/PEOPLE.md`
-- `~/.moltis/agents/`
+- `~/.moltis/config/moltis.toml`
+- `~/.moltis/data/USER.md`
+- `~/.moltis/data/PEOPLE.md`
+- `~/.moltis/data/agents/`
 
-此外，这个环境下 `~/.moltis/skills/` 不是空目录，因此如果你依赖这些技能，也应纳入备份。
+此外，这个环境下 `~/.moltis/data/skills/` 不是空目录，因此如果你依赖这些技能，也应纳入备份。
 
 ## 最小备份集
 
 如果你要做一次“可完全重建、但不保留旧数据库垃圾”的重置，建议至少备份：
 
-- `~/.config/moltis/moltis.toml`
-- `~/.moltis/USER.md`
-- `~/.moltis/PEOPLE.md`
-- `~/.moltis/agents/`
-- `~/.moltis/skills/`
+- `~/.moltis/config/moltis.toml`
+- `~/.moltis/data/USER.md`
+- `~/.moltis/data/PEOPLE.md`
+- `~/.moltis/data/agents/`
+- `~/.moltis/data/skills/`
 
-如果你不打算保留 `~/.moltis/moltis.db`，那还必须额外保存每个 Telegram bot 的完整渠道配置：
+如果你不打算保留 `~/.moltis/data/moltis.db`，那还必须额外保存每个 Telegram bot 的完整渠道配置：
 
 - `token`
 - `chan_user_name`
@@ -47,13 +47,13 @@
 
 以下内容通常不是“V3 重置后恢复运行”的最小必需项：
 
-- `~/.moltis/HEARTBEAT.md`
-- `~/.moltis/memory.db`
-- `~/.moltis/metrics.db`
-- `~/.moltis/logs.jsonl`
-- `~/.moltis/.onboarded`
-- `~/.config/moltis/moltis.toml.bak`
-- `~/.config/moltis/moltis.toml.default`
+- `~/.moltis/data/HEARTBEAT.md`
+- `~/.moltis/data/memory.db`
+- `~/.moltis/data/metrics.db`
+- `~/.moltis/data/logs.jsonl`
+- `~/.moltis/data/.onboarded`
+- `~/.moltis/config/moltis.toml.bak`
+- `~/.moltis/config/moltis.toml.default`
 
 其中：
 
@@ -64,14 +64,14 @@
 
 以下内容是否保留，取决于你是否还需要沿用对应状态：
 
-- `~/.config/moltis/kimi_device_id`
+- `~/.moltis/config/kimi_device_id`
   - 仅当你还想保留 Moonshot/Kimi 设备登录态时才需要
-- `~/.config/moltis/certs/`
+- `~/.moltis/config/certs/`
   - 仅当你想保留当前本地 TLS 证书与信任链时才需要
 
 ## 当前数据库里的过时内容
 
-当前 `~/.moltis/moltis.db` 里，Telegram 渠道配置仍然带有旧字段内容：
+当前 `~/.moltis/data/moltis.db` 里，Telegram 渠道配置仍然带有旧字段内容：
 
 - `persona_id`
 - `group_session_transcript_format`
