@@ -1,0 +1,584 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>V3 Design - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/v3-design.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="v3-整体方案"><a class="header" href="#v3-整体方案">V3 整体方案</a></h1>
+<p>本文档只定义一件事：</p>
+<ul>
+<li>第三版整体架构方案的方向性原则与总体目标</li>
+</ul>
+<p>本文档不讨论：</p>
+<ul>
+<li>分阶段实施步骤</li>
+<li>排期与迁移顺序</li>
+<li>某个阶段的局部代码改造</li>
+</ul>
+<p>也就是说，本文档讨论的是：</p>
+<ul>
+<li><strong>第三版要收敛成什么架构</strong></li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li><strong>第三版按什么顺序实施</strong></li>
+</ul>
+<h2 id="一句话结论"><a class="header" href="#一句话结论">一句话结论</a></h2>
+<p>第三版的总目标是：</p>
+<ul>
+<li>用<strong>少量、稳定、收敛</strong>的核心概念定义上层语义</li>
+<li>用渠道适配层封装各渠道内部细节</li>
+<li>用 <code>type</code> / <code>scope</code> 决定会话语义</li>
+<li>用统一的事件记录格式保存稳定事实</li>
+<li>用 core 的上下文管理把这些事实整理成模型输入</li>
+</ul>
+<p>一句话：</p>
+<ul>
+<li><strong>core 定义语义并管理 agent 运行时，adapter 封装渠道细节，统一事件记录保存稳定事实，模型上下文由 core 管理</strong></li>
+</ul>
+<p>这里还要补一条当前实施口径：</p>
+<ul>
+<li><strong>C 阶段的第一优先级，不是先替换保存层，而是先把 Telegram adapter / core 的职责切干净</strong></li>
+<li><strong>因此 C 阶段允许先保留旧 <code>SessionStore</code> / <code>PersistedMessage</code>，由 core 通过 bridge 方式读取旧记录并统一整理模型上下文</strong></li>
+</ul>
+<h2 id="总体目标"><a class="header" href="#总体目标">总体目标</a></h2>
+<p>第三版想解决的不是单点命名问题，而是整条链路的责任边界问题：</p>
+<ul>
+<li>哪些概念属于 core</li>
+<li>哪些概念属于 adapter</li>
+<li>哪些内容属于统一事件记录</li>
+<li>哪些内容属于 core 的上下文管理</li>
+<li>哪些内容属于渠道实现细节</li>
+</ul>
+<p>如果这些边界不清晰，就会长期出现：</p>
+<ul>
+<li>核心概念膨胀</li>
+<li>渠道细节泄漏到 core</li>
+<li>transcript / prompt 文本反向污染保存层</li>
+<li>不同渠道各自长出一套半独立语义</li>
+</ul>
+<h2 id="设计原则"><a class="header" href="#设计原则">设计原则</a></h2>
+<h3 id="1-核心概念必须收敛"><a class="header" href="#1-核心概念必须收敛">1. 核心概念必须收敛</a></h3>
+<p>第三版里，core 不应一开始就维护一张膨胀的大概念表。</p>
+<p>core 应长期冻结的，应当是<strong>少量、稳定、跨渠道成立</strong>的上层语义。</p>
+<p>当前更合理的收敛方式是：</p>
+<ul>
+<li>先冻结少量稳定概念，例如 <code>agent</code>、<code>type</code>、<code>scope</code>、<code>peer</code></li>
+<li>其中 <code>type</code> 是上层会话类型，例如 <code>dm</code>、<code>group</code>、<code>cron</code>、<code>heartbeat</code></li>
+<li><code>session_key</code>、<code>session_id</code> 是 core 管理的会话身份结果</li>
+<li><code>sender</code>、<code>account</code>、<code>channel</code> 等，则由不同 <code>type</code> / <code>scope</code> 在需要时按语义引入</li>
+<li><code>branch</code> 不应上升为强 core 公共概念；它更适合作为 adapter 按特定 <code>scope</code> 返回的子线标识</li>
+</ul>
+<p>这里要额外强调：</p>
+<ul>
+<li>保存层里可以出现比 core 公共概念表更丰富的结构化字段</li>
+<li>但“保存时需要记录哪些事实”不等于“core 长期公开维护哪些核心概念”</li>
+</ul>
+<p>一句话：</p>
+<ul>
+<li><strong>先冻结最少的公共语义，不把 type-specific 轴一开始就平铺成 core 总表</strong></li>
+</ul>
+<h3 id="2-核心层与渠道层必须拆开"><a class="header" href="#2-核心层与渠道层必须拆开">2. 核心层与渠道层必须拆开</a></h3>
+<p>第三版里，core 和 adapter 的关系必须固定为：</p>
+<ul>
+<li><strong>core 只定义核心语义</strong></li>
+<li><strong>adapter 只封装渠道细节并输出统一后的结果</strong></li>
+</ul>
+<p>这意味着：</p>
+<ul>
+<li>core 不需要知道 Telegram / Feishu / Slack 的原生字段长什么样</li>
+<li>core 不需要知道某个渠道内部怎么识别 account / peer / topic / thread</li>
+<li>core 只关心这些渠道细节最后是否被可靠地映射成 core 需要的语义</li>
+</ul>
+<p>对应地：</p>
+<ul>
+<li>渠道层可以有自己的内部概念</li>
+<li>渠道层可以有自己的实现细节字段</li>
+<li>渠道层可以保留本渠道协议所必需的局部状态</li>
+</ul>
+<p>但这些内容应当：</p>
+<ul>
+<li>封装在渠道层内部</li>
+<li>通过统一后的结果或分桶结果暴露给 core</li>
+<li>不直接泄漏成 core 长期依赖的公共概念</li>
+</ul>
+<h3 id="3-type-与-scope-负责会话语义"><a class="header" href="#3-type-与-scope-负责会话语义">3. <code>type</code> 与 <code>scope</code> 负责会话语义</a></h3>
+<p>第三版的会话语义，应由：</p>
+<ul>
+<li><code>type</code></li>
+<li><code>scope</code></li>
+</ul>
+<p>共同决定。</p>
+<p>也就是说：</p>
+<ul>
+<li><code>dm</code> 和 <code>group</code> 不是同一类问题</li>
+<li><code>dm</code> 表示 agent 与单个外部参与者之间的 1 对 1 会话</li>
+<li><code>group</code> 表示 agent 与多个外部参与者之间的共享会话</li>
+<li><code>cron</code>、<code>heartbeat</code> 这类系统触发也应作为独立 <code>type</code></li>
+<li><code>dm_scope</code> 与 <code>group_scope</code> 应分别定义、分别收敛</li>
+<li>core 只定义同桶/异桶语义</li>
+<li>adapter 负责把这些语义在本渠道实现为稳定结果</li>
+</ul>
+<h3 id="4-session_key-是编码结果不是上层语义来源"><a class="header" href="#4-session_key-是编码结果不是上层语义来源">4. <code>session_key</code> 是编码结果，不是上层语义来源</a></h3>
+<p>第三版里，<code>session_key</code> 的定位应明确为：</p>
+<ul>
+<li>会话语义被实现后的编码结果</li>
+</ul>
+<p>它回答的是：</p>
+<ul>
+<li>这条消息最终应落入哪个逻辑桶</li>
+</ul>
+<p>但它不应反过来成为：</p>
+<ul>
+<li>概念定义本身</li>
+<li>渠道细节泄漏的入口</li>
+</ul>
+<h3 id="5-事件记录与上下文管理必须解耦"><a class="header" href="#5-事件记录与上下文管理必须解耦">5. 事件记录与上下文管理必须解耦</a></h3>
+<p>第三版里，至少要分开三件事：</p>
+<ul>
+<li>会话身份</li>
+<li>会话保存格式</li>
+<li>推理上下文格式</li>
+</ul>
+<p>更准确地说：</p>
+<ul>
+<li>统一事件记录只保存稳定事实</li>
+<li>上下文管理把这些事实整理成模型输入</li>
+<li>在分阶段落地时，允许 core 先通过 legacy persistence bridge 读取旧会话记录</li>
+</ul>
+<p>不应继续沿用：</p>
+<ul>
+<li>直接把 adapter 拼好的 transcript / prompt 文本当作唯一事实来源</li>
+</ul>
+<h3 id="6-统一事件记录只存稳定事实"><a class="header" href="#6-统一事件记录只存稳定事实">6. 统一事件记录只存稳定事实</a></h3>
+<p>第三版里，统一事件记录应收敛为：</p>
+<ul>
+<li><code>session_event</code></li>
+</ul>
+<p>它应当是：</p>
+<ul>
+<li>统一的</li>
+<li>结构化的</li>
+<li>可重放的</li>
+<li>与特定渠道原生格式解耦的</li>
+<li>与最终 LLM 上下文格式解耦的</li>
+</ul>
+<p>可以把它理解成：</p>
+<ul>
+<li>一条统一的会话事件记录</li>
+</ul>
+<p>因此：</p>
+<ul>
+<li>统一事件记录必须保存稳定事实</li>
+<li>渠道原始数据不应直接成为统一字段</li>
+<li>直接给模型看的临时拼接文本不应直接成为统一字段</li>
+</ul>
+<h3 id="7-上下文管理负责组织模型输入"><a class="header" href="#7-上下文管理负责组织模型输入">7. 上下文管理负责组织模型输入</a></h3>
+<p>第三版里：</p>
+<ul>
+<li>core 的上下文管理负责把已落盘的稳定事实整理成当前 run 需要的模型输入</li>
+<li>它内部可以包含不同 <code>type</code> 的上下文组织规则，以及拼装 / 压缩 / 窗口控制</li>
+</ul>
+<p>也就是说：</p>
+<ul>
+<li>adapter 不负责最终给模型的文本</li>
+<li>core 不应依赖渠道临时拼出来的一次性 transcript</li>
+<li>C 阶段里，core 可以先基于旧 <code>PersistedMessage</code> 做 bridge assemble / render；这不改变“上下文归 core”的职责归属</li>
+</ul>
+<h2 id="core-职责范围"><a class="header" href="#core-职责范围">Core 职责范围</a></h2>
+<p>第三版里，core 不应被理解成“抽象层集合”，而应被理解成一组收敛、清晰的职责。</p>
+<p>当前更合理的 core 职责范围是：</p>
+<h3 id="1-agent-执行主链"><a class="header" href="#1-agent-执行主链">1. Agent 执行主链</a></h3>
+<p>负责：</p>
+<ul>
+<li>agent run 生命周期</li>
+<li>模型调用</li>
+<li>工具 / 技能 / sandbox / approval 编排</li>
+<li>流式输出与 run 级状态</li>
+</ul>
+<p>这里回答的是：</p>
+<ul>
+<li>谁在思考</li>
+<li>这一轮 run 如何执行</li>
+<li>tool / skill 如何进入这轮推理</li>
+</ul>
+<h3 id="2-会话语义与会话身份"><a class="header" href="#2-会话语义与会话身份">2. 会话语义与会话身份</a></h3>
+<p>负责：</p>
+<ul>
+<li><code>type</code></li>
+<li><code>scope</code></li>
+<li><code>peer</code></li>
+<li><code>session_key</code></li>
+<li><code>session_id</code></li>
+</ul>
+<p>这里回答的是：</p>
+<ul>
+<li>这是什么类型的会话</li>
+<li>该按什么语义同桶/异桶</li>
+<li>这条消息最终落到哪个逻辑会话</li>
+</ul>
+<h3 id="3-统一事件记录"><a class="header" href="#3-统一事件记录">3. 统一事件记录</a></h3>
+<p>负责：</p>
+<ul>
+<li><code>session_event</code> 结构</li>
+<li>持久化格式</li>
+<li>可重放的事实流</li>
+</ul>
+<p>这里要强调：</p>
+<ul>
+<li>统一事件记录格式应尽量与特定渠道原生格式解耦</li>
+<li>统一事件记录格式应尽量与最终 LLM 上下文格式解耦</li>
+<li>保存的是稳定事实，不是 Telegram update，也不是 prompt 文本</li>
+</ul>
+<h3 id="4-上下文整理"><a class="header" href="#4-上下文整理">4. 上下文整理</a></h3>
+<p>负责：</p>
+<ul>
+<li>从已落盘的稳定事实整理模型输入</li>
+<li>不同 <code>type</code> 的上下文规则</li>
+<li>拼装 / 压缩 / 摘要 / 窗口控制</li>
+<li>最终送入模型的 messages / context blocks</li>
+</ul>
+<p>这里要强调：</p>
+<ul>
+<li>这是 core 的内部职责</li>
+<li>不再额外拆成多个并列“大层”</li>
+<li>adapter 不参与最终给模型的文本塑形</li>
+<li>在 C 阶段里，这一职责可以先建立在 legacy persistence bridge 之上，而不要求先完成 <code>session_event</code> 持久化</li>
+</ul>
+<h3 id="5-回复结果"><a class="header" href="#5-回复结果">5. 回复结果</a></h3>
+<p>负责：</p>
+<ul>
+<li>这次 run 产出的回复语义结果是什么</li>
+<li>是普通文本、结构化结果，还是带附件的回复</li>
+<li>回复与哪条上游事实记录相关</li>
+</ul>
+<p>这里不负责：</p>
+<ul>
+<li>Telegram 怎么 reply</li>
+<li>Telegram 怎么 chunk</li>
+<li>Telegram 是否先发 typing</li>
+</ul>
+<p>这些属于渠道适配层。</p>
+<h2 id="telegram-适配模块职责"><a class="header" href="#telegram-适配模块职责">Telegram 适配模块职责</a></h2>
+<p>第三版当前先落 Telegram，但 Telegram 仍只是一个渠道适配器，不是 core 语义来源。</p>
+<p>Telegram adapter 当前应收敛为以下职责：</p>
+<h3 id="1-telegram-连接与生命周期"><a class="header" href="#1-telegram-连接与生命周期">1. Telegram 连接与生命周期</a></h3>
+<p>负责：</p>
+<ul>
+<li>polling / webhook 接入</li>
+<li>webhook 清理</li>
+<li>reconnect / retry / backoff</li>
+<li>账号连通性与运行时可观测性</li>
+</ul>
+<h3 id="2-telegram-原生对象解析"><a class="header" href="#2-telegram-原生对象解析">2. Telegram 原生对象解析</a></h3>
+<p>负责从 Telegram 原生 update 中提取：</p>
+<ul>
+<li>bot/account</li>
+<li>chat / user / sender</li>
+<li>message / reply / quote</li>
+<li>topic / thread 相关信息</li>
+<li>media / file / location 等原生对象</li>
+</ul>
+<h3 id="3-telegram-输入整理"><a class="header" href="#3-telegram-输入整理">3. Telegram 输入整理</a></h3>
+<p>负责：</p>
+<ul>
+<li>把 Telegram 原生字段整理成 core 需要的统一输入</li>
+<li>产出 <code>peer</code></li>
+<li>在需要时产出 <code>sender</code></li>
+<li>在 <code>per_branch</code> 语义下能稳定识别子线（<code>branch</code>），并以 <code>bucket_key</code> / <code>adapter_hints</code> 等方式交付上层使用</li>
+<li>产出 <code>body</code> / <code>attachments</code> / <code>reply_ref</code> / <code>source</code> / <code>adapter_hints</code></li>
+</ul>
+<p>但它不负责：</p>
+<ul>
+<li>定义 <code>dm_scope</code> / <code>group_scope</code></li>
+<li>定义 <code>session_key</code> 语义</li>
+<li>定义最终给模型的文本</li>
+</ul>
+<h3 id="4-telegram-出站执行"><a class="header" href="#4-telegram-出站执行">4. Telegram 出站执行</a></h3>
+<p>负责：</p>
+<ul>
+<li>把 core 的回复结果翻译成 Telegram API 调用</li>
+<li>reply_to / topic routing</li>
+<li>typing / media upload / chunking / parse mode</li>
+<li>Telegram 特定错误恢复与重试</li>
+</ul>
+<h3 id="5-telegram-渠道特有策略与护栏"><a class="header" href="#5-telegram-渠道特有策略与护栏">5. Telegram 渠道特有策略与护栏</a></h3>
+<p>负责：</p>
+<ul>
+<li>mention / addressed / listen-only 等 Telegram 表面规则</li>
+<li>mirror / relay 等 Telegram 群策略的候选识别与协议侧护栏</li>
+<li>Telegram 特有 access policy</li>
+<li>Telegram 特有降级、跳过与 reason code 可观测性</li>
+</ul>
+<p>这些策略的职责边界是：</p>
+<ul>
+<li>TG adapter 负责“协议侧能否/如何触发”的判定与护栏（候选识别、去重线索、限频、重试等）</li>
+<li>core 负责把“最终如何写入会话事实流/历史、如何进入上下文”收口为可审计的上层决策（transcript/history shaping）</li>
+</ul>
+<p>而不应反向定义：</p>
+<ul>
+<li>core 的长期会话语义</li>
+<li>统一事件记录格式</li>
+<li>上下文管理格式</li>
+</ul>
+<h2 id="telegram-在第三版中的位置"><a class="header" href="#telegram-在第三版中的位置">Telegram 在第三版中的位置</a></h2>
+<p>第三版当前实施虽然优先聚焦 Telegram，但 Telegram 优先只是<strong>实施顺序</strong>，不是设计特权。</p>
+<p>也就是说：</p>
+<ul>
+<li>Telegram 可以先落地</li>
+<li>但 Telegram 不应反向决定第三版 core 概念</li>
+<li>Telegram 的实现细节仍应被封装在 Telegram adapter 内部</li>
+</ul>
+<h2 id="与实施路线图的关系"><a class="header" href="#与实施路线图的关系">与实施路线图的关系</a></h2>
+<p>这份文档定义：</p>
+<ul>
+<li>第三版整体设计目标和责任边界</li>
+</ul>
+<p>而实施路线图定义：</p>
+<ul>
+<li>第三版按什么顺序落地</li>
+<li>哪些旧能力阶段性复用</li>
+<li>Telegram 优先的渐进步骤如何安排</li>
+</ul>
+<h2 id="相关文档"><a class="header" href="#相关文档">相关文档</a></h2>
+<ul>
+<li><code>docs/src/refactor/v3-roadmap.md</code></li>
+<li><code>docs/src/concepts-and-ids.md</code></li>
+<li><code>docs/src/refactor/dm-scope.md</code></li>
+<li><code>docs/src/refactor/group-scope.md</code></li>
+<li><code>docs/src/refactor/session-scope-overview.md</code></li>
+<li><code>docs/src/refactor/session-context-layering.md</code></li>
+<li><code>docs/src/refactor/session-event-canonical.md</code></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../concepts-and-ids.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/v3-gap.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../concepts-and-ids.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/v3-gap.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

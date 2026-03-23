@@ -1,0 +1,580 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Session Event Canonical - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/session-event-canonical.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="session_event-字段表"><a class="header" href="#session_event-字段表"><code>session_event</code> 字段表</a></h1>
+<p>本文档只定义一件事：</p>
+<ul>
+<li>第三轮目标形态下，<code>session_event</code> 的统一持久化字段应如何收敛</li>
+</ul>
+<p>本文档不讨论：</p>
+<ul>
+<li><code>session_key</code> 的具体拼接规则</li>
+<li><code>dm_scope</code> / <code>group_scope</code> 的具体取值</li>
+<li>某个具体渠道的原生 webhook / SDK 字段</li>
+<li>某次 agent run 里最终给模型看的 prompt 文本长什么样</li>
+</ul>
+<p>也就是说，本文档讨论的是：</p>
+<ul>
+<li><strong>保存层的统一事件模型</strong></li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li>某个 adapter 今天临时怎么拼上下文</li>
+</ul>
+<h2 id="一句话结论"><a class="header" href="#一句话结论">一句话结论</a></h2>
+<p><code>session_event</code> 应当是：</p>
+<ul>
+<li>统一的</li>
+<li>结构化的</li>
+<li>可重放的</li>
+<li>与最终 prompt 文本解耦的</li>
+</ul>
+<p>因此：</p>
+<ul>
+<li>它必须保存稳定事实</li>
+<li>但不应把 <code>BodyForAgent</code>、<code>InboundHistory</code>、plaintext envelope 这类给模型看的临时文本直接当作统一字段</li>
+</ul>
+<p>这里还要明确区分：</p>
+<ul>
+<li><code>session_event</code> 的字段表是保存层字段表</li>
+<li>它不等于 core 的最小公共概念表</li>
+<li>保存层为了可重放与可审计，可以比 core 公共概念更丰富</li>
+</ul>
+<h2 id="与-c-阶段的关系"><a class="header" href="#与-c-阶段的关系">与 C 阶段的关系</a></h2>
+<p>本文档描述的是：</p>
+<ul>
+<li><strong>最终持久化目标</strong></li>
+</ul>
+<p>它不是：</p>
+<ul>
+<li><strong>C 阶段当前实施的前置条件</strong></li>
+</ul>
+<p>也就是说：</p>
+<ul>
+<li>C 阶段可以先不改落盘</li>
+<li>C 阶段可以继续复用 <code>SessionStore</code> / <code>PersistedMessage</code></li>
+<li>C 阶段的第一优先级仍是 Telegram adapter / core 边界收敛，以及 context ownership 收敛</li>
+</ul>
+<p>当前更准确的理解是：</p>
+<ul>
+<li><code>session_event</code> 是后续替换 legacy persistence bridge 的目标形态</li>
+<li>而不是 C 阶段必须同轮落地的内容</li>
+</ul>
+<h2 id="设计原则"><a class="header" href="#设计原则">设计原则</a></h2>
+<h3 id="1-保存层是唯一事实来源"><a class="header" href="#1-保存层是唯一事实来源">1. 保存层是唯一事实来源</a></h3>
+<p><code>session_event</code> 保存的是：</p>
+<ul>
+<li>发生了什么事实</li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li>这次准备怎么向模型讲述这些事实</li>
+</ul>
+<h3 id="2-上下文是按需整理出来的"><a class="header" href="#2-上下文是按需整理出来的">2. 上下文是按需整理出来的</a></h3>
+<p>core 的上下文管理应从 <code>session_event</code> 整理出：</p>
+<ul>
+<li><code>dm</code> 上下文</li>
+<li><code>group</code> 上下文</li>
+</ul>
+<p>而不是反过来让保存层依赖某一版上下文文本。</p>
+<h3 id="3-渠道字段只保留必要统一字段其余放补充信息"><a class="header" href="#3-渠道字段只保留必要统一字段其余放补充信息">3. 渠道字段只保留必要统一字段，其余放补充信息</a></h3>
+<p>凡是会被多处核心逻辑稳定依赖的字段，才应进入统一字段层。</p>
+<p>其余渠道细节：</p>
+<ul>
+<li>放进 <code>adapter_hints</code></li>
+</ul>
+<h3 id="4-顶层字段数量要收敛"><a class="header" href="#4-顶层字段数量要收敛">4. 顶层字段数量要收敛</a></h3>
+<p>顶层只保留核心字段。</p>
+<p>更细的内容应进入受控嵌套对象，而不是不断平铺新字段。</p>
+<h2 id="顶层字段表"><a class="header" href="#顶层字段表">顶层字段表</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>字段</th><th>必填</th><th>owner</th><th>含义</th></tr></thead><tbody>
+<tr><td><code>event_id</code></td><td>是</td><td>core</td><td>当前 <code>session_event</code> 的稳定唯一标识</td></tr>
+<tr><td><code>session_key</code></td><td>是</td><td>core</td><td>该事件所属的逻辑会话桶</td></tr>
+<tr><td><code>session_id</code></td><td>是</td><td>core</td><td>该事件写入时对应的会话代次</td></tr>
+<tr><td><code>type</code></td><td>是</td><td>core</td><td>当前事件所属会话类型，如 <code>dm</code>、<code>group</code></td></tr>
+<tr><td><code>direction</code></td><td>是</td><td>core</td><td>事件方向，如 <code>inbound</code>、<code>outbound</code>、<code>system</code></td></tr>
+<tr><td><code>event_kind</code></td><td>是</td><td>core</td><td>事件种类，如普通消息、系统事件、工具事件</td></tr>
+<tr><td><code>ts</code></td><td>是</td><td>core</td><td>该事件的规范时间戳</td></tr>
+<tr><td><code>channel</code></td><td>否</td><td>adapter -&gt; core</td><td>事件来源渠道；用于说明来源，不等于一定参与分桶</td></tr>
+<tr><td><code>account</code></td><td>否</td><td>adapter -&gt; core</td><td>当前渠道账号表示；channel-scoped</td></tr>
+<tr><td><code>peer</code></td><td>视 <code>type</code> 而定</td><td>adapter -&gt; core</td><td>逻辑对端；在 <code>group</code> 下表示多人共享会话对象</td></tr>
+<tr><td><code>branch</code></td><td>否</td><td>adapter -&gt; core</td><td>adapter 返回的子线判别结果，承接 <code>topic</code> / <code>thread</code> 等</td></tr>
+<tr><td><code>sender</code></td><td>否</td><td>adapter -&gt; core</td><td>逻辑发言人</td></tr>
+<tr><td><code>body</code></td><td>是</td><td>adapter -&gt; core</td><td>该事件的统一文本正文；无文本时可为空字符串</td></tr>
+<tr><td><code>attachments</code></td><td>否</td><td>adapter -&gt; core</td><td>规范化附件列表</td></tr>
+<tr><td><code>reply_ref</code></td><td>否</td><td>adapter -&gt; core</td><td>该事件引用 / 回复的上游对象</td></tr>
+<tr><td><code>source</code></td><td>是</td><td>adapter -&gt; core</td><td>原生来源与采集信息</td></tr>
+<tr><td><code>adapter_hints</code></td><td>否</td><td>adapter</td><td>不上升为核心语义的渠道局部信息</td></tr>
+</tbody></table>
+</div>
+<p>这些字段里，像 <code>channel</code>、<code>account</code>、<code>branch</code>、<code>sender</code> 是否出现，首先取决于保存这一类事实是否有价值；
+这并不表示它们都应被抬成 core 长期冻结的强公共概念。</p>
+<h2 id="推荐的顶层枚举约束"><a class="header" href="#推荐的顶层枚举约束">推荐的顶层枚举约束</a></h2>
+<h3 id="type"><a class="header" href="#type"><code>type</code></a></h3>
+<p>当前至少应支持：</p>
+<ul>
+<li><code>dm</code></li>
+<li><code>group</code></li>
+<li><code>cron</code></li>
+<li><code>heartbeat</code></li>
+</ul>
+<p>未来可扩展其他类型，但不应让不同类型共用一套含混不清的语义字段。</p>
+<h3 id="direction"><a class="header" href="#direction"><code>direction</code></a></h3>
+<p>当前建议冻结：</p>
+<ul>
+<li><code>inbound</code></li>
+<li><code>outbound</code></li>
+<li><code>system</code></li>
+</ul>
+<p>含义分别是：</p>
+<ul>
+<li><code>inbound</code>：来自外部用户 / 外部系统进入当前会话</li>
+<li><code>outbound</code>：当前 agent / 系统向外发出的回复或动作结果</li>
+<li><code>system</code>：不属于正常入站/出站消息，但应进入会话事实流的系统事件</li>
+</ul>
+<h3 id="event_kind"><a class="header" href="#event_kind"><code>event_kind</code></a></h3>
+<p>当前建议先收敛为少量稳定值：</p>
+<ul>
+<li><code>message</code></li>
+<li><code>control</code></li>
+<li><code>tool</code></li>
+<li><code>notice</code></li>
+</ul>
+<p>要求是：</p>
+<ul>
+<li><code>event_kind</code> 只表达事件类别</li>
+<li>不把渠道细节塞进枚举名</li>
+</ul>
+<h2 id="引用对象"><a class="header" href="#引用对象">引用对象</a></h2>
+<p>以下几个字段建议统一使用相同风格的对象，而不是随处散落裸字符串。</p>
+<h3 id="account"><a class="header" href="#account"><code>account</code></a></h3>
+<pre><code class="language-text">account = {
+  id,
+  label?
+}
+</code></pre>
+<p>约束：</p>
+<ul>
+<li><code>id</code> 是稳定黑盒 id</li>
+<li><code>label</code> 仅用于展示，不参与语义判定</li>
+</ul>
+<h3 id="peer"><a class="header" href="#peer"><code>peer</code></a></h3>
+<pre><code class="language-text">peer = {
+  id,
+  label?
+}
+</code></pre>
+<p>约束：</p>
+<ul>
+<li><code>id</code> 是逻辑对端 id；在 <code>group</code> 下可表示多人共享会话对象</li>
+<li>不要求它等于某个渠道原生字段</li>
+</ul>
+<h3 id="branch"><a class="header" href="#branch"><code>branch</code></a></h3>
+<pre><code class="language-text">branch = {
+  id,
+  label?
+}
+</code></pre>
+<p>约束：</p>
+<ul>
+<li><code>branch</code> 是统一命名槽位</li>
+<li>它更接近 adapter 返回的黑盒子线标识</li>
+<li>不要求区分 <code>topic</code> / <code>thread</code></li>
+<li>是否来自 topic、thread、reply-root，可放入 <code>adapter_hints</code></li>
+</ul>
+<h3 id="sender"><a class="header" href="#sender"><code>sender</code></a></h3>
+<pre><code class="language-text">sender = {
+  id,
+  label?
+}
+</code></pre>
+<p>约束：</p>
+<ul>
+<li><code>id</code> 是逻辑发言人标识</li>
+<li><code>label</code> 仅用于展示</li>
+</ul>
+<h2 id="attachments-结构"><a class="header" href="#attachments-结构"><code>attachments</code> 结构</a></h2>
+<p>建议 <code>attachments</code> 为数组，每项至少包含：</p>
+<div class="table-wrapper"><table><thead><tr><th>字段</th><th>必填</th><th>含义</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>是</td><td>当前附件的稳定标识</td></tr>
+<tr><td><code>kind</code></td><td>是</td><td>附件大类，如 <code>image</code>、<code>audio</code>、<code>video</code>、<code>file</code>、<code>location</code></td></tr>
+<tr><td><code>uri</code></td><td>是</td><td>当前附件的规范访问位置或存储位置</td></tr>
+<tr><td><code>mime_type</code></td><td>否</td><td>MIME 类型</td></tr>
+<tr><td><code>name</code></td><td>否</td><td>原始文件名或展示名</td></tr>
+<tr><td><code>size_bytes</code></td><td>否</td><td>大小</td></tr>
+</tbody></table>
+</div>
+<p>要求：</p>
+<ul>
+<li><code>attachments</code> 保存的是统一附件事实</li>
+<li>不在这里提前塞入“给模型看的媒体提示语”</li>
+</ul>
+<h2 id="reply_ref-结构"><a class="header" href="#reply_ref-结构"><code>reply_ref</code> 结构</a></h2>
+<p>建议 <code>reply_ref</code> 至少包含：</p>
+<div class="table-wrapper"><table><thead><tr><th>字段</th><th>必填</th><th>含义</th></tr></thead><tbody>
+<tr><td><code>event_id</code></td><td>否</td><td>若已解析到本地统一事件，则指向对应 <code>event_id</code></td></tr>
+<tr><td><code>source_message_id</code></td><td>否</td><td>原生渠道里的被回复消息 id</td></tr>
+<tr><td><code>snippet</code></td><td>否</td><td>引用片段的短文本快照</td></tr>
+</tbody></table>
+</div>
+<p>要求：</p>
+<ul>
+<li><code>reply_ref</code> 的目标是保存“引用关系”</li>
+<li>不是把整段 reply envelope 提前拼好</li>
+<li>也不是 adapter 出站时用于回投消息的私有投递路径</li>
+</ul>
+<p>后一类“怎么把回复发回原渠道”的投递信息，应留在 adapter 自己的回复私有对象里，例如 Telegram 的 <code>tg_reply.private_target</code>，而不是写进统一保存字段。</p>
+<h2 id="source-结构"><a class="header" href="#source-结构"><code>source</code> 结构</a></h2>
+<p><code>source</code> 用于保存原生来源信息。</p>
+<p>建议至少包含：</p>
+<div class="table-wrapper"><table><thead><tr><th>字段</th><th>必填</th><th>含义</th></tr></thead><tbody>
+<tr><td><code>adapter</code></td><td>是</td><td>该事件来自哪个 adapter</td></tr>
+<tr><td><code>message_id</code></td><td>否</td><td>原生 provider message id</td></tr>
+<tr><td><code>conversation_id</code></td><td>否</td><td>原生 provider conversation/chat id</td></tr>
+<tr><td><code>thread_id</code></td><td>否</td><td>原生 provider thread/topic id</td></tr>
+<tr><td><code>ingest_mode</code></td><td>否</td><td>采集方式，如正常消息、listen-only、relay 等</td></tr>
+</tbody></table>
+</div>
+<p>要求：</p>
+<ul>
+<li><code>source</code> 解决来源追踪和排障问题</li>
+<li>不应被误当作上层会话语义定义</li>
+</ul>
+<h2 id="adapter_hints-的边界"><a class="header" href="#adapter_hints-的边界"><code>adapter_hints</code> 的边界</a></h2>
+<p><code>adapter_hints</code> 允许存在，但必须受约束。</p>
+<p>可以放进去的内容：</p>
+<ul>
+<li>某渠道 reply threading 的本地额外信息</li>
+<li>某渠道 topic/forum 的局部标记</li>
+<li>某渠道必须保留但暂时没必要上升为统一字段的元数据</li>
+</ul>
+<p>不该放进去的内容：</p>
+<ul>
+<li>已被核心层长期依赖的稳定语义字段</li>
+<li>最终给模型的文本</li>
+<li>会影响同桶/异桶判定、但又没有升为统一字段的关键字段</li>
+</ul>
+<p>一句话：</p>
+<ul>
+<li><code>adapter_hints</code> 是缓冲区，不是语义垃圾桶</li>
+</ul>
+<h2 id="dm--group-的必填矩阵"><a class="header" href="#dm--group-的必填矩阵"><code>dm</code> / <code>group</code> 的必填矩阵</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>字段</th><th><code>dm</code></th><th><code>group</code></th><th>说明</th></tr></thead><tbody>
+<tr><td><code>peer</code></td><td>必填</td><td>必填</td><td><code>dm</code> 是逻辑对端；<code>group</code> 是多人共享会话对象</td></tr>
+<tr><td><code>channel</code></td><td>建议必填</td><td>建议必填</td><td>用于说明来源，也常参与下游策略</td></tr>
+<tr><td><code>account</code></td><td>条件必填</td><td>条件必填</td><td>多账号渠道下应明确记录</td></tr>
+<tr><td><code>branch</code></td><td>通常为空</td><td>条件必填</td><td><code>group</code> 在 topic/thread/子线场景下应有值</td></tr>
+<tr><td><code>sender</code></td><td>通常为空</td><td>入站建议必填</td><td><code>group</code> 入站消息通常需要标识发言人</td></tr>
+</tbody></table>
+</div>
+<p>这里要注意：</p>
+<ul>
+<li><code>dm</code> 中通常不需要 <code>sender</code></li>
+<li><code>group</code> 中通常不需要把 <code>account</code> 当作主分桶轴，但仍可能需要保留其来源信息</li>
+</ul>
+<h2 id="哪些字段不应进入统一字段层"><a class="header" href="#哪些字段不应进入统一字段层">哪些字段不应进入统一字段层</a></h2>
+<p>以下内容不应直接成为统一持久化字段：</p>
+<ul>
+<li><code>BodyForAgent</code></li>
+<li><code>BodyForCommands</code></li>
+<li><code>InboundHistory</code></li>
+<li><code>ConversationLabel</code></li>
+<li><code>GroupSystemPrompt</code></li>
+<li>任意 plaintext inbound envelope</li>
+<li>任意“本轮给模型看的最终拼接文本”</li>
+</ul>
+<p>原因很简单：</p>
+<ul>
+<li>这些都是上下文整理阶段才会生成的内容</li>
+<li>不是保存层事实本身</li>
+</ul>
+<h2 id="session_event-与上下文管理的关系"><a class="header" href="#session_event-与上下文管理的关系"><code>session_event</code> 与上下文管理的关系</a></h2>
+<p>关系应当固定为：</p>
+<pre><code class="language-text">adapter 原生事件
+  -&gt; 归一化
+  -&gt; session_event 统一持久化
+  -&gt; core 上下文管理
+  -&gt; 最终模型上下文
+</code></pre>
+<p>也就是说：</p>
+<ul>
+<li><code>session_event</code> 位于保存层</li>
+<li>这些都属于 core 的上下文管理内部职责</li>
+</ul>
+<p>它们不能倒置。</p>
+<h2 id="对-openclaw-当前架构的对比"><a class="header" href="#对-openclaw-当前架构的对比">对 OpenClaw 当前架构的对比</a></h2>
+<p>OpenClaw 当前已经明显有：</p>
+<ul>
+<li>channel adapter</li>
+<li>结构化 inbound context</li>
+<li>上下文管理</li>
+</ul>
+<p>但它当前更接近：</p>
+<ul>
+<li>用 <code>FinalizedMsgContext</code> 作为结构化入站上下文对象</li>
+<li>由 adapter 仍提供一部分面向模型的字段</li>
+<li>core 再继续做 assemble / compact</li>
+</ul>
+<p>这说明 OpenClaw 已经走向：</p>
+<ul>
+<li>结构化输入</li>
+<li>context orchestration 分层</li>
+</ul>
+<p>但它当前还没有完全收敛到：</p>
+<ul>
+<li><code>session_event</code> 作为唯一统一保存对象</li>
+<li>面向模型的字段完全退出统一字段层</li>
+</ul>
+<p>因此，第三轮更合理的目标是：</p>
+<ul>
+<li>继承 OpenClaw 已经建立的“结构化输入 + 上下文引擎”方向</li>
+<li>再把保存层继续收紧到 <code>session_event</code></li>
+</ul>
+<h2 id="最后收口"><a class="header" href="#最后收口">最后收口</a></h2>
+<p>如果只记住一句话，就记住这句：</p>
+<ul>
+<li><strong><code>session_event</code> 应只保存稳定事实</strong></li>
+<li><strong>最终上下文应由 core 的上下文管理根据这些事实整理出来</strong></li>
+</ul>
+<h2 id="相关文档"><a class="header" href="#相关文档">相关文档</a></h2>
+<ul>
+<li><code>docs/src/refactor/session-context-layering.md</code></li>
+<li><code>docs/src/refactor/session-scope-overview.md</code></li>
+<li><code>docs/src/refactor/dm-scope.md</code></li>
+<li><code>docs/src/refactor/group-scope.md</code></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../refactor/session-context-layering.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/dm-scope.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../refactor/session-context-layering.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/dm-scope.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

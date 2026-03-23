@@ -1,0 +1,415 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Session Scope Overview - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/session-scope-overview.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="会话-scope-总表"><a class="header" href="#会话-scope-总表">会话 scope 总表</a></h1>
+<p>本文档只做一件事：</p>
+<ul>
+<li>把当前已经冻结的会话类型、scope 枚举和语义轴并排收拢成一张总表</li>
+</ul>
+<p>它不展开具体渠道实现，也不讨论 <code>session_key</code> 的编码细节。</p>
+<h2 id="一句话结论"><a class="header" href="#一句话结论">一句话结论</a></h2>
+<p>当前上层 scope 设计分成两类：</p>
+<ul>
+<li><code>dm_scope</code>：解决 1v1 对话在“人 / 渠道 / 账号”维度上的分桶歧义</li>
+<li><code>group_scope</code>：解决共享群会话在“共享会话对象 / 子线判别 / 发言人”维度上的分桶细化</li>
+</ul>
+<p>两者关注的语义轴不同，不应混成一套枚举。</p>
+<h2 id="术语对齐subkey-vs-bucket_key"><a class="header" href="#术语对齐subkey-vs-bucket_key">术语对齐：<code>subkey</code> vs <code>bucket_key</code></a></h2>
+<p>本文档在 <code>dm_scope</code> / <code>group_scope</code> 语义讨论里使用：</p>
+<ul>
+<li><code>dm_subkey</code> / <code>group_subkey</code>：表示“适配层把分桶语义实现出来后返回的黑盒结果”</li>
+</ul>
+<p>在工程实现与运行时表里，也常把这一黑盒结果称为：</p>
+<ul>
+<li><code>bucket_key</code></li>
+</ul>
+<p>两者的关系可以理解成：</p>
+<ul>
+<li><code>subkey</code> 是“接口概念”（黑盒分桶结果）</li>
+<li><code>bucket_key</code> 是“具体编码后的字符串值”（可持久化、可比对、用于查表命中同一个桶）</li>
+</ul>
+<p>无论叫哪个名字，核心约束不变：</p>
+<ul>
+<li>上层只比较相等/不相等，不解析其内部结构</li>
+<li><code>session_key</code> 仍由 core 统一装配（例如：<code>&lt;agent-prefix&gt; + :&lt;type&gt;: + &lt;bucket_key&gt;</code>）</li>
+</ul>
+<h2 id="总表"><a class="header" href="#总表">总表</a></h2>
+<div class="table-wrapper"><table><thead><tr><th><code>type</code></th><th>scope 值</th><th>同桶判定所看的语义轴</th><th>说明</th></tr></thead><tbody>
+<tr><td><code>dm</code></td><td><code>main</code></td><td><code>agent</code></td><td>所有 DM 塌缩到同一主线</td></tr>
+<tr><td><code>dm</code></td><td><code>per_peer</code></td><td><code>agent + peer</code></td><td>同一逻辑对端跨渠道可共桶</td></tr>
+<tr><td><code>dm</code></td><td><code>per_channel</code></td><td><code>agent + peer + channel</code></td><td>同一对端在不同渠道不共桶</td></tr>
+<tr><td><code>dm</code></td><td><code>per_account</code></td><td><code>agent + peer + account</code></td><td>同一对端在不同接入账号不共桶；<code>account</code> 内含 <code>channel</code></td></tr>
+<tr><td><code>group</code></td><td><code>group</code></td><td><code>agent + peer</code></td><td>同一共享群会话对象共桶</td></tr>
+<tr><td><code>group</code></td><td><code>per_sender</code></td><td><code>agent + peer + sender</code></td><td>同群内按发言人拆桶</td></tr>
+<tr><td><code>group</code></td><td><code>per_branch</code></td><td><code>agent + peer + branch</code></td><td>同群内按 adapter 识别出的子线拆桶</td></tr>
+<tr><td><code>group</code></td><td><code>per_branch_sender</code></td><td><code>agent + peer + branch + sender</code></td><td>同群内按子线和发言人共同拆桶</td></tr>
+</tbody></table>
+</div>
+<h2 id="语义轴解释"><a class="header" href="#语义轴解释">语义轴解释</a></h2>
+<h3 id="agent"><a class="header" href="#agent"><code>agent</code></a></h3>
+<p>最大的思考与隔离边界。</p>
+<h3 id="peer"><a class="header" href="#peer"><code>peer</code></a></h3>
+<p>逻辑对端。</p>
+<p>在 <code>dm</code> 中，它表示 agent 面对的单个外部参与者。<br />
+在 <code>group</code> 中，它表示 agent 面对的多人共享会话对象。</p>
+<h3 id="channel"><a class="header" href="#channel"><code>channel</code></a></h3>
+<p>消息来自哪个渠道。</p>
+<p>例如：</p>
+<ul>
+<li>Telegram</li>
+<li>Feishu</li>
+<li>Slack</li>
+</ul>
+<h3 id="account"><a class="header" href="#account"><code>account</code></a></h3>
+<p>某个对象在某个 <code>channel</code> 上的账号表示。</p>
+<p>因此：</p>
+<ul>
+<li><code>account</code> 天然带有 <code>channel</code> 边界</li>
+</ul>
+<h3 id="branch"><a class="header" href="#branch"><code>branch</code></a></h3>
+<p>由 adapter 识别出的群内子线判别结果。</p>
+<ul>
+<li>
+<p>它服务于 <code>per_branch</code> / <code>per_branch_sender</code> 语义</p>
+</li>
+<li>
+<p>它是 group-scope 局部语义槽位，不是 core 的强公共概念</p>
+</li>
+<li>
+<p>它本身不要求 core 深度理解其内部结构</p>
+</li>
+<li>
+<p>它常见地承接：</p>
+</li>
+<li>
+<p><code>topic</code></p>
+</li>
+<li>
+<p><code>thread</code></p>
+</li>
+<li>
+<p>forum topic</p>
+</li>
+<li>
+<p>reply-root 形成的子线</p>
+</li>
+</ul>
+<h3 id="sender"><a class="header" href="#sender"><code>sender</code></a></h3>
+<p>群内消息的逻辑发言人。</p>
+<h2 id="为什么不能把两类-scope-混成一套"><a class="header" href="#为什么不能把两类-scope-混成一套">为什么不能把两类 scope 混成一套</a></h2>
+<p>因为它们解决的是不同问题。</p>
+<h3 id="dm_scope-解决什么"><a class="header" href="#dm_scope-解决什么"><code>dm_scope</code> 解决什么</a></h3>
+<p><code>dm_scope</code> 的核心问题是：</p>
+<ul>
+<li>同一个人跨渠道要不要共桶</li>
+<li>同一个人跨账号要不要共桶</li>
+</ul>
+<p>所以它的语义轴天然集中在：</p>
+<ul>
+<li><code>peer</code></li>
+<li><code>channel</code></li>
+<li><code>account</code></li>
+</ul>
+<h3 id="group_scope-解决什么"><a class="header" href="#group_scope-解决什么"><code>group_scope</code> 解决什么</a></h3>
+<p><code>group_scope</code> 的核心问题是：</p>
+<ul>
+<li>同一群里要不要按子线拆</li>
+<li>同一群里要不要按发言人拆</li>
+</ul>
+<p>所以它的语义轴天然集中在：</p>
+<ul>
+<li><code>peer</code></li>
+<li>adapter 返回的子线结果</li>
+<li><code>sender</code></li>
+</ul>
+<h2 id="当前收敛原则"><a class="header" href="#当前收敛原则">当前收敛原则</a></h2>
+<h3 id="1-先按-type-分开定义"><a class="header" href="#1-先按-type-分开定义">1. 先按 <code>type</code> 分开定义</a></h3>
+<p>不要试图发明一套覆盖所有类型的大而全 scope 枚举。</p>
+<p>当前至少应保持：</p>
+<ul>
+<li><code>dm_scope</code></li>
+<li><code>group_scope</code></li>
+</ul>
+<p>分别定义、分别收敛。</p>
+<h3 id="2-上层只定义语义轴"><a class="header" href="#2-上层只定义语义轴">2. 上层只定义语义轴</a></h3>
+<p>上层只定义：</p>
+<ul>
+<li>哪些维度参与同桶判定</li>
+<li>哪些维度不参与同桶判定</li>
+</ul>
+<p>上层不定义：</p>
+<ul>
+<li>具体渠道用哪些原生字段完成判定</li>
+</ul>
+<h3 id="3-渠道适配层负责黑盒落地"><a class="header" href="#3-渠道适配层负责黑盒落地">3. 渠道适配层负责黑盒落地</a></h3>
+<p>适配层负责回答：</p>
+<ul>
+<li>这个 <code>peer</code> 在本渠道怎么识别</li>
+<li>这个子线判别结果在本渠道怎么识别</li>
+<li>这个 <code>account</code> 在本渠道怎么识别</li>
+<li>这个 <code>sender</code> 在本渠道怎么识别</li>
+</ul>
+<p>然后返回稳定的 subkey 给上层装配 <code>session_key</code>。</p>
+<h2 id="与-openclaw-的关系"><a class="header" href="#与-openclaw-的关系">与 OpenClaw 的关系</a></h2>
+<p><code>dm</code> 侧是一一对应的：</p>
+<ul>
+<li><code>main</code> ↔ <code>main</code></li>
+<li><code>per_peer</code> ↔ <code>per-peer</code></li>
+<li><code>per_channel</code> ↔ <code>per-channel-peer</code></li>
+<li><code>per_account</code> ↔ <code>per-account-channel-peer</code></li>
+</ul>
+<p><code>group</code> 侧也是一一对应的：</p>
+<ul>
+<li><code>group</code> ↔ <code>group</code></li>
+<li><code>per_sender</code> ↔ <code>group_sender</code></li>
+<li><code>per_branch</code> ↔ <code>group_topic</code></li>
+<li><code>per_branch_sender</code> ↔ <code>group_topic_sender</code></li>
+</ul>
+<p>差异主要在命名收敛：</p>
+<ul>
+<li>我们把 <code>topic</code> / <code>thread</code> / 类似子线统一抽象成 <code>branch</code></li>
+<li>并明确它更适合作为 adapter 落地时返回的子线结果</li>
+<li>我们把较长的 OpenClaw 模式名收敛成更短的 snake_case 形式</li>
+</ul>
+<h2 id="相关文档"><a class="header" href="#相关文档">相关文档</a></h2>
+<ul>
+<li><code>docs/src/refactor/session-context-layering.md</code></li>
+<li><code>docs/src/refactor/session-event-canonical.md</code></li>
+<li><code>docs/src/refactor/dm-scope.md</code></li>
+<li><code>docs/src/refactor/group-scope.md</code></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../refactor/channel-info-exposure-boundary.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/session-context-layering.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../refactor/channel-info-exposure-boundary.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/session-context-layering.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

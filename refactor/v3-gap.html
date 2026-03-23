@@ -1,0 +1,493 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>V3 Gap - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/v3-gap.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="当前代码现状与-v3-目标差距"><a class="header" href="#当前代码现状与-v3-目标差距">当前代码现状与 V3 目标差距</a></h1>
+<blockquote>
+<p>补充说明（2026-03-20）：
+本文档尚未完成与最新 one-cut 主单的再同步。若本文与 <code>issues/issue-v3-session-ids-and-channel-boundary-one-cut.md</code>、<code>issues/issue-v3-one-cut-readiness-gaps.md</code>、<code>docs/src/refactor/channel-info-exposure-boundary.md</code>、<code>docs/src/refactor/telegram-adapter-boundary.md</code> 冲突，以后者为准。</p>
+</blockquote>
+<h2 id="2026-03-20-最新结论"><a class="header" href="#2026-03-20-最新结论">2026-03-20 最新结论</a></h2>
+<p>以当前代码为准，如果先把“落盘改造 / <code>session_event</code> 持久化替换”排除掉，V3 C 阶段这次要收的东西已经基本收口：</p>
+<ul>
+<li>TG 主消息、callback、edited live location、voice/location follow-up，都已经先走正式 <code>TelegramCoreBridge</code>，不再由 Telegram handler 直接跨层打旧入口：<code>crates/telegram/src/adapter.rs:103</code>、<code>crates/gateway/src/channel_events.rs:1800</code>、<code>crates/telegram/src/handlers.rs:4743</code></li>
+<li>gateway/core 侧的群聊文本整理、<code>ChannelTurnContext</code>、bucket/thread-aware web echo/final reply 真值链，已经改成新主链，不再依赖 chat 级 active session 猜测：<code>crates/gateway/src/channel_events.rs:126</code>、<code>crates/gateway/src/state.rs:92</code>、<code>crates/gateway/src/chat.rs:2322</code></li>
+<li>Telegram typing keepalive、transcript-format helper、relay route/reply helper 已收口到 Telegram adapter / outbound；gateway 只消费 helper 或 bridge，不再自带第二套独立语义：<code>crates/telegram/src/outbound.rs:370</code>、<code>crates/telegram/src/adapter.rs:147</code>、<code>crates/telegram/src/adapter.rs:163</code></li>
+<li>升级兼容也已补回：如果老数据只有 <code>active_session_id</code>、还没回填 <code>bucket_session_id</code>，主路径会先复用匹配的旧 Telegram 会话并自动回填 bucket 映射，不会因为升级平白断上下文；但不同 bucket 仍不会错误共用：<code>crates/gateway/src/channel_events.rs:210</code>、<code>crates/gateway/src/chat.rs:7538</code></li>
+<li>topic/thread typing 也已修正回 thread-aware；论坛 topic 里的长回复不会把 typing 丢到根 chat：<code>crates/telegram/src/outbound.rs:355</code></li>
+<li><code>_triggerId</code> / legacy tool-chat key / <code>channel_binding</code> 这批旧运行时桥接已经退出 TG 主路径真值判断；允许保留的尾巴只剩旧落盘承载：<code>crates/gateway/src/channel_events.rs:2182</code>、<code>crates/gateway/src/chat.rs:13515</code></li>
+</ul>
+<p>一句更准确的人话：</p>
+<ul>
+<li><strong>除落盘之外，Telegram adapter / core 的正式契约、职责归位、旧路径退场，这一轮已经收口。</strong></li>
+<li><strong>后面剩下的主要硬差距，就是保存层本身还没换。</strong></li>
+</ul>
+<p>说明：</p>
+<ul>
+<li><code>ChannelEventSink</code> 还存在，但它对 Telegram 来说已经退到 gateway 内部复用和 OTP/UI 旁路事件，不再承担 TG 主路径跨层语义。</li>
+<li>这里说“active session fallback 退出真值路径”，指的是稳态真值；为兼容升级前旧行数据，仍保留一次性 bucket 回填，不算重新把 chat 级 fallback 带回主路径。</li>
+<li>下文的“历史差距拆解”已按 2026-03-20 的最新代码现状逐条回填状态；不会再出现“上面说收口、下面又在说没做”的口径冲突。</li>
+</ul>
+<p>本文档只定义一件事：</p>
+<ul>
+<li>当前代码库离 V3 目标到底还差什么</li>
+</ul>
+<p>本文档不讨论：</p>
+<ul>
+<li>V3 设计原则本身</li>
+<li>V3 分阶段实施顺序</li>
+<li>落盘改造如何做</li>
+</ul>
+<p>也就是说，本文档讨论的是：</p>
+<ul>
+<li><strong>当前已经做到什么</strong></li>
+<li><strong>除落盘之外，还差哪些硬差距</strong></li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li><strong>V3 应该怎么设计</strong></li>
+<li><strong>每一步具体怎么落地</strong></li>
+</ul>
+<h2 id="一句话结论"><a class="header" href="#一句话结论">一句话结论</a></h2>
+<p>如果把“落盘改造”先排除掉，当前代码已经不再卡在“正式契约、职责归位、旧路径退场”这几个 C 阶段核心问题上。</p>
+<p>更准确的判断是：</p>
+<ul>
+<li><strong>行为层已经对齐 V3 C 阶段目标</strong></li>
+<li><strong>边界层和契约层也已收口到“只剩落盘尾巴”的状态</strong></li>
+</ul>
+<p>一句人话：</p>
+<ul>
+<li><strong>现在已经可以说：除落盘之外，Telegram adapter / core 这一刀已经切到位了。</strong></li>
+</ul>
+<h2 id="现状总评"><a class="header" href="#现状总评">现状总评</a></h2>
+<p>从“除落盘外的 V3 终态”看，当前状态已经不是“两头都没收完”，而是：</p>
+<ul>
+<li>已经到位的：
+<ul>
+<li>Telegram 入站归一化与 route/bucket 解析</li>
+<li>callback / live location / liveness / retry 这些 follow-up 基础能力</li>
+<li>群聊最终文本整理已经回到 core 统一入口</li>
+<li>TG 主路径跨层已经显式走 <code>TelegramCoreBridge</code></li>
+<li>web echo / final reply 的运行时主链已经切到 <code>ChannelTurnContext</code></li>
+<li>active-session fallback 已退出 TG 主路径真值判断</li>
+</ul>
+</li>
+<li>仍未到位的：
+<ul>
+<li>旧保存层还没有替换</li>
+</ul>
+</li>
+</ul>
+<p>因此，当前更准确的定位是：</p>
+<ul>
+<li><strong>Telegram / core 运行时主链已经进入 V3 C 阶段完成态</strong></li>
+<li><strong>剩余差距主要落在保存层，而不是边界层/契约层</strong></li>
+</ul>
+<h2 id="当前已经完成的部分"><a class="header" href="#当前已经完成的部分">当前已经完成的部分</a></h2>
+<h2 id="1-telegram-专项入站对象已经存在"><a class="header" href="#1-telegram-专项入站对象已经存在">1. Telegram 专项入站对象已经存在</a></h2>
+<p>当前 Telegram 侧已经有比较明确的专项对象：</p>
+<ul>
+<li><code>TgInbound</code>：<code>crates/telegram/src/adapter.rs:46</code></li>
+<li><code>TgRoute</code>：<code>crates/telegram/src/adapter.rs:54</code></li>
+<li><code>resolve_tg_route(...)</code>：<code>crates/telegram/src/adapter.rs:211</code></li>
+</ul>
+<p>handlers 里也确实是先构造 <code>TgInbound</code>，再解析 route，而不是继续全靠散点字段临时拼：</p>
+<ul>
+<li><code>build_tg_inbound(...)</code>：<code>crates/telegram/src/handlers.rs:3409</code></li>
+<li>主入站使用 <code>build_tg_inbound(...) + resolve_tg_route(...)</code>：<code>crates/telegram/src/handlers.rs:529</code>, <code>crates/telegram/src/handlers.rs:801</code>, <code>crates/telegram/src/handlers.rs:943</code></li>
+</ul>
+<p>这说明 Telegram adapter 的“先归一化、再分桶”这一步已经成形。</p>
+<h2 id="2-群聊最终文本整理已经主要回到-core"><a class="header" href="#2-群聊最终文本整理已经主要回到-core">2. 群聊最终文本整理已经主要回到 core</a></h2>
+<p>当前真正做 <code>TgGstV1</code> 群聊最终文本整理的是 core 侧统一入口：</p>
+<ul>
+<li><code>format_channel_inbound_text(...)</code>：<code>crates/gateway/src/channel_events.rs:126</code></li>
+</ul>
+<p>Telegram handler 侧现在主要做的是：</p>
+<ul>
+<li>提取 Telegram 原生事实</li>
+<li>计算 route / bucket</li>
+<li>构造 reply target</li>
+<li>构造 metadata</li>
+<li>决定是 <code>dispatch</code> 还是 <code>ingest</code></li>
+</ul>
+<p>关键点在：</p>
+<ul>
+<li><code>build_channel_message_meta(...)</code>：<code>crates/telegram/src/handlers.rs:3070</code></li>
+<li>普通分发路径：<code>crates/telegram/src/handlers.rs:1482</code></li>
+<li>listen-only 路径：<code>crates/telegram/src/handlers.rs:529</code></li>
+</ul>
+<p>这比旧链路已经前进了一大步：Telegram 不再直接负责最终 speaker/envelope 的大部分落地文本。</p>
+<h2 id="3-follow-up-基础链路已经较稳定"><a class="header" href="#3-follow-up-基础链路已经较稳定">3. follow-up 基础链路已经较稳定</a></h2>
+<p>当前这些 Telegram 专项能力仍主要留在 Telegram adapter：</p>
+<ul>
+<li>callback：<code>crates/telegram/src/handlers.rs:2629</code></li>
+<li>edited live location：<code>crates/telegram/src/handlers.rs:1797</code></li>
+<li>polling liveness：<code>crates/telegram/src/plugin.rs:523</code></li>
+<li>retry reason / retry budget：<code>crates/telegram/src/bot.rs:35</code></li>
+</ul>
+<p>这部分符合 V3 想要的方向：Telegram 专项 follow-up 没有继续被塞回 core 统一语义层。</p>
+<h2 id="4-运行时回投回声主链已经明显改进"><a class="header" href="#4-运行时回投回声主链已经明显改进">4. 运行时回投/回声主链已经明显改进</a></h2>
+<p>当前 reply/echo 的运行时主链已经切到 <code>ChannelTurnContext</code>：</p>
+<ul>
+<li><code>ChannelTurnContext</code>：<code>crates/gateway/src/state.rs:92</code></li>
+<li>作用域已经修正为 <code>session_key + turn_id</code>：<code>crates/gateway/src/state.rs:554</code></li>
+</ul>
+<p>这比旧的 session + trigger reply queue 明显更接近 V3 要求的“显式一次消息处理上下文”。</p>
+<h2 id="历史差距拆解已基本收口"><a class="header" href="#历史差距拆解已基本收口">历史差距拆解（已基本收口）</a></h2>
+<p>下面按本轮实施前的拆解顺序，把每一项都用“已收口 / 仅剩落盘尾巴 / 非阻塞”标注清楚；避免出现“顶部说已收口、下文又在说还没做”的自相矛盾。</p>
+<h2 id="1-tg--core-正式跨层主契约已收口"><a class="header" href="#1-tg--core-正式跨层主契约已收口">1. TG / core 正式跨层主契约（已收口）</a></h2>
+<p>这曾经是最大的差距：新对象已经有了，但 TG 主路径还在走旧入口壳。</p>
+<p>截至 2026-03-20，这一项已经收口为：</p>
+<ul>
+<li>TG 主消息、callback、edited live location、voice/location follow-up 都优先走 <code>TelegramCoreBridge</code>：<code>crates/telegram/src/adapter.rs:103</code>、<code>crates/telegram/src/handlers.rs:943</code>、<code>crates/telegram/src/handlers.rs:2622</code>、<code>crates/telegram/src/handlers.rs:1770</code></li>
+<li>gateway 侧通过 <code>impl TelegramCoreBridge for GatewayChannelEventSink</code> 承接跨层入口：<code>crates/gateway/src/channel_events.rs:1844</code></li>
+<li>回归已锁死“即便 legacy <code>event_sink</code> 仍存在，TG 主路径也会优先走 <code>core_bridge</code>”：<code>crates/telegram/src/handlers.rs:4743</code></li>
+</ul>
+<p>一句人话：<strong>TG -&gt; core 的主入口已经切到 <code>TelegramCoreBridge</code>，并被测试锁住。</strong></p>
+<h2 id="2-gateway-残留-telegram-adapter-职责已收口到core-只调-helperbridge"><a class="header" href="#2-gateway-残留-telegram-adapter-职责已收口到core-只调-helperbridge">2. <code>gateway</code> 残留 Telegram adapter 职责（已收口到“core 只调 helper/bridge”）</a></h2>
+<p>这项历史差距的核心不是“gateway 里不能出现任何 TG 字样”，而是：</p>
+<ul>
+<li>不要在 gateway 再养一套“Telegram 自己的独立语义实现”（typing lifecycle、route/reply 的第二套判断、prompt 注入散点）</li>
+<li>gateway 如果需要 TG 专项能力，应只通过 bridge 或 TG adapter/outbound 的 helper 完成</li>
+</ul>
+<p>截至 2026-03-20，已收口为：</p>
+<ul>
+<li>typing keepalive：gateway 侧只负责“何时需要保活”，发送细节统一走 <code>telegram/outbound</code> 的 targeted typing loop（带 thread/topic）：<code>crates/telegram/src/outbound.rs:355</code>、<code>crates/gateway/src/channel_events.rs:557</code></li>
+<li>TG-GST v1 system prompt 注入：gateway 侧不再直接读 Telegram 私有配置字段，只调用 <code>tg_gst_v1_system_prompt_block_for_binding(...)</code>：<code>crates/gateway/src/chat.rs:937</code>、<code>crates/telegram/src/adapter.rs:147</code></li>
+<li>group relay 的 bucket_key / reply 文本生成：已集中到 TG adapter helper，gateway 只消费结果：<code>crates/telegram/src/adapter.rs:163</code>、<code>crates/telegram/src/adapter.rs:188</code>、<code>crates/gateway/src/chat.rs:7347</code></li>
+</ul>
+<p>同时说明一个“看起来还在 gateway，其实是预期归属”的点：</p>
+<ul>
+<li>group relay / mirror / mention 这类“入模怎么组织、怎么写入 session history”的逻辑，本轮按 C 阶段口径仍归 core（因为它直接改写会话事实流/历史），并不等同于“Telegram 协议细节泄漏到 core”。</li>
+</ul>
+<h2 id="3-core-直接依赖-telegram-配置专项语义已收敛为-snapshot--helper"><a class="header" href="#3-core-直接依赖-telegram-配置专项语义已收敛为-snapshot--helper">3. core 直接依赖 Telegram 配置/专项语义（已收敛为 snapshot + helper）</a></h2>
+<p>目标不是“core 完全看不见 Telegram”，而是“core 不要直接依赖 Telegram 的 raw update / secret config / 散点策略分支去决定主链语义”。</p>
+<p>截至 2026-03-20，core 对 Telegram 的依赖已收敛成：</p>
+<ul>
+<li>只读 <code>TelegramBusAccountSnapshot</code>（无 token 等 secret）来做 group scope / relay/mirror 的必要决策：<code>crates/telegram/src/config.rs:166</code></li>
+<li>通过 TG adapter helper 解析：bucket_key、transcript-format system prompt block 等，不再散点重复实现：<code>crates/telegram/src/adapter.rs:132</code>、<code>crates/telegram/src/adapter.rs:147</code>、<code>crates/gateway/src/chat.rs:949</code></li>
+</ul>
+<p>一句人话：<strong>core 不再“反向摸 Telegram 细节字段”，而是只吃“归一化后的 snapshot + helper 输出”。</strong></p>
+<h2 id="4-session-主链仍是-bridge-形态仅剩落盘尾巴"><a class="header" href="#4-session-主链仍是-bridge-形态仅剩落盘尾巴">4. session 主链仍是 bridge 形态（仅剩落盘尾巴）</a></h2>
+<p>截至 2026-03-20，运行时“真值链”已收口为：</p>
+<ul>
+<li>session 解析优先使用 <code>bucket_session_id</code>（bucket_key 真值），而不是 chat 级 active session 猜测：<code>crates/gateway/src/channel_events.rs:215</code>、<code>crates/gateway/src/chat.rs:7518</code></li>
+<li><code>active_session_id</code> 仅保留“升级兼容一次性回填”，并带结构化日志标注：<code>crates/gateway/src/channel_events.rs:231</code>、<code>crates/gateway/src/chat.rs:7543</code></li>
+<li><code>ChannelTurnContext</code> 以 <code>session_key + turn_id</code> 隔离，避免跨 session 串线回投：<code>crates/gateway/src/state.rs:554</code></li>
+</ul>
+<p>仍未替换的部分主要是：</p>
+<ul>
+<li>session history / metadata 仍建立在旧 <code>SessionStore</code> / <code>PersistedMessage</code> + metadata table 之上</li>
+<li><code>channel_binding</code> / legacy tool-chat key 仍作为“旧保存层/工具链”兼容载体存在（但已退出 TG 主路径真值判断）</li>
+</ul>
+<p>因此这条差距在本文档的归类里属于：<strong>落盘尾巴（后续保存层替换阶段再清）</strong>。</p>
+<h2 id="5-旧跨层模型仍在系统里并存已与-tg-主路径脱钩--非阻塞"><a class="header" href="#5-旧跨层模型仍在系统里并存已与-tg-主路径脱钩--非阻塞">5. 旧跨层模型仍在系统里并存（已与 TG 主路径脱钩 / 非阻塞）</a></h2>
+<p><code>MsgContext</code>/旧 routing/auto-reply 仍存在于仓库中，但截至 2026-03-20：</p>
+<ul>
+<li>TG 主路径已经不再依赖这些旧模型完成路由与上下文（它们对本单来说是“系统里还在，但不参与主链”）</li>
+<li>是否要清理它们属于全局收口问题，不是 Telegram 垂直切的阻塞项</li>
+</ul>
+<p>因此这里的差距状态是：<strong>非阻塞（可在后续做全局清理）</strong>。</p>
+<h2 id="6-telegram-transcript-format--群聊最终文本整理归属已收口格式在-corehint-在-adapter"><a class="header" href="#6-telegram-transcript-format--群聊最终文本整理归属已收口格式在-corehint-在-adapter">6. Telegram transcript-format / 群聊最终文本整理归属（已收口：格式在 core，hint 在 adapter）</a></h2>
+<p>截至 2026-03-20：</p>
+<ul>
+<li>TG handler 不再输出 TgGstV1 的最终 speaker/envelope 文本，core 统一入口负责最终格式化：<code>crates/telegram/src/handlers.rs:943</code>、<code>crates/gateway/src/channel_events.rs:126</code></li>
+<li>TgGstV1 的 system prompt 注入通过 TG helper 从 <code>channel_binding</code> + snapshot 决定：<code>crates/gateway/src/chat.rs:937</code>、<code>crates/telegram/src/adapter.rs:147</code></li>
+</ul>
+<p>一句人话：<strong>Telegram 侧只决定“怎么收/怎么发”，core 决定“模型看到什么文本”。</strong></p>
+<h2 id="7-落盘虽然不在本阶段做但当前上下文主链仍深度依赖旧消息流仍未做--真实剩余最大差距"><a class="header" href="#7-落盘虽然不在本阶段做但当前上下文主链仍深度依赖旧消息流仍未做--真实剩余最大差距">7. 落盘虽然不在本阶段做，但当前上下文主链仍深度依赖旧消息流（仍未做 / 真实剩余最大差距）</a></h2>
+<p>这一项就是你问“除了落盘之外”的“落盘”本体：</p>
+<ul>
+<li>仍在大量依赖 <code>SessionStore</code> / <code>PersistedMessage</code>：<code>crates/sessions/src/store.rs:24</code>、<code>crates/sessions/src/message.rs:15</code></li>
+<li>gateway <code>chat.rs</code> 仍以旧消息流读写历史并组装上下文：<code>crates/gateway/src/chat.rs:2309</code>、<code>crates/gateway/src/chat.rs:5005</code></li>
+</ul>
+<p>也因此：</p>
+<ul>
+<li><strong>除落盘之外</strong>：这轮已经不再被“边界/契约/旧路径”卡住</li>
+<li><strong>包含落盘</strong>：仍差保存层替换与历史迁移这一整段工程</li>
+</ul>
+<h2 id="当前距离-v3-终态还有多远"><a class="header" href="#当前距离-v3-终态还有多远">当前距离 V3 终态还有多远</a></h2>
+<p>如果你问的是本文档开头强调的口径——<strong>先不算落盘</strong>——那答案已经很明确：</p>
+<ul>
+<li><strong>除落盘外：已经收口</strong></li>
+<li><strong>包含落盘：剩余几乎都集中在保存层替换（<code>session_event</code> + migration + context bridge 从旧消息流脱钩）</strong></li>
+</ul>
+<p>一句人话：<strong>现在的差距不是“边界还差一段”，而是“保存层还差一段”。</strong></p>
+<h2 id="当前可直接复用的基础"><a class="header" href="#当前可直接复用的基础">当前可直接复用的基础</a></h2>
+<p>当前可以直接复用的部分仍然成立（并且多数已处于“完成态”，不需要再回头修边界）：</p>
+<p>当前可以直接复用的部分有：</p>
+<ul>
+<li>Telegram 入站归一化对象：<code>crates/telegram/src/adapter.rs:46</code></li>
+<li>Telegram route/bucket 解析：<code>crates/telegram/src/adapter.rs:211</code></li>
+<li>callback / live location follow-up 保持 bucket/thread-aware：<code>crates/telegram/src/handlers.rs:2622</code>、<code>crates/telegram/src/handlers.rs:1770</code></li>
+<li>polling liveness / retry：<code>crates/telegram/src/plugin.rs:523</code>、<code>crates/telegram/src/bot.rs:35</code></li>
+<li>core 侧群聊文本整理入口：<code>crates/gateway/src/channel_events.rs:126</code></li>
+<li><code>ChannelTurnContext</code> 运行时回投主链：<code>crates/gateway/src/state.rs:92</code>, <code>crates/gateway/src/state.rs:554</code></li>
+<li>现有 <code>SessionStore</code> / <code>PersistedMessage</code> 作为本阶段允许继续借用的承载：<code>crates/sessions/src/store.rs:24</code>, <code>crates/sessions/src/message.rs:15</code></li>
+</ul>
+<p>也就是说：下一步完全可以围绕“保存层替换”推进，而不是再回头补边界与主链语义。</p>
+<h2 id="建议把-gap-分成三类看避免再混口径"><a class="header" href="#建议把-gap-分成三类看避免再混口径">建议把 gap 分成三类看（避免再混口径）</a></h2>
+<p>为了避免后面继续混淆，建议把 gap 永久分成三类看：</p>
+<h3 id="a-本阶段已清掉的-gapdone"><a class="header" href="#a-本阶段已清掉的-gapdone">A. 本阶段已清掉的 gap（DONE）</a></h3>
+<p>这些是“除落盘外”本轮必须清掉的；截至 2026-03-20 已全部收口：</p>
+<ul>
+<li>TG / core 正式跨层契约切到 <code>TelegramCoreBridge</code></li>
+<li><code>ChannelTurnContext</code> 真值链替代 session+trigger 旧队列</li>
+<li>web echo / final reply / follow-up 全链路 bucket/thread-aware</li>
+<li>active-session fallback 退出稳态真值路径（仅保留升级一次性回填）</li>
+</ul>
+<h3 id="b-后续阶段再做的-gappending"><a class="header" href="#b-后续阶段再做的-gappending">B. 后续阶段再做的 gap（PENDING）</a></h3>
+<p>这些是明确留给后续的：</p>
+<ul>
+<li><code>session_event</code> 统一事件记录</li>
+<li><code>SessionStore</code> / <code>PersistedMessage</code> 替换</li>
+<li>历史数据迁移</li>
+</ul>
+<h3 id="c-非阻塞但建议后续清理的事项optional"><a class="header" href="#c-非阻塞但建议后续清理的事项optional">C. 非阻塞但建议后续清理的事项（Optional）</a></h3>
+<p>这些不阻塞“除落盘外已收口”的结论，但会影响后续保存层替换的成本与长期可维护性：</p>
+<ul>
+<li>逐步退出 legacy tool-chat key / <code>_triggerId</code> 这类 legacy 工具/前端兼容字段（目前已退出真值路径，但仍在 payload 中存在）</li>
+<li>把“TG 专项 helper 的归属”在文档里说更死：哪些算 adapter 内部、哪些算稳定边界工具（避免后续又长出第二套）</li>
+</ul>
+<h2 id="相关文档"><a class="header" href="#相关文档">相关文档</a></h2>
+<ul>
+<li><code>docs/src/refactor/v3-design.md</code></li>
+<li><code>docs/src/refactor/v3-roadmap.md</code></li>
+<li><code>docs/src/refactor/telegram-adapter-boundary.md</code></li>
+<li><code>docs/src/refactor/session-context-layering.md</code></li>
+<li><code>docs/src/refactor/session-event-canonical.md</code></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../refactor/v3-design.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/v3-roadmap.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../refactor/v3-design.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/v3-roadmap.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

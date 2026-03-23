@@ -1,0 +1,456 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>V3 Channel Info Exposure Boundary - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/channel-info-exposure-boundary.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="v3-渠道信息暴露边界gateway--ui--hooks--tools"><a class="header" href="#v3-渠道信息暴露边界gateway--ui--hooks--tools">V3 渠道信息暴露边界（Gateway / UI / Hooks / Tools）</a></h1>
+<p>本文档定义一件事：</p>
+<ul>
+<li>在 V3（不改落盘）阶段，<strong>TG 适配层之外</strong>（gateway/core/ui/hooks/tools）允许看到哪些“渠道信息”，以及这些信息如何生成、如何流转、如何被限制。</li>
+</ul>
+<p>本文档是实施级方案（可直接转成改造任务清单）。</p>
+<p>配套文档：</p>
+<ul>
+<li><code>issues/issue-v3-session-ids-and-channel-boundary-one-cut.md</code></li>
+<li><code>docs/src/refactor/telegram-adapter-boundary.md</code></li>
+<li><code>docs/src/refactor/channel-adapter-generic-interfaces.md</code></li>
+<li><code>docs/src/refactor/session-context-layering.md</code></li>
+</ul>
+<h2 id="总原则默认不暴露"><a class="header" href="#总原则默认不暴露">总原则（默认不暴露）</a></h2>
+<p>一句话：</p>
+<ul>
+<li><strong>渠道细节若不是必须由 core/ui/hooks/tools 知道，就全部收敛到渠道适配层。</strong></li>
+</ul>
+<p>落地为三条硬规则：</p>
+<ol>
+<li><strong>core 不识别渠道</strong>：core 不解析 Telegram/Discord 私有字段，不通过前缀/字符串猜测渠道类型。</li>
+<li><strong>投递细节不外溢</strong>：<code>chat_id/thread_id/message_id/account_key/...</code> 这类“能定位平台对象”的字段，不进入 LLM 上下文、不进入 UI、hooks 默认不提供。</li>
+<li><strong>唯一回投入口</strong>：任何“发回渠道”的动作只允许走：
+<ul>
+<li><code>session_id -&gt; session metadata.channel_binding (opaque)</code>，或 turn 级 <code>reply_target_ref (opaque)</code> -&gt; adapter/outbound</li>
+</ul>
+</li>
+</ol>
+<h2 id="字段分层3-层模型"><a class="header" href="#字段分层3-层模型">字段分层（3 层模型）</a></h2>
+<p>把所有“看起来像渠道信息”的字段按用途分为三层：</p>
+<h3 id="1-跨渠道语义core-允许知道"><a class="header" href="#1-跨渠道语义core-允许知道">1) 跨渠道语义（core 允许知道）</a></h3>
+<p>用于会话语义、上下文、策略（跨渠道一致）：</p>
+<ul>
+<li><code>session_id</code>：会话实例唯一 id（prompt cache / worktree / sandbox 默认分桶）</li>
+<li><code>session_key</code>：逻辑桶 key（路由/分桶语义；替代 V2 “确定性渠道对话坐标”旧键）</li>
+<li><code>chat_kind</code>：<code>direct | group</code>（跨渠道抽象）</li>
+<li><code>addressed</code>：是否明确点名/触发意图（跨渠道抽象，由适配层计算）</li>
+<li><code>mode</code>：<code>dispatch | record_only</code>（是否触发 LLM；可被策略/Hook/限流降级）</li>
+<li><code>message_kind</code>：<code>text | voice | photo | location | ...</code>（跨渠道媒体类型）</li>
+<li><code>text</code>：入站最终文本（由适配层提供；core 不再拼装 TG transcript）</li>
+</ul>
+<blockquote>
+<p><code>addressed</code> 与 <code>mode</code> 不重复：</p>
+<ul>
+<li><code>addressed</code> 是“事实语义”（是否点名）</li>
+<li><code>mode</code> 是“动作决策”（是否跑 LLM）
+允许出现 <code>addressed=true, mode=record_only</code>（点名但被策略降级）等组合，避免把系统逻辑写死。</li>
+</ul>
+</blockquote>
+<h3 id="2-展示信息ui日志可见但不用于路由回投"><a class="header" href="#2-展示信息ui日志可见但不用于路由回投">2) 展示信息（UI/日志可见，但不用于路由/回投）</a></h3>
+<p>仅用于 UI footer 与调试展示（不应影响会话/路由/回投）：</p>
+<ul>
+<li><code>channel.type</code>：例如 <code>"telegram"</code></li>
+<li><code>channel.senderName?</code> / <code>channel.username?</code></li>
+<li><code>channel.messageKind?</code></li>
+<li><code>channel.model?</code>（如 UI 需要）</li>
+</ul>
+<p>UI 侧明确 <strong>不需要</strong>：</p>
+<ul>
+<li><code>accountKey/chatId/threadId/messageId</code></li>
+<li><code>senderId/senderIsBot</code></li>
+<li><code>transcriptFormat</code></li>
+</ul>
+<h3 id="3-投递目标细节强渠道内部信息"><a class="header" href="#3-投递目标细节强渠道内部信息">3) 投递目标细节（强渠道内部信息）</a></h3>
+<p>用于把回复/工具结果准确发回平台（强渠道私有）：</p>
+<ul>
+<li><code>account_key</code></li>
+<li><code>chat_id</code></li>
+<li><code>thread_id</code>（topic/thread）</li>
+<li><code>message_id</code>（reply-to）</li>
+<li>任何平台内部的 <code>sender_id</code>（例如 TG 数字 id）</li>
+</ul>
+<p>这些信息 <strong>只能存在于</strong>：</p>
+<ul>
+<li>渠道适配层内部对象；或</li>
+<li>session metadata 的 <code>channel_binding</code>（opaque 字符串，adapter 定义结构，gateway 仅用于回投）</li>
+</ul>
+<h2 id="关键契约tg-适配层之外的目标形态"><a class="header" href="#关键契约tg-适配层之外的目标形态">关键契约（TG 适配层之外的目标形态）</a></h2>
+<p>本节列出 gateway/core/ui/hooks/tools 可见的“最终形态”（收敛版）。</p>
+<h3 id="a-入站主链adapter---gatewaycore"><a class="header" href="#a-入站主链adapter---gatewaycore">A) 入站主链（adapter -&gt; gateway/core）</a></h3>
+<p>内部（Rust，snake_case）建议最小字段：</p>
+<pre><code class="language-text">inbound_envelope_v3 {
+  session_id
+  session_key
+  chat_kind
+  addressed
+  mode
+  message_kind?
+  text
+  attachments?        // 多模态载荷（如有）
+}
+</code></pre>
+<p>约束：</p>
+<ul>
+<li><code>text</code> 必须是“最终可给模型看的文本”：
+<ul>
+<li>DM：原文（或语音转写后的文本）</li>
+<li>Group：使用 TG-GST v1（或当前 TG 侧既有群聊拼装格式）</li>
+</ul>
+</li>
+<li>gateway/core 不再根据 Telegram 私有字段重写/拼装 <code>text</code>。</li>
+</ul>
+<h3 id="b-会话绑定session_id---channel_binding"><a class="header" href="#b-会话绑定session_id---channel_binding">B) 会话绑定（session_id -&gt; channel_binding）</a></h3>
+<p>session metadata 保存（opaque）：</p>
+<pre><code class="language-text">channel_binding: String  // adapter 定义的 JSON 字符串（包含投递细节）
+</code></pre>
+<p>约束：</p>
+<ul>
+<li>gateway 可以把它交给 adapter/helper 的本地解析 helper，用于回投（outbound）或生成 <code>channelTarget</code>；但不得把它作为“通用渠道信息”向外透传。</li>
+<li>tools/hook/UI 不直接接触 <code>channel_binding</code> 原文。</li>
+</ul>
+<p>补充：</p>
+<ul>
+<li>per-turn reply / typing / edit / topic/thread 等运行时回投，使用 adapter 私有 <code>reply_target_ref</code>。</li>
+<li><code>reply_target_ref</code> 也是 opaque，不应展开成跨层公共字段。</li>
+</ul>
+<h3 id="c-ui-消息展示gateway---wsui"><a class="header" href="#c-ui-消息展示gateway---wsui">C) UI 消息展示（gateway -&gt; WS/UI）</a></h3>
+<p>外部（JSON，camelCase）建议字段：</p>
+<pre><code class="language-text">channel {
+  type
+  senderName?
+  username?
+  messageKind?
+  model?
+}
+</code></pre>
+<p>来源与生成：</p>
+<ul>
+<li>由 adapter 的入站请求提供展示字段（如 <code>sender_name/username/message_kind/model</code>），gateway 组装并做 sanitize 后挂到消息上。</li>
+<li>Web UI 自己发出的消息通常没有 <code>channel</code>（不是渠道入站）。</li>
+</ul>
+<h3 id="d-hooksgateway---hooks"><a class="header" href="#d-hooksgateway---hooks">D) Hooks（gateway -&gt; hooks）</a></h3>
+<p>hooks 默认只拿跨渠道语义，避免泄露投递细节：</p>
+<pre><code class="language-text">hook payload {
+  sessionId
+  sessionKey?
+  channel?            // "telegram" 等
+  chatKind?
+  addressed?
+  mode?
+  channelTarget?      // 默认 null（见下）
+}
+</code></pre>
+<p><code>channelTarget</code>（可空）是“可选展开的投递目标细节”，用于需要与外部系统做显式对接的 hook：</p>
+<pre><code class="language-text">channelTarget {
+  type
+  accountKey
+  chatId
+  threadId?
+}
+</code></pre>
+<p>约束：</p>
+<ul>
+<li><code>channelTarget</code> 的数据来源必须是 <code>session_id -&gt; channel_binding -&gt; adapter/helper 本地解析 helper</code> 的结果（由 gateway 填充）。</li>
+<li>schema 稳定：所有带 <code>sessionId</code> 的事件都应包含 <code>channelTarget</code> 字段（可为 <code>null</code>），避免事件间字段漂移。</li>
+<li>默认策略：shell hooks 默认 <code>channelTarget=null</code>（最小暴露）；需要显式对接坐标的 hook 可通过 hook env 开启：
+<ul>
+<li><code>MOLTIS_HOOK_INCLUDE_CHANNEL_TARGET=1</code></li>
+</ul>
+</li>
+</ul>
+<h3 id="e-toolsllm---tools---gateway"><a class="header" href="#e-toolsllm---tools---gateway">E) Tools（LLM -&gt; tools -&gt; gateway）</a></h3>
+<p>tool context（JSON）只允许：</p>
+<ul>
+<li><code>_sessionId</code>（必需）</li>
+<li><code>_sessionKey</code>（可选，仅用于跨渠道策略/分桶；不得用于回投定位）</li>
+</ul>
+<p>任何“渠道交互能力”（示例：位置请求）一律按 <code>session_id</code> 路由：</p>
+<pre><code class="language-text">tools.location(_sessionId, ...) -&gt; gateway.request_channel_location(session_id)
+  -&gt; gateway: session_id -&gt; channel_binding
+  -&gt; adapter/outbound: 发送 TG 位置请求 / 按钮
+</code></pre>
+<p>失败与可观测性：</p>
+<ul>
+<li>缺少 <code>channel_binding</code> 或渠道不支持：立即 <code>NotSupported</code>，并记录结构化日志 <code>reason_code</code>：
+<ul>
+<li><code>missing_channel_binding</code></li>
+<li><code>channel_not_supported</code></li>
+<li><code>missing_session_id</code></li>
+</ul>
+</li>
+</ul>
+<h2 id="冗余字段清单应从跨层契约中移除"><a class="header" href="#冗余字段清单应从跨层契约中移除">冗余字段清单（应从跨层契约中移除）</a></h2>
+<p>下列字段属于“渠道内部细节”，不应出现在 TG 适配层之外的契约对象中：</p>
+<ul>
+<li><code>sender_id</code>（平台内部 id）</li>
+<li><code>sender_is_bot</code>（平台侧判断结果）</li>
+<li><code>transcript_format</code>（由适配层决定是否以及如何转写）</li>
+<li><code>chat_id/thread_id/message_id/account_key</code>（投递细节）</li>
+<li>任意 V2 legacy：旧“渠道对话坐标键”、旧工具上下文字段、旧渠道账号键等</li>
+</ul>
+<h2 id="实施清单可直接拆任务"><a class="header" href="#实施清单可直接拆任务">实施清单（可直接拆任务）</a></h2>
+<ol>
+<li>TG-GST v1 转写职责回收：
+<ul>
+<li>TG adapter 产出最终 <code>text</code>（群聊使用 TG-GST v1/现有格式）。</li>
+<li>gateway/core 删除基于 Telegram meta 的二次转写逻辑。</li>
+</ul>
+</li>
+<li>UI meta 收敛：
+<ul>
+<li>UI 仅保留 <code>channel.type/senderName/username/messageKind/model</code>。</li>
+<li>禁止任何投递细节出现在 WS/UI payload。</li>
+</ul>
+</li>
+<li>Hooks 收敛：
+<ul>
+<li>hooks payload 增补跨渠道字段（<code>sessionKey/chatKind/addressed/mode/channel</code>）。</li>
+<li><code>channelTarget</code> 作为可选展开字段（默认 null），来源仅 <code>channel_binding</code>。</li>
+</ul>
+</li>
+<li>Tools 收敛：
+<ul>
+<li>tool context 只用 <code>_sessionId/_sessionKey</code>。</li>
+<li>任何渠道交互能力仅按 <code>_sessionId</code> 路由；unsupported 立刻失败并带 <code>reason_code</code>。</li>
+</ul>
+</li>
+</ol>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../refactor/telegram-adapter-boundary.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/session-scope-overview.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../refactor/telegram-adapter-boundary.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/session-scope-overview.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

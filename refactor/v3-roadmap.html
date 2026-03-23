@@ -1,0 +1,708 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>V3 Roadmap - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/v3-roadmap.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="v3-实施路线图"><a class="header" href="#v3-实施路线图">V3 实施路线图</a></h1>
+<p>本文档只定义一件事：</p>
+<ul>
+<li>第三版架构应如何按一条<strong>外向内、TG 优先、渐进替换</strong>的路径落地</li>
+</ul>
+<p>本文档不讨论：</p>
+<ul>
+<li>历史数据迁移</li>
+<li>前向兼容</li>
+<li>其他渠道如何并行接入</li>
+<li>某个阶段内的具体代码 diff</li>
+<li>第三版整体设计原则本身</li>
+</ul>
+<p>也就是说，本文档讨论的是：</p>
+<ul>
+<li><strong>第三版的实施顺序与阶段边界</strong></li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li>某个模块的局部实现细节</li>
+</ul>
+<h2 id="一句话结论"><a class="header" href="#一句话结论">一句话结论</a></h2>
+<p>第三版不应从“先重构整个 core”开始。</p>
+<p>更稳妥的落地路径应当是：</p>
+<ul>
+<li>先从 <strong>Telegram 渠道适配边界</strong> 开始</li>
+<li>再把 <strong>Telegram 的 session 分桶/定位</strong> 单独抽出</li>
+<li>期间阶段性复用现有 <strong>会话记录</strong> 与 <strong>旧上下文链路</strong></li>
+<li>但要尽快清掉 Telegram 对 LLM 可见文本的残余塑形职责，让上下文整理真正由 core 统一负责</li>
+<li>然后按 <strong>TG DM -&gt; TG Group -&gt; TG Group 复杂能力</strong>
+的顺序逐段替换</li>
+<li>最后再把内部旧会话记录替换成第三版目标持久化形态</li>
+</ul>
+<p>一句人话：</p>
+<ul>
+<li><strong>先把 Telegram 和 core 切干净，先不动落盘，最后再换最里面的保存层</strong></li>
+</ul>
+<p>第三版整体设计原则，见：</p>
+<ul>
+<li><code>docs/src/refactor/v3-design.md</code></li>
+</ul>
+<h2 id="2026-03-20-当前状态不含落盘替换"><a class="header" href="#2026-03-20-当前状态不含落盘替换">2026-03-20 当前状态（不含落盘替换）</a></h2>
+<p>截至 2026-03-20，如果先把“落盘改造 / <code>session_event</code> 持久化替换”排除掉：</p>
+<ul>
+<li>Telegram adapter / core 的边界切分、bucket/thread-aware 路由与回投主链，已基本收口</li>
+<li>仍未完成且属于主线的剩余工作，集中在：保存层替换 + 历史迁移（阶段 7）</li>
+</ul>
+<p>当前代码现状与差距归档见：</p>
+<ul>
+<li><code>docs/src/refactor/v3-gap.md</code></li>
+</ul>
+<h2 id="路线总原则"><a class="header" href="#路线总原则">路线总原则</a></h2>
+<h3 id="1-从外向内"><a class="header" href="#1-从外向内">1. 从外向内</a></h3>
+<p>不要一开始就改最内层核心契约。</p>
+<p>先改：</p>
+<ul>
+<li>Telegram 收消息入口</li>
+<li>Telegram 到 core 的边界</li>
+</ul>
+<p>后改：</p>
+<ul>
+<li>统一事件记录模型</li>
+<li><code>session_event</code> 原生持久化</li>
+</ul>
+<h3 id="2-先垂直切-telegram不横扫全系统"><a class="header" href="#2-先垂直切-telegram不横扫全系统">2. 先垂直切 Telegram，不横扫全系统</a></h3>
+<p>现阶段只聚焦：</p>
+<ul>
+<li>Telegram adapter</li>
+<li>与 Telegram 直接相连的 core 上层</li>
+</ul>
+<p>现阶段暂不处理：</p>
+<ul>
+<li>Feishu / Slack / Discord 等其他渠道</li>
+</ul>
+<h3 id="3-先收边界再换内核"><a class="header" href="#3-先收边界再换内核">3. 先收边界，再换内核</a></h3>
+<p>前几个阶段应优先做到：</p>
+<ul>
+<li>Telegram 不再直接主导“给模型的文本”语义</li>
+<li>Telegram 不再在多个模块里零散决定 session</li>
+<li>Telegram 入口只负责归一化与交付</li>
+<li>最终给模型的上下文整理由 core 主链统一负责</li>
+</ul>
+<p>在边界稳定之前，不急着改：</p>
+<ul>
+<li>最终事件记录模型</li>
+<li>最终持久化格式</li>
+</ul>
+<h3 id="4-阶段性复用旧能力"><a class="header" href="#4-阶段性复用旧能力">4. 阶段性复用旧能力</a></h3>
+<p>第三版落地初期，允许阶段性复用：</p>
+<ul>
+<li>现有 <code>SessionStore</code></li>
+<li>现有 <code>PersistedMessage</code></li>
+<li>现有 chat.send / chat run 主链</li>
+<li>现有上下文相关基础设施（仅作为 bridge 过渡）</li>
+</ul>
+<p>但复用方式必须是：</p>
+<ul>
+<li><strong>新边界输出兼容旧接口</strong></li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li>继续让旧接口反过来定义第三版边界</li>
+</ul>
+<h3 id="5-按复杂度递进"><a class="header" href="#5-按复杂度递进">5. 按复杂度递进</a></h3>
+<p>Telegram 侧的切换顺序应固定为：</p>
+<ol>
+<li>DM 文本</li>
+<li>Group 文本</li>
+<li>Group relay / mirror / mention 复杂策略</li>
+<li>多媒体 / voice / location / reply_ref</li>
+</ol>
+<p>不要倒着做。</p>
+<h2 id="整体步骤"><a class="header" href="#整体步骤">整体步骤</a></h2>
+<p>第三版建议分成 7 个阶段。</p>
+<h3 id="阶段-1抽取-telegram-adapter-边界"><a class="header" href="#阶段-1抽取-telegram-adapter-边界">阶段 1：抽取 Telegram adapter 边界</a></h3>
+<p>先把 Telegram 从当前散落逻辑中收边界。</p>
+<p>这一阶段只回答一个问题：</p>
+<ul>
+<li><strong>Telegram 收到一条原生消息后，如何把它整理成面向 core 的统一输入</strong></li>
+</ul>
+<h3 id="阶段-2抽取-telegram-session-分桶定位模块"><a class="header" href="#阶段-2抽取-telegram-session-分桶定位模块">阶段 2：抽取 Telegram session 分桶/定位模块</a></h3>
+<p>把“这条 TG 消息应该进哪个 session”从零散逻辑中单独收出来。</p>
+<p>这一阶段只回答一个问题：</p>
+<ul>
+<li><strong>Telegram DM / Group 的会话定位规则如何统一收口</strong></li>
+</ul>
+<h3 id="阶段-3桥接旧会话记录并清理-telegram-残余上下文塑形"><a class="header" href="#阶段-3桥接旧会话记录并清理-telegram-残余上下文塑形">阶段 3：桥接旧会话记录，并清理 Telegram 残余上下文塑形</a></h3>
+<p>在不改内核存储格式的前提下，让新的 Telegram 输入边界先跑起来。</p>
+<p>这一阶段只回答一个问题：</p>
+<ul>
+<li><strong>新 TG adapter 能否先稳定接上现有 <code>SessionStore</code> 与 chat 主链，并把最终模型上下文整理统一收回 core</strong></li>
+</ul>
+<h3 id="阶段-4先切-telegram-dm"><a class="header" href="#阶段-4先切-telegram-dm">阶段 4：先切 Telegram DM</a></h3>
+<p>第一批真正进入第三版路径的流量，应当是：</p>
+<ul>
+<li>Telegram DM 文本消息</li>
+</ul>
+<p>这一阶段的目标是：</p>
+<ul>
+<li>用最简单的业务切片验证新边界和 session 定位</li>
+</ul>
+<h3 id="阶段-5再切-telegram-group-基础链路"><a class="header" href="#阶段-5再切-telegram-group-基础链路">阶段 5：再切 Telegram Group 基础链路</a></h3>
+<p>第二批进入第三版路径的流量，应当是：</p>
+<ul>
+<li>Telegram Group 普通文本消息</li>
+</ul>
+<p>这一阶段先不碰复杂群策略，只先把：</p>
+<ul>
+<li><code>group_scope</code></li>
+<li><code>peer</code></li>
+<li><code>per_branch</code> / <code>per_branch_sender</code> 的黑盒落地</li>
+<li><code>sender</code></li>
+<li>listen-only / addressed run</li>
+</ul>
+<p>这些基础能力理顺。</p>
+<h3 id="阶段-6切-telegram-group-复杂能力"><a class="header" href="#阶段-6切-telegram-group-复杂能力">阶段 6：切 Telegram Group 复杂能力</a></h3>
+<p>当 Group 基础链路稳定后，再处理：</p>
+<ul>
+<li>relay</li>
+<li>mirror</li>
+<li>mention 触发策略</li>
+<li>topic / thread / forum topic</li>
+<li>reply_ref</li>
+<li>多媒体 / voice / location</li>
+</ul>
+<p>这一阶段的目标是：</p>
+<ul>
+<li>把 Telegram 复杂能力也收进第三版边界，而不是继续散落在 gateway/chat 特化分支里</li>
+</ul>
+<h3 id="阶段-7最后替换内部旧内核"><a class="header" href="#阶段-7最后替换内部旧内核">阶段 7：最后替换内部旧内核</a></h3>
+<p>当 Telegram 全链路都稳定跑在第三版边界上后，再逐步替换：</p>
+<ul>
+<li><code>session_event</code> 统一事件记录</li>
+<li>core context bridge 的底层输入，改为 <code>session_event</code> 原生事实流</li>
+<li>旧会话文本驱动的保存/拼接路径</li>
+</ul>
+<p>也就是说：</p>
+<ul>
+<li><strong>最里面的内核改造，放到最后</strong></li>
+</ul>
+<h2 id="各阶段的具体工作"><a class="header" href="#各阶段的具体工作">各阶段的具体工作</a></h2>
+<p>下面按阶段展开。</p>
+<h2 id="阶段-1抽取-telegram-adapter-边界-1"><a class="header" href="#阶段-1抽取-telegram-adapter-边界-1">阶段 1：抽取 Telegram adapter 边界</a></h2>
+<h3 id="本阶段目标"><a class="header" href="#本阶段目标">本阶段目标</a></h3>
+<p>先把 Telegram 入口整理干净。</p>
+<p>让 Telegram 这一层只负责：</p>
+<ul>
+<li>解析原生 update</li>
+<li>识别消息类型</li>
+<li>提取 Telegram 原生字段</li>
+<li>归一化出一个面向 core 的 Telegram 输入对象</li>
+</ul>
+<h3 id="本阶段完成后应达到的状态"><a class="header" href="#本阶段完成后应达到的状态">本阶段完成后应达到的状态</a></h3>
+<p>Telegram adapter 输出的对象，至少应能稳定表达：</p>
+<ul>
+<li>当前消息属于 <code>dm</code> 还是 <code>group</code></li>
+<li>当前消息体 <code>body</code></li>
+<li>当前附件 <code>attachments</code></li>
+<li>当前 reply / quote / source message 信息</li>
+<li>当前消息属于普通消息、命令、listen-only、relay 候选中的哪一类</li>
+<li>一份仅供 Telegram adapter 自己后续解析的 <code>private_source</code> 私有载荷</li>
+</ul>
+<p>补充说明：</p>
+<ul>
+<li><code>private_source</code> 里可以携带 route 解析所需的本地线索（例如候选 sender/thread/message id）</li>
+<li>但这些线索不等于“已产出的 core 语义结果”；<code>peer</code>/<code>sender</code>/<code>bucket_key</code> 仍应在阶段 2 的 route resolver 中作为结果字段产出</li>
+</ul>
+<p>这里故意<strong>不</strong>要求阶段 1 直接产出：</p>
+<ul>
+<li><code>peer</code></li>
+<li><code>sender</code></li>
+<li><code>branch</code></li>
+<li><code>bucket_key</code></li>
+<li><code>addressed</code></li>
+</ul>
+<p>这些应在下一阶段通过：</p>
+<ul>
+<li><code>resolve_tg_route(tg_inbound, scope) -&gt; tg_route</code></li>
+</ul>
+<p>再由 Telegram route resolver 产出。</p>
+<h3 id="本阶段不要做什么"><a class="header" href="#本阶段不要做什么">本阶段不要做什么</a></h3>
+<ul>
+<li>不在聊天主入口对象里提前塞入 <code>peer</code> / <code>sender</code> / <code>bucket_key</code></li>
+<li>不在聊天主入口对象里提前塞入 <code>branch</code> / <code>addressed</code></li>
+<li>不改最终落盘格式</li>
+<li>不改上下文管理</li>
+<li>不改全局 session key 体系</li>
+<li>不改其他渠道</li>
+</ul>
+<h3 id="本阶段为什么先做"><a class="header" href="#本阶段为什么先做">本阶段为什么先做</a></h3>
+<p>在开始改造前，Telegram 相关语义仍散落在：</p>
+<ul>
+<li><code>crates/telegram/src/handlers.rs</code></li>
+<li><code>crates/gateway/src/channel_events.rs</code></li>
+<li><code>crates/gateway/src/chat.rs</code></li>
+</ul>
+<p>必须先把 Telegram 入口与 core 的责任切开，后续才能稳定推进。</p>
+<h2 id="阶段-2抽取-telegram-session-分桶定位模块-1"><a class="header" href="#阶段-2抽取-telegram-session-分桶定位模块-1">阶段 2：抽取 Telegram session 分桶/定位模块</a></h2>
+<h3 id="本阶段目标-1"><a class="header" href="#本阶段目标-1">本阶段目标</a></h3>
+<p>把“Telegram 消息到底应该落到哪个会话”收成一个明确模块。</p>
+<p>这一模块至少要统一处理：</p>
+<ul>
+<li>Telegram DM</li>
+<li>Telegram Group</li>
+<li>Telegram account</li>
+<li>Telegram chat</li>
+<li>Telegram thread/topic</li>
+<li>Telegram sender</li>
+</ul>
+<h3 id="本阶段完成后应达到的状态-1"><a class="header" href="#本阶段完成后应达到的状态-1">本阶段完成后应达到的状态</a></h3>
+<p>Telegram 侧不再在多个模块零散决定：</p>
+<ul>
+<li>是不是新 session</li>
+<li>当前 active session 是谁</li>
+<li>当前消息应进入哪个 session</li>
+</ul>
+<p>而应统一改成：</p>
+<ul>
+<li>Telegram adapter 输出归一化对象</li>
+<li>Telegram route resolver 先返回 <code>tg_route</code></li>
+<li>再由 Telegram session resolver 基于 <code>tg_route + scope</code> 返回当前消息对应的 session 定位结果</li>
+</ul>
+<h3 id="本阶段允许复用什么"><a class="header" href="#本阶段允许复用什么">本阶段允许复用什么</a></h3>
+<p>本阶段允许继续复用：</p>
+<ul>
+<li>当前 <code>channel_sessions</code></li>
+<li>当前 <code>sessions</code> metadata</li>
+<li>当前 active session 记录方式</li>
+</ul>
+<p>原因是：</p>
+<ul>
+<li>这一阶段的目标是先收口“谁来决定 session”，不是立刻改底层存储模型</li>
+</ul>
+<h3 id="本阶段不要做什么-1"><a class="header" href="#本阶段不要做什么-1">本阶段不要做什么</a></h3>
+<ul>
+<li>不引入最终版 <code>session_event</code></li>
+<li>不引入全渠道统一 resolver</li>
+<li>不处理其他渠道</li>
+</ul>
+<h2 id="阶段-3桥接旧会话记录并清理-telegram-残余上下文塑形-1"><a class="header" href="#阶段-3桥接旧会话记录并清理-telegram-残余上下文塑形-1">阶段 3：桥接旧会话记录，并清理 Telegram 残余上下文塑形</a></h2>
+<h3 id="本阶段目标-2"><a class="header" href="#本阶段目标-2">本阶段目标</a></h3>
+<p>让新 Telegram 边界先稳定接上旧核心。</p>
+<p>也就是说：</p>
+<ul>
+<li>新 Telegram adapter</li>
+<li>新 Telegram session resolver</li>
+</ul>
+<p>在这一阶段后面，先继续桥接到：</p>
+<ul>
+<li>现有 <code>PersistedMessage</code></li>
+<li>现有 <code>SessionStore</code></li>
+<li>现有 chat.send / agent run 主链</li>
+<li>现有保存结构</li>
+</ul>
+<h3 id="本阶段完成后应达到的状态-2"><a class="header" href="#本阶段完成后应达到的状态-2">本阶段完成后应达到的状态</a></h3>
+<p>第三版前半截已经建立：</p>
+<ul>
+<li>Telegram 入口边界是新的</li>
+<li>Telegram session 决策边界是新的</li>
+<li>最终给模型的上下文整理职责已经明确收口到 core 主链</li>
+</ul>
+<p>但第三版后半截还没替换：</p>
+<ul>
+<li>会话记录仍可先写旧格式</li>
+<li>core 仍是先读取旧消息/旧 metadata，再桥接出当前需要的上下文</li>
+<li><code>session_event</code> 仍未落地</li>
+</ul>
+<h3 id="本阶段为什么关键"><a class="header" href="#本阶段为什么关键">本阶段为什么关键</a></h3>
+<p>这是整条路线能否收敛的关键。</p>
+<p>如果没有这一步，就只能二选一：</p>
+<ul>
+<li>要么一开始就大改最内层核心</li>
+<li>要么第三版边界永远被旧链路反向污染</li>
+</ul>
+<p>桥接层的作用就是：</p>
+<ul>
+<li><strong>让 Telegram 外层和 core 分工先变对，旧落盘稍后再换</strong></li>
+</ul>
+<h2 id="阶段-4切-telegram-dm"><a class="header" href="#阶段-4切-telegram-dm">阶段 4：切 Telegram DM</a></h2>
+<h3 id="本阶段目标-3"><a class="header" href="#本阶段目标-3">本阶段目标</a></h3>
+<p>先让 Telegram DM 文本消息跑到新链路。</p>
+<p>建议本阶段只覆盖：</p>
+<ul>
+<li>文本入站</li>
+<li>基础 reply</li>
+<li>基础 session 进入</li>
+<li>基础上下文桥接使用</li>
+</ul>
+<h3 id="本阶段为什么先切-dm"><a class="header" href="#本阶段为什么先切-dm">本阶段为什么先切 DM</a></h3>
+<p>因为 DM 是当前 Telegram 场景里最简单、变量最少的一条链。</p>
+<p>它最适合验证：</p>
+<ul>
+<li>adapter 边界是否合理</li>
+<li>session 定位是否合理</li>
+<li>旧桥接层是否稳定</li>
+</ul>
+<h3 id="本阶段不要做什么-2"><a class="header" href="#本阶段不要做什么-2">本阶段不要做什么</a></h3>
+<ul>
+<li>不碰 group</li>
+<li>不碰 relay / mirror</li>
+<li>不碰复杂媒体</li>
+</ul>
+<h2 id="阶段-5切-telegram-group-基础链路"><a class="header" href="#阶段-5切-telegram-group-基础链路">阶段 5：切 Telegram Group 基础链路</a></h2>
+<h3 id="本阶段目标-4"><a class="header" href="#本阶段目标-4">本阶段目标</a></h3>
+<p>在 DM 跑稳后，再把 Group 基础文本链路切到新边界。</p>
+<p>本阶段优先处理：</p>
+<ul>
+<li>addressed group message</li>
+<li>listen-only ingest</li>
+<li>group 下的 <code>peer</code></li>
+<li>group 下的 <code>sender</code></li>
+<li>group 下的子线判别结果</li>
+<li><code>group_scope</code> 的基础落地</li>
+</ul>
+<h3 id="本阶段的核心要求"><a class="header" href="#本阶段的核心要求">本阶段的核心要求</a></h3>
+<p>这一阶段开始，Telegram Group 不应再由 Telegram handler 直接主导：</p>
+<ul>
+<li>给模型的文本格式</li>
+<li>上下文语义</li>
+<li>session 分桶</li>
+</ul>
+<p>它只应负责：</p>
+<ul>
+<li>提供 Telegram 原生信息</li>
+<li>交给上层 session resolver 与 core context bridge</li>
+</ul>
+<h3 id="本阶段不要做什么-3"><a class="header" href="#本阶段不要做什么-3">本阶段不要做什么</a></h3>
+<ul>
+<li>不先碰 relay / mirror</li>
+<li>不先碰 topic/thread 的全部复杂边角</li>
+<li>不先碰多媒体和 voice</li>
+</ul>
+<h2 id="阶段-6切-telegram-group-复杂能力-1"><a class="header" href="#阶段-6切-telegram-group-复杂能力-1">阶段 6：切 Telegram Group 复杂能力</a></h2>
+<h3 id="本阶段目标-5"><a class="header" href="#本阶段目标-5">本阶段目标</a></h3>
+<p>把 Telegram Group 的复杂能力也收进第三版边界。</p>
+<p>建议这一阶段逐步吸收：</p>
+<ul>
+<li>relay</li>
+<li>mirror</li>
+<li>mention 相关策略</li>
+<li>topic / thread / forum topic 细化规则</li>
+<li>reply_ref</li>
+<li>多媒体</li>
+<li>voice / location</li>
+</ul>
+<h3 id="本阶段的要求"><a class="header" href="#本阶段的要求">本阶段的要求</a></h3>
+<p>复杂策略可以继续存在，但必须：</p>
+<ul>
+<li>通过 Telegram adapter 输出结构化信息</li>
+<li>通过 Telegram session resolver 和 core 上层接管会话语义与上下文语义</li>
+<li>不再把复杂语义直接写死在会话文本或给模型的文本里</li>
+</ul>
+<h2 id="阶段-7最后替换内部旧内核-1"><a class="header" href="#阶段-7最后替换内部旧内核-1">阶段 7：最后替换内部旧内核</a></h2>
+<h3 id="本阶段目标-6"><a class="header" href="#本阶段目标-6">本阶段目标</a></h3>
+<p>在 Telegram 外层已经稳定后，再替换第三版真正的内核目标：</p>
+<ul>
+<li><code>session_event</code></li>
+<li>统一事件记录持久化</li>
+<li>core context bridge 的底层输入，改为 <code>session_event</code> 原生事实流</li>
+</ul>
+<h3 id="本阶段为什么最后做"><a class="header" href="#本阶段为什么最后做">本阶段为什么最后做</a></h3>
+<p>因为这些属于最内层改造。</p>
+<p>只有在 Telegram 外层已经稳定后，再替换内层，才能避免：</p>
+<ul>
+<li>一边改内核</li>
+<li>一边还在反复改 Telegram 入口边界</li>
+</ul>
+<h3 id="本阶段完成后意味着什么"><a class="header" href="#本阶段完成后意味着什么">本阶段完成后意味着什么</a></h3>
+<p>到这一步，第三版才算真正完成了：</p>
+<ul>
+<li>外层 Telegram adapter 已收敛</li>
+<li>中层 session 分桶/定位已收敛</li>
+<li>内层统一事件记录已完成替换</li>
+<li>core context engine 也不再依赖 legacy persistence bridge</li>
+</ul>
+<h2 id="每阶段的复用策略"><a class="header" href="#每阶段的复用策略">每阶段的复用策略</a></h2>
+<p>为了保证路径收敛，复用策略应明确固定：</p>
+<h3 id="阶段-1--3"><a class="header" href="#阶段-1--3">阶段 1 ~ 3</a></h3>
+<p>明确复用：</p>
+<ul>
+<li>现有 <code>SessionStore</code></li>
+<li>现有 <code>PersistedMessage</code></li>
+<li>现有 chat.send / chat run</li>
+<li>现有保存结构</li>
+</ul>
+<h3 id="阶段-4--6"><a class="header" href="#阶段-4--6">阶段 4 ~ 6</a></h3>
+<p>优先复用：</p>
+<ul>
+<li>现有落盘</li>
+<li>core context bridge</li>
+</ul>
+<p>只替换：</p>
+<ul>
+<li>Telegram adapter 边界</li>
+<li>Telegram session resolver</li>
+<li>Telegram 业务链路</li>
+<li>Telegram 残余 transcript / prompt shaping 逻辑</li>
+</ul>
+<h3 id="阶段-7"><a class="header" href="#阶段-7">阶段 7</a></h3>
+<p>再真正替换：</p>
+<ul>
+<li>统一事件记录模型</li>
+<li>legacy persistence bridge</li>
+</ul>
+<h2 id="本路线明确不建议的做法"><a class="header" href="#本路线明确不建议的做法">本路线明确不建议的做法</a></h2>
+<p>不建议：</p>
+<ul>
+<li>一开始就全局重构所有 core 契约</li>
+<li>一开始就把所有渠道一起纳入第三版</li>
+<li>一开始就把旧会话记录和旧上下文全部替换</li>
+<li>在 Telegram 边界还没收住之前，就直接重写最终版 <code>session_event</code> 持久化</li>
+<li>按零散函数、零散字段、零散命名做碎片化替换</li>
+</ul>
+<h2 id="最后收口"><a class="header" href="#最后收口">最后收口</a></h2>
+<p>如果只记住一句话，就记住这句：</p>
+<ul>
+<li><strong>第三版应先从 Telegram 外围收边界开始</strong></li>
+<li><strong>期间阶段性复用旧会话记录，但尽快清掉 Telegram 对上下文塑形的残余控制</strong></li>
+<li><strong>按 TG DM -&gt; TG Group -&gt; TG Group 复杂能力 的顺序推进</strong></li>
+<li><strong>最后再替换最里面的事件记录持久化</strong></li>
+</ul>
+<h2 id="相关文档"><a class="header" href="#相关文档">相关文档</a></h2>
+<ul>
+<li><code>docs/src/concepts-and-ids.md</code></li>
+<li><code>docs/src/refactor/dm-scope.md</code></li>
+<li><code>docs/src/refactor/group-scope.md</code></li>
+<li><code>docs/src/refactor/session-scope-overview.md</code></li>
+<li><code>docs/src/refactor/session-context-layering.md</code></li>
+<li><code>docs/src/refactor/session-event-canonical.md</code></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../refactor/v3-gap.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/v3-extension-guidance.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../refactor/v3-gap.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/v3-extension-guidance.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

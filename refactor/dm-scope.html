@@ -1,0 +1,712 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>DM Scope - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/dm-scope.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="dm_scopedm-类型的分桶语义"><a class="header" href="#dm_scopedm-类型的分桶语义"><code>dm_scope</code>：<code>dm</code> 类型的分桶语义</a></h1>
+<p>本文档只定义一件事：</p>
+<ul>
+<li>当 <code>type = dm</code> 时，系统如何判断两条 1v1 对话消息应该落进同一个逻辑会话桶</li>
+</ul>
+<p>本文档<strong>不</strong>讨论：</p>
+<ul>
+<li>群聊、频道、thread、topic 如何分桶</li>
+<li>cron、subagent、hook 等非 <code>dm</code> 类型如何分桶</li>
+<li>Telegram、Feishu 等渠道内部到底使用哪些原生字段</li>
+<li><code>session_key</code> 后半截具体长什么样</li>
+</ul>
+<p>也就是说，本文档讨论的是：</p>
+<ul>
+<li><code>dm</code> 类型的<strong>分桶语义</strong></li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li>具体渠道的<strong>分桶实现细节</strong></li>
+</ul>
+<h2 id="一句话结论"><a class="header" href="#一句话结论">一句话结论</a></h2>
+<p><code>dm_scope</code> 是上层核心对 <code>dm</code> 类型分桶语义的定义。</p>
+<p>它只规定：</p>
+<ul>
+<li>哪些 <code>dm</code> 消息应当同桶</li>
+<li>哪些 <code>dm</code> 消息必须异桶</li>
+</ul>
+<p>它不规定：</p>
+<ul>
+<li>渠道适配模块内部如何用本地字段实现这个判定</li>
+</ul>
+<p>因此：</p>
+<ul>
+<li>上层负责定义语义</li>
+<li>渠道适配模块负责实现语义</li>
+<li><code>session_key</code> 只是最终编码结果</li>
+</ul>
+<h2 id="前提与边界"><a class="header" href="#前提与边界">前提与边界</a></h2>
+<p>本文档始终在以下前提下讨论：</p>
+<ul>
+<li>固定单个 <code>agent</code></li>
+<li>固定 <code>type = dm</code></li>
+<li>讨论对象是 agent 与单个外部参与者之间的 1 对 1 会话</li>
+<li><code>session_key</code> 是逻辑会话桶名</li>
+<li><code>session_id</code> 是该逻辑桶当前指向的 transcript / 持久会话代次</li>
+</ul>
+<p>这里故意不把 Telegram、Feishu、Slack 等渠道内部对象直接拉进核心概念层。</p>
+<h2 id="核心概念"><a class="header" href="#核心概念">核心概念</a></h2>
+<h3 id="agent"><a class="header" href="#agent"><code>agent</code></a></h3>
+<p>处理这段对话的逻辑 agent。</p>
+<p>它是最大的思考与隔离边界。</p>
+<p>在本文档里，所有规则默认都带着一句隐含前提：</p>
+<ul>
+<li>“对这个固定的 <code>agent</code> 来说”</li>
+</ul>
+<h3 id="peer"><a class="header" href="#peer"><code>peer</code></a></h3>
+<p>与这个 <code>agent</code> 进行 1 对 1 <code>dm</code> 对话的单个外部参与者。</p>
+<p>这里强调的是：</p>
+<ul>
+<li><code>peer</code> 是上层逻辑概念</li>
+<li>它不是某个具体渠道里的原生 id 字段</li>
+</ul>
+<p>也就是说：</p>
+<ul>
+<li>Telegram 上怎么定位这个 <code>peer</code></li>
+<li>Feishu 上怎么定位这个 <code>peer</code></li>
+</ul>
+<p>属于下层实现问题，不属于本文档定义范围。</p>
+<h3 id="channel"><a class="header" href="#channel"><code>channel</code></a></h3>
+<p>当前这条 <code>dm</code> 消息来自哪个渠道。</p>
+<p>例如：</p>
+<ul>
+<li>Telegram</li>
+<li>Feishu</li>
+</ul>
+<p><code>channel</code> 是上层已知语义输入之一，但它不等于渠道内部的原生分桶字段。</p>
+<h3 id="account"><a class="header" href="#account"><code>account</code></a></h3>
+<p>某个对象在某个 <code>channel</code> 上的账号表示。</p>
+<p>这里只保留 <code>account</code> 这个核心概念，不在本文档继续展开更多相关概念。</p>
+<p>对 <code>dm</code> 分桶来说，更重要的结论是：</p>
+<ul>
+<li><code>account</code> 的具体识别、解析、比较，属于渠道适配模块内部职责</li>
+</ul>
+<p>上层不需要知道 Telegram / Feishu 到底如何确定“当前是哪一个本地 account”。</p>
+<h3 id="session_key"><a class="header" href="#session_key"><code>session_key</code></a></h3>
+<p>逻辑会话桶的稳定名字。</p>
+<p>它回答的是：</p>
+<ul>
+<li>这条消息应该落进哪个逻辑桶</li>
+</ul>
+<p>本文档不把 <code>session_key</code> 当成核心语义来源。</p>
+<p>更准确地说：</p>
+<ul>
+<li><code>session_key</code> 是分桶语义被实现并编码后的结果</li>
+</ul>
+<h3 id="session_id"><a class="header" href="#session_id"><code>session_id</code></a></h3>
+<p><code>session_key</code> 当前指向的那一代持久 transcript / 会话正文。</p>
+<p>因此必须区分：</p>
+<ul>
+<li><code>session_key</code>：逻辑桶是谁</li>
+<li><code>session_id</code>：这个逻辑桶当前挂着哪一代正文</li>
+</ul>
+<h2 id="三层分工"><a class="header" href="#三层分工">三层分工</a></h2>
+<p>为了避免概念膨胀、避免渠道细节泄漏到上层，<code>dm</code> 分桶应明确拆成三层。</p>
+<h3 id="第一层语义层"><a class="header" href="#第一层语义层">第一层：语义层</a></h3>
+<p>这一层只定义上层语义输入。</p>
+<p>对 <code>dm</code>，上层核心只关心：</p>
+<ul>
+<li>是哪个 <code>agent</code></li>
+<li>对端是谁，也就是哪个 <code>peer</code></li>
+<li>当前消息来自哪个 <code>channel</code></li>
+<li>当前会话类型是 <code>dm</code></li>
+<li>当前分桶要求是什么</li>
+</ul>
+<p>这一层<strong>不</strong>关心：</p>
+<ul>
+<li>Telegram 用的是 user id、chat id 还是别的字段</li>
+<li>Feishu 用的是 open id、chat id 还是别的字段</li>
+<li>当前本地 account 到底是怎么从渠道事件里解析出来的</li>
+</ul>
+<h3 id="第二层适配实现层"><a class="header" href="#第二层适配实现层">第二层：适配实现层</a></h3>
+<p>这一层由具体 <code>dm</code> 渠道适配模块负责。</p>
+<p>它接收上层给出的分桶要求，然后自己处理本渠道细节，例如：</p>
+<ul>
+<li>我这里哪个原生字段能唯一确定这个 <code>peer</code></li>
+<li>我这里哪个原生字段能唯一确定当前本地 <code>account</code></li>
+<li>我这里是否还有额外本地边界细节需要纳入分桶</li>
+</ul>
+<p>然后，它返回一个稳定的 <code>dm</code> 分桶结果，也就是：</p>
+<ul>
+<li><code>dm_subkey</code></li>
+</ul>
+<p>这里的 <code>dm_subkey</code> 是实现接口概念，不是新的上层核心概念。</p>
+<p>术语对齐说明：</p>
+<ul>
+<li>在实现代码与运行时表里，这个“黑盒分桶结果”也常被称为 <code>bucket_key</code></li>
+<li><code>bucket_key</code> 可以理解为 <code>dm_subkey</code> 的具体编码值；上层同样只应比较相等/不相等，不解析其内部结构</li>
+</ul>
+<p>上层只把它当作：</p>
+<ul>
+<li>一个黑盒结果</li>
+</ul>
+<p>也就是：</p>
+<ul>
+<li>可以比较相等/不相等</li>
+<li>可以持久化</li>
+<li>可以用于拼接 <code>session_key</code></li>
+<li>但不应依赖其内部结构</li>
+</ul>
+<h3 id="第三层编码装配层"><a class="header" href="#第三层编码装配层">第三层：编码装配层</a></h3>
+<p>这一层只做统一装配。</p>
+<p>例如可以把最终结果表达成：</p>
+<pre><code class="language-text">session_key = &lt;agent-prefix&gt; + :dm: + &lt;dm_subkey&gt;
+</code></pre>
+<p>其中：</p>
+<ul>
+<li><code>&lt;agent-prefix&gt;</code> 由上层统一决定</li>
+<li><code>&lt;dm_subkey&gt;</code> 由对应渠道适配模块返回</li>
+</ul>
+<p>重点在于：</p>
+<ul>
+<li><code>session_key</code> 只是编码结果</li>
+<li>真正需要先冻结的是“同桶/异桶语义”</li>
+</ul>
+<h2 id="dm_scope-的输入与输出"><a class="header" href="#dm_scope-的输入与输出"><code>dm_scope</code> 的输入与输出</a></h2>
+<p>对 <code>dm</code> 分桶，上层核心向渠道适配模块发出的，其实不是“请你按某种字符串模板拼 key”，而是一个<strong>分桶请求</strong>。</p>
+<p>这个请求至少包含：</p>
+<ul>
+<li>固定的 <code>agent</code></li>
+<li>固定的 <code>type = dm</code></li>
+<li>当前逻辑 <code>peer</code></li>
+<li>当前 <code>channel</code></li>
+<li>当前 <code>dm_scope</code></li>
+</ul>
+<p>渠道适配模块收到这个请求后，返回：</p>
+<ul>
+<li>满足该语义约束的 <code>dm_subkey</code></li>
+</ul>
+<h2 id="dm_scope-的四种取值"><a class="header" href="#dm_scope-的四种取值"><code>dm_scope</code> 的四种取值</a></h2>
+<p>当前文档冻结四种 <code>dm</code> 分桶语义：</p>
+<ol>
+<li><code>main</code></li>
+<li><code>per_peer</code></li>
+<li><code>per_channel</code></li>
+<li><code>per_account</code></li>
+</ol>
+<p>这是当前 1v1 <code>dm</code> 场景下最小、最收敛的一组语义。</p>
+<p>这四种取值与 OpenClaw 现有 DM 分桶语义一一对应：</p>
+<ul>
+<li><code>main</code> 对应 OpenClaw 的 <code>main</code></li>
+<li><code>per_peer</code> 对应 OpenClaw 的 <code>per-peer</code></li>
+<li><code>per_channel</code> 对应 OpenClaw 的 <code>per-channel-peer</code></li>
+<li><code>per_account</code> 对应 OpenClaw 的 <code>per-account-channel-peer</code></li>
+</ul>
+<p>这里的差异只在命名与分层表达，不在语义本身：</p>
+<ul>
+<li>OpenClaw 把 <code>channel</code> / <code>peer</code> / <code>account</code> 更显式地展开进模式名</li>
+<li>本文档把这些维度收敛进核心概念定义与适配层职责里</li>
+<li>因此两边的同桶/异桶判定保持等价，但本文档的命名更短、信息隐藏边界更清晰</li>
+</ul>
+<h3 id="main"><a class="header" href="#main"><code>main</code></a></h3>
+<p>含义：</p>
+<ul>
+<li>对固定 <code>agent</code> 来说，所有 <code>dm</code> 都进入同一个逻辑桶</li>
+</ul>
+<p>这里不区分：</p>
+<ul>
+<li><code>peer</code></li>
+<li><code>channel</code></li>
+<li>当前本地 <code>account</code></li>
+</ul>
+<p>因此它表达的是：</p>
+<ul>
+<li><code>dm</code> 主线完全塌缩</li>
+</ul>
+<p>对渠道适配模块的行为要求是：</p>
+<ul>
+<li>只要分桶请求是 <code>main</code>，它返回的 <code>dm_subkey</code> 必须对所有 <code>dm</code> 输入保持相同</li>
+</ul>
+<h3 id="per_peer"><a class="header" href="#per_peer"><code>per_peer</code></a></h3>
+<p>含义：</p>
+<ul>
+<li>对固定 <code>agent</code> 来说，同一个逻辑 <code>peer</code> 的 <code>dm</code> 进入同一个逻辑桶</li>
+</ul>
+<p>这里不区分：</p>
+<ul>
+<li><code>channel</code></li>
+<li>当前本地 <code>account</code></li>
+</ul>
+<p>这里区分：</p>
+<ul>
+<li><code>peer</code> 是否相同</li>
+</ul>
+<p>因此它表达的是：</p>
+<ul>
+<li><code>dm</code> 按逻辑对端分桶</li>
+</ul>
+<p>对渠道适配模块的行为要求是：</p>
+<ul>
+<li>如果两条 <code>dm</code> 消息对应同一个逻辑 <code>peer</code>，返回的 <code>dm_subkey</code> 必须相同</li>
+<li>如果对应不同逻辑 <code>peer</code>，返回的 <code>dm_subkey</code> 必须不同</li>
+</ul>
+<p>这里特别要注意：</p>
+<ul>
+<li><code>peer</code> 是否相同，是上层语义输入</li>
+<li>适配模块负责实现，不负责改写这条语义</li>
+</ul>
+<h3 id="per_channel"><a class="header" href="#per_channel"><code>per_channel</code></a></h3>
+<p>含义：</p>
+<ul>
+<li>对固定 <code>agent</code> 来说，同一个逻辑 <code>peer</code> 的 <code>dm</code>，若 <code>channel</code> 不同，则必须分桶</li>
+</ul>
+<p>这里区分：</p>
+<ul>
+<li><code>peer</code> 是否相同</li>
+<li><code>channel</code> 是否相同</li>
+</ul>
+<p>这里不继续区分：</p>
+<ul>
+<li>同一 <code>channel</code> 下的当前本地 <code>account</code></li>
+</ul>
+<p>因此它表达的是：</p>
+<ul>
+<li><code>dm</code> 按“逻辑对端 + 渠道”分桶</li>
+</ul>
+<p>它与 OpenClaw 里的 <code>per-channel-peer</code> 是同一层语义。</p>
+<p>对渠道适配模块的行为要求是：</p>
+<ul>
+<li>如果两条 <code>dm</code> 消息对应同一个逻辑 <code>peer</code>，且 <code>channel</code> 也相同，返回的 <code>dm_subkey</code> 必须相同</li>
+<li>如果 <code>channel</code> 不同，则返回的 <code>dm_subkey</code> 必须不同</li>
+</ul>
+<p>这里要注意：</p>
+<ul>
+<li>在 <code>dm</code> 语义下，<code>per_channel</code> 不是“只按 channel 分桶”</li>
+<li>它的真实含义是“同一个 <code>peer</code> 在不同 <code>channel</code> 上不共桶”</li>
+<li>也就是：<code>peer + channel</code></li>
+</ul>
+<h3 id="per_account"><a class="header" href="#per_account"><code>per_account</code></a></h3>
+<p>含义：</p>
+<ul>
+<li>对固定 <code>agent</code> 来说，同一个逻辑 <code>peer</code> 的 <code>dm</code>，若当前本地 <code>account</code> 不同，则必须分桶</li>
+</ul>
+<p>这里区分：</p>
+<ul>
+<li><code>peer</code> 是否相同</li>
+<li><code>channel</code> 是否相同</li>
+<li>当前本地 <code>account</code> 是否相同</li>
+</ul>
+<p>因此它表达的是：</p>
+<ul>
+<li><code>dm</code> 按“逻辑对端 + 渠道内当前本地接入账号”分桶</li>
+</ul>
+<p>它与 OpenClaw 里的 <code>per-account-channel-peer</code> 是同一层语义，只是这里把 <code>channel</code> 内含进 <code>account</code> 的定义里，不再单独展开进模式名。</p>
+<p>对渠道适配模块的行为要求是：</p>
+<ul>
+<li>如果两条 <code>dm</code> 消息对应同一个逻辑 <code>peer</code>，且当前本地 <code>account</code> 也相同，返回的 <code>dm_subkey</code> 必须相同</li>
+<li>如果当前本地 <code>account</code> 不同，则返回的 <code>dm_subkey</code> 必须不同</li>
+</ul>
+<p>这里仍然要注意：</p>
+<ul>
+<li><code>account</code> 是某个对象在某个 <code>channel</code> 上的账号表示，因此 <code>per_account</code> 天然包含 <code>channel</code> 边界</li>
+<li>上层不需要知道“当前本地 <code>account</code>”在 Telegram / Feishu 里到底是怎么解析出来的</li>
+<li>这正是适配模块的信息隐藏边界</li>
+</ul>
+<h2 id="四种语义的等价关系"><a class="header" href="#四种语义的等价关系">四种语义的等价关系</a></h2>
+<p>对固定 <code>agent</code>、固定 <code>type = dm</code>，两条消息是否同桶，可以直接写成：</p>
+<h3 id="main-1"><a class="header" href="#main-1"><code>main</code></a></h3>
+<p>同桶当且仅当：</p>
+<ul>
+<li>它们都属于这个 <code>agent</code> 的 <code>dm</code> 主线</li>
+</ul>
+<h3 id="per_peer-1"><a class="header" href="#per_peer-1"><code>per_peer</code></a></h3>
+<p>同桶当且仅当：</p>
+<ul>
+<li>它们属于同一个 <code>agent</code></li>
+<li>它们属于同一个逻辑 <code>peer</code></li>
+</ul>
+<h3 id="per_channel-1"><a class="header" href="#per_channel-1"><code>per_channel</code></a></h3>
+<p>同桶当且仅当：</p>
+<ul>
+<li>它们属于同一个 <code>agent</code></li>
+<li>它们属于同一个逻辑 <code>peer</code></li>
+<li>它们来自同一个 <code>channel</code></li>
+</ul>
+<h3 id="per_account-1"><a class="header" href="#per_account-1"><code>per_account</code></a></h3>
+<p>同桶当且仅当：</p>
+<ul>
+<li>它们属于同一个 <code>agent</code></li>
+<li>它们属于同一个逻辑 <code>peer</code></li>
+<li>它们对应同一个当前本地 <code>account</code></li>
+</ul>
+<p>由于 <code>account</code> 是 channel-scoped，这也隐含要求：</p>
+<ul>
+<li>它们位于同一个 <code>channel</code></li>
+</ul>
+<h2 id="适配模块的黑盒契约"><a class="header" href="#适配模块的黑盒契约">适配模块的黑盒契约</a></h2>
+<p>既然 <code>dm_subkey</code> 由渠道适配模块负责生成，那就必须明确黑盒契约。</p>
+<p>渠道适配模块至少必须满足：</p>
+<h3 id="1-语义正确"><a class="header" href="#1-语义正确">1. 语义正确</a></h3>
+<p>它返回的 <code>dm_subkey</code> 必须满足上层定义的 <code>dm_scope</code> 语义。</p>
+<p>也就是：</p>
+<ul>
+<li>该同桶时必须同桶</li>
+<li>该异桶时必须异桶</li>
+</ul>
+<h3 id="2-稳定"><a class="header" href="#2-稳定">2. 稳定</a></h3>
+<p>在相同语义输入和相同本地事实下，它必须返回相同结果。</p>
+<p>否则：</p>
+<ul>
+<li>同一条会话线会漂移到不同 <code>session_key</code></li>
+</ul>
+<h3 id="3-局部封装"><a class="header" href="#3-局部封装">3. 局部封装</a></h3>
+<p>它可以自由决定内部使用哪些渠道字段，但这些字段不应泄漏为上层核心概念。</p>
+<p>换句话说：</p>
+<ul>
+<li>上层不应依赖 Telegram/Feishu 专有字段来解释 <code>dm</code> 分桶语义</li>
+</ul>
+<h3 id="4-opaque"><a class="header" href="#4-opaque">4. Opaque</a></h3>
+<p>上层可以使用 <code>dm_subkey</code>，但不应要求解析它的内部结构。</p>
+<p>因此，上层对 <code>dm_subkey</code> 的依赖应限制在：</p>
+<ul>
+<li>比较</li>
+<li>拼接</li>
+<li>存储</li>
+</ul>
+<p>而不应包括：</p>
+<ul>
+<li>反向解释其内部渠道细节</li>
+</ul>
+<h2 id="例子"><a class="header" href="#例子">例子</a></h2>
+<p>下面的例子只说明语义，不说明某个具体渠道到底怎么拼内部字段。</p>
+<h3 id="main-2"><a class="header" href="#main-2"><code>main</code></a></h3>
+<p>上层请求：</p>
+<ul>
+<li><code>agent = alma</code></li>
+<li><code>type = dm</code></li>
+<li><code>dm_scope = main</code></li>
+</ul>
+<p>则：</p>
+<ul>
+<li>Telegram 上的 Alice</li>
+<li>Feishu 上的 Bob</li>
+<li>Telegram 上的 Carol</li>
+</ul>
+<p>都应进入同一个 <code>session_key</code></p>
+<h3 id="per_peer-2"><a class="header" href="#per_peer-2"><code>per_peer</code></a></h3>
+<p>上层请求：</p>
+<ul>
+<li><code>agent = alma</code></li>
+<li><code>type = dm</code></li>
+<li><code>dm_scope = per_peer</code></li>
+</ul>
+<p>则：</p>
+<ul>
+<li>同一个逻辑 <code>peer</code>，无论从 Telegram 还是 Feishu 发来，只要上层判定仍是同一个 <code>peer</code>，就应进入同一个 <code>session_key</code></li>
+<li>不同逻辑 <code>peer</code> 必须分桶</li>
+</ul>
+<h3 id="per_channel-2"><a class="header" href="#per_channel-2"><code>per_channel</code></a></h3>
+<p>上层请求：</p>
+<ul>
+<li><code>agent = alma</code></li>
+<li><code>type = dm</code></li>
+<li><code>dm_scope = per_channel</code></li>
+</ul>
+<p>则：</p>
+<ul>
+<li>同一个逻辑 <code>peer</code>，若分别从 Telegram 和 Feishu 发来，应进入不同 <code>session_key</code></li>
+<li>但同一个逻辑 <code>peer</code> 在同一个 <code>channel</code> 上，仍应进入同一个 <code>session_key</code></li>
+</ul>
+<h3 id="per_account-2"><a class="header" href="#per_account-2"><code>per_account</code></a></h3>
+<p>上层请求：</p>
+<ul>
+<li><code>agent = alma</code></li>
+<li><code>type = dm</code></li>
+<li><code>dm_scope = per_account</code></li>
+</ul>
+<p>则：</p>
+<ul>
+<li>同一个逻辑 <code>peer</code>，如果它是通过同一 <code>channel</code> 下不同本地接入 <code>account</code> 与这个 <code>agent</code> 发生 <code>dm</code>，就应进入不同 <code>session_key</code></li>
+</ul>
+<p>这里的“不同本地接入 <code>account</code>”具体意味着什么，由对应渠道适配模块负责解释和实现。</p>
+<h2 id="对-openclaw-当前架构的对比"><a class="header" href="#对-openclaw-当前架构的对比">对 OpenClaw 当前架构的对比</a></h2>
+<p>OpenClaw 在 <code>dm</code> 语义上，与本文档是一一对应的：</p>
+<ul>
+<li><code>main</code></li>
+<li><code>per-peer</code></li>
+<li><code>per-channel-peer</code></li>
+<li><code>per-account-channel-peer</code></li>
+</ul>
+<p>也就是说：</p>
+<ul>
+<li>在 <code>dm</code> 的同桶/异桶判定上，两边语义是等价的</li>
+</ul>
+<p>但在架构分层上，OpenClaw 当前更接近：</p>
+<ul>
+<li>adapter 先构造结构化 inbound context</li>
+<li>core 再消费这些结构化字段并交给上下文引擎做 assemble / compact</li>
+</ul>
+<p>这说明它已经明显区分了：</p>
+<ul>
+<li>渠道接入层</li>
+<li>结构化入站上下文</li>
+<li>会话上下文编排层</li>
+</ul>
+<p>但它当前仍保留了一部分 adapter-shaped prompt 痕迹，例如：</p>
+<ul>
+<li>adapter 仍会填写 <code>BodyForAgent</code></li>
+<li>adapter 仍会填写 <code>InboundHistory</code></li>
+</ul>
+<p>所以更准确地说，OpenClaw 当前在 <code>dm</code> 上是：</p>
+<ul>
+<li><strong>语义已对齐</strong></li>
+<li><strong>分层已部分建立</strong></li>
+<li><strong>最终 prompt render 仍未完全 core-owned</strong></li>
+</ul>
+<p>而本文档对应的第三轮目标是：</p>
+<ul>
+<li>保持与 OpenClaw 等价的 <code>dm</code> 分桶语义</li>
+<li>继续把最终上下文 render 收回 core / <code>type</code> renderer</li>
+<li>让 adapter 更专注于 <code>peer</code> / <code>channel</code> / <code>account</code> 的归一化与 <code>dm_subkey</code> 实现</li>
+</ul>
+<p>更完整的上下文分层讨论，见：</p>
+<ul>
+<li><code>docs/src/refactor/session-context-layering.md</code></li>
+<li><code>docs/src/refactor/session-event-canonical.md</code></li>
+</ul>
+<h2 id="最后收敛"><a class="header" href="#最后收敛">最后收敛</a></h2>
+<p>如果只记住一句话，就记住这句：</p>
+<ul>
+<li><code>dm_scope</code> 定义的是 <code>dm</code> 类型的同桶/异桶语义</li>
+<li>渠道适配模块负责把这个语义实现成一个稳定的 <code>dm_subkey</code></li>
+<li><code>session_key</code> 只是把这个结果编码出来</li>
+<li><code>session_id</code> 则是该逻辑桶当前指向的那一代 transcript</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../refactor/session-event-canonical.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/group-scope.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../refactor/session-event-canonical.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/group-scope.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

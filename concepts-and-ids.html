@@ -1,0 +1,679 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>概念与标识符 - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/admonish.css">
+        <link rel="stylesheet" href="theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/concepts-and-ids.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="概念与标识符"><a class="header" href="#概念与标识符">概念与标识符</a></h1>
+<p>本文档定义 Moltis 的核心概念，以及代表这些概念的标识符（identifier）。</p>
+<p>目标：当你看到一个字段名/变量名时，你应该立刻知道它的语义、允许用途、以及
+必须禁止的用途。</p>
+<div id="admonition-术语冻结authoritative" class="admonition admonish-warning" role="note" aria-labelledby="admonition-术语冻结authoritative-title">
+<div class="admonition-title">
+<div id="admonition-术语冻结authoritative-title">
+<p>术语冻结（Authoritative）</p>
+</div>
+<a class="admonition-anchor-link" href="#admonition-术语冻结authoritative"></a>
+</div>
+<div>
+<p>本文档中的名称与一行定义是权威口径。
+需要新增概念时，必须先更新本文档再改代码；严禁在代码/文档/协议里偷偷引入
+“再加一个 alias 先凑合”的做法。</p>
+</div>
+</div>
+<div id="admonition-禁止-alias硬规则" class="admonition admonish-danger" role="note" aria-labelledby="admonition-禁止-alias硬规则-title">
+<div class="admonition-title">
+<div id="admonition-禁止-alias硬规则-title">
+<p>禁止 alias（硬规则）</p>
+</div>
+<a class="admonition-anchor-link" href="#admonition-禁止-alias硬规则"></a>
+</div>
+<div>
+<p>禁止为同一概念提供多个对外名字（alias）。</p>
+<p>例如：禁止再出现 <code>sessionKey</code> 既表示 <code>sessionId</code> 又表示 <code>chanChatKey</code>；禁止再
+出现 <code>tool_session_key</code> 这种第三套命名；禁止继续扩散 <code>account_id</code> 这类历史字段。</p>
+<p>如果兼容历史数据/旧 payload 必不可少，也只能做“输入解析兼容”，并且必须保证：
+对外输出、文档示例、UI 显示只出现冻结后的名字。</p>
+</div>
+</div>
+<h2 id="核心概念已冻结"><a class="header" href="#核心概念已冻结">核心概念（已冻结）</a></h2>
+<p>核心概念定义了“身份坐标”和“路由边界”。只有核心概念才允许回答如下问题：</p>
+<ul>
+<li>对话历史存在哪？</li>
+<li>这条消息来自哪个渠道的哪个 chat/thread？</li>
+<li>当前说话的是哪只 bot/哪个渠道账号配置？</li>
+<li>回复应该发回到哪里？</li>
+</ul>
+<h3 id="sessionid"><a class="header" href="#sessionid"><code>sessionId</code></a></h3>
+<p>**一句话：**持久会话桶 / 存储地址。</p>
+<ul>
+<li>**用于：**消息历史存储、媒体存储路径、会话 metadata、分叉/复制（fork/branch）。</li>
+<li><strong>典型取值：</strong><code>main</code>、<code>session:&lt;uuid&gt;</code>。</li>
+<li>**禁止用于：**推断渠道身份（bot/chat/thread），也禁止用于任何“确定性跨域路由”。</li>
+</ul>
+<h3 id="chanchatkey"><a class="header" href="#chanchatkey"><code>chanChatKey</code></a></h3>
+<p>**一句话：**确定性对话坐标（跨域桥）。</p>
+<ul>
+<li><strong>格式：</strong><code>&lt;chanType&gt;:&lt;chanUserId&gt;:&lt;chatId&gt;[:&lt;threadId&gt;]</code>。</li>
+<li>**用于：**确定性路由、绑定、可观测性，以及“同一 chat 共享边界”的可选分桶策略。</li>
+<li>**禁止用于：**持久存储身份（它无法表达 fork/branch 产生的多个并行会话）。</li>
+</ul>
+<h3 id="chanaccountkey"><a class="header" href="#chanaccountkey"><code>chanAccountKey</code></a></h3>
+<p>**一句话：**渠道账号稳定主键。</p>
+<ul>
+<li><strong>格式：</strong><code>&lt;chanType&gt;:&lt;chanUserId&gt;</code>。</li>
+<li>**用于：**标识“是哪只 bot / 哪个渠道账号配置”在执行/说话。</li>
+<li>**禁止用于：**展示/UX 命名（展示名属于可变字段）。</li>
+</ul>
+<div id="admonition-内部命名也要对齐snake_case-版本" class="admonition admonish-tip" role="note" aria-labelledby="admonition-内部命名也要对齐snake_case-版本-title">
+<div class="admonition-title">
+<div id="admonition-内部命名也要对齐snake_case-版本-title">
+<p>内部命名也要对齐（snake_case 版本）</p>
+</div>
+<a class="admonition-anchor-link" href="#admonition-内部命名也要对齐snake_case-版本"></a>
+</div>
+<div>
+<p>内部实现（Rust/DB/schema）允许使用 <code>snake_case</code>，但<strong>概念名必须与本文档对齐</strong>。</p>
+<ul>
+<li>Rust 代码（变量/struct 字段）优先使用 <code>chan_account_key</code>（语义 = <code>chanAccountKey</code>），避免新增
+<code>account_handle/account_id</code> 这类历史名。</li>
+<li>DB/schema 现存列名可能仍是 <code>account_handle/channel_type/session_key</code>（legacy 存储名）。短期允许
+保留以减少迁移 churn，但它们不得向上层协议/服务层传播；对外仍只使用冻结字段名。</li>
+<li>同理：<code>chanChatKey</code>→<code>chan_chat_key</code>，<code>chanType</code>→<code>chan_type</code>，<code>chanReplyTarget</code>→<code>chan_reply_target</code>。</li>
+</ul>
+</div>
+</div>
+<h3 id="chantype"><a class="header" href="#chantype"><code>chanType</code></a></h3>
+<p>**一句话：**渠道类型 / 平台标识。</p>
+<ul>
+<li><strong>示例：</strong><code>telegram</code>、<code>discord</code>。</li>
+<li>**用于：**组成 <code>chanAccountKey</code> 与 <code>chanChatKey</code>。</li>
+</ul>
+<h3 id="chanuserid"><a class="header" href="#chanuserid"><code>chanUserId</code></a></h3>
+<p>**一句话：**渠道账号本体的稳定唯一 ID。</p>
+<ul>
+<li>**Telegram：**bot 的 <code>getMe.id</code>。</li>
+<li>**用于：**稳定身份；仅此而已。</li>
+</ul>
+<h3 id="chanusername"><a class="header" href="#chanusername"><code>chanUserName</code></a></h3>
+<p>**一句话：**人类可读的渠道用户名（可变、可空）。</p>
+<ul>
+<li>**Telegram：**bot 的 <code>getMe.username</code>（展示时格式化为 <code>@{chanUserName}</code>）。</li>
+<li>**用于：**UI、日志、调试。</li>
+<li>**禁止用于：**任何 key、路由、存储、绑定。</li>
+</ul>
+<h3 id="channickname"><a class="header" href="#channickname"><code>chanNickname</code></a></h3>
+<p>**一句话：**展示名/昵称（可变、可空）。</p>
+<ul>
+<li>**用于：**UI。</li>
+<li>**禁止用于：**任何 key、路由、存储、绑定。</li>
+</ul>
+<h3 id="chanreplytarget"><a class="header" href="#chanreplytarget"><code>chanReplyTarget</code></a></h3>
+<p>**一句话：**可执行的“回信地址对象”。</p>
+<p><code>chanReplyTarget</code> 表示把回复发回渠道所需的最小信息集合。</p>
+<ul>
+<li><strong>必须包含：</strong><code>chanType</code>、<code>chanAccountKey</code>、<code>chatId</code>。</li>
+<li><strong>可以包含：</strong><code>messageId</code>（用于 threaded reply / reply-to）。</li>
+<li>**禁止包含（逻辑关键）：**任何展示字段（<code>chanUserName</code>、<code>chanNickname</code>）。展示字段
+可以单独用于 UI，但不能参与“回信地址”的逻辑判定。</li>
+</ul>
+<h3 id="chatid"><a class="header" href="#chatid"><code>chatId</code></a></h3>
+<p>**一句话：**渠道内 chat/peer 的稳定标识。</p>
+<ul>
+<li>**用于：**定位消息发送目标。</li>
+</ul>
+<h3 id="messageid"><a class="header" href="#messageid"><code>messageId</code></a></h3>
+<p>**一句话：**渠道内某条消息的标识（可选）。</p>
+<ul>
+<li>**用于：**threaded reply / reply-to。</li>
+</ul>
+<h2 id="对外字段命名风格冻结"><a class="header" href="#对外字段命名风格冻结">对外字段命名风格（冻结）</a></h2>
+<p><strong>对外（RPC / WebSocket / Hooks / UI / 文档示例）字段名统一使用 <code>camelCase</code>。</strong></p>
+<ul>
+<li>**允许：**仅输出冻结字段名（例如 <code>sessionId</code>、<code>chanChatKey</code>、<code>chanAccountKey</code>）。</li>
+<li>**禁止：**同时输出两套命名（例如 <code>accountHandle</code> + <code>account_handle</code>；或 <code>sessionId</code> +
+<code>session_id</code>）。</li>
+<li>**兼容：**如需兼容历史 payload，只能在“输入解析”层做 <code>snake_case</code> 的短期兼容，并且
+必须有明确的移除截止线。</li>
+</ul>
+<p>这条规则的目的就是：防止“同一概念多个名字”长期共存，导致团队心智模型无法收敛。</p>
+<h2 id="工具上下文字段tool-context-keys"><a class="header" href="#工具上下文字段tool-context-keys">工具上下文字段（Tool Context Keys）</a></h2>
+<p>工具调用会收到系统注入的上下文字段（不是用户输入）。</p>
+<h3 id="_sessionid"><a class="header" href="#_sessionid"><code>_sessionId</code></a></h3>
+<p>**一句话：**本次工具调用所属的持久会话桶。</p>
+<ul>
+<li>**用于：**读写会话历史、metadata、媒体、以及 per-session state。</li>
+</ul>
+<h3 id="_chanchatkey"><a class="header" href="#_chanchatkey"><code>_chanChatKey</code></a></h3>
+<p>**一句话：**本次工具调用所属的确定性对话坐标。</p>
+<ul>
+<li>**出现条件：**当工具调用来自 channel-bound 交互时存在。</li>
+<li>**用于：**判断渠道来源、可选的 sandbox 分桶策略、channel 特定工具行为。</li>
+</ul>
+<div id="admonition-工具上下文禁止-alias" class="admonition admonish-note" role="note" aria-labelledby="admonition-工具上下文禁止-alias-title">
+<div class="admonition-title">
+<div id="admonition-工具上下文禁止-alias-title">
+<p>工具上下文：禁止 alias</p>
+</div>
+<a class="admonition-anchor-link" href="#admonition-工具上下文禁止-alias"></a>
+</div>
+<div>
+<p>工具上下文字段禁止引入额外 alias 名称（例如 <code>tool_session_key</code>）。
+如需兼容旧 payload，只能做“输入解析兼容”，文档与对外输出必须只发冻结字段。</p>
+</div>
+</div>
+<h2 id="非核心但独立的重要标识符"><a class="header" href="#非核心但独立的重要标识符">非核心、但独立的重要标识符</a></h2>
+<p>这些标识符很有用，但它们不属于“身份/路由坐标系”，不能替代核心概念。</p>
+<p>为了避免心智模型混乱，可以把它们按“用途/生命周期”分为四类：</p>
+<ol>
+<li><strong>记录 ID（record id）</strong>：标识“某条内部记录”，不标识会话本体</li>
+<li><strong>游标/序号（cursor/index）</strong>：用于 UI 去重/排序诊断，通常不持久</li>
+<li><strong>展示元信息（display/meta）</strong>：帮助 UI 呈现，禁止参与身份/路由</li>
+<li><strong>内部路由键（route key）</strong>：仅用于内部路由/绑定，禁止对外</li>
+</ol>
+<blockquote>
+<p>规则：当你需要“身份坐标”时，永远回到核心概念：<code>sessionId</code> / <code>chanChatKey</code> /
+<code>chanAccountKey</code> / <code>chanReplyTarget</code>。</p>
+</blockquote>
+<p>另外一条经验法则：</p>
+<ul>
+<li><strong>核心概念回答“地址/坐标/回复目标”</strong>（会影响路由/存储/隔离边界）</li>
+<li><strong>非核心标识回答“记录/游标/显示/追踪”</strong>（只用于 UI/排障/策略，不得当作地址）</li>
+</ul>
+<h3 id="connid"><a class="header" href="#connid"><code>connId</code></a></h3>
+<p>**一句话：**短生命周期的 WebSocket 连接标识。</p>
+<ul>
+<li>**生命周期：**只在 WS 连接存活期间有效，断线即失效。</li>
+<li>**用于：**浏览器侧工具协作（例如请求定位）、连接级默认值。</li>
+<li>**禁止用于：**会话身份、用户身份、路由、存储、任何持久映射。</li>
+</ul>
+<h3 id="runid"><a class="header" href="#runid"><code>runId</code></a></h3>
+<p>**一句话：**一次 agent/LLM run 的短生命周期标识。</p>
+<ul>
+<li>**生命周期：**一次 run（一次流式响应），用于取消、诊断、错误关联。</li>
+<li>**用于：**tracing、错误报告、流式事件关联。</li>
+<li>**禁止用于：**会话身份、存储桶命名、任何需要跨 run 长期存在的映射。</li>
+</ul>
+<h3 id="projectid"><a class="header" href="#projectid"><code>projectId</code></a></h3>
+<p>**一句话：**绑定在 <code>sessionId</code> 上的工程上下文选择。</p>
+<ul>
+<li>**用于：**解析项目文件/上下文、worktree 操作。</li>
+<li><strong>关系：</strong><code>sessionId -&gt; projectId</code>（一个 session 可能有也可能没有 project）。</li>
+<li>**禁止用于：**会话身份。</li>
+</ul>
+<h3 id="worktreebranch"><a class="header" href="#worktreebranch"><code>worktreeBranch</code></a></h3>
+<p>**一句话：**绑定在 <code>sessionId</code> 上的 git 分支/worktree 名。</p>
+<ul>
+<li>**用于：**将 session 映射到一个可用于改代码的 worktree。</li>
+<li><strong>关系：</strong><code>sessionId -&gt; worktreeBranch</code>。</li>
+<li>**禁止用于：**身份、路由、存储。</li>
+</ul>
+<h3 id="sessionentryid"><a class="header" href="#sessionentryid"><code>sessionEntryId</code></a></h3>
+<p>**一句话：**会话 metadata 记录自身的内部 ID（不是会话桶地址）。</p>
+<ul>
+<li>**背景：**当前 <code>SessionEntry</code> 同时存在 <code>id</code> 与 <code>key</code> 两个字段。
+<ul>
+<li><code>key</code>（内部名）语义等价 <code>sessionId</code>（持久会话桶地址）。</li>
+<li><code>id</code> 更像是“这条 metadata 记录的 UUID”。</li>
+</ul>
+</li>
+<li>**用于：**内部记录/索引/排障（若确有需要）。</li>
+<li>**禁止用于：**替代 <code>sessionId</code>；也不要在协议/路由/存储中作为会话身份。</li>
+</ul>
+<h3 id="messageindex"><a class="header" href="#messageindex"><code>messageIndex</code></a></h3>
+<p>**一句话：**会话内消息序号/游标（用于去重与 UI 逻辑，不是消息身份）。</p>
+<ul>
+<li>**用于：**UI 去重、重放、历史与实时流的对齐。</li>
+<li>**禁止用于：**身份（不是 <code>messageId</code>，也不是 <code>sessionId</code>）。</li>
+</ul>
+<blockquote>
+<p>直觉类比：<code>messageIndex</code> 是“第几条消息 / 第几个位置”，不是“这条消息的身份证”。</p>
+</blockquote>
+<h3 id="clientseq"><a class="header" href="#clientseq"><code>clientSeq</code></a></h3>
+<p>**一句话：**客户端序列号（仅用于排序诊断/排障）。</p>
+<ul>
+<li>**用于：**在网关与 UI 之间诊断乱序/重放。</li>
+<li>**禁止用于：**任何持久化身份。</li>
+</ul>
+<blockquote>
+<p>直觉类比：<code>clientSeq</code> 是“这个浏览器标签页发来的第 N 次请求序号”，页面刷新会重置。</p>
+</blockquote>
+<h3 id="chanmessagemeta"><a class="header" href="#chanmessagemeta"><code>chanMessageMeta</code></a></h3>
+<p>**一句话：**渠道入站消息的“展示/提示元信息”（用于 UI 展示与提示，不是身份坐标）。</p>
+<p><code>chanMessageMeta</code> 表示“这条消息来自哪个渠道、谁发的、消息种类是什么、默认模型是什么”等
+UI 展示友好的信息。</p>
+<ul>
+<li>**用于：**UI 展示、调试提示。</li>
+<li>**禁止用于：**构造 <code>sessionId</code>/<code>chanChatKey</code>/<code>chanAccountKey</code>；也禁止用于任何路由与存储。</li>
+</ul>
+<blockquote>
+<p>直觉类比：<code>chanMessageMeta</code> 是“UI 角标/提示信息”，不是“坐标/地址”。</p>
+</blockquote>
+<h3 id="routesessionkeylegacy"><a class="header" href="#routesessionkeylegacy"><code>routeSessionKey</code>（Legacy）</a></h3>
+<p>**一句话：**内部路由键（历史名 <code>SessionKey</code>，与 <code>sessionId/chanChatKey</code> 无关）。</p>
+<ul>
+<li>**背景：**仓库中存在一个内部类型名叫 <code>SessionKey</code>，其格式类似
+<code>agent:&lt;id&gt;:channel:&lt;...&gt;:account:&lt;...&gt;:peer:&lt;...&gt;</code>。</li>
+<li>**用于：**内部“消息 → agent”路由/绑定级的 key（如果仍在使用）。</li>
+<li>**禁止用于：**对外协议；也不得替代 <code>sessionId</code> 或 <code>chanChatKey</code>。</li>
+<li>**建议：**后续实现阶段应把类型/字段名从 <code>SessionKey/session_key</code> 改为 <code>routeSessionKey/route_session_key</code>，避免与本文档冻结概念冲突。</li>
+</ul>
+<h3 id="peerid"><a class="header" href="#peerid"><code>peerId</code></a></h3>
+<p>**一句话：**渠道内“消息发送者（人类用户）”的稳定标识（不是 bot）。</p>
+<ul>
+<li>**用于：**访问控制（allowlist）、按发送者分层策略（例如 tools policy）、审计日志。</li>
+<li>**禁止用于：**替代 <code>chanUserId</code>（bot 身份）或 <code>chanAccountKey</code>（bot 配置主键）。</li>
+</ul>
+<blockquote>
+<p>直觉类比：<code>chanUserId</code> 是“机器人身份证”，<code>peerId</code> 是“群里某个人的身份证”。</p>
+</blockquote>
+<h3 id="operatorid"><a class="header" href="#operatorid"><code>operatorId</code></a></h3>
+<p>**一句话：**Web UI / 运维操作者身份标识（非渠道 peer）。</p>
+<ul>
+<li>**用于：**权限控制、审计、passkey/WebAuthn 账号标识。</li>
+<li>**禁止用于：**替代 <code>peerId</code>（渠道人类发送者）或 <code>chanUserId</code>（bot 身份）。</li>
+</ul>
+<blockquote>
+<p>直觉类比：<code>operatorId</code> 是“后台登录用户”，<code>peerId</code> 是“Telegram/Discord 里的发信人”。</p>
+</blockquote>
+<h3 id="peerusername--peerdisplayname"><a class="header" href="#peerusername--peerdisplayname"><code>peerUserName</code> / <code>peerDisplayName</code></a></h3>
+<p>**一句话：**渠道内“消息发送者”的展示名（可变、可空）。</p>
+<ul>
+<li>**用于：**UI 展示、日志辅助。</li>
+<li>**禁止用于：**任何 key、路由、存储、绑定。</li>
+</ul>
+<h3 id="chattype"><a class="header" href="#chattype"><code>chatType</code></a></h3>
+<p>**一句话：**渠道内对话类型分类（用于策略与展示，不是身份坐标）。</p>
+<ul>
+<li>**示例：**dm / group / channel。</li>
+<li>**用于：**访问控制与策略分层（例如群聊需要 mention gating）。</li>
+<li>**禁止用于：**构造 <code>sessionId</code> 或 <code>chanChatKey</code>。</li>
+</ul>
+<h3 id="groupidlegacy"><a class="header" href="#groupidlegacy"><code>groupId</code>（Legacy）</a></h3>
+<p>**一句话：**群/频道容器 ID（历史字段；在 Telegram 中通常等价 <code>chatId</code>）。</p>
+<ul>
+<li>**用于：**策略分层（per-group policy）与旧代码兼容。</li>
+<li>**禁止用于：**替代 <code>chatId</code>（新口径中应直接使用 <code>chatId</code>）。</li>
+</ul>
+<h2 id="非核心标识符快速选用指南"><a class="header" href="#非核心标识符快速选用指南">非核心标识符：快速选用指南</a></h2>
+<p>下面这张“选型表”用于快速判断某个字段该不该用、该用在哪。</p>
+<ul>
+<li>需要定位历史/媒体/状态存储桶 → 用 <code>sessionId</code></li>
+<li>需要定位渠道对话坐标（bot+chat+thread）→ 用 <code>chanChatKey</code></li>
+<li>需要把回复发回渠道 → 用 <code>chanReplyTarget</code></li>
+<li>需要在 UI 里把实时消息与历史对齐/去重 → 用 <code>messageIndex</code>（同时必须带 <code>sessionId</code>）</li>
+<li>需要诊断浏览器侧乱序/重放 → 用 <code>clientSeq</code>（同时通常带 <code>connId</code>）</li>
+<li>需要引用一条 metadata 记录本身 → 用 <code>sessionEntryId</code>（很少需要）</li>
+<li>需要内部“消息 → agent”路由键 → 用 <code>routeSessionKey</code>（仅内部，禁止对外）</li>
+<li>需要在策略里区分“谁发的” → 用 <code>peerId</code>（不是 bot）</li>
+<li>需要按群/频道分层策略 → 用 <code>chatId</code>（不要再用 <code>groupId</code>）</li>
+</ul>
+<h2 id="常见结构体的口径映射legacy--frozen"><a class="header" href="#常见结构体的口径映射legacy--frozen">常见结构体的口径映射（Legacy → Frozen）</a></h2>
+<p>这一节用于快速识别“旧结构体字段名”的真实语义，避免把旧名词继续扩散。</p>
+<h3 id="msgcontextlegacy-inbound-message-context"><a class="header" href="#msgcontextlegacy-inbound-message-context"><code>MsgContext</code>（legacy inbound message context）</a></h3>
+<p>仓库中存在一个 <code>MsgContext</code>（注释：mirrors TypeScript），它把旧术语打包在一起。
+它不是核心概念的一部分，但它的字段需要明确映射到冻结概念。</p>
+<ul>
+<li><code>channel</code> → 语义等价 <code>chanType</code>（平台类型），不应理解为“channel 对象”。</li>
+<li><code>account_handle</code> → 语义等价 <code>chanAccountKey</code>（Rust 上层应优先使用 <code>chan_account_key</code>；DB 列名可能仍为 legacy）。</li>
+<li><code>session_key</code> → <strong>历史漂移字段</strong>：必须拆分为 <code>sessionId</code> + <code>chanChatKey</code>。</li>
+<li><code>reply_to_id</code> → 语义等价 <code>messageId</code>。</li>
+<li><code>from</code>（PeerId）→ 语义等价 <code>peerId</code>（发送者，不是 bot）。</li>
+<li><code>sender_name</code> → 语义等价 <code>peerDisplayName</code>（display-only）。</li>
+<li><code>group_id/guild_id/team_id</code> → 平台/组织容器维度（非核心；策略可用，但不要当身份坐标）。</li>
+</ul>
+<blockquote>
+<p>规则：任何新代码不得继续扩展 <code>MsgContext</code> 的旧字段；应直接使用冻结概念字段名。</p>
+</blockquote>
+<h3 id="常见-legacy-type-alias"><a class="header" href="#常见-legacy-type-alias">常见 legacy type alias</a></h3>
+<p><code>crates/common/src/types.rs</code> 中存在一些历史 type alias，其语义应按冻结概念理解：</p>
+<ul>
+<li><code>AccountHandle</code> → 语义等价 <code>chanAccountKey</code>（内部应逐步改名，不再叫 handle；允许 DB 层 legacy 名继续存在一段时间）</li>
+<li><code>ChannelId</code> → 语义等价 <code>chanType</code></li>
+<li><code>PeerId</code> → 语义等价 <code>peerId</code></li>
+</ul>
+<h3 id="policycontexttools-policy-layering"><a class="header" href="#policycontexttools-policy-layering"><code>PolicyContext</code>（tools policy layering）</a></h3>
+<p>工具策略分层上下文里目前使用了 <code>channel/group_id/sender_id</code> 这样的旧字段：</p>
+<ul>
+<li><code>channel</code> → 语义等价 <code>chanType</code></li>
+<li><code>group_id</code> → 通常语义等价 <code>chatId</code>（per-group policy 的 group 就是 chat）</li>
+<li><code>sender_id</code> → 语义等价 <code>peerId</code></li>
+</ul>
+<p>建议后续实现阶段把这些字段也改成更自解释的名称（例如 <code>chan_type/chat_id/peer_id</code>）。</p>
+<h2 id="默认策略冻结"><a class="header" href="#默认策略冻结">默认策略（冻结）</a></h2>
+<p>本节把“哪些地方用 <code>sessionId</code>，哪些地方用 <code>chanChatKey</code>”说清楚，避免后续实现
+各自为政。</p>
+<h3 id="prompt-cache-分桶"><a class="header" href="#prompt-cache-分桶">Prompt Cache 分桶</a></h3>
+<p><strong>结论：prompt cache bucket key = <code>sessionId</code>。</strong></p>
+<ul>
+<li>理由：<code>sessionId</code> 才是“真实上下文边界”（同一 <code>sessionId</code> 才属于同一会话桶）；在同
+一 <code>chanChatKey</code> 下 <code>/new</code> 切出来的多个会话不应共享同一个 prompt-cache bucket。</li>
+<li>备注：上游 provider 的字段名/实现可能仍写作 <code>session_key</code>（历史遗留），但其语义必须
+等价于本文档定义的 <code>sessionId</code>。</li>
+</ul>
+<h3 id="sandbox-scope"><a class="header" href="#sandbox-scope">Sandbox Scope</a></h3>
+<p><strong>结论：sandbox scope 默认 = <code>chat</code>（按 chat 复用；由 <code>chanChatKey</code> 派生）。</strong></p>
+<ul>
+<li>意义：同一 chat/thread 内的多条指令可以复用同一套 sandbox 环境，提高连续操作效率。</li>
+<li>注意：如果你需要更强隔离（例如高风险命令、或不希望同一 chat 内共享环境），可以将 scope
+设置为 <code>session</code>（channel-bound 场景按 <code>chanChatKey</code>；非 channel 场景按 <code>sessionId</code>）。</li>
+</ul>
+<div id="admonition-当前实现差异" class="admonition admonish-note" role="note" aria-labelledby="admonition-当前实现差异-title">
+<div class="admonition-title">
+<div id="admonition-当前实现差异-title">
+<p>当前实现差异</p>
+</div>
+<a class="admonition-anchor-link" href="#admonition-当前实现差异"></a>
+</div>
+<div>
+<p>当前实现已对齐：<code>SandboxScope</code> 默认值为 <code>chat</code>。</p>
+</div>
+</div>
+<h2 id="过载词汇overloaded-words必须避免"><a class="header" href="#过载词汇overloaded-words必须避免">过载词汇（Overloaded Words）【必须避免】</a></h2>
+<p>以下词汇在代码库里被多个子系统复用，极易造成“同词不同义”的沟通与实现事故。</p>
+<h3 id="scope"><a class="header" href="#scope"><code>scope</code></a></h3>
+<p><strong>规则：文档与协议中禁止裸写 <code>scope</code>，必须写全称。</strong></p>
+<ul>
+<li><code>sandboxScope</code>：容器复用边界（session/chat/bot/global）。</li>
+<li><code>authScope</code>：权限范围（例如 <code>operator.read</code>/<code>operator.write</code>）。</li>
+<li><code>throttleScope</code>：限流范围（login/api/ws/…）。</li>
+</ul>
+<p>配置文件中如果出现 <code>scope</code>，必须由所属对象限定语义（例如 <code>[tools.exec.sandbox] scope = "chat"</code>），
+并在文档中写作 “sandbox scope”。</p>
+<h3 id="channel"><a class="header" href="#channel"><code>channel</code></a></h3>
+<p><strong>规则：对外禁止使用泛化字段名 <code>channel</code>。</strong></p>
+<p>必须拆成以下之一：</p>
+<ul>
+<li>仅平台类型：用 <code>chanType</code>。</li>
+<li>可执行回信地址：用 <code>chanReplyTarget</code>。</li>
+<li>仅 UI 展示/提示元信息：用 <code>chanMessageMeta</code>。</li>
+</ul>
+<h3 id="key"><a class="header" href="#key"><code>key</code></a></h3>
+<p><strong>规则：对外禁止使用泛化字段名 <code>key</code> 表示会话。</strong></p>
+<p>必须使用 <code>sessionId</code>（持久会话桶）或 <code>chanChatKey</code>（渠道坐标），禁止模糊化。</p>
+<h3 id="handle"><a class="header" href="#handle"><code>handle</code></a></h3>
+<p><strong>规则：对外与内部都避免用 <code>handle</code> 表示稳定主键。</strong></p>
+<ul>
+<li>稳定主键：用 <code>chanAccountKey</code> / <code>chan_account_key</code>。</li>
+<li>展示名：用 <code>chanUserName/chanNickname</code>。</li>
+</ul>
+<h3 id="user--sender"><a class="header" href="#user--sender"><code>user</code> / <code>sender</code></a></h3>
+<p><strong>规则：避免使用笼统的 <code>user_id/sender_id</code> 作为长期概念名。</strong></p>
+<p>必须明确“是 bot 还是人类发送者”：</p>
+<ul>
+<li>bot（渠道账号本体）→ <code>chanUserId</code> / <code>chanAccountKey</code></li>
+<li>人类发送者（peer）→ <code>peerId</code></li>
+</ul>
+<p><code>sender_id</code> 属于 legacy 字段名：</p>
+<ul>
+<li>当它出现在“渠道消息/群聊策略/命令触发者”语境下，语义应等价 <code>peerId</code>（内部 <code>peer_id</code>）。</li>
+<li>如果未来需要表达“Web UI 登录用户/运维操作者”的身份，不得复用 <code>peerId</code>，应引入新的
+非核心概念（例如 <code>operatorId</code>），避免同名不同义。</li>
+</ul>
+<h2 id="示例对外-payload"><a class="header" href="#示例对外-payload">示例（对外 payload）</a></h2>
+<p>下面示例展示“对外输出只用冻结字段名”的形态。展示字段是可选的，核心字段必须语义稳定。</p>
+<pre><code class="language-json">{
+  "sessionId": "session:550e8400-e29b-41d4-a716-446655440000",
+  "chanChatKey": "telegram:8576199590:-1001234567890:12",
+  "chanAccountKey": "telegram:8576199590",
+  "chanType": "telegram",
+  "chanUserId": "8576199590",
+  "chanUserName": "lovely_apple_bot",
+  "chanNickname": "Apple Bot",
+  "chatId": "-1001234567890",
+  "messageId": "42",
+  "chanReplyTarget": {
+    "chanType": "telegram",
+    "chanAccountKey": "telegram:8576199590",
+    "chatId": "-1001234567890",
+    "messageId": "42"
+  }
+}
+</code></pre>
+<h2 id="关系总结人类心智模型"><a class="header" href="#关系总结人类心智模型">关系总结（人类心智模型）</a></h2>
+<ul>
+<li>一个 <strong>channel chat</strong> 有一个稳定坐标：<code>chanChatKey</code>。</li>
+<li>该 chat 默认指向一个 <strong>当前活跃的持久会话桶</strong>：<code>sessionId</code>。</li>
+<li>同一个 <code>chanChatKey</code> 在时间维度上可以对应多个 <code>sessionId</code>（例如 <code>/new</code> 或 fork/branch），
+但任一时刻只有一个活跃 <code>sessionId</code>。</li>
+<li>渠道回复使用 <code>chanReplyTarget</code>（可执行地址）。</li>
+</ul>
+<h2 id="常见误区必须避免"><a class="header" href="#常见误区必须避免">常见误区（必须避免）</a></h2>
+<ul>
+<li>把 <code>chanUserName</code> / <code>chanNickname</code> 当作稳定标识。</li>
+<li>把 <code>connId</code> 当作用户/会话标识。</li>
+<li>把 <code>runId</code> 当作会话标识。</li>
+<li>用一个含混的名字（例如 <code>sessionKey</code>）同时表示 <code>sessionId</code> 与 <code>chanChatKey</code>。</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="system-prompt.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="refactor/v3-design.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="system-prompt.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="refactor/v3-design.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

@@ -1,0 +1,975 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Channel Adapter Generic Interfaces - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/channel-adapter-generic-interfaces.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="channel-adapter-generic-interfaces"><a class="header" href="#channel-adapter-generic-interfaces">Channel Adapter Generic Interfaces</a></h1>
+<p>本文档只定义一件事：</p>
+<ul>
+<li>第三版里，渠道适配层与 core 之间，应该抽成哪些<strong>通用接口</strong></li>
+</ul>
+<p>本文档讨论的是：</p>
+<ul>
+<li>Rust 里如何表达这组抽象接口</li>
+<li>四个边界面分别对应什么 trait</li>
+<li>哪些对象应当做成跨渠道通用对象</li>
+<li>哪些对象只能做成渠道私有 opaque ref</li>
+<li>TG 如何作为第一份实现接入</li>
+</ul>
+<p>本文档不讨论：</p>
+<ul>
+<li>Telegram 具体实现细节</li>
+<li>其他渠道的具体字段</li>
+<li>最终版 <code>session_event</code> 全字段</li>
+<li>一次性全局迁移顺序</li>
+</ul>
+<p>也就是说，本文档讨论的是：</p>
+<ul>
+<li><strong>通用接口层</strong></li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li><strong>某个渠道自己的边界实现细节</strong></li>
+</ul>
+<p>本文档与下列 Telegram 专项文档配套使用：</p>
+<ul>
+<li><code>issues/issue-v3-session-ids-and-channel-boundary-one-cut.md</code></li>
+<li><code>docs/src/refactor/channel-info-exposure-boundary.md</code></li>
+<li><code>docs/src/refactor/telegram-adapter-boundary.md</code></li>
+</ul>
+<p>两者关系是：</p>
+<ul>
+<li>先由 Telegram 专项边界压实真实需求</li>
+<li>再从中提炼稳定的通用接口</li>
+</ul>
+<p>如果两者暂时出现冲突，应先以主单 + 渠道边界专项文档为准，再回修本通用接口文档</p>
+<p>这里再明确一条当前阶段的实施原则：</p>
+<ul>
+<li>本文档不是当前阶段的直接施工蓝图</li>
+<li>当前实现应先以 <code>issues/issue-v3-session-ids-and-channel-boundary-one-cut.md</code>、<code>docs/src/refactor/channel-info-exposure-boundary.md</code>、<code>docs/src/refactor/telegram-adapter-boundary.md</code> 为准</li>
+<li>本文档更适合作为 Telegram 落地后的回看、提炼与校验材料</li>
+<li>C 阶段不应阻塞在“全渠道通用 trait 一次性全部落地”上</li>
+<li>只要 Telegram 专项边界已经把 adapter / core 分工切清，就允许先以 TG-first 方式推进</li>
+</ul>
+<h2 id="一句话结论"><a class="header" href="#一句话结论">一句话结论</a></h2>
+<p>Rust 有“抽象接口”的概念，对应的就是：</p>
+<ul>
+<li><code>trait</code></li>
+</ul>
+<p>第三版里，渠道适配层与 core 之间，建议固定为四个边界面：</p>
+<ul>
+<li>配置面</li>
+<li>聊天面</li>
+<li>控制面</li>
+<li>回复面</li>
+</ul>
+<p>但工程上不要做成<strong>一个巨型 trait</strong>，而应拆成：</p>
+<ul>
+<li>小 trait</li>
+<li>少量通用对象</li>
+<li>渠道私有 opaque ref</li>
+</ul>
+<p>一句话：</p>
+<ul>
+<li><strong>接口通用，语义通用，渠道细节不通用</strong></li>
+</ul>
+<h2 id="为什么这里应使用-rust-trait"><a class="header" href="#为什么这里应使用-rust-trait">为什么这里应使用 Rust trait</a></h2>
+<p>在 Rust 里，如果想表达“这一层暴露什么能力，而不是怎么实现”，最合适的工具就是 <code>trait</code>。</p>
+<p>在这里使用 <code>trait</code> 有三个直接好处：</p>
+<ul>
+<li>core 可以只依赖能力，不依赖某个具体渠道实现</li>
+<li>Telegram / Feishu / Slack 后续都可以按同一组边界实现</li>
+<li>测试时可以直接用 mock adapter 替换真实渠道实现</li>
+</ul>
+<p>但这里有一个重要约束：</p>
+<ul>
+<li><strong>不要为了抽象而抽象</strong></li>
+</ul>
+<p>当前更合理的做法不是：</p>
+<ul>
+<li>一开始设计一套很重的泛型体系</li>
+<li>或一开始就把所有渠道的细节统一建模</li>
+</ul>
+<p>而是：</p>
+<ul>
+<li>先从 Telegram 专项边界压实真实需求</li>
+<li>再回看哪些接口和对象真的足够稳定</li>
+<li>其余渠道私有细节都收进 opaque ref</li>
+</ul>
+<h2 id="总体原则"><a class="header" href="#总体原则">总体原则</a></h2>
+<h3 id="1-四个边界面固定"><a class="header" href="#1-四个边界面固定">1. 四个边界面固定</a></h3>
+<p>无论哪个渠道，和 core 的边界都应只落在这四类问题上：</p>
+<ul>
+<li>配置怎么进入渠道适配层</li>
+<li>聊天消息怎么进入 core</li>
+<li>非聊天控制输入怎么进入 core</li>
+<li>core 产出的回复怎么回到渠道</li>
+</ul>
+<h3 id="2-通用的是接口不是所有字段"><a class="header" href="#2-通用的是接口不是所有字段">2. 通用的是接口，不是所有字段</a></h3>
+<p>这里要明确：</p>
+<ul>
+<li>通用的是 <code>trait</code></li>
+<li>通用的是少量上层对象</li>
+</ul>
+<p>不通用的是：</p>
+<ul>
+<li><code>chat_id</code></li>
+<li><code>message_id</code></li>
+<li><code>topic_id</code></li>
+<li><code>thread_id</code></li>
+<li><code>reply_to_message_id</code></li>
+<li>relay hop / mirror key</li>
+<li>各渠道自己的回包、重试、线程化细节</li>
+</ul>
+<p>这些不应抬成公共字段。</p>
+<h3 id="3-通用对象只保留稳定语义"><a class="header" href="#3-通用对象只保留稳定语义">3. 通用对象只保留稳定语义</a></h3>
+<p>跨渠道通用对象里，只保留 core 长期稳定需要的内容，例如：</p>
+<ul>
+<li>聊天类型</li>
+<li>进入模式</li>
+<li>通用消息内容</li>
+<li>逻辑路由结果</li>
+</ul>
+<h3 id="4-渠道私有信息统一走-opaque-ref"><a class="header" href="#4-渠道私有信息统一走-opaque-ref">4. 渠道私有信息统一走 opaque ref</a></h3>
+<p>如果一段信息：</p>
+<ul>
+<li>只有本渠道自己知道怎么解释</li>
+<li>core 只需要“保存 / 回传 / 再交还给渠道”</li>
+</ul>
+<p>那它就不应展开成公共字段，而应进入：</p>
+<ul>
+<li><code>MessageSourceRef</code></li>
+<li><code>ReplyTargetRef</code></li>
+</ul>
+<p>这样的 opaque ref 对象。</p>
+<h3 id="5-长期的上下文分层归-core当前-c-阶段入站最终文本由-adapter-提供"><a class="header" href="#5-长期的上下文分层归-core当前-c-阶段入站最终文本由-adapter-提供">5. 长期的上下文分层归 core，当前 C 阶段入站最终文本由 adapter 提供</a></h3>
+<p>长期看，渠道适配层不应直接主导最终 LLM 可见 transcript 的分层与整理。</p>
+<p>更合理的分工是：</p>
+<ul>
+<li>adapter 负责归一化原生事件</li>
+<li>adapter 负责返回路由语义</li>
+<li>core 负责最终的上下文分层 / compact / 长期记录结构</li>
+</ul>
+<p>但当前 C 阶段 one-cut 的已冻结口径是：</p>
+<ul>
+<li>Telegram adapter 直接产出“最终可给模型看的入站文本”</li>
+<li>gateway/core 不再根据 Telegram 私有字段二次拼装 TG 群聊 transcript</li>
+</ul>
+<p>也就是说，当前阶段并不要求先把这里落成一个统一的 <code>NormalizedMessage -&gt; core renderer</code> 终态。</p>
+<p>当前这一步仍可以先通过：</p>
+<ul>
+<li><code>legacy persistence bridge</code></li>
+</ul>
+<p>来落地。</p>
+<p>也就是说：</p>
+<ul>
+<li>当前不要求先完成 <code>session_event</code> 持久化</li>
+<li>也不要求先把所有通用 trait 都接进全系统</li>
+<li>但要求先把“最终上下文由谁负责”这件事收口到 core</li>
+</ul>
+<h2 id="命名规则"><a class="header" href="#命名规则">命名规则</a></h2>
+<p>这一组命名先冻结三条规则：</p>
+<ul>
+<li>trait 名使用<strong>能力域名</strong></li>
+<li>对象名使用<strong>结果/请求/引用类型名</strong></li>
+<li>方法名使用<strong>动作动词</strong></li>
+</ul>
+<p>对应到当前文档，就是：</p>
+<ul>
+<li>trait：
+<ul>
+<li><code>ChannelConfig</code></li>
+<li><code>ChannelMessageIngress</code></li>
+<li><code>ChannelMessageRouting</code></li>
+<li><code>ChannelControl</code></li>
+<li><code>ChannelReplyDelivery</code></li>
+</ul>
+</li>
+<li>对象：
+<ul>
+<li><code>NormalizedMessage</code></li>
+<li><code>MessageBody</code></li>
+<li><code>MessageSourceRef</code></li>
+<li><code>ResolvedRoute</code></li>
+<li><code>ControlRequest</code></li>
+<li><code>ControlResult</code></li>
+<li><code>ReplyRequest</code></li>
+<li><code>ReplyTargetRef</code></li>
+<li><code>ReplyReceipt</code></li>
+<li><code>SessionPolicy</code></li>
+</ul>
+</li>
+<li>方法：
+<ul>
+<li><code>apply_account_config</code></li>
+<li><code>export_session_policy</code></li>
+<li><code>normalize_message</code></li>
+<li><code>resolve_route</code></li>
+<li><code>handle_control</code></li>
+<li><code>deliver_reply</code></li>
+</ul>
+</li>
+</ul>
+<p>这里的命名意图是：</p>
+<ul>
+<li>trait 不强调 <code>Interface</code> / <code>Port</code> / <code>Manager</code></li>
+<li>trait 直接表达“这一层提供哪类能力”</li>
+<li>对象名一眼能看出它是：
+<ul>
+<li>归一化结果</li>
+<li>解析结果</li>
+<li>请求</li>
+<li>回执</li>
+<li>opaque 引用</li>
+</ul>
+</li>
+</ul>
+<h2 id="四个边界面对应的-trait"><a class="header" href="#四个边界面对应的-trait">四个边界面对应的 trait</a></h2>
+<p>这里说“四个边界面”，是按职责分层。</p>
+<p>其中“聊天面”在工程实现上会拆成两个 trait：</p>
+<ul>
+<li>入站</li>
+<li>路由解析</li>
+</ul>
+<p>这不代表多出第五个边界面；只是因为聊天面天然有两个方向的问题。</p>
+<h2 id="1-配置面"><a class="header" href="#1-配置面">1. 配置面</a></h2>
+<p>建议抽象为：</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>#[async_trait]
+pub trait ChannelConfig: Send + Sync {
+    async fn apply_account_config(
+        &amp;self,
+        account_key: &amp;str,
+        config: serde_json::Value,
+    ) -&gt; anyhow::Result&lt;()&gt;;
+
+    async fn export_session_policy(
+        &amp;self,
+        account_key: &amp;str,
+    ) -&gt; anyhow::Result&lt;SessionPolicy&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="这个接口回答什么"><a class="header" href="#这个接口回答什么">这个接口回答什么</a></h3>
+<ul>
+<li>渠道配置如何应用到该渠道运行时</li>
+<li>core 需要的会话策略如何从渠道配置中导出</li>
+</ul>
+<h3 id="为什么这里不统一配置结构体"><a class="header" href="#为什么这里不统一配置结构体">为什么这里不统一配置结构体</a></h3>
+<p>因为不同渠道的配置本来就不一样。</p>
+<p>所以通用的应是：</p>
+<ul>
+<li>“怎么应用配置”</li>
+<li>“怎么导出 session policy”</li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li>所有渠道共用同一个配置 struct</li>
+</ul>
+<h3 id="当前-tg-如何接入"><a class="header" href="#当前-tg-如何接入">当前 TG 如何接入</a></h3>
+<p>TG 第一阶段完全可以继续复用：</p>
+<ul>
+<li><code>TelegramAccountConfig</code></li>
+<li>现有 add/update/start 链路</li>
+</ul>
+<p>也就是：</p>
+<ul>
+<li>先不改配置来源</li>
+<li>先不改配置存储</li>
+<li>先只在代码职责上，让 TG 实现 <code>ChannelConfig</code></li>
+</ul>
+<h2 id="2-聊天面"><a class="header" href="#2-聊天面">2. 聊天面</a></h2>
+<p>聊天面建议拆成两个 trait：</p>
+<ul>
+<li><code>ChannelMessageIngress</code></li>
+<li><code>ChannelMessageRouting</code></li>
+</ul>
+<p>原因很简单：</p>
+<ul>
+<li>一部分问题是“原生消息如何归一化进入 core”</li>
+<li>另一部分问题是“给定 scope 后，这条消息如何解析成 peer / sender / bucket”</li>
+</ul>
+<p>这两个方向不应强行揉成一个方法。</p>
+<h3 id="21-channelmessageingress"><a class="header" href="#21-channelmessageingress">2.1 <code>ChannelMessageIngress</code></a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>#[async_trait]
+pub trait ChannelMessageIngress: Send + Sync {
+    async fn normalize_message(&amp;self) -&gt; anyhow::Result&lt;NormalizedMessage&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<p>这里的重点不是方法签名本身，而是：</p>
+<ul>
+<li>聊天主链只接收归一化后的 <code>NormalizedMessage</code></li>
+<li>这仍是 future-facing 草案；当前 C 阶段 Telegram 落地以主单和专项边界文档里的最小 envelope 为准</li>
+</ul>
+<h3 id="normalizedmessage"><a class="header" href="#normalizedmessage"><code>NormalizedMessage</code></a></h3>
+<blockquote>
+<p>下列结构是“后续通用接口提炼”的草案，不是当前 C 阶段 one-cut 必须逐字段落成的现网结构。</p>
+</blockquote>
+<p>建议收敛为：</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct NormalizedMessage {
+    pub channel_kind: ChannelKind,
+    pub chat_kind: ChatKind,
+    pub ingress_mode: IngressMode,
+    pub body: MessageBody,
+    pub source_ref: MessageSourceRef,
+}
+<span class="boring">}</span></code></pre></pre>
+<p>逐字段解释如下。</p>
+<h4 id="channel_kind"><a class="header" href="#channel_kind"><code>channel_kind</code></a></h4>
+<p>来源渠道，例如：</p>
+<ul>
+<li><code>telegram</code></li>
+<li><code>feishu</code></li>
+</ul>
+<p>这是稳定的跨渠道语义，保留是合理的。</p>
+<h4 id="chat_kind"><a class="header" href="#chat_kind"><code>chat_kind</code></a></h4>
+<p>建议只保留：</p>
+<ul>
+<li><code>dm</code></li>
+<li><code>group</code></li>
+</ul>
+<p>这里故意不掺：</p>
+<ul>
+<li><code>cron</code></li>
+<li><code>heartbeat</code></li>
+</ul>
+<p>因为这里讨论的是<strong>渠道聊天输入</strong>，不是 core 全局所有触发类型。</p>
+<h4 id="ingress_mode"><a class="header" href="#ingress_mode"><code>ingress_mode</code></a></h4>
+<p>建议只保留：</p>
+<ul>
+<li><code>dispatch</code></li>
+<li><code>record_only</code></li>
+</ul>
+<p>它只表达：</p>
+<ul>
+<li>这条聊天输入是否要触发 run</li>
+</ul>
+<p>它不表达：</p>
+<ul>
+<li>relay / mirror / native 这种渠道内部来历</li>
+</ul>
+<h4 id="body"><a class="header" href="#body"><code>body</code></a></h4>
+<p>建议收敛为：</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct MessageBody {
+    pub text: Option&lt;String&gt;,
+    pub attachments: Vec&lt;Attachment&gt;,
+    pub location: Option&lt;LocationPayload&gt;,
+}
+<span class="boring">}</span></code></pre></pre>
+<p>它回答的是：</p>
+<ul>
+<li>这条消息的通用内容是什么</li>
+</ul>
+<p>这里不应放：</p>
+<ul>
+<li>原生 update</li>
+<li>file id</li>
+<li>mention entity</li>
+<li>thread/topic 原始对象</li>
+<li>最终给模型看的 transcript 文本</li>
+</ul>
+<h4 id="source_ref"><a class="header" href="#source_ref"><code>source_ref</code></a></h4>
+<p>这是：</p>
+<ul>
+<li><strong>渠道私有 opaque ref</strong></li>
+</ul>
+<p>它回答的是：</p>
+<ul>
+<li>渠道后续如果要做 route 解析、回复路径恢复、幂等、去重、线程化，需要依赖哪些本地信息</li>
+</ul>
+<p>core 对它的态度应当是：</p>
+<ul>
+<li>可以持久化</li>
+<li>可以回传给同一渠道 adapter</li>
+<li>但不解析内部结构</li>
+</ul>
+<h3 id="22-channelmessagerouting"><a class="header" href="#22-channelmessagerouting">2.2 <code>ChannelMessageRouting</code></a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>#[async_trait]
+pub trait ChannelMessageRouting: Send + Sync {
+    async fn resolve_route(
+        &amp;self,
+        message: &amp;NormalizedMessage,
+        scope: SessionScope,
+    ) -&gt; anyhow::Result&lt;ResolvedRoute&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="resolvedroute"><a class="header" href="#resolvedroute"><code>ResolvedRoute</code></a></h3>
+<p>建议收敛为：</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct ResolvedRoute {
+    pub peer: PeerRef,
+    pub sender: Option&lt;SenderRef&gt;,
+    pub bucket_key: String,
+    pub addressed: bool,
+}
+<span class="boring">}</span></code></pre></pre>
+<h4 id="peer"><a class="header" href="#peer"><code>peer</code></a></h4>
+<p>这是 core 语义结果。</p>
+<p>它回答的是：</p>
+<ul>
+<li>这条消息属于哪个逻辑对端</li>
+</ul>
+<p>这里要明确：</p>
+<ul>
+<li><code>peer</code> 不是从旧 session 反推出来的</li>
+<li><code>peer</code> 不是从配置里直接写死的</li>
+</ul>
+<p>而是由渠道 adapter 基于：</p>
+<ul>
+<li>原生 source</li>
+<li>identity link</li>
+<li>当前 <code>chat_kind</code></li>
+</ul>
+<p>解析出来的结果。</p>
+<h4 id="sender"><a class="header" href="#sender"><code>sender</code></a></h4>
+<p>这是当前消息的逻辑发言人。</p>
+<p>允许为空。</p>
+<p>为空的原因可能包括：</p>
+<ul>
+<li>渠道协议边角</li>
+<li>当前场景无法稳定解析 sender</li>
+</ul>
+<p>这里不应为了满足某种 scope，硬在 core 里制造假 sender。</p>
+<h4 id="bucket_key"><a class="header" href="#bucket_key"><code>bucket_key</code></a></h4>
+<p>这是当前 <code>scope</code> 下，adapter 返回给 core 的稳定分桶结果。</p>
+<p>它的定位应明确为：</p>
+<ul>
+<li>同桶 / 异桶的实现结果</li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li>上层概念来源</li>
+</ul>
+<p>术语对齐说明：</p>
+<ul>
+<li>在 <code>dm_scope</code> / <code>group_scope</code> 文档里，这个“黑盒分桶结果”也会被称为 <code>dm_subkey</code> / <code>group_subkey</code></li>
+<li>在工程实现里通常统一叫 <code>bucket_key</code>，表示“可持久化、可比对的具体编码值”</li>
+</ul>
+<p>所以这里不应强行把：</p>
+<ul>
+<li><code>account</code></li>
+<li><code>branch</code></li>
+<li><code>topic</code></li>
+<li><code>thread</code></li>
+</ul>
+<p>都展开成公共字段。</p>
+<h4 id="addressed"><a class="header" href="#addressed"><code>addressed</code></a></h4>
+<p>这是群聊语义结果。</p>
+<p>它回答的是：</p>
+<ul>
+<li>这条话在语义上是不是明确对 agent 说</li>
+</ul>
+<p>它和 <code>ingress_mode</code> 不重复：</p>
+<ul>
+<li><code>ingress_mode</code>：是否触发 run</li>
+<li><code>addressed</code>：这条消息在群语义上是否对 agent 说</li>
+</ul>
+<h2 id="3-控制面"><a class="header" href="#3-控制面">3. 控制面</a></h2>
+<p>建议抽象为：</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>#[async_trait]
+pub trait ChannelControl: Send + Sync {
+    async fn handle_control(
+        &amp;self,
+        input: ControlRequest,
+    ) -&gt; anyhow::Result&lt;ControlResult&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<p>这里不要求一开始就冻结完整字段表。</p>
+<p>但职责边界应先明确：</p>
+<ul>
+<li>控制面不属于聊天正文</li>
+<li>不应混进 <code>ChatIngress</code></li>
+</ul>
+<p>典型包括：</p>
+<ul>
+<li>slash command</li>
+<li>inline callback</li>
+<li>OTP challenge / approval</li>
+<li>access denied feedback</li>
+<li>account health / runtime event</li>
+</ul>
+<p>这里可以允许：</p>
+<ul>
+<li><code>ControlRequest</code> 里保留更多 adapter-shaped 字段</li>
+</ul>
+<p>因为它本来就不是会话主链对象。</p>
+<h2 id="4-回复面"><a class="header" href="#4-回复面">4. 回复面</a></h2>
+<p>建议抽象为：</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>#[async_trait]
+pub trait ChannelReplyDelivery: Send + Sync {
+    async fn deliver_reply(
+        &amp;self,
+        target: &amp;ReplyTargetRef,
+        reply: &amp;ReplyRequest,
+    ) -&gt; anyhow::Result&lt;ReplyReceipt&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="replyrequest"><a class="header" href="#replyrequest"><code>ReplyRequest</code></a></h3>
+<p>它表达的是：</p>
+<ul>
+<li>core 想发什么</li>
+</ul>
+<p>这里建议只放 core 关心的回复内容，例如：</p>
+<ul>
+<li>文本</li>
+<li>媒体</li>
+<li>位置</li>
+<li>流式回复</li>
+</ul>
+<h3 id="replytargetref"><a class="header" href="#replytargetref"><code>ReplyTargetRef</code></a></h3>
+<p>这是另一类 opaque ref。</p>
+<p>它表达的是：</p>
+<ul>
+<li>往哪里回</li>
+<li>用哪个本地 account 回</li>
+<li>是否需要 reply_to 某条原消息</li>
+<li>是否要带 thread/topic 细节</li>
+</ul>
+<p>core 对它的态度也应与 <code>MessageSourceRef</code> 一致：</p>
+<ul>
+<li>可以保存</li>
+<li>可以回传</li>
+<li>但不解析内部结构</li>
+</ul>
+<h2 id="通用对象与-opaque-ref-的分层"><a class="header" href="#通用对象与-opaque-ref-的分层">通用对象与 opaque ref 的分层</a></h2>
+<p>这一层是整套方案里最关键的一点。</p>
+<h3 id="通用对象"><a class="header" href="#通用对象">通用对象</a></h3>
+<p>建议长期冻结的通用对象主要是：</p>
+<ul>
+<li><code>NormalizedMessage</code></li>
+<li><code>MessageBody</code></li>
+<li><code>ResolvedRoute</code></li>
+<li><code>ControlRequest</code></li>
+<li><code>ControlResult</code></li>
+<li><code>ReplyRequest</code></li>
+<li><code>ReplyReceipt</code></li>
+<li><code>SessionPolicy</code></li>
+</ul>
+<p>这些对象里只保留：</p>
+<ul>
+<li>跨渠道稳定成立的语义</li>
+</ul>
+<h3 id="opaque-ref"><a class="header" href="#opaque-ref">opaque ref</a></h3>
+<p>建议长期保留为 opaque ref 的对象主要是：</p>
+<ul>
+<li><code>MessageSourceRef</code></li>
+<li><code>ReplyTargetRef</code></li>
+</ul>
+<p>它们的职责是：</p>
+<ul>
+<li>承载渠道私有信息</li>
+<li>允许 core 持有与回传</li>
+<li>不允许 core 依赖内部字段做长期语义判断</li>
+</ul>
+<h2 id="opaque-ref-在-rust-里怎么落"><a class="header" href="#opaque-ref-在-rust-里怎么落">opaque ref 在 Rust 里怎么落</a></h2>
+<p>这里不要一开始用一大堆复杂泛型。</p>
+<p>当前阶段，更稳的落地方式是：</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct MessageSourceRef {
+    pub channel_kind: ChannelKind,
+    pub opaque: serde_json::Value,
+}
+
+pub struct ReplyTargetRef {
+    pub channel_kind: ChannelKind,
+    pub opaque: serde_json::Value,
+}
+<span class="boring">}</span></code></pre></pre>
+<p>这样做的好处是：</p>
+<ul>
+<li>object-safe</li>
+<li>易于持久化</li>
+<li>易于跨线程/跨组件传递</li>
+<li>不要求 core 知道 TG / Feishu 私有结构</li>
+</ul>
+<p>当前阶段不建议一开始就用：</p>
+<ul>
+<li>大量 trait associated type</li>
+<li>每个渠道一套不同泛型参数</li>
+<li>让运行时注册系统被泛型形态绑死</li>
+</ul>
+<h2 id="核心职责与渠道职责"><a class="header" href="#核心职责与渠道职责">核心职责与渠道职责</a></h2>
+<h3 id="core-应负责什么"><a class="header" href="#core-应负责什么">core 应负责什么</a></h3>
+<ul>
+<li><code>scope</code> 语义</li>
+<li><code>session_key</code> / <code>session_id</code></li>
+<li><code>NormalizedMessage + ResolvedRoute</code> -&gt; <code>dm_record</code> / <code>group_record</code></li>
+<li>最终上下文整理与 renderer</li>
+<li>agent run / tool / skill / sandbox 主链</li>
+</ul>
+<h3 id="这里尤其要明确"><a class="header" href="#这里尤其要明确">这里尤其要明确</a></h3>
+<p>群聊消息最终如何进入 LLM 上下文，应由：</p>
+<ul>
+<li>core 负责</li>
+</ul>
+<p>更准确地说：</p>
+<ul>
+<li>adapter 提供 <code>NormalizedMessage</code></li>
+<li>adapter 提供 <code>ResolvedRoute</code></li>
+<li>core 生成 <code>group_record</code></li>
+<li>core renderer 决定最终文本如何进入上下文</li>
+</ul>
+<p>渠道适配层不应继续直接主导最终 transcript。</p>
+<h3 id="adapter-应负责什么"><a class="header" href="#adapter-应负责什么">adapter 应负责什么</a></h3>
+<ul>
+<li>raw update / raw event 解析</li>
+<li>原生媒体下载与归一化</li>
+<li>原生 mention / reply / topic / thread 判别</li>
+<li>route 解析</li>
+<li>回复投递目标恢复</li>
+<li>回复投递</li>
+<li>渠道私有重试、typing、threading、dedupe</li>
+<li>relay / mirror 这类渠道私有群策略</li>
+</ul>
+<h2 id="tg-作为第一份实现"><a class="header" href="#tg-作为第一份实现">TG 作为第一份实现</a></h2>
+<p>TG 作为第一份实现时，不需要先强改成“所有名字都通用”。</p>
+<p>更合理的分层方式是：</p>
+<ul>
+<li>通用接口层：本文档定义的 trait 与通用对象</li>
+<li>TG 实现层：<code>tg_*</code> 私有结构与实现逻辑</li>
+</ul>
+<p>例如：</p>
+<ul>
+<li>TG 私有 <code>message_source_ref</code> 的内部 payload，可以继续落在 Telegram 专项文档里的 <code>tg_inbound.private_source</code></li>
+<li>TG 私有 <code>reply_target_ref</code> 的内部 payload，可以继续落在 Telegram 专项文档里的 <code>tg_reply.private_target</code></li>
+</ul>
+<p>这不与通用接口冲突。</p>
+<p>相反，这样更清楚：</p>
+<ul>
+<li>哪些是接口层名字</li>
+<li>哪些是 TG 自己的实现细节</li>
+</ul>
+<h2 id="tg-第一阶段如何尽量复用现有代码"><a class="header" href="#tg-第一阶段如何尽量复用现有代码">TG 第一阶段如何尽量复用现有代码</a></h2>
+<p>第一阶段建议尽量复用：</p>
+<ul>
+<li><code>TelegramAccountConfig</code></li>
+<li>现有 channel add/update/start 流程</li>
+<li><code>crates/telegram/src/outbound.rs</code></li>
+<li><code>crates/telegram/src/handlers.rs</code></li>
+<li><code>crates/telegram/src/bot.rs</code></li>
+</ul>
+<p>第一阶段不必先改：</p>
+<ul>
+<li>配置来源</li>
+<li>配置存储 schema</li>
+<li>配置热更新入口</li>
+</ul>
+<p>更合理的做法是：</p>
+<ul>
+<li>先让 TG 代码按通用接口重新归类</li>
+<li>再逐步把今天散在 <code>gateway</code> 里的 TG 逻辑回收</li>
+</ul>
+<h2 id="当前代码与通用接口的大致对应"><a class="header" href="#当前代码与通用接口的大致对应">当前代码与通用接口的大致对应</a></h2>
+<h3 id="现有粗接口"><a class="header" href="#现有粗接口">现有粗接口</a></h3>
+<p>当前已有一批较粗的渠道接口，见：</p>
+<ul>
+<li><code>crates/channels/src/plugin.rs:88</code></li>
+<li><code>crates/channels/src/plugin.rs:236</code></li>
+</ul>
+<p>它们今天的问题不是“没有抽象”，而是：</p>
+<ul>
+<li>chat / control / reply 仍混在一起</li>
+<li><code>ChannelReplyTarget</code> 这类对象仍直接展开了很多渠道细节</li>
+<li>route 解析还没有单独成为一个独立接口</li>
+</ul>
+<p>这里的 <code>ChannelReplyTarget</code> 引用属于 as-is 批判，不代表当前 C 阶段仍把它当正式跨层契约；当前 one-cut 目标是收敛到 <code>reply_target_ref</code>。</p>
+<h3 id="后续收敛方向"><a class="header" href="#后续收敛方向">后续收敛方向</a></h3>
+<p>应逐步从当前粗接口，收敛到：</p>
+<ul>
+<li><code>ChannelConfig</code></li>
+<li><code>ChannelMessageIngress</code></li>
+<li><code>ChannelMessageRouting</code></li>
+<li><code>ChannelControl</code></li>
+<li><code>ChannelReplyDelivery</code></li>
+</ul>
+<h2 id="当前阶段的冻结结论"><a class="header" href="#当前阶段的冻结结论">当前阶段的冻结结论</a></h2>
+<p>这一轮先冻结以下几点：</p>
+<h3 id="1-用-trait-表达通用接口"><a class="header" href="#1-用-trait-表达通用接口">1. 用 trait 表达通用接口</a></h3>
+<p>Rust 里完全可以，而且应该这样做。</p>
+<h3 id="2-四个边界面固定"><a class="header" href="#2-四个边界面固定">2. 四个边界面固定</a></h3>
+<ul>
+<li>配置面</li>
+<li>聊天面</li>
+<li>控制面</li>
+<li>回复面</li>
+</ul>
+<h3 id="3-聊天面拆成两个-trait"><a class="header" href="#3-聊天面拆成两个-trait">3. 聊天面拆成两个 trait</a></h3>
+<ul>
+<li>入站归一化</li>
+<li>路由解析</li>
+</ul>
+<h3 id="4-通用对象与-opaque-ref-明确分层"><a class="header" href="#4-通用对象与-opaque-ref-明确分层">4. 通用对象与 opaque ref 明确分层</a></h3>
+<p>通用对象只保留稳定语义；
+渠道私货统一进 <code>MessageSourceRef</code> / <code>ReplyTargetRef</code>。</p>
+<h3 id="5-tg-作为第一份实现"><a class="header" href="#5-tg-作为第一份实现">5. TG 作为第一份实现</a></h3>
+<p>先实现通用接口；
+TG 私有细节继续保留 <code>tg_*</code> 命名，不强装通用。</p>
+<h3 id="6-c-阶段不以持久化替换为前置条件"><a class="header" href="#6-c-阶段不以持久化替换为前置条件">6. C 阶段不以持久化替换为前置条件</a></h3>
+<p>当前 C 阶段可以先做到：</p>
+<ul>
+<li><code>NormalizedMessage</code> / <code>ResolvedRoute</code> 语义收口</li>
+<li>reply / control / route 边界收口</li>
+<li>core context bridge 收口</li>
+</ul>
+<p>而暂不要求：</p>
+<ul>
+<li><code>session_event</code> 已经落地</li>
+<li>legacy persistence bridge 已经被删除</li>
+</ul>
+<h2 id="相关文档"><a class="header" href="#相关文档">相关文档</a></h2>
+<ul>
+<li><code>docs/src/refactor/telegram-adapter-boundary.md</code></li>
+<li><code>docs/src/refactor/v3-design.md</code></li>
+<li><code>docs/src/refactor/v3-gap.md</code></li>
+<li><code>docs/src/refactor/v3-roadmap.md</code></li>
+<li><code>docs/src/refactor/dm-scope.md</code></li>
+<li><code>docs/src/refactor/group-scope.md</code></li>
+<li><code>docs/src/refactor/session-context-layering.md</code></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../refactor/v3-extension-guidance.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/telegram-adapter-boundary.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../refactor/v3-extension-guidance.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/telegram-adapter-boundary.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

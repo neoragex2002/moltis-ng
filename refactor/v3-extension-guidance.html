@@ -1,0 +1,536 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>V3 Extension Guidance - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/v3-extension-guidance.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="v3-扩展风险与指导原则"><a class="header" href="#v3-扩展风险与指导原则">V3 扩展风险与指导原则</a></h1>
+<p>本文档只定义一件事：</p>
+<ul>
+<li>在第三版设计继续推进时，哪些地方最容易重新失控，以及当前应先遵守哪些指导性原则</li>
+</ul>
+<p>本文档不讨论：</p>
+<ul>
+<li>某一条原则现在就要不要立刻变成硬约束</li>
+<li>具体代码应该怎么改</li>
+<li>某个渠道今天的局部实现细节</li>
+<li>最终版字段表、接口表、测试表的冻结版本</li>
+</ul>
+<p>也就是说，本文档讨论的是：</p>
+<ul>
+<li><strong>后续扩展时，先要警惕哪些失控方向</strong></li>
+<li><strong>当前先按什么原则约束设计讨论</strong></li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li><strong>现在就把所有规则一次性钉死</strong></li>
+</ul>
+<h2 id="一句话结论"><a class="header" href="#一句话结论">一句话结论</a></h2>
+<p>第三版现在最大的风险，不是方向不清，而是：</p>
+<ul>
+<li>文档层已经收敛</li>
+<li>Telegram 这条主链的代码契约已基本冻结（除落盘替换之外）</li>
+<li>但保存层替换（<code>session_event</code> + migration）与全渠道通用契约仍未冻结</li>
+</ul>
+<p>所以当前最重要的不是继续长新概念，而是先记住几条扩展期指导原则，避免后面一边实现、一边把边界重新写散。</p>
+<p>一句话：</p>
+<ul>
+<li><strong>先把容易失控的方向标出来，先按指导原则推进，具体硬约束后面再逐条定</strong></li>
+</ul>
+<h2 id="这份文档为什么现在就要有"><a class="header" href="#这份文档为什么现在就要有">这份文档为什么现在就要有</a></h2>
+<p>OpenClaw 已经比当前代码更早进入“多渠道、多入口、多策略、多特例”的阶段。</p>
+<p>它的现状说明了一件事：</p>
+<ul>
+<li>架构在纸面上清晰，不等于扩展后还能一直保持清晰</li>
+</ul>
+<p>很多问题都不是设计一开始就错了，而是系统变大后慢慢长出来的，例如：</p>
+<ul>
+<li><code>session_key</code> 开始承担越来越多运行时语义</li>
+<li>adapter 又重新参与“给模型的文本”塑形</li>
+<li>显式 override、特例入口、兼容逻辑越来越多</li>
+<li>平台表面对象慢慢重新渗进 core</li>
+</ul>
+<p>所以第三版现在需要的，不是更多抽象概念，而是：</p>
+<ul>
+<li><strong>一组指导后续讨论的防失控原则</strong></li>
+</ul>
+<h2 id="openclaw-现状带来的直接启发"><a class="header" href="#openclaw-现状带来的直接启发">OpenClaw 现状带来的直接启发</a></h2>
+<p>这里只提启发，不做价值判断。</p>
+<h3 id="1-session_key-很容易从编码结果变成运行时语义载体"><a class="header" href="#1-session_key-很容易从编码结果变成运行时语义载体">1. <code>session_key</code> 很容易从“编码结果”变成“运行时语义载体”</a></h3>
+<p>当系统变复杂后，最容易出现的情况是：</p>
+<ul>
+<li>一开始只是拼 key</li>
+<li>后来很多逻辑开始反向解析 key</li>
+<li>最后代码对 key 的字符串结构产生隐式依赖</li>
+</ul>
+<p>这会带来两个问题：</p>
+<ul>
+<li>key 一旦改格式，影响面会很大</li>
+<li>原本属于语义层或 adapter 的东西，会被偷偷塞回 key 结构里</li>
+</ul>
+<h3 id="2-adapter-很容易重新长出-prompt-形态字段"><a class="header" href="#2-adapter-很容易重新长出-prompt-形态字段">2. adapter 很容易重新长出 prompt 形态字段</a></h3>
+<p>系统一旦进入复杂渠道阶段，adapter 往往会觉得：</p>
+<ul>
+<li>“我这里最懂渠道语境”</li>
+<li>“我直接先把文本整理好更方便”</li>
+</ul>
+<p>于是就容易重新长出：</p>
+<ul>
+<li>面向模型的临时文本字段</li>
+<li>某渠道专属的上下文包装</li>
+<li>事实记录与模型输入混写的中间结构</li>
+</ul>
+<p>这类东西短期很顺手，长期会把边界重新打穿。</p>
+<h3 id="3-平台表面对象会不断向-core-施压"><a class="header" href="#3-平台表面对象会不断向-core-施压">3. 平台表面对象会不断向 core 施压</a></h3>
+<p>群、频道、thread、topic、reply-root、forum topic，这些对象在不同渠道里都存在。</p>
+<p>系统一开始很容易说：</p>
+<ul>
+<li>“先抽象成一个统一概念”</li>
+</ul>
+<p>但扩展到一定阶段后，真正的压力通常来自：</p>
+<ul>
+<li>它们并不完全等价</li>
+<li>它们又都想参与分桶、上下文、回复路由、权限策略</li>
+</ul>
+<p>如果处理不好，core 就会重新被平台细节拉脏。</p>
+<h3 id="4-显式-override-会越来越诱人"><a class="header" href="#4-显式-override-会越来越诱人">4. 显式 override 会越来越诱人</a></h3>
+<p>一旦系统支持：</p>
+<ul>
+<li>外部直接指定 <code>session_key</code></li>
+<li>hook / tool / relay 直接覆盖路由目标</li>
+<li>特定场景跳过默认分桶逻辑</li>
+</ul>
+<p>短期上看很灵活，长期上看最容易把主链语义绕穿。</p>
+<p>这类能力不是不能有，而是要非常克制。</p>
+<h3 id="5-复杂群策略最容易污染基础会话语义"><a class="header" href="#5-复杂群策略最容易污染基础会话语义">5. 复杂群策略最容易污染基础会话语义</a></h3>
+<p>真正把系统拖复杂的，往往不是普通 DM，也不是普通 group。</p>
+<p>最容易把边界冲散的，是这些东西：</p>
+<ul>
+<li>mention</li>
+<li>listen-only</li>
+<li>relay</li>
+<li>mirror</li>
+<li>thread/topic 特例</li>
+<li>reply_ref</li>
+<li>多媒体和语音</li>
+</ul>
+<p>如果这些东西直接改写分桶、会话记录、上下文拼接，系统很快就会重新回到第二版状态。</p>
+<h2 id="当前建议先遵守的指导原则"><a class="header" href="#当前建议先遵守的指导原则">当前建议先遵守的指导原则</a></h2>
+<p>这些原则当前只作为<strong>讨论与设计原则</strong>。</p>
+<p>现在先不要把它们理解成全部都已冻结的强规则。</p>
+<h3 id="1-session_key-先坚持只编码不承载解释职责"><a class="header" href="#1-session_key-先坚持只编码不承载解释职责">1. <code>session_key</code> 先坚持“只编码，不承载解释职责”</a></h3>
+<p>当前建议始终按这个方向讨论：</p>
+<ul>
+<li><code>session_key</code> 是编码结果</li>
+<li>它用于稳定命中同一个逻辑桶</li>
+<li>它不应成为上层语义定义来源</li>
+</ul>
+<p>进一步说：</p>
+<ul>
+<li>能在 resolver 阶段决定的语义，不要留到后面靠拆 key 再理解</li>
+<li>能由 adapter 返回的结构化结果，不要只编码进 key 再指望下游去猜</li>
+</ul>
+<p>这条不是说以后永远绝对不能解析 key，而是说：</p>
+<ul>
+<li><strong>不要把“反向解析 key”当成常规主路径</strong></li>
+</ul>
+<h3 id="2-adapter-先坚持交事实不交最终模型文本"><a class="header" href="#2-adapter-先坚持交事实不交最终模型文本">2. adapter 先坚持“交事实，不交最终模型文本”</a></h3>
+<p>当前建议始终按这个方向讨论：</p>
+<ul>
+<li>adapter 负责原生对象解析</li>
+<li>adapter 负责结构化归一化</li>
+<li>adapter 负责渠道收发协议</li>
+</ul>
+<p>但 adapter 不应天然负责：</p>
+<ul>
+<li>最终给模型的文本</li>
+<li>长期保存格式</li>
+<li>某个渠道自己的 transcript 语义</li>
+</ul>
+<p>换句话说：</p>
+<ul>
+<li>adapter 可以提供事实</li>
+<li>adapter 可以提供少量补充信息</li>
+<li>但不应主导最终上下文长什么样</li>
+</ul>
+<h3 id="3-session_event-先坚持宁可少一点也不要重新混层"><a class="header" href="#3-session_event-先坚持宁可少一点也不要重新混层">3. <code>session_event</code> 先坚持“宁可少一点，也不要重新混层”</a></h3>
+<p>当前建议始终按这个方向讨论：</p>
+<ul>
+<li><code>session_event</code> 首先要稳定</li>
+<li>其次才是丰富</li>
+</ul>
+<p>也就是说：</p>
+<ul>
+<li>不要一开始就把各种渠道细节都灌进去</li>
+<li>也不要为了省事，重新把“给模型的文本”直接塞进去</li>
+</ul>
+<p>如果字段是否应进入统一事件记录层还拿不准，当前更稳妥的做法通常是：</p>
+<ul>
+<li>暂时留在 adapter 的补充信息里</li>
+<li>后面再讨论它是否真的值得上升为统一字段</li>
+</ul>
+<h3 id="4-core-先坚持少量语义--明确主链"><a class="header" href="#4-core-先坚持少量语义--明确主链">4. core 先坚持“少量语义 + 明确主链”</a></h3>
+<p>当前建议始终按这个方向讨论：</p>
+<ul>
+<li>core 只保留少量稳定概念</li>
+<li>不因为某个渠道当前实现方便，就扩张 core 总表</li>
+</ul>
+<p>尤其要警惕：</p>
+<ul>
+<li>为了容纳某个渠道特例，往 core 里硬塞新名词</li>
+<li>为了兼容历史逻辑，长期保留混合概念对象</li>
+</ul>
+<p>第三版真正要守住的不是“概念数量一定最少”，而是：</p>
+<ul>
+<li><strong>主链必须明确</strong></li>
+</ul>
+<p>也就是：</p>
+<ul>
+<li>会话语义怎么定</li>
+<li>会话桶怎么定</li>
+<li>统一事件怎么写</li>
+<li>上下文怎么整理</li>
+</ul>
+<p>这四件事不能再混。</p>
+<h3 id="5-群复杂策略先坚持附着在主链外不改写主链定义"><a class="header" href="#5-群复杂策略先坚持附着在主链外不改写主链定义">5. 群复杂策略先坚持“附着在主链外，不改写主链定义”</a></h3>
+<p>当前建议始终按这个方向讨论：</p>
+<ul>
+<li>群复杂策略可以很多</li>
+<li>但基础会话语义主链必须先单独成立</li>
+</ul>
+<p>也就是说：</p>
+<ul>
+<li>先明确 group 的分桶与上下文基础语义</li>
+<li>再让 mention / relay / mirror / listen-only 这类策略附着其上</li>
+</ul>
+<p>而不是反过来：</p>
+<ul>
+<li>先由复杂策略决定会话该怎么理解</li>
+</ul>
+<h3 id="6-显式-override-先坚持少窄可观测"><a class="header" href="#6-显式-override-先坚持少窄可观测">6. 显式 override 先坚持“少、窄、可观测”</a></h3>
+<p>当前建议始终按这个方向讨论：</p>
+<ul>
+<li>显式 override 可以存在</li>
+<li>但应始终被视为例外能力，而不是默认主路径</li>
+</ul>
+<p>更准确地说，后面讨论这类能力时，至少要同时问三件事：</p>
+<ul>
+<li>它为什么不能走默认主链</li>
+<li>它的生效边界是否清楚</li>
+<li>它是否会让排障变得困难</li>
+</ul>
+<p>如果这三件事讲不清，说明 override 很可能还不适合进入主链。</p>
+<h3 id="7-新渠道接入时优先验证是否会把-core-拉脏"><a class="header" href="#7-新渠道接入时优先验证是否会把-core-拉脏">7. 新渠道接入时，优先验证“是否会把 core 拉脏”</a></h3>
+<p>第三版虽然当前先从 Telegram 开刀，但后面一定还会遇到别的渠道。</p>
+<p>到那个阶段，最重要的检查点不是：</p>
+<ul>
+<li>“能不能快速接上”</li>
+</ul>
+<p>而是：</p>
+<ul>
+<li>“这个渠道是否正在逼 core 接受它的内部概念”</li>
+</ul>
+<p>如果答案是“是”，就说明边界设计还不够好。</p>
+<h2 id="当前最值得优先继续讨论的几个问题"><a class="header" href="#当前最值得优先继续讨论的几个问题">当前最值得优先继续讨论的几个问题</a></h2>
+<p>这几个点现在都不建议直接钉死，后面应逐条讨论。</p>
+<h3 id="1-session_key-的允许能力边界"><a class="header" href="#1-session_key-的允许能力边界">1. <code>session_key</code> 的允许能力边界</a></h3>
+<p>后面需要继续讨论：</p>
+<ul>
+<li>哪些场景允许显式指定 <code>session_key</code></li>
+<li>哪些场景只允许 resolver 产出</li>
+<li>运行时允许在多大程度上从 key 回推信息</li>
+</ul>
+<h3 id="2-adapter-输出对象的最小稳定契约"><a class="header" href="#2-adapter-输出对象的最小稳定契约">2. adapter 输出对象的最小稳定契约</a></h3>
+<p>后面需要继续讨论：</p>
+<ul>
+<li>TG adapter 到底最少要输出哪些字段</li>
+<li>哪些字段属于统一输入</li>
+<li>哪些字段只能算补充信息</li>
+</ul>
+<h3 id="3-session_event-的最小必需字段集"><a class="header" href="#3-session_event-的最小必需字段集">3. <code>session_event</code> 的最小必需字段集</a></h3>
+<p>后面需要继续讨论：</p>
+<ul>
+<li>哪些字段必须先冻结</li>
+<li>哪些字段可以晚一点再升格</li>
+<li>哪些字段永远不该进入统一事件记录层</li>
+</ul>
+<h3 id="4-群复杂策略和基础-group-语义的边界"><a class="header" href="#4-群复杂策略和基础-group-语义的边界">4. 群复杂策略和基础 group 语义的边界</a></h3>
+<p>后面需要继续讨论：</p>
+<ul>
+<li>mention、listen-only、relay、mirror 到底各自位于哪一层</li>
+<li>它们能不能影响分桶</li>
+<li>它们能不能影响统一事件记录</li>
+<li>它们能不能影响上下文整理</li>
+</ul>
+<h3 id="5-出站语义结果的稳定边界"><a class="header" href="#5-出站语义结果的稳定边界">5. 出站语义结果的稳定边界</a></h3>
+<p>后面需要继续讨论：</p>
+<ul>
+<li>core 的“回复结果”最少应该表达什么</li>
+<li>哪些东西交给 adapter 决定</li>
+<li>哪些东西不能再让渠道自由发挥</li>
+</ul>
+<h2 id="这份文档和其他-v3-文档的关系"><a class="header" href="#这份文档和其他-v3-文档的关系">这份文档和其他 V3 文档的关系</a></h2>
+<p>这份文档不替代：</p>
+<ul>
+<li><code>docs/src/refactor/v3-design.md</code></li>
+<li><code>docs/src/refactor/v3-roadmap.md</code></li>
+<li><code>docs/src/refactor/v3-gap.md</code></li>
+</ul>
+<p>它只补一件事：</p>
+<ul>
+<li><strong>把“后继扩展时最容易重新失控的地方”单独拉出来</strong></li>
+</ul>
+<p>因此这几份文档的分工是：</p>
+<ul>
+<li><code>docs/src/refactor/v3-design.md</code>：讲第三版目标设计</li>
+<li><code>docs/src/refactor/v3-gap.md</code>：讲当前代码现状与差距</li>
+<li><code>docs/src/refactor/v3-roadmap.md</code>：讲第三版实施路径</li>
+<li><code>docs/src/refactor/v3-extension-guidance.md</code>：讲扩展期的风险点与指导原则</li>
+</ul>
+<h2 id="最后收口"><a class="header" href="#最后收口">最后收口</a></h2>
+<p>如果只记住一句话，就记住这句：</p>
+<ul>
+<li><strong>第三版现在先不要急着把所有防失控规则钉死</strong></li>
+<li><strong>先把容易失控的方向标出来，先按指导原则推进</strong></li>
+<li><strong>后面再把关键约束一条条讨论、收紧、冻结</strong></li>
+</ul>
+<h2 id="相关文档"><a class="header" href="#相关文档">相关文档</a></h2>
+<ul>
+<li><code>docs/src/refactor/v3-design.md</code></li>
+<li><code>docs/src/refactor/v3-gap.md</code></li>
+<li><code>docs/src/refactor/v3-roadmap.md</code></li>
+<li><code>docs/src/refactor/session-context-layering.md</code></li>
+<li><code>docs/src/refactor/session-event-canonical.md</code></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../refactor/v3-roadmap.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/channel-adapter-generic-interfaces.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../refactor/v3-roadmap.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/channel-adapter-generic-interfaces.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
