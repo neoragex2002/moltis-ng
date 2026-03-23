@@ -646,7 +646,6 @@ struct TgLineStartMention {
 
 #[derive(Debug, Clone)]
 struct TgLineStartMentionGroup {
-    segment_text: String,
     task_text: String,
     mentions: Vec<TgLineStartMention>,
 }
@@ -838,7 +837,6 @@ fn extract_line_start_mention_groups(
             continue;
         }
 
-        let segment_text = sanitized[group_start..seg_end].trim().to_string();
         let raw_task = trim_trailing_connectors(&sanitized[group_end..seg_end]);
         let task_text = trim_leading_separators(raw_task).trim().to_string();
 
@@ -859,7 +857,6 @@ fn extract_line_start_mention_groups(
         }
         if !resolved.is_empty() {
             groups.push(TgLineStartMentionGroup {
-                segment_text,
                 task_text,
                 mentions: resolved,
             });
@@ -888,7 +885,7 @@ pub fn plan_group_target_action(
 
     let mention_groups = extract_line_start_mention_groups(body, accounts);
     let any_line_start_target = !mention_groups.is_empty();
-    let mut line_start_segments = Vec::new();
+    let mut line_start_targeted = false;
     let mut line_start_has_task = false;
     for group in &mention_groups {
         if group
@@ -896,23 +893,23 @@ pub fn plan_group_target_action(
             .iter()
             .any(|mention| mention.account_handle == target_account_handle)
         {
-            line_start_segments.push(group.segment_text.clone());
+            line_start_targeted = true;
             line_start_has_task |= !group.task_text.is_empty();
         }
     }
 
-    if !line_start_segments.is_empty() {
+    if line_start_targeted {
         if line_start_mention_dispatch && line_start_has_task {
             return Some(TgGroupTargetAction {
                 mode: TgInboundMode::Dispatch,
-                body: line_start_segments.join("\n\n"),
+                body: body.to_string(),
                 addressed: true,
                 reason_code: "tg_dispatch_line_start_mention",
             });
         }
         return Some(TgGroupTargetAction {
             mode: TgInboundMode::RecordOnly,
-            body: line_start_segments.join("\n\n"),
+            body: body.to_string(),
             addressed: line_start_mention_dispatch,
             reason_code: if line_start_mention_dispatch {
                 "tg_record_presence_ping"
@@ -1389,8 +1386,9 @@ mod tests {
 
     #[test]
     fn group_target_plan_merges_line_start_tasks_once_per_target() {
+        let body = "@bot_a 做A\n\n@bot_b 做B\n\n@bot_a 补A2";
         let plan = plan_group_target_action(
-            "@bot_a 做A\n\n@bot_b 做B\n\n@bot_a 补A2",
+            body,
             &[
                 snapshot("telegram:bot_a", "bot_a"),
                 snapshot("telegram:bot_b", "bot_b"),
@@ -1406,7 +1404,7 @@ mod tests {
 
         assert_eq!(plan.mode, TgInboundMode::Dispatch);
         assert_eq!(plan.reason_code, "tg_dispatch_line_start_mention");
-        assert_eq!(plan.body, "@bot_a 做A\n\n@bot_a 补A2");
+        assert_eq!(plan.body, body);
         assert!(plan.addressed);
     }
 
@@ -1416,9 +1414,10 @@ mod tests {
             snapshot("telegram:bot_a", "bot_a"),
             snapshot("telegram:bot_b", "bot_b"),
         ];
+        let body = "@bot_b 你处理这件事";
 
         let bot_a = plan_group_target_action(
-            "@bot_b 你处理这件事",
+            body,
             &accounts,
             "telegram:bot_a",
             Some("bot_a"),
@@ -1433,7 +1432,7 @@ mod tests {
         assert!(!bot_a.addressed);
 
         let bot_b = plan_group_target_action(
-            "@bot_b 你处理这件事",
+            body,
             &accounts,
             "telegram:bot_b",
             Some("bot_b"),
@@ -1444,13 +1443,14 @@ mod tests {
         )
         .expect("plan");
         assert_eq!(bot_b.mode, TgInboundMode::Dispatch);
-        assert_eq!(bot_b.body, "@bot_b 你处理这件事");
+        assert_eq!(bot_b.body, body);
     }
 
     #[test]
     fn group_target_plan_records_when_dispatch_policies_are_disabled() {
+        let body = "@bot_a 处理一下";
         let plan = plan_group_target_action(
-            "@bot_a 处理一下",
+            body,
             &[snapshot("telegram:bot_a", "bot_a")],
             "telegram:bot_a",
             Some("bot_a"),
@@ -1463,14 +1463,15 @@ mod tests {
 
         assert_eq!(plan.mode, TgInboundMode::RecordOnly);
         assert_eq!(plan.reason_code, "tg_record_context");
-        assert_eq!(plan.body, "@bot_a 处理一下");
+        assert_eq!(plan.body, body);
         assert!(!plan.addressed);
     }
 
     #[test]
     fn group_target_plan_marks_presence_ping_as_addressed_record() {
+        let body = "@bot_a";
         let plan = plan_group_target_action(
-            "@bot_a",
+            body,
             &[snapshot("telegram:bot_a", "bot_a")],
             "telegram:bot_a",
             Some("bot_a"),
@@ -1483,14 +1484,15 @@ mod tests {
 
         assert_eq!(plan.mode, TgInboundMode::RecordOnly);
         assert_eq!(plan.reason_code, "tg_record_presence_ping");
-        assert_eq!(plan.body, "@bot_a");
+        assert_eq!(plan.body, body);
         assert!(plan.addressed);
     }
 
     #[test]
     fn group_target_plan_keeps_target_inside_multi_mention_line_start_cluster() {
+        let body = "@a @bot_a @c do X";
         let plan = plan_group_target_action(
-            "@a @bot_a @c do X",
+            body,
             &[snapshot("telegram:bot_a", "bot_a")],
             "telegram:bot_a",
             Some("bot_a"),
@@ -1503,8 +1505,133 @@ mod tests {
 
         assert_eq!(plan.mode, TgInboundMode::Dispatch);
         assert_eq!(plan.reason_code, "tg_dispatch_line_start_mention");
-        assert_eq!(plan.body, "@a @bot_a @c do X");
+        assert_eq!(plan.body, body);
         assert!(plan.addressed);
+    }
+
+    #[test]
+    fn group_target_plan_keeps_full_body_for_bad_example_context() {
+        let body = "@cute_alma_bot 我用自己的话复述 + 例子如下：\n\n我会刻意避免的错误写法（示例）\n@cute_alma_bot @lovely_apple_bot 我先说下：我做了一半，等会再补。\n（问题：一条消息正式唤醒了两个人。）";
+        let plan = plan_group_target_action(
+            body,
+            &[
+                snapshot("telegram:cute_alma_bot", "cute_alma_bot"),
+                snapshot("telegram:lovely_apple_bot", "lovely_apple_bot"),
+            ],
+            "telegram:lovely_apple_bot",
+            Some("lovely_apple_bot"),
+            None,
+            true,
+            true,
+            false,
+        )
+        .expect("plan");
+
+        assert_eq!(plan.mode, TgInboundMode::Dispatch);
+        assert_eq!(plan.reason_code, "tg_dispatch_line_start_mention");
+        assert_eq!(plan.body, body);
+        assert!(plan.addressed);
+    }
+
+    #[test]
+    fn group_target_plan_keeps_same_full_body_for_multiple_targets() {
+        let body = "@bot_a 你负责日志\n@bot_b 你负责配置\n下面是统一背景、边界和注意事项...";
+        let accounts = [
+            snapshot("telegram:bot_a", "bot_a"),
+            snapshot("telegram:bot_b", "bot_b"),
+        ];
+
+        let plan_a = plan_group_target_action(
+            body,
+            &accounts,
+            "telegram:bot_a",
+            Some("bot_a"),
+            None,
+            true,
+            true,
+            false,
+        )
+        .expect("plan a");
+        let plan_b = plan_group_target_action(
+            body,
+            &accounts,
+            "telegram:bot_b",
+            Some("bot_b"),
+            None,
+            true,
+            true,
+            false,
+        )
+        .expect("plan b");
+
+        assert_eq!(plan_a.mode, TgInboundMode::Dispatch);
+        assert_eq!(plan_b.mode, TgInboundMode::Dispatch);
+        assert_eq!(plan_a.body, body);
+        assert_eq!(plan_b.body, body);
+        assert!(plan_a.addressed);
+        assert!(plan_b.addressed);
+    }
+
+    #[test]
+    fn group_target_plan_only_trims_outer_whitespace_and_keeps_internal_newlines() {
+        let raw_body = "\n\n  @bot_a 第一段\n\n第二段保留\n  ";
+        let expected_body = "@bot_a 第一段\n\n第二段保留";
+        let plan = plan_group_target_action(
+            raw_body,
+            &[snapshot("telegram:bot_a", "bot_a")],
+            "telegram:bot_a",
+            Some("bot_a"),
+            None,
+            true,
+            true,
+            false,
+        )
+        .expect("plan");
+
+        assert_eq!(plan.mode, TgInboundMode::Dispatch);
+        assert_eq!(plan.body, expected_body);
+    }
+
+    #[test]
+    fn group_target_plan_ignores_quote_and_code_mentions_for_matching_but_keeps_full_body() {
+        let body = "> @bot_a 这是引用示例\n`@bot_a` 这是行内代码\n```text\n@bot_a 这是代码块\n```\n@bot_b 处理正式任务\n补充说明保留在正文里";
+        let accounts = [
+            snapshot("telegram:bot_a", "bot_a"),
+            snapshot("telegram:bot_b", "bot_b"),
+        ];
+
+        let plan_a = plan_group_target_action(
+            body,
+            &accounts,
+            "telegram:bot_a",
+            Some("bot_a"),
+            None,
+            true,
+            true,
+            false,
+        )
+        .expect("plan a");
+        let plan_b = plan_group_target_action(
+            body,
+            &accounts,
+            "telegram:bot_b",
+            Some("bot_b"),
+            None,
+            true,
+            true,
+            false,
+        )
+        .expect("plan b");
+
+        assert_eq!(plan_a.mode, TgInboundMode::RecordOnly);
+        assert_eq!(plan_a.reason_code, "tg_record_context");
+        assert!(!plan_a.addressed);
+        assert_eq!(plan_a.body, body);
+
+        assert_eq!(plan_b.mode, TgInboundMode::Dispatch);
+        assert_eq!(plan_b.reason_code, "tg_dispatch_line_start_mention");
+        assert!(plan_b.addressed);
+        assert_eq!(plan_b.body, body);
     }
 
     #[test]
