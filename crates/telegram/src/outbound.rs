@@ -866,16 +866,21 @@ impl TelegramOutbound {
                 true,
                 route.addressed,
             );
-            if rendered.degraded {
+            if rendered.degraded || rendered.disambiguated {
                 info!(
                     event = "telegram.speaker_resolution",
                     account_handle = target_account_handle,
                     reason_code = rendered.reason_code,
-                    decision = "degraded",
+                    decision = if rendered.degraded {
+                        "degraded"
+                    } else {
+                        "disambiguated"
+                    },
                     policy = "tg_gst_v1_speaker",
                     match_method = rendered.match_method,
+                    collision = rendered.disambiguated,
                     sender_short_id = source_sender_id.map(|id| id % 100000),
-                    "telegram outbound speaker rendering degraded to technical fallback"
+                    "telegram outbound speaker rendering required fallback or disambiguation"
                 );
             }
             let mut inbound = inbound;

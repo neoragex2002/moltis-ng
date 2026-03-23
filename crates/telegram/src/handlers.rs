@@ -3461,16 +3461,21 @@ fn build_tg_inbound_request(
             sender_is_bot,
             addressed,
         );
-        if rendered.degraded {
+        if rendered.degraded || rendered.disambiguated {
             info!(
                 event = "telegram.speaker_resolution",
                 account_handle = inbound.private_source.account_handle,
                 reason_code = rendered.reason_code,
-                decision = "degraded",
+                decision = if rendered.degraded {
+                    "degraded"
+                } else {
+                    "disambiguated"
+                },
                 policy = "tg_gst_v1_speaker",
                 match_method = rendered.match_method,
+                collision = rendered.disambiguated,
                 sender_short_id = sender_id.map(|id| id % 100000),
-                "telegram speaker rendering degraded to technical fallback"
+                "telegram speaker rendering required fallback or disambiguation"
             );
         }
         inbound.body.text = rendered.text;

@@ -264,14 +264,120 @@ pub(crate) struct TgGstV1RenderedText {
     pub match_method: &'static str,
     pub reason_code: &'static str,
     pub degraded: bool,
+    pub disambiguated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TgSpeakerResolution {
     speaker: String,
+    actor_key: Option<String>,
+    username_hint: Option<String>,
+    user_id: Option<u64>,
     match_method: &'static str,
     reason_code: &'static str,
     degraded: bool,
+}
+
+fn tg_gst_v1_actor_key_from_snapshot(snapshot: &TelegramBusAccountSnapshot) -> String {
+    if let Some(user_id) = snapshot.chan_user_id {
+        return format!("uid:{user_id}");
+    }
+    if let Some(username) = snapshot.chan_user_name.as_deref() {
+        return format!("uname:{}", tg_gst_v1_normalize_username(username));
+    }
+    format!("acct:{}", snapshot.account_handle)
+}
+
+fn tg_gst_v1_actor_key_from_identity_link(link: &TelegramIdentityLink) -> Option<String> {
+    if let Some(user_id) = link.telegram_user_id {
+        return Some(format!("uid:{user_id}"));
+    }
+    link.telegram_user_name
+        .as_deref()
+        .map(tg_gst_v1_normalize_username)
+        .map(|username| format!("uname:{username}"))
+}
+
+fn tg_gst_v1_known_speaker_for_snapshot(
+    snapshot: &TelegramBusAccountSnapshot,
+    identity_links: &[TelegramIdentityLink],
+) -> String {
+    let identity_link =
+        tg_gst_v1_find_identity_link_by_agent_id(identity_links, snapshot.agent_id.as_deref());
+    if let Some(display_name) =
+        identity_link.and_then(|link| tg_gst_v1_display_value(link.display_name.as_deref()))
+    {
+        return format!("{display_name}(bot)");
+    }
+    if let Some(chan_nickname) = tg_gst_v1_display_value(snapshot.chan_nickname.as_deref()) {
+        return format!("{chan_nickname}(bot)");
+    }
+    if let Some(link_display) =
+        identity_link.and_then(|link| tg_gst_v1_display_value(link.telegram_display_name.as_deref()))
+    {
+        return format!("{link_display}(bot)");
+    }
+    if let Some(username) = tg_gst_v1_display_value(snapshot.chan_user_name.as_deref()) {
+        return format!("{username}(bot)");
+    }
+    format!("tg-bot-{}(bot)", tg_gst_v1_short_id(snapshot.chan_user_id))
+}
+
+fn tg_gst_v1_known_speaker_for_identity_link(link: &TelegramIdentityLink) -> Option<String> {
+    if let Some(display_name) = tg_gst_v1_display_value(link.display_name.as_deref()) {
+        return Some(display_name);
+    }
+    if let Some(link_display) = tg_gst_v1_display_value(link.telegram_display_name.as_deref()) {
+        return Some(link_display);
+    }
+    tg_gst_v1_display_value(link.telegram_user_name.as_deref())
+}
+
+fn tg_gst_v1_has_speaker_collision(
+    speaker: &str,
+    actor_key: Option<&str>,
+    managed_snapshots: &[TelegramBusAccountSnapshot],
+    identity_links: &[TelegramIdentityLink],
+) -> bool {
+    let Some(actor_key) = actor_key else {
+        return false;
+    };
+
+    if managed_snapshots.iter().any(|snapshot| {
+        tg_gst_v1_actor_key_from_snapshot(snapshot) != actor_key
+            && tg_gst_v1_known_speaker_for_snapshot(snapshot, identity_links) == speaker
+    }) {
+        return true;
+    }
+
+    identity_links.iter().any(|link| {
+        tg_gst_v1_actor_key_from_identity_link(link)
+            .filter(|key| key != actor_key)
+            .and_then(|_| tg_gst_v1_known_speaker_for_identity_link(link))
+            .is_some_and(|candidate| candidate == speaker)
+    })
+}
+
+fn tg_gst_v1_apply_speaker_disambiguation(
+    speaker: &str,
+    actor_key: Option<&str>,
+    username_hint: Option<&str>,
+    user_id: Option<u64>,
+    managed_snapshots: &[TelegramBusAccountSnapshot],
+    identity_links: &[TelegramIdentityLink],
+) -> String {
+    if !tg_gst_v1_has_speaker_collision(speaker, actor_key, managed_snapshots, identity_links) {
+        return speaker.to_string();
+    }
+
+    if let Some(username) = username_hint
+        .map(tg_gst_v1_normalize_username)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("{speaker}[{username}]");
+    }
+
+    format!("{speaker}[{}]", tg_gst_v1_short_id(user_id))
 }
 
 fn tg_gst_v1_resolve_speaker(
@@ -296,6 +402,9 @@ fn tg_gst_v1_resolve_speaker(
         {
             return TgSpeakerResolution {
                 speaker: format!("{display_name}(bot)"),
+                actor_key: Some(tg_gst_v1_actor_key_from_snapshot(snapshot)),
+                username_hint: snapshot.chan_user_name.clone().or_else(|| username.map(str::to_string)),
+                user_id,
                 match_method: "managed_bot_agent_id",
                 reason_code: "speaker_link_display_name",
                 degraded: false,
@@ -305,6 +414,9 @@ fn tg_gst_v1_resolve_speaker(
         if let Some(chan_nickname) = tg_gst_v1_display_value(snapshot.chan_nickname.as_deref()) {
             return TgSpeakerResolution {
                 speaker: format!("{chan_nickname}(bot)"),
+                actor_key: Some(tg_gst_v1_actor_key_from_snapshot(snapshot)),
+                username_hint: snapshot.chan_user_name.clone().or_else(|| username.map(str::to_string)),
+                user_id,
                 match_method: "managed_bot_chan_nickname",
                 reason_code: "speaker_managed_bot_nickname",
                 degraded: false,
@@ -316,6 +428,9 @@ fn tg_gst_v1_resolve_speaker(
         {
             return TgSpeakerResolution {
                 speaker: format!("{link_display}(bot)"),
+                actor_key: Some(tg_gst_v1_actor_key_from_snapshot(snapshot)),
+                username_hint: snapshot.chan_user_name.clone().or_else(|| username.map(str::to_string)),
+                user_id,
                 match_method: "managed_bot_link_telegram_display_name",
                 reason_code: "speaker_link_telegram_display_name",
                 degraded: false,
@@ -333,6 +448,10 @@ fn tg_gst_v1_resolve_speaker(
                 } else {
                     display_name
                 },
+                actor_key: tg_gst_v1_actor_key_from_identity_link(identity_link),
+                username_hint: username.map(str::to_string)
+                    .or_else(|| identity_link.telegram_user_name.clone()),
+                user_id,
                 match_method,
                 reason_code: "speaker_link_display_name",
                 degraded: false,
@@ -347,6 +466,10 @@ fn tg_gst_v1_resolve_speaker(
                 } else {
                     link_display
                 },
+                actor_key: tg_gst_v1_actor_key_from_identity_link(identity_link),
+                username_hint: username.map(str::to_string)
+                    .or_else(|| identity_link.telegram_user_name.clone()),
+                user_id,
                 match_method,
                 reason_code: "speaker_link_telegram_display_name",
                 degraded: false,
@@ -361,6 +484,11 @@ fn tg_gst_v1_resolve_speaker(
             } else {
                 sender_name
             },
+            actor_key: user_id
+                .map(|value| format!("uid:{value}"))
+                .or_else(|| username.map(tg_gst_v1_normalize_username).map(|value| format!("uname:{value}"))),
+            username_hint: username.map(str::to_string),
+            user_id,
             match_method: "telegram_sender_name",
             reason_code: "speaker_sender_name",
             degraded: false,
@@ -368,12 +496,19 @@ fn tg_gst_v1_resolve_speaker(
     }
 
     if let Some(username) = tg_gst_v1_display_value(username) {
+        let username_hint = username.clone();
+        let speaker = if sender_is_bot {
+            format!("{username}(bot)")
+        } else {
+            username.clone()
+        };
         return TgSpeakerResolution {
-            speaker: if sender_is_bot {
-                format!("{username}(bot)")
-            } else {
-                username
-            },
+            speaker,
+            actor_key: user_id
+                .map(|value| format!("uid:{value}"))
+                .or_else(|| Some(format!("uname:{}", tg_gst_v1_normalize_username(&username)))),
+            username_hint: Some(username_hint),
+            user_id,
             match_method: "telegram_username",
             reason_code: "speaker_username",
             degraded: false,
@@ -383,6 +518,9 @@ fn tg_gst_v1_resolve_speaker(
     let prefix = if sender_is_bot { "tg-bot" } else { "tg-user" };
     TgSpeakerResolution {
         speaker: format!("{prefix}-{}{}", tg_gst_v1_short_id(user_id), if sender_is_bot { "(bot)" } else { "" }),
+        actor_key: user_id.map(|value| format!("uid:{value}")),
+        username_hint: None,
+        user_id,
         match_method: "technical_short_id",
         reason_code: "speaker_technical_short_id",
         degraded: true,
@@ -407,6 +545,7 @@ pub(crate) fn tg_gst_v1_render_text(
             match_method: "empty_body",
             reason_code: "empty_body",
             degraded: false,
+            disambiguated: false,
         };
     }
     let resolution = tg_gst_v1_resolve_speaker(
@@ -417,16 +556,26 @@ pub(crate) fn tg_gst_v1_render_text(
         sender_name,
         sender_is_bot,
     );
+    let speaker = tg_gst_v1_apply_speaker_disambiguation(
+        &resolution.speaker,
+        resolution.actor_key.as_deref(),
+        resolution.username_hint.as_deref(),
+        resolution.user_id,
+        managed_snapshots,
+        identity_links,
+    );
+    let disambiguated = speaker != resolution.speaker;
     let addr_flag = if addressed {
         " -> you"
     } else {
         ""
     };
     TgGstV1RenderedText {
-        text: format!("{}{addr_flag}: {body}", resolution.speaker),
+        text: format!("{speaker}{addr_flag}: {body}"),
         match_method: resolution.match_method,
         reason_code: resolution.reason_code,
         degraded: resolution.degraded,
+        disambiguated,
     }
 }
 
@@ -1410,5 +1559,73 @@ mod tests {
         assert!(rendered.degraded);
         assert!(!rendered.text.contains("telegram:"));
         assert!(!rendered.text.contains("tg:1234567890"));
+    }
+
+    #[test]
+    fn tg_gst_v1_render_text_disambiguates_same_display_name_bots_by_username() {
+        let mut bot_a = snapshot("telegram:100", "risk_bot_cn");
+        bot_a.agent_id = Some("risk-a".into());
+        bot_a.chan_user_id = Some(100);
+        bot_a.chan_nickname = Some("风险助手中文".into());
+
+        let mut bot_b = snapshot("telegram:200", "risk_helper_backup");
+        bot_b.agent_id = Some("risk-b".into());
+        bot_b.chan_user_id = Some(200);
+        bot_b.chan_nickname = Some("风险助手中文备用".into());
+
+        let rendered = tg_gst_v1_render_text(
+            "已处理",
+            Some(moltis_channels::ChannelMessageKind::Text),
+            &[bot_a, bot_b],
+            &[
+                identity_link(
+                    "risk-a",
+                    Some("风险助手"),
+                    Some(100),
+                    Some("risk_bot_cn"),
+                    Some("风险助手中文"),
+                ),
+                identity_link(
+                    "risk-b",
+                    Some("风险助手"),
+                    Some(200),
+                    Some("risk_helper_backup"),
+                    Some("风险助手中文备用"),
+                ),
+            ],
+            Some("risk_bot_cn"),
+            Some(100),
+            Some("风险助手中文"),
+            true,
+            false,
+        );
+
+        assert_eq!(rendered.text, "风险助手(bot)[risk_bot_cn]: 已处理");
+        assert_eq!(rendered.match_method, "managed_bot_agent_id");
+        assert!(!rendered.degraded);
+        assert!(rendered.disambiguated);
+    }
+
+    #[test]
+    fn tg_gst_v1_render_text_disambiguates_same_display_name_humans_by_short_id() {
+        let rendered = tg_gst_v1_render_text(
+            "hello everyone",
+            Some(moltis_channels::ChannelMessageKind::Text),
+            &[],
+            &[
+                identity_link("alice-a", Some("Alice Zhang"), Some(12345), None, Some("Alice A")),
+                identity_link("alice-b", Some("Alice Zhang"), Some(54321), None, Some("Alice B")),
+            ],
+            None,
+            Some(12345),
+            Some("Alice A"),
+            false,
+            false,
+        );
+
+        assert_eq!(rendered.text, "Alice Zhang[12345]: hello everyone");
+        assert_eq!(rendered.match_method, "identity_link_user_id");
+        assert!(!rendered.degraded);
+        assert!(rendered.disambiguated);
     }
 }

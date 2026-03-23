@@ -16,11 +16,14 @@
 - 2026-03-23：gateway 已把 PEOPLE Telegram 字段提炼成 Telegram 专属只读 identity 快照，并在启动、`workspace.people.updateEntry`、`workspace.people.sync` 三条现有路径刷新到 Telegram runtime：`crates/gateway/src/people.rs:139`、`crates/gateway/src/methods.rs:49`、`crates/gateway/src/server.rs:1826`、`crates/gateway/src/channel.rs:626`、`crates/gateway/src/services.rs:389`。
 - 2026-03-23：TG adapter 已统一收口 `speaker_match` + `speaker_render`，handlers 与 outbound 共用同一 `tg_gst_v1_render_text()`，并补齐降级可观测日志：`crates/telegram/src/adapter.rs:392`、`crates/telegram/src/handlers.rs:3453`、`crates/telegram/src/outbound.rs:858`。
 - 2026-03-23：本地受管 bot 真值与 PEOPLE link identity 已进入同一 Telegram runtime 快照：`crates/telegram/src/config.rs`、`crates/telegram/src/plugin.rs:113`、`crates/telegram/src/state.rs`。
+- 2026-03-23：已补齐同名 speaker 的最小可读消歧；当两个 Telegram 发言者最终渲染名相同，优先追加 `[username]`，否则追加短 ID：`crates/telegram/src/adapter.rs`
+- 2026-03-23：已补齐 speaker collision 的结构化可观测性；同名消歧命中时 `telegram.speaker_resolution` 会记录 `decision=disambiguated` 与 `collision=true`：`crates/telegram/src/handlers.rs`、`crates/telegram/src/outbound.rs`
 
 **已覆盖测试（如有）**
 - TG-GST v1 群聊转写已有基本测试：`crates/telegram/src/handlers.rs:5463`
 - `tg_gst_v1_format_inbound_text()` 已被群聊路径实际使用：`crates/telegram/src/handlers.rs:3491`
 - TG speaker 渲染单测已覆盖 link display_name、managed bot `chan_nickname`、human display_name、technical short-id：`crates/telegram/src/adapter.rs:1316`、`crates/telegram/src/adapter.rs:1346`、`crates/telegram/src/adapter.rs:1370`、`crates/telegram/src/adapter.rs:1395`
+- TG speaker 渲染单测已覆盖同名 bot / human 的最小消歧：`crates/telegram/src/adapter.rs`
 - handlers / outbound 已覆盖 identity 快照参与群聊入站与 group-visible 文本渲染：`crates/telegram/src/handlers.rs:5605`、`crates/telegram/src/outbound.rs:3019`
 - gateway 已覆盖 PEOPLE -> Telegram identity link 提取：`crates/gateway/src/people.rs:405`
 - 2026-03-23：已执行 `cargo test -p moltis-telegram`、`cargo test -p moltis-gateway`、`cargo check -p moltis --bin moltis` 全绿。
