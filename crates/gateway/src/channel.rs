@@ -727,6 +727,45 @@ mod tests {
     }
 
     #[test]
+    fn classify_telegram_config_patch_accepts_all_hot_update_fields() {
+        let patch = serde_json::json!({
+            "agent_id": null,
+            "dm_policy": "disabled",
+            "allowlist": ["alice", "bob"],
+            "group_line_start_mention_dispatch": false,
+            "group_reply_to_dispatch": true,
+            "model": "gpt-5.2",
+            "model_provider": "openai",
+        });
+
+        assert_eq!(
+            classify_telegram_config_patch(&patch).unwrap(),
+            TelegramConfigPatchKind::HotUpdate
+        );
+    }
+
+    #[test]
+    fn merge_patch_can_clear_model_without_touching_token() {
+        let mut base = serde_json::json!({
+            "token": "123:ABC",
+            "dm_policy": "open",
+            "model": "gpt-5.2",
+            "model_provider": "openai",
+        });
+        let patch = serde_json::json!({
+            "model": null,
+            "model_provider": null,
+        });
+
+        merge_json_in_place(&mut base, &patch);
+
+        assert_eq!(base["token"], "123:ABC");
+        assert_eq!(base["dm_policy"], "open");
+        assert!(base["model"].is_null());
+        assert!(base["model_provider"].is_null());
+    }
+
+    #[test]
     fn normalize_telegram_runtime_config_strips_removed_transcript_field() {
         let (normalized, removed_fields) = normalize_telegram_runtime_config(serde_json::json!({
             "token": "123:ABC",

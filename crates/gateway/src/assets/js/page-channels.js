@@ -315,52 +315,114 @@ function AllowlistInput({ value, onChange }) {
       placeholder=${value.length === 0 ? "Type a username and press Enter" : ""}
       class="flex-1 bg-transparent text-[var(--text)] text-sm outline-none border-none"
       style="min-width:80px;padding:2px 0;font-family:var(--font-body);" />
-  </div>`;
+	</div>`;
+}
+
+function defaultAddChannelDraft() {
+	return {
+		agent_id: "",
+		token: "",
+		dm_policy: "open",
+		group_line_start_mention_dispatch: true,
+		group_reply_to_dispatch: true,
+		model: "",
+		allowlist: [],
+	};
+}
+
+function editChannelDraftFromChannel(ch) {
+	var cfg = ch?.config || {};
+	return {
+		agent_id: cfg.agent_id || "",
+		dm_policy: cfg.dm_policy || "open",
+		group_line_start_mention_dispatch: cfg.group_line_start_mention_dispatch !== false,
+		group_reply_to_dispatch: cfg.group_reply_to_dispatch !== false,
+		model: cfg.model || "",
+		allowlist: Array.isArray(cfg.allowlist) ? cfg.allowlist.slice() : [],
+	};
+}
+
+function resolveModelProvider(modelId) {
+	if (!modelId) return null;
+	var found = modelsSig.value.find((item) => item.id === modelId);
+	return found?.provider || null;
+}
+
+function buildModelUpdateFields(nextModelId, baseConfig) {
+	var modelId = nextModelId || "";
+	var previousModelId = baseConfig?.model || "";
+	if (!modelId) {
+		return { model: null, model_provider: null };
+	}
+	if (modelId !== previousModelId) {
+		return { model: modelId, model_provider: resolveModelProvider(modelId) };
+	}
+	var fields = { model: modelId };
+	if (Object.prototype.hasOwnProperty.call(baseConfig || {}, "model_provider")) {
+		fields.model_provider = baseConfig.model_provider ?? null;
+	}
+	return fields;
 }
 
 // ── Add channel modal ────────────────────────────────────────
 function AddChannelModal() {
+	var draft = useSignal(defaultAddChannelDraft());
 	var error = useSignal("");
 	var saving = useSignal(false);
-	var addModel = useSignal("");
-	var allowlistItems = useSignal([]);
+	var requestVersion = useSignal(0);
+
+	function updateDraft(patch) {
+		draft.value = { ...draft.value, ...patch };
+	}
+
+	function resetModal() {
+		draft.value = defaultAddChannelDraft();
+		error.value = "";
+		saving.value = false;
+	}
+
+	function closeModal() {
+		requestVersion.value += 1;
+		showAddModal.value = false;
+		resetModal();
+	}
 
 	function onSubmit(e) {
 		e.preventDefault();
-		var form = e.target.closest(".channel-form");
-		var token = form.querySelector("[data-field=token]").value.trim();
+		var token = draft.value.token.trim();
 		if (!token) {
 			error.value = "Bot token is required.";
 			return;
 		}
-			var agentName = form.querySelector("[data-field=agentName]")?.value?.trim() || "";
 		error.value = "";
 		saving.value = true;
-			var addConfig = {
-				token: token,
-				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
-				group_line_start_mention_dispatch: form.querySelector("[data-field=groupLineStartMentionDispatch]").checked,
-				group_reply_to_dispatch: form.querySelector("[data-field=groupReplyToDispatch]").checked,
-				allowlist: allowlistItems.value,
-			};
-			if (agentName) {
-				addConfig.agent_id = agentName;
-			}
-		if (addModel.value) {
-			addConfig.model = addModel.value;
-			var found = modelsSig.value.find((x) => x.id === addModel.value);
-			if (found?.provider) addConfig.model_provider = found.provider;
+		var requestId = requestVersion.value + 1;
+		requestVersion.value = requestId;
+		var addConfig = {
+			token: token,
+			dm_policy: draft.value.dm_policy,
+			group_line_start_mention_dispatch: draft.value.group_line_start_mention_dispatch,
+			group_reply_to_dispatch: draft.value.group_reply_to_dispatch,
+			allowlist: draft.value.allowlist.slice(),
+		};
+		if (draft.value.agent_id) {
+			addConfig.agent_id = draft.value.agent_id;
+		}
+		if (draft.value.model) {
+			addConfig.model = draft.value.model;
+			addConfig.model_provider = resolveModelProvider(draft.value.model);
 		}
 		sendRpc("channels.add", {
 			type: "telegram",
 			config: addConfig,
 		}).then((res) => {
+			if (res?.ok) {
+				loadChannels();
+			}
+			if (requestVersion.value !== requestId) return;
 			saving.value = false;
 			if (res?.ok) {
-				showAddModal.value = false;
-				addModel.value = "";
-				allowlistItems.value = [];
-				loadChannels();
+				closeModal();
 			} else {
 				error.value = (res?.error && (res.error.message || res.error.detail)) || "Failed to connect bot.";
 			}
@@ -377,9 +439,7 @@ function AddChannelModal() {
 	var inputStyle =
 		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;";
 
-	return html`<${Modal} show=${showAddModal.value} onClose=${() => {
-		showAddModal.value = false;
-	}} title="Add Telegram Bot">
+	return html`<${Modal} show=${showAddModal.value} onClose=${closeModal} title="Add Telegram Bot">
     <div class="channel-form">
       <div class="channel-card">
         <span class="text-xs font-medium text-[var(--text-strong)]">How to create a Telegram bot</span>
@@ -392,7 +452,10 @@ function AddChannelModal() {
 					<div class="text-xs text-[var(--muted)]" style="margin-top:-2px;margin-bottom:6px;">
 						Choose an agent under <code>${"agents/<agent_id>/"}</code>.
 					</div>
-	      <select data-field="agentName" style=${selectStyle} name="telegram_agent_name">
+	      <select data-field="agentName" style=${selectStyle} name="telegram_agent_name" value=${draft.value.agent_id}
+	        onChange=${(e) => {
+					updateDraft({ agent_id: e.target.value });
+				}}>
 					<option value="">(default)</option>
 					${agentNames.value.map((id) => html`<option key=${id} value=${id}>${id}</option>`)}
 				</select>
@@ -403,35 +466,48 @@ function AddChannelModal() {
 				}
 	      <label class="text-xs text-[var(--muted)]">Bot Token (from @BotFather)</label>
 	      <input data-field="token" type="password" placeholder="123456:ABC-DEF..." style=${inputStyle}
+	        value=${draft.value.token}
+	        onInput=${(e) => {
+					updateDraft({ token: e.target.value });
+				}}
 	        autocomplete="new-password"
 	        autocapitalize="none"
 	        autocorrect="off"
 	        spellcheck="false"
 	        name="telegram_bot_token" />
       <label class="text-xs text-[var(--muted)]">DM Policy</label>
-      <select data-field="dmPolicy" style=${selectStyle}>
+      <select data-field="dmPolicy" style=${selectStyle} value=${draft.value.dm_policy}
+        onChange=${(e) => {
+					updateDraft({ dm_policy: e.target.value });
+				}}>
         <option value="open">Open (anyone)</option>
         <option value="allowlist">Allowlist only</option>
         <option value="disabled">Disabled</option>
       </select>
 	      <label class="text-xs text-[var(--muted)]">Group Dispatch</label>
       <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
-        <input type="checkbox" data-field="groupLineStartMentionDispatch" checked=${true} />
+        <input type="checkbox" data-field="groupLineStartMentionDispatch" checked=${draft.value.group_line_start_mention_dispatch}
+          onChange=${(e) => {
+					updateDraft({ group_line_start_mention_dispatch: e.target.checked });
+				}} />
         Dispatch on line-start mentions
       </label>
       <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
-        <input type="checkbox" data-field="groupReplyToDispatch" checked=${true} />
+        <input type="checkbox" data-field="groupReplyToDispatch" checked=${draft.value.group_reply_to_dispatch}
+          onChange=${(e) => {
+					updateDraft({ group_reply_to_dispatch: e.target.checked });
+				}} />
         Dispatch on reply-to bot
       </label>
 	      <label class="text-xs text-[var(--muted)]">Default Model</label>
-	      <${ModelSelect} models=${modelsSig.value} value=${addModel.value}
+	      <${ModelSelect} models=${modelsSig.value} value=${draft.value.model}
 	        onChange=${(v) => {
-					addModel.value = v;
+					updateDraft({ model: v });
 				}}
         placeholder=${defaultPlaceholder} />
       <label class="text-xs text-[var(--muted)]">DM Allowlist</label>
-      <${AllowlistInput} value=${allowlistItems.value} onChange=${(v) => {
-				allowlistItems.value = v;
+      <${AllowlistInput} value=${draft.value.allowlist} onChange=${(v) => {
+				updateDraft({ allowlist: v });
 			}} />
       ${error.value && html`<div class="text-xs text-[var(--error)] channel-error" style="display:block;">${error.value}</div>`}
       <button class="provider-btn"
@@ -445,45 +521,61 @@ function AddChannelModal() {
 // ── Edit channel modal ───────────────────────────────────────
 function EditChannelModal() {
 	var ch = editingChannel.value;
+	var draft = useSignal(ch ? editChannelDraftFromChannel(ch) : null);
 	var error = useSignal("");
 	var saving = useSignal(false);
-	var editModel = useSignal("");
-	var allowlistItems = useSignal([]);
+	var requestVersion = useSignal(0);
+
 	useEffect(() => {
-		editModel.value = ch?.config?.model || "";
-		allowlistItems.value = ch?.config?.allowlist || [];
-	}, [ch]);
+		if (ch) {
+			draft.value = editChannelDraftFromChannel(ch);
+		} else {
+			draft.value = null;
+		}
+		error.value = "";
+		saving.value = false;
+	}, [ch?.chanAccountKey]);
+
+	function updateDraft(patch) {
+		draft.value = { ...draft.value, ...patch };
+	}
+
+	function closeModal() {
+		requestVersion.value += 1;
+		draft.value = null;
+		editingChannel.value = null;
+		error.value = "";
+		saving.value = false;
+	}
 	if (!ch) return null;
-	var cfg = ch.config || {};
+	var cfg = draft.value || editChannelDraftFromChannel(ch);
 
 	function onSave(e) {
 		e.preventDefault();
-		var form = e.target.closest(".channel-form");
 		error.value = "";
 		saving.value = true;
-			var agentName = form.querySelector("[data-field=agentName]")?.value?.trim() || "";
-			var updateConfig = {
-				token: cfg.token || "",
-				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
-				group_line_start_mention_dispatch: form.querySelector("[data-field=groupLineStartMentionDispatch]").checked,
-				group_reply_to_dispatch: form.querySelector("[data-field=groupReplyToDispatch]").checked,
-				allowlist: allowlistItems.value,
-			};
-			// Allow clearing agent binding by sending explicit null.
-			updateConfig.agent_id = agentName ? agentName : null;
-		if (editModel.value) {
-			updateConfig.model = editModel.value;
-			var found = modelsSig.value.find((x) => x.id === editModel.value);
-			if (found?.provider) updateConfig.model_provider = found.provider;
-		}
+		var requestId = requestVersion.value + 1;
+		requestVersion.value = requestId;
+		var modelFields = buildModelUpdateFields(cfg.model, ch.config || {});
+		var updateConfig = {
+			dm_policy: cfg.dm_policy,
+			group_line_start_mention_dispatch: cfg.group_line_start_mention_dispatch,
+			group_reply_to_dispatch: cfg.group_reply_to_dispatch,
+			allowlist: cfg.allowlist.slice(),
+			agent_id: cfg.agent_id ? cfg.agent_id : null,
+			...modelFields,
+		};
 		sendRpc("channels.update", {
 			chanAccountKey: ch.chanAccountKey,
 			config: updateConfig,
 		}).then((res) => {
+			if (res?.ok) {
+				loadChannels();
+			}
+			if (requestVersion.value !== requestId) return;
 			saving.value = false;
 			if (res?.ok) {
-				editingChannel.value = null;
-				loadChannels();
+				closeModal();
 			} else {
 				error.value = (res?.error && (res.error.message || res.error.detail)) || "Failed to update bot.";
 			}
@@ -498,7 +590,7 @@ function EditChannelModal() {
 	var selectStyle =
 		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;cursor:pointer;";
 
-		var configuredAgent = cfg.agent_id || "";
+	var configuredAgent = cfg.agent_id || "";
 	var agentMissing = Boolean(
 		configuredAgent &&
 			agentNamesLoaded.value &&
@@ -506,44 +598,54 @@ function EditChannelModal() {
 			!agentNames.value.includes(configuredAgent),
 	);
 
-	return html`<${Modal} show=${true} onClose=${() => {
-		editingChannel.value = null;
-	}} title="Edit Telegram Bot">
+	return html`<${Modal} show=${true} onClose=${closeModal} title="Edit Telegram Bot">
     <div class="channel-form">
 			<div class="text-sm text-[var(--text-strong)]">${ch.name || ch.chanAccountKey}</div>
       <label class="text-xs text-[var(--muted)]">Agent (optional)</label>
 				<div class="text-xs text-[var(--muted)]" style="margin-top:-2px;margin-bottom:6px;">
 					Choose an agent under <code>${"agents/<agent_id>/"}</code>.
 				</div>
-      <select data-field="agentName" style=${selectStyle} value=${configuredAgent || ""} name="telegram_agent_name_edit">
+      <select data-field="agentName" style=${selectStyle} value=${configuredAgent || ""} name="telegram_agent_name_edit"
+        onChange=${(e) => {
+					updateDraft({ agent_id: e.target.value });
+				}}>
         <option value="">(default)</option>
         ${agentNames.value.map((id) => html`<option key=${id} value=${id}>${id}</option>`)}
         ${agentMissing ? html`<option value=${configuredAgent}>Missing: ${configuredAgent}</option>` : null}
       </select>
       <label class="text-xs text-[var(--muted)]">DM Policy</label>
-      <select data-field="dmPolicy" style=${selectStyle} value=${cfg.dm_policy || "open"}>
+      <select data-field="dmPolicy" style=${selectStyle} value=${cfg.dm_policy || "open"}
+        onChange=${(e) => {
+					updateDraft({ dm_policy: e.target.value });
+				}}>
         <option value="open">Open (anyone)</option>
         <option value="allowlist">Allowlist only</option>
         <option value="disabled">Disabled</option>
       </select>
 	      <label class="text-xs text-[var(--muted)]">Group Dispatch</label>
       <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
-        <input type="checkbox" data-field="groupLineStartMentionDispatch" checked=${cfg.group_line_start_mention_dispatch !== false} />
+        <input type="checkbox" data-field="groupLineStartMentionDispatch" checked=${cfg.group_line_start_mention_dispatch !== false}
+          onChange=${(e) => {
+					updateDraft({ group_line_start_mention_dispatch: e.target.checked });
+				}} />
         Dispatch on line-start mentions
       </label>
       <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
-        <input type="checkbox" data-field="groupReplyToDispatch" checked=${cfg.group_reply_to_dispatch !== false} />
+        <input type="checkbox" data-field="groupReplyToDispatch" checked=${cfg.group_reply_to_dispatch !== false}
+          onChange=${(e) => {
+					updateDraft({ group_reply_to_dispatch: e.target.checked });
+				}} />
         Dispatch on reply-to bot
       </label>
 	      <label class="text-xs text-[var(--muted)]">Default Model</label>
-	      <${ModelSelect} models=${modelsSig.value} value=${editModel.value}
+	      <${ModelSelect} models=${modelsSig.value} value=${cfg.model}
 	        onChange=${(v) => {
-					editModel.value = v;
+					updateDraft({ model: v });
 				}}
         placeholder=${defaultPlaceholder} />
       <label class="text-xs text-[var(--muted)]">DM Allowlist</label>
-      <${AllowlistInput} value=${allowlistItems.value} onChange=${(v) => {
-				allowlistItems.value = v;
+      <${AllowlistInput} value=${cfg.allowlist} onChange=${(v) => {
+				updateDraft({ allowlist: v });
 			}} />
       ${error.value && html`<div class="text-xs text-[var(--error)] channel-error" style="display:block;">${error.value}</div>`}
       <button class="provider-btn"

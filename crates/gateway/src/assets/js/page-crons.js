@@ -3,7 +3,7 @@
 import { signal } from "@preact/signals";
 import { html } from "htm/preact";
 import { render } from "preact";
-import { useEffect } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import * as gon from "./gon.js";
 import { refresh as refreshGon } from "./gon.js";
 import { sendRpc } from "./helpers.js";
@@ -564,21 +564,54 @@ function RunHistoryPanel() {
   </div>`;
 }
 
-function parseScheduleFromForm(form, kind) {
-	if (kind === "at") {
-		var ts = new Date(form.querySelector("[data-field=at]").value).getTime();
+function defaultCronDraft() {
+	return {
+		name: "",
+		schedKind: "cron",
+		at: "",
+		every: "",
+		cron: "",
+		tz: "",
+		payloadKind: "systemEvent",
+		message: "",
+		sessionTarget: "isolated",
+		deleteAfterRun: false,
+		enabled: true,
+	};
+}
+
+function cronDraftFromJob(job) {
+	var draft = defaultCronDraft();
+	if (!job) return draft;
+	draft.name = job.name || "";
+	draft.schedKind = job.schedule?.kind || "cron";
+	draft.at = schedDefault("at", job);
+	draft.every = schedDefault("every", job);
+	draft.cron = job.schedule?.kind === "cron" ? job.schedule.expr || "" : "";
+	draft.tz = job.schedule?.kind === "cron" ? job.schedule.tz || "" : "";
+	draft.payloadKind = job.payload?.kind || "systemEvent";
+	draft.message = job.payload?.text || job.payload?.message || "";
+	draft.sessionTarget = job.sessionTarget || "isolated";
+	draft.deleteAfterRun = Boolean(job.deleteAfterRun);
+	draft.enabled = job.enabled !== false;
+	return draft;
+}
+
+function parseScheduleDraft(draft) {
+	if (draft.schedKind === "at") {
+		var ts = new Date(draft.at).getTime();
 		if (Number.isNaN(ts)) return { error: "at" };
 		return { schedule: { kind: "at", atMs: ts } };
 	}
-	if (kind === "every") {
-		var secs = parseInt(form.querySelector("[data-field=every]").value, 10);
+	if (draft.schedKind === "every") {
+		var secs = parseInt(draft.every, 10);
 		if (Number.isNaN(secs) || secs <= 0) return { error: "every" };
 		return { schedule: { kind: "every", everyMs: secs * 1000 } };
 	}
-	var expr = form.querySelector("[data-field=cron]").value.trim();
+	var expr = draft.cron.trim();
 	if (!expr) return { error: "cron" };
 	var schedule = { kind: "cron", expr: expr };
-	var tz = form.querySelector("[data-field=tz]").value.trim();
+	var tz = draft.tz.trim();
 	if (tz) schedule.tz = tz;
 	return { schedule: schedule };
 }
@@ -597,29 +630,57 @@ function schedDefault(kind, job) {
 function CronModal() {
 	var isEdit = !!editingJob.value;
 	var job = editingJob.value;
-	var saving = signal(false);
-	var schedKind = signal(isEdit ? job.schedule.kind : "cron");
-	var errorField = signal(null);
+	var [draft, setDraft] = useState(defaultCronDraft());
+	var [saving, setSaving] = useState(false);
+	var [errorField, setErrorField] = useState(null);
+	var [error, setError] = useState("");
+	var requestVersionRef = useRef(0);
+
+	useLayoutEffect(() => {
+		if (!showModal.value) return;
+		setDraft(isEdit ? cronDraftFromJob(job) : defaultCronDraft());
+		setSaving(false);
+		setErrorField(null);
+		setError("");
+	}, [showModal.value, job?.id]);
+
+	function updateDraft(patch) {
+		setDraft((prev) => ({ ...prev, ...patch }));
+		setErrorField(null);
+		setError("");
+	}
+
+	function closeModal() {
+		requestVersionRef.current += 1;
+		showModal.value = false;
+		editingJob.value = null;
+		setDraft(defaultCronDraft());
+		setSaving(false);
+		setErrorField(null);
+		setError("");
+	}
 
 	function onSave(e) {
 		e.preventDefault();
-		var form = e.target.closest(".provider-key-form");
-		var name = form.querySelector("[data-field=name]").value.trim();
+		setError("");
+		var name = draft.name.trim();
 		if (!name) {
-			errorField.value = "name";
+			setErrorField("name");
 			return;
 		}
-		var parsed = parseScheduleFromForm(form, schedKind.value);
+		var parsed = parseScheduleDraft(draft);
 		if (parsed.error) {
-			errorField.value = parsed.error;
+			setErrorField(parsed.error);
 			return;
 		}
-		var msgText = form.querySelector("[data-field=message]").value.trim();
+		var msgText = draft.message.trim();
 		if (!msgText) {
-			errorField.value = "message";
+			setErrorField("message");
 			return;
 		}
-		var payloadKind = form.querySelector("[data-field=payloadKind]").value;
+		setErrorField(null);
+		setError("");
+		var payloadKind = draft.payloadKind;
 		var payload =
 			payloadKind === "systemEvent"
 				? { kind: "systemEvent", text: msgText }
@@ -628,55 +689,73 @@ function CronModal() {
 			name: name,
 			schedule: parsed.schedule,
 			payload: payload,
-			sessionTarget: form.querySelector("[data-field=target]").value,
-			deleteAfterRun: form.querySelector("[data-field=deleteAfter]").checked,
-			enabled: form.querySelector("[data-field=enabled]").checked,
+			sessionTarget: draft.sessionTarget,
+			deleteAfterRun: draft.deleteAfterRun,
+			enabled: draft.enabled,
 		};
 
-		saving.value = true;
+		setSaving(true);
+		var requestId = requestVersionRef.current + 1;
+		requestVersionRef.current = requestId;
 		var rpcMethod = isEdit ? "cron.update" : "cron.add";
 		var rpcParams = isEdit ? { id: job.id, patch: fields } : fields;
 		sendRpc(rpcMethod, rpcParams).then((res) => {
-			saving.value = false;
 			if (res?.ok) {
-				showModal.value = false;
-				editingJob.value = null;
 				loadJobs();
 				loadStatus();
+			}
+			if (requestVersionRef.current !== requestId) return;
+			setSaving(false);
+			if (res?.ok) {
+				closeModal();
+			} else {
+				setError((res?.error && (res.error.message || res.error.detail)) || "Failed to save cron job.");
 			}
 		});
 	}
 
 	function schedParams() {
-		if (schedKind.value === "at") {
+		if (draft.schedKind === "at") {
 			return html`<input data-field="at" class="provider-key-input" type="datetime-local"
-        value=${schedDefault("at", job)} />`;
+        value=${draft.at}
+        onInput=${(e) => {
+					updateDraft({ at: e.target.value });
+				}} />`;
 		}
-		if (schedKind.value === "every") {
+		if (draft.schedKind === "every") {
 			return html`<input data-field="every" class="provider-key-input" type="number" placeholder="Interval in seconds" min="1"
-        value=${schedDefault("every", job)} />`;
+        value=${draft.every}
+        onInput=${(e) => {
+					updateDraft({ every: e.target.value });
+				}} />`;
 		}
 		return html`
       <input data-field="cron" class="provider-key-input" placeholder="*/5 * * * *"
-        value=${isEdit && job.schedule.kind === "cron" ? job.schedule.expr || "" : ""} />
+        value=${draft.cron}
+        onInput=${(e) => {
+					updateDraft({ cron: e.target.value });
+				}} />
       <input data-field="tz" class="provider-key-input" placeholder="Timezone (optional, e.g. Europe/Paris)"
-        value=${isEdit && job.schedule.kind === "cron" ? job.schedule.tz || "" : ""} />
+        value=${draft.tz}
+        onInput=${(e) => {
+					updateDraft({ tz: e.target.value });
+				}} />
     `;
 	}
 
-	return html`<${Modal} show=${showModal.value} onClose=${() => {
-		showModal.value = false;
-		editingJob.value = null;
-	}} title=${isEdit ? "Edit Job" : "Add Job"}>
+	return html`<${Modal} show=${showModal.value} onClose=${closeModal} title=${isEdit ? "Edit Job" : "Add Job"}>
     <div class="provider-key-form">
       <label class="text-xs text-[var(--muted)]">Name</label>
-      <input data-field="name" class="provider-key-input ${errorField.value === "name" ? "field-error" : ""}"
-        placeholder="Job name" value=${isEdit ? job.name : ""} />
+      <input data-field="name" class="provider-key-input ${errorField === "name" ? "field-error" : ""}"
+        placeholder="Job name" value=${draft.name}
+        onInput=${(e) => {
+					updateDraft({ name: e.target.value });
+				}} />
 
       <label class="text-xs text-[var(--muted)]">Schedule Type</label>
-      <select data-field="schedKind" class="provider-key-input" value=${schedKind.value}
+      <select data-field="schedKind" class="provider-key-input" value=${draft.schedKind}
         onChange=${(e) => {
-					schedKind.value = e.target.value;
+					updateDraft({ schedKind: e.target.value });
 				}}>
         <option value="at">At (one-shot)</option>
         <option value="every">Every (interval)</option>
@@ -687,38 +766,54 @@ function CronModal() {
 
       <label class="text-xs text-[var(--muted)]">Payload Type</label>
       <select data-field="payloadKind" class="provider-key-input"
-        value=${isEdit ? job.payload.kind : "systemEvent"}>
+        value=${draft.payloadKind}
+        onChange=${(e) => {
+					updateDraft({ payloadKind: e.target.value });
+				}}>
         <option value="systemEvent">System Event</option>
         <option value="agentTurn">Agent Turn</option>
       </select>
 
       <label class="text-xs text-[var(--muted)]">Message</label>
-      <textarea data-field="message" class="provider-key-input textarea-sm ${errorField.value === "message" ? "field-error" : ""}"
-        placeholder="Message text">${isEdit ? job.payload.text || job.payload.message || "" : ""}</textarea>
+      <textarea data-field="message" class="provider-key-input textarea-sm ${errorField === "message" ? "field-error" : ""}"
+        value=${draft.message}
+        placeholder="Message text"
+        onInput=${(e) => {
+					updateDraft({ message: e.target.value });
+				}} />
 
       <label class="text-xs text-[var(--muted)]">Session Target</label>
       <select data-field="target" class="provider-key-input"
-        value=${isEdit ? job.sessionTarget || "isolated" : "isolated"}>
+        value=${draft.sessionTarget}
+        onChange=${(e) => {
+					updateDraft({ sessionTarget: e.target.value });
+				}}>
         <option value="isolated">Isolated</option>
         <option value="main">Main</option>
       </select>
 
       <label class="text-xs text-[var(--muted)] flex items-center gap-2">
-        <input data-field="deleteAfter" type="checkbox" checked=${isEdit ? job.deleteAfterRun : false} />
+        <input data-field="deleteAfter" type="checkbox" checked=${draft.deleteAfterRun}
+          onChange=${(e) => {
+					updateDraft({ deleteAfterRun: e.target.checked });
+				}} />
         Delete after run
       </label>
       <label class="text-xs text-[var(--muted)] flex items-center gap-2">
-        <input data-field="enabled" type="checkbox" checked=${isEdit ? job.enabled : true} />
+        <input data-field="enabled" type="checkbox" checked=${draft.enabled}
+          onChange=${(e) => {
+					updateDraft({ enabled: e.target.checked });
+				}} />
         Enabled
       </label>
+      ${error && html`<div class="text-xs text-[var(--error)]">${error}</div>`}
 
       <div class="btn-row-mt">
         <button class="provider-btn provider-btn-secondary" onClick=${() => {
-					showModal.value = false;
-					editingJob.value = null;
+					closeModal();
 				}}>Cancel</button>
-        <button class="provider-btn" onClick=${onSave} disabled=${saving.value}>
-          ${saving.value ? "Saving\u2026" : isEdit ? "Update" : "Create"}
+        <button class="provider-btn" onClick=${onSave} disabled=${saving}>
+          ${saving ? "Saving\u2026" : isEdit ? "Update" : "Create"}
         </button>
       </div>
     </div>
