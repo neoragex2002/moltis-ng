@@ -1,5 +1,5 @@
 use {
-    moltis_channels::gating::{self, DmPolicy, MentionMode},
+    moltis_channels::gating::{self, DmPolicy},
     moltis_common::types::ChatType,
 };
 
@@ -53,22 +53,12 @@ fn check_dm_access(
 }
 
 fn check_group_access(
-    config: &TelegramAccountConfig,
+    _config: &TelegramAccountConfig,
     _peer_id: &str,
     _group_id: Option<&str>,
-    bot_mentioned: bool,
+    _bot_mentioned: bool,
 ) -> Result<(), AccessDenied> {
-    // Mention gating
-    match config.mention_mode {
-        MentionMode::Always => Ok(()),
-        MentionMode::Mention => {
-            if bot_mentioned {
-                Ok(())
-            } else {
-                Err(AccessDenied::NotMentioned)
-            }
-        },
-    }
+    Ok(())
 }
 
 /// Reason an inbound message was denied.
@@ -76,7 +66,6 @@ fn check_group_access(
 pub enum AccessDenied {
     DmsDisabled,
     NotOnAllowlist,
-    NotMentioned,
 }
 
 impl std::fmt::Display for AccessDenied {
@@ -84,7 +73,6 @@ impl std::fmt::Display for AccessDenied {
         match self {
             Self::DmsDisabled => write!(f, "DMs are disabled"),
             Self::NotOnAllowlist => write!(f, "user not on allowlist"),
-            Self::NotMentioned => write!(f, "bot was not mentioned"),
         }
     }
 }
@@ -155,20 +143,10 @@ mod tests {
     }
 
     #[test]
-    fn group_mention_required() {
-        let c = cfg(); // mention_mode=Mention by default
-        assert_eq!(
-            check_access(&c, &ChatType::Group, "user", None, Some("grp1"), false),
-            Err(AccessDenied::NotMentioned)
-        );
-        assert!(check_access(&c, &ChatType::Group, "user", None, Some("grp1"), true).is_ok());
-    }
-
-    #[test]
-    fn group_always_mode() {
-        let mut c = cfg();
-        c.mention_mode = MentionMode::Always;
+    fn group_access_is_always_allowed() {
+        let c = cfg();
         assert!(check_access(&c, &ChatType::Group, "user", None, Some("grp1"), false).is_ok());
+        assert!(check_access(&c, &ChatType::Group, "user", None, Some("grp1"), true).is_ok());
     }
 
     #[test]

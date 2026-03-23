@@ -1,5 +1,5 @@
 use {
-    moltis_channels::gating::{DmPolicy, MentionMode},
+    moltis_channels::gating::DmPolicy,
     secrecy::{ExposeSecret, Secret},
     serde::{Deserialize, Serialize},
 };
@@ -34,17 +34,6 @@ pub enum GroupScope {
     PerBranchSender,
 }
 
-/// How strict the group relay parser should be when interpreting bot@bot mentions.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum RelayStrictness {
-    /// Conservative: only relay when the mention looks like an explicit directive.
-    #[default]
-    Strict,
-    /// More permissive: relay on weaker signals (still skips code blocks/quotes).
-    Loose,
-}
-
 /// How streaming responses are delivered.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -68,9 +57,6 @@ pub struct TelegramAccountConfig {
     /// DM access policy.
     pub dm_policy: DmPolicy,
 
-    /// Mention activation mode for groups.
-    pub mention_mode: MentionMode,
-
     /// User/peer allowlist for DMs.
     pub allowlist: Vec<String>,
 
@@ -80,23 +66,11 @@ pub struct TelegramAccountConfig {
     /// Session bucketing mode for group conversations.
     pub group_scope: GroupScope,
 
-    /// Whether group relay can trigger chained bot-to-bot delegations.
-    pub relay_chain_enabled: bool,
+    /// Whether line-start mentions dispatch the target bot in groups.
+    pub group_line_start_mention_dispatch: bool,
 
-    /// Maximum number of relay hops for a single chain.
-    ///
-    /// Default: 3.
-    pub relay_hop_limit: u32,
-
-    /// Maximum number of relay injections allowed in a single relay epoch.
-    ///
-    /// Short-term definition of epoch: `relayChainId`.
-    ///
-    /// Default: 128.
-    pub epoch_relay_budget: u32,
-
-    /// Relay parsing strictness.
-    pub relay_strictness: RelayStrictness,
+    /// Whether reply-to-bot dispatches the target bot in groups.
+    pub group_reply_to_dispatch: bool,
 
     /// How streaming responses are delivered.
     pub stream_mode: StreamMode,
@@ -148,19 +122,31 @@ pub struct TelegramAccountConfig {
 }
 
 /// Safe, non-secret snapshot of Telegram bot identity + group bus config.
-///
-/// Used by the gateway to implement group mirror/relay behavior without
-/// depending on secret config fields (token).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TelegramBusAccountSnapshot {
     pub account_handle: String,
+    pub agent_id: Option<String>,
+    pub chan_user_id: Option<u64>,
     pub chan_user_name: Option<String>,
+    pub chan_nickname: Option<String>,
     pub dm_scope: DmScope,
     pub group_scope: GroupScope,
-    pub relay_chain_enabled: bool,
-    pub relay_hop_limit: u32,
-    pub epoch_relay_budget: u32,
-    pub relay_strictness: RelayStrictness,
+}
+
+/// Read-only Telegram identity link derived from workspace PEOPLE plus local
+/// Telegram account truth. Consumed only by Telegram-side speaker resolution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramIdentityLink {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram_user_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram_user_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram_display_name: Option<String>,
 }
 
 impl std::fmt::Debug for TelegramAccountConfig {
@@ -184,14 +170,11 @@ impl Default for TelegramAccountConfig {
         Self {
             token: Secret::new(String::new()),
             dm_policy: DmPolicy::default(),
-            mention_mode: MentionMode::default(),
             allowlist: Vec::new(),
             dm_scope: DmScope::default(),
             group_scope: GroupScope::default(),
-            relay_chain_enabled: true,
-            relay_hop_limit: 3,
-            epoch_relay_budget: 128,
-            relay_strictness: RelayStrictness::default(),
+            group_line_start_mention_dispatch: true,
+            group_reply_to_dispatch: true,
             stream_mode: StreamMode::default(),
             edit_throttle_ms: 300,
             outbound_max_attempts: 3,
@@ -218,7 +201,8 @@ mod tests {
     fn default_config() {
         let cfg = TelegramAccountConfig::default();
         assert_eq!(cfg.dm_policy, DmPolicy::Open);
-        assert_eq!(cfg.mention_mode, MentionMode::Mention);
+        assert!(cfg.group_line_start_mention_dispatch);
+        assert!(cfg.group_reply_to_dispatch);
         assert_eq!(cfg.dm_scope, DmScope::Main);
         assert_eq!(cfg.group_scope, GroupScope::Group);
         assert_eq!(cfg.stream_mode, StreamMode::EditInPlace);
@@ -226,10 +210,6 @@ mod tests {
         assert_eq!(cfg.outbound_max_attempts, 3);
         assert_eq!(cfg.outbound_retry_base_delay_ms, 500);
         assert_eq!(cfg.outbound_retry_max_delay_ms, 5000);
-        assert_eq!(cfg.relay_chain_enabled, true);
-        assert_eq!(cfg.relay_hop_limit, 3);
-        assert_eq!(cfg.epoch_relay_budget, 128);
-        assert_eq!(cfg.relay_strictness, RelayStrictness::Strict);
     }
 
     #[test]
@@ -246,20 +226,24 @@ mod tests {
         assert_eq!(cfg.stream_mode, StreamMode::Off);
         assert_eq!(cfg.allowlist, vec!["user1", "user2"]);
         // defaults for unspecified fields
-        assert_eq!(cfg.mention_mode, MentionMode::Mention);
+        assert!(cfg.group_line_start_mention_dispatch);
+        assert!(cfg.group_reply_to_dispatch);
         assert_eq!(cfg.outbound_max_attempts, 3);
         assert_eq!(cfg.outbound_retry_base_delay_ms, 500);
         assert_eq!(cfg.outbound_retry_max_delay_ms, 5000);
     }
 
     #[test]
-    fn deserialize_mention_mode_none_is_accepted_as_mention() {
+    fn deserialize_rejects_legacy_group_strategy_fields() {
         let json = r#"{
             "token": "123:ABC",
-            "mention_mode": "none"
+            "mention_mode": "mention"
         }"#;
-        let cfg: TelegramAccountConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.mention_mode, MentionMode::Mention);
+        let err = serde_json::from_str::<TelegramAccountConfig>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `mention_mode`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

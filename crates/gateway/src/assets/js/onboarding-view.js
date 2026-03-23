@@ -2025,7 +2025,8 @@ function ChannelStep({ onNext, onBack }) {
 			config: {
 				token: token.trim(),
 				dm_policy: dmPolicy,
-				mention_mode: "mention",
+				group_line_start_mention_dispatch: true,
+				group_reply_to_dispatch: true,
 				allowlist: allowlistEntries,
 			},
 		}).then((res) => {

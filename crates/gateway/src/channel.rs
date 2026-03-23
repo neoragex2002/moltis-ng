@@ -69,14 +69,11 @@ fn classify_telegram_config_patch(patch: &Value) -> Result<TelegramConfigPatchKi
     for key in patch_obj.keys() {
         match key.as_str() {
             "dm_policy"
-            | "mention_mode"
             | "allowlist"
             | "dm_scope"
             | "group_scope"
-            | "relay_chain_enabled"
-            | "relay_hop_limit"
-            | "epoch_relay_budget"
-            | "relay_strictness"
+            | "group_line_start_mention_dispatch"
+            | "group_reply_to_dispatch"
             | "stream_mode"
             | "edit_throttle_ms"
             | "outbound_max_attempts"
@@ -624,6 +621,14 @@ impl ChannelService for LiveChannelService {
     ) -> Vec<moltis_telegram::config::TelegramBusAccountSnapshot> {
         let tg = self.telegram.read().await;
         tg.bus_accounts_snapshot()
+    }
+
+    async fn set_telegram_identity_links(
+        &self,
+        links: Vec<moltis_telegram::config::TelegramIdentityLink>,
+    ) {
+        let tg = self.telegram.read().await;
+        tg.set_identity_links(links);
     }
 
     async fn telegram_account_agent_id(&self, chan_account_key: &str) -> Option<String> {

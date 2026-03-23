@@ -46,6 +46,22 @@ use crate::{
     state::GatewayState,
 };
 
+async fn refresh_telegram_identity_links(state: &Arc<GatewayState>) {
+    match crate::people::telegram_identity_links() {
+        Ok(links) => {
+            state.services.channel.set_telegram_identity_links(links).await;
+        },
+        Err(error) => warn!(
+            event = "telegram.identity_link.refresh_failed",
+            reason_code = "people_load_failed",
+            decision = "skip_refresh",
+            policy = "tg_gst_v1_speaker",
+            error = %error,
+            "failed to refresh telegram identity links from PEOPLE.md"
+        ),
+    }
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 /// Context passed to every method handler.
@@ -1323,16 +1339,18 @@ impl MethodRegistry {
                 Box::pin(async move {
                     let payload = crate::people::people_update_entry(&ctx.params)
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    refresh_telegram_identity_links(&ctx.state).await;
                     Ok(payload)
                 })
             }),
         );
         self.register(
             "workspace.people.sync",
-            Box::new(|_ctx| {
+            Box::new(|ctx| {
                 Box::pin(async move {
                     crate::people::people_sync_from_identities()
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    refresh_telegram_identity_links(&ctx.state).await;
                     Ok(serde_json::json!({}))
                 })
             }),

@@ -4,6 +4,7 @@ use {
     base64::Engine,
     rand::Rng,
     std::future::Future,
+    std::sync::{Arc, Mutex, OnceLock},
     teloxide::{
         payloads::{
             SendAudioSetters, SendChatActionSetters, SendDocumentSetters, SendLocationSetters,
@@ -24,9 +25,9 @@ use {
 };
 
 use crate::{
-    adapter::TgPrivateTarget,
+    adapter::{TgContent, TgInbound, TgInboundKind, TgInboundMode, TgInboundRequest, TgPrivateSource, TgPrivateTarget, plan_group_target_action, resolve_tg_route},
     markdown::{self, TELEGRAM_MAX_MESSAGE_LEN},
-    state::AccountStateMap,
+    state::{AccountStateMap, TelegramGroupRuntime},
 };
 
 #[cfg(not(test))]
@@ -42,6 +43,19 @@ const TELEGRAM_TYPING_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration
 /// Outbound message sender for Telegram.
 pub struct TelegramOutbound {
     pub(crate) accounts: AccountStateMap,
+}
+
+pub(crate) fn shared_group_runtime(accounts: &AccountStateMap) -> Arc<Mutex<TelegramGroupRuntime>> {
+    static STORE: OnceLock<Mutex<std::collections::HashMap<usize, Arc<Mutex<TelegramGroupRuntime>>>>> =
+        OnceLock::new();
+    let store = STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let key = Arc::as_ptr(accounts) as usize;
+    let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+    Arc::clone(
+        store
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(TelegramGroupRuntime::new()))),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -659,6 +673,10 @@ fn classify_retry_decision(
 }
 
 impl TelegramOutbound {
+    pub fn new(accounts: AccountStateMap) -> Self {
+        Self { accounts }
+    }
+
     fn get_bot(&self, account_handle: &str) -> Result<teloxide::Bot> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
@@ -673,6 +691,234 @@ impl TelegramOutbound {
             .get(account_handle)
             .ok_or_else(|| anyhow::anyhow!("unknown account: {account_handle}"))?;
         Ok(OutboundRetryConfig::from_account(&state.config))
+    }
+
+    fn is_group_chat(chat_id: &str) -> bool {
+        chat_id.parse::<i64>().is_ok_and(|id| id < 0)
+    }
+
+    fn group_action_dedupe_key(account_handle: &str, chat_id: &str, message_id: &str) -> String {
+        format!("telegram.group.action|account:{account_handle}|chat:{chat_id}|message:{message_id}")
+    }
+
+    async fn emit_group_visible_outbound_event(
+        &self,
+        source_account_handle: &str,
+        chat_id: &str,
+        reply_to_message_id: Option<&str>,
+        thread_id: Option<&str>,
+        text: &str,
+        message_kind: Option<moltis_channels::ChannelMessageKind>,
+        sent_message_id: &str,
+    ) {
+        if !Self::is_group_chat(chat_id)
+            || (text.trim().is_empty()
+                && !message_kind.is_some_and(|kind| kind != moltis_channels::ChannelMessageKind::Text))
+        {
+            return;
+        }
+
+        let (
+            snapshots,
+            identity_links,
+            source_username,
+            source_sender_name,
+            source_sender_id,
+            source_sender_token,
+            participants,
+        ) = {
+            let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+            let Some(source_state) = accounts.get(source_account_handle) else {
+                return;
+            };
+            let source_sender_token = crate::state::effective_bot_user_id(source_state)
+                .map(|id| id.to_string())
+                .or_else(|| crate::state::effective_bot_username(source_state));
+            let snapshots = accounts
+                .iter()
+                .map(|(account_handle, state)| crate::config::TelegramBusAccountSnapshot {
+                    account_handle: account_handle.clone(),
+                    agent_id: state.config.agent_id.clone(),
+                    chan_user_id: crate::state::effective_bot_user_id(state),
+                    chan_user_name: crate::state::effective_bot_username(state),
+                    chan_nickname: state.config.chan_nickname.clone(),
+                    dm_scope: state.config.dm_scope.clone(),
+                    group_scope: state.config.group_scope.clone(),
+                })
+                .collect::<Vec<_>>();
+            let identity_links = crate::state::telegram_identity_links_snapshot(&self.accounts);
+            let group_runtime = shared_group_runtime(&self.accounts);
+            let mut runtime = group_runtime.lock().unwrap_or_else(|e| e.into_inner());
+            runtime.register_participant(chat_id, source_account_handle);
+            runtime.register_message_author(chat_id, sent_message_id, source_account_handle);
+            let participants = runtime.participants_for_chat(chat_id);
+            (
+                snapshots,
+                identity_links,
+                crate::state::effective_bot_username(source_state),
+                source_state
+                    .config
+                    .chan_nickname
+                    .clone()
+                    .or_else(|| crate::state::effective_bot_username(source_state)),
+                crate::state::effective_bot_user_id(source_state),
+                source_sender_token,
+                participants,
+            )
+        };
+
+        if participants.is_empty() {
+            return;
+        }
+
+        let reply_to_target_account = reply_to_message_id.and_then(|message_id| {
+            shared_group_runtime(&self.accounts)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .message_author(chat_id, message_id)
+        });
+
+        let targets = {
+            let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+            participants
+                .into_iter()
+                .filter(|account_handle| account_handle != source_account_handle)
+                .filter_map(|account_handle| {
+                    let state = accounts.get(&account_handle)?;
+                    Some((
+                        account_handle,
+                        state.config.clone(),
+                        state.bot_username.clone(),
+                        state.core_bridge.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for (target_account_handle, target_config, target_username, target_bridge) in targets {
+            let Some(bridge) = target_bridge else {
+                continue;
+            };
+            let Some(action) = plan_group_target_action(
+                text,
+                &snapshots,
+                &target_account_handle,
+                target_username.as_deref(),
+                reply_to_target_account.as_deref(),
+                target_config.group_line_start_mention_dispatch,
+                target_config.group_reply_to_dispatch,
+                message_kind.is_some_and(|kind| kind != moltis_channels::ChannelMessageKind::Text),
+            ) else {
+                continue;
+            };
+
+            let dedupe_key = Self::group_action_dedupe_key(
+                &target_account_handle,
+                chat_id,
+                sent_message_id,
+            );
+            let is_dup = shared_group_runtime(&self.accounts)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .check_and_insert_action(&dedupe_key);
+            if is_dup {
+                info!(
+                    event = "telegram.group.outbound_plan",
+                    source_account_handle,
+                    target_account_handle,
+                    chat_id,
+                    message_id = sent_message_id,
+                    reason_code = "tg_dedup_hit",
+                    decision = "drop",
+                    policy = "group_record_dispatch_v3",
+                    "telegram group outbound event deduped before gateway handoff"
+                );
+                continue;
+            }
+
+            let inbound = TgInbound {
+                kind: TgInboundKind::Group,
+                mode: action.mode,
+                body: TgContent {
+                    text: action.body,
+                    has_attachments: false,
+                    has_location: matches!(message_kind, Some(moltis_channels::ChannelMessageKind::Location)),
+                },
+                private_source: TgPrivateSource {
+                    account_handle: target_account_handle.clone(),
+                    chat_id: chat_id.to_string(),
+                    message_id: Some(sent_message_id.to_string()),
+                    thread_id: thread_id.map(str::to_string),
+                    peer: chat_id.to_string(),
+                    sender: source_sender_token.clone(),
+                    addressed: action.addressed,
+                },
+            };
+            let route = resolve_tg_route(&target_config, &inbound);
+            let rendered = crate::adapter::tg_gst_v1_render_text(
+                inbound.body.text.as_str(),
+                message_kind,
+                &snapshots,
+                &identity_links,
+                source_username.as_deref(),
+                source_sender_id,
+                source_sender_name.as_deref(),
+                true,
+                route.addressed,
+            );
+            if rendered.degraded {
+                info!(
+                    event = "telegram.speaker_resolution",
+                    account_handle = target_account_handle,
+                    reason_code = rendered.reason_code,
+                    decision = "degraded",
+                    policy = "tg_gst_v1_speaker",
+                    match_method = rendered.match_method,
+                    sender_short_id = source_sender_id.map(|id| id % 100000),
+                    "telegram outbound speaker rendering degraded to technical fallback"
+                );
+            }
+            let mut inbound = inbound;
+            inbound.body.text = rendered.text;
+            let request = TgInboundRequest {
+                inbound,
+                route: route.clone(),
+                private_target: TgPrivateTarget {
+                    account_handle: target_account_handle.clone(),
+                    chat_id: chat_id.to_string(),
+                    message_id: Some(sent_message_id.to_string()),
+                    thread_id: thread_id.map(str::to_string),
+                },
+                transcript_format: crate::adapter::TgTranscriptFormat::TgGstV1,
+                sender_name: source_sender_name.clone(),
+                username: source_username.clone(),
+                sender_id: source_sender_id,
+                sender_is_bot: true,
+                model: target_config.model.clone(),
+                message_kind,
+                attachments: Vec::new(),
+            };
+            info!(
+                event = "telegram.group.outbound_plan",
+                source_account_handle,
+                target_account_handle,
+                chat_id,
+                message_id = sent_message_id,
+                reason_code = if matches!(request.inbound.mode, TgInboundMode::Dispatch) {
+                    "tg_dispatch_promoted_from_record"
+                } else {
+                    "tg_record_context"
+                },
+                decision = if matches!(request.inbound.mode, TgInboundMode::Dispatch) {
+                    "dispatch"
+                } else {
+                    "record"
+                },
+                policy = "group_record_dispatch_v3",
+                "telegram group outbound event handed to gateway"
+            );
+            bridge.handle_inbound(request).await;
+        }
     }
 
     fn reply_params(
@@ -922,6 +1168,7 @@ impl TelegramOutbound {
         let retry_cfg = self.get_retry_config(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_handle, to, "send_text", reply_to);
+        let thread_id_text = thread_id.map(str::to_string);
         let thread_id = self.thread_id(account_handle, to, "send_text", thread_id);
         let transport = BotTextTransport { bot };
 
@@ -1005,6 +1252,18 @@ impl TelegramOutbound {
             silent,
             "telegram outbound text sent"
         );
+        if let Some(sent_id) = first_id {
+            self.emit_group_visible_outbound_event(
+                account_handle,
+                to,
+                reply_to,
+                thread_id_text.as_deref(),
+                text,
+                Some(moltis_channels::ChannelMessageKind::Text),
+                &sent_id.0.to_string(),
+            )
+            .await;
+        }
         Ok(first_id)
     }
 
@@ -1021,6 +1280,7 @@ impl TelegramOutbound {
         let retry_cfg = self.get_retry_config(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_handle, to, "send_text_with_suffix", reply_to);
+        let thread_id_text = thread_id.map(str::to_string);
         let thread_id = self.thread_id(account_handle, to, "send_text_with_suffix", thread_id);
         let transport = BotTextTransport { bot };
 
@@ -1137,6 +1397,18 @@ impl TelegramOutbound {
                         chunk_count = chunks.len(),
                         "telegram outbound text+suffix sent (separate suffix message)"
                     );
+                    if let Some(sent_id) = first_id {
+                        self.emit_group_visible_outbound_event(
+                            account_handle,
+                            to,
+                            reply_to,
+                            thread_id_text.as_deref(),
+                            text,
+                            Some(moltis_channels::ChannelMessageKind::Text),
+                            &sent_id.0.to_string(),
+                        )
+                        .await;
+                    }
                     return Ok(first_id);
                 }
             } else {
@@ -1183,6 +1455,18 @@ impl TelegramOutbound {
             chunk_count = chunks.len(),
             "telegram outbound text+suffix sent"
         );
+        if let Some(sent_id) = first_id {
+            self.emit_group_visible_outbound_event(
+                account_handle,
+                to,
+                reply_to,
+                thread_id_text.as_deref(),
+                text,
+                Some(moltis_channels::ChannelMessageKind::Text),
+                &sent_id.0.to_string(),
+            )
+            .await;
+        }
         Ok(first_id)
     }
 
@@ -1197,6 +1481,7 @@ impl TelegramOutbound {
         let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_handle, to, "send_media", reply_to);
+        let thread_id_text = thread_id.map(str::to_string);
         let parsed_thread_id = self.thread_id(account_handle, to, "send_media", thread_id);
         let (caption, caption_overflow) = split_caption_for_telegram(&payload.text);
         let media_mime = payload
@@ -1288,6 +1573,16 @@ impl TelegramOutbound {
                                     );
                                 }
                             }
+                            self.emit_group_visible_outbound_event(
+                                account_handle,
+                                to,
+                                reply_to,
+                                thread_id_text.as_deref(),
+                                &payload.text,
+                                Some(moltis_channels::ChannelMessageKind::Photo),
+                                &sent_id.0.to_string(),
+                            )
+                            .await;
                             return Ok(Some(sent_id));
                         },
                         Err(e) => {
@@ -1342,6 +1637,16 @@ impl TelegramOutbound {
                                         );
                                     }
                                 }
+                                self.emit_group_visible_outbound_event(
+                                    account_handle,
+                                    to,
+                                    reply_to,
+                                    thread_id_text.as_deref(),
+                                    &payload.text,
+                                    Some(moltis_channels::ChannelMessageKind::Document),
+                                    &sent_id.0.to_string(),
+                                )
+                                .await;
                                 return Ok(Some(sent_id));
                             }
                             return Err(e.into());
@@ -1388,6 +1693,16 @@ impl TelegramOutbound {
                             );
                         }
                     }
+                    self.emit_group_visible_outbound_event(
+                        account_handle,
+                        to,
+                        reply_to,
+                        thread_id_text.as_deref(),
+                        &payload.text,
+                        Some(moltis_channels::ChannelMessageKind::Voice),
+                        &sent_id.0.to_string(),
+                    )
+                    .await;
                     return Ok(Some(sent_id));
                 }
                 if media.mime_type.starts_with("audio/") {
@@ -1428,6 +1743,16 @@ impl TelegramOutbound {
                             );
                         }
                     }
+                    self.emit_group_visible_outbound_event(
+                        account_handle,
+                        to,
+                        reply_to,
+                        thread_id_text.as_deref(),
+                        &payload.text,
+                        Some(moltis_channels::ChannelMessageKind::Audio),
+                        &sent_id.0.to_string(),
+                    )
+                    .await;
                     return Ok(Some(sent_id));
                 }
 
@@ -1468,6 +1793,16 @@ impl TelegramOutbound {
                         );
                     }
                 }
+                self.emit_group_visible_outbound_event(
+                    account_handle,
+                    to,
+                    reply_to,
+                    thread_id_text.as_deref(),
+                    &payload.text,
+                    Some(moltis_channels::ChannelMessageKind::Document),
+                    &sent_id.0.to_string(),
+                )
+                .await;
                 return Ok(Some(sent_id));
             }
 
@@ -1579,6 +1914,26 @@ impl TelegramOutbound {
                     );
                 }
             }
+            self.emit_group_visible_outbound_event(
+                account_handle,
+                to,
+                reply_to,
+                thread_id_text.as_deref(),
+                &payload.text,
+                payload.media.as_ref().map(|media| {
+                    if media.mime_type.starts_with("image/") {
+                        moltis_channels::ChannelMessageKind::Photo
+                    } else if media.mime_type == "audio/ogg" {
+                        moltis_channels::ChannelMessageKind::Voice
+                    } else if media.mime_type.starts_with("audio/") {
+                        moltis_channels::ChannelMessageKind::Audio
+                    } else {
+                        moltis_channels::ChannelMessageKind::Document
+                    }
+                }),
+                &sent.0.to_string(),
+            )
+            .await;
             return Ok(Some(sent));
         }
 
@@ -1612,6 +1967,7 @@ impl TelegramOutbound {
         let bot = self.get_bot(account_handle)?;
         let chat_id = ChatId(to.parse::<i64>()?);
         let rp = self.reply_params(account_handle, to, "send_location", reply_to);
+        let thread_id_text = thread_id.map(str::to_string);
         let thread_id = self.thread_id(account_handle, to, "send_location", thread_id);
         info!(
             account_handle,
@@ -1654,6 +2010,16 @@ impl TelegramOutbound {
             has_title = title.is_some(),
             "telegram outbound location sent"
         );
+        self.emit_group_visible_outbound_event(
+            account_handle,
+            to,
+            reply_to,
+            thread_id_text.as_deref(),
+            title.unwrap_or_default(),
+            Some(moltis_channels::ChannelMessageKind::Location),
+            &sent.id.0.to_string(),
+        )
+        .await;
         Ok(Some(sent.id))
     }
 }
@@ -2405,6 +2771,7 @@ impl TelegramOutbound {
 #[cfg(test)]
 mod tests {
     use {
+        async_trait::async_trait,
         super::*,
         axum::{Json, Router, body::Bytes, extract::State, routing::post},
         moltis_channels::ChannelReplyTarget,
@@ -2416,6 +2783,47 @@ mod tests {
         teloxide::types::Seconds,
         tokio::sync::mpsc,
     };
+
+    #[derive(Default)]
+    struct RecordingBridge {
+        requests: Arc<Mutex<Vec<crate::adapter::TgInboundRequest>>>,
+    }
+
+    #[async_trait]
+    impl crate::adapter::TelegramCoreBridge for RecordingBridge {
+        async fn handle_inbound(&self, request: crate::adapter::TgInboundRequest) {
+            self.requests.lock().unwrap().push(request);
+        }
+
+        async fn dispatch_command(
+            &self,
+            _command: &str,
+            _target: crate::adapter::TgFollowUpTarget,
+        ) -> anyhow::Result<String> {
+            unreachable!("dispatch_command not used in outbound tests")
+        }
+
+        async fn request_voice_transcription(
+            &self,
+            _audio_data: &[u8],
+            _format: &str,
+        ) -> anyhow::Result<String> {
+            unreachable!("request_voice_transcription not used in outbound tests")
+        }
+
+        async fn voice_transcription_available(&self) -> bool {
+            false
+        }
+
+        async fn update_location(
+            &self,
+            _target: crate::adapter::TgFollowUpTarget,
+            _latitude: f64,
+            _longitude: f64,
+        ) -> bool {
+            false
+        }
+    }
 
     #[derive(Debug)]
     enum MockSendResult {
@@ -2605,6 +3013,105 @@ mod tests {
         let (none, invalid) = super::parse_reply_params_checked(Some("not-a-number"));
         assert!(none.is_none());
         assert!(invalid);
+    }
+
+    #[tokio::test]
+    async fn group_visible_outbound_uses_identity_display_name_for_bot_speaker() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        };
+        let bridge = Arc::new(RecordingBridge::default());
+
+        crate::state::replace_telegram_identity_links(
+            &accounts,
+            vec![crate::config::TelegramIdentityLink {
+                agent_id: "risk".into(),
+                display_name: Some("风险助手".into()),
+                telegram_user_id: Some(100),
+                telegram_user_name: Some("risk_bot_cn".into()),
+                telegram_display_name: Some("风险助手中文".into()),
+            }],
+        );
+
+        {
+            let mut map = accounts.write().unwrap();
+            map.insert(
+                "telegram:100".into(),
+                crate::state::AccountState {
+                    bot: teloxide::Bot::new("token-a"),
+                    bot_user_id: Some(UserId(100)),
+                    bot_username: Some("risk_bot_cn".into()),
+                    account_handle: "telegram:100".into(),
+                    config: crate::config::TelegramAccountConfig {
+                        agent_id: Some("risk".into()),
+                        chan_user_id: Some(100),
+                        chan_user_name: Some("risk_bot_cn".into()),
+                        chan_nickname: Some("风险助手中文".into()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::new(TelegramOutbound {
+                        accounts: Arc::clone(&accounts),
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: None,
+                    core_bridge: None,
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                },
+            );
+            map.insert(
+                "telegram:200".into(),
+                crate::state::AccountState {
+                    bot: teloxide::Bot::new("token-b"),
+                    bot_user_id: Some(UserId(200)),
+                    bot_username: Some("listener_bot".into()),
+                    account_handle: "telegram:200".into(),
+                    config: crate::config::TelegramAccountConfig {
+                        chan_user_id: Some(200),
+                        chan_user_name: Some("listener_bot".into()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::new(TelegramOutbound {
+                        accounts: Arc::clone(&accounts),
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: None,
+                    core_bridge: Some(Arc::clone(&bridge) as Arc<dyn crate::adapter::TelegramCoreBridge>),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                },
+            );
+        }
+
+        super::shared_group_runtime(&accounts)
+            .lock()
+            .unwrap()
+            .register_participant("-1001", "telegram:200");
+
+        outbound
+            .emit_group_visible_outbound_event(
+                "telegram:100",
+                "-1001",
+                None,
+                None,
+                "done",
+                Some(moltis_channels::ChannelMessageKind::Text),
+                "50",
+            )
+            .await;
+
+        let requests = bridge.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].inbound.body.text, "风险助手(bot): done");
     }
 
     #[test]

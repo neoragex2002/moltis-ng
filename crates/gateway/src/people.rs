@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 struct PeopleMd {
@@ -133,6 +134,80 @@ fn yaml_scalar_to_string(v: &serde_yaml::Value) -> Option<String> {
         serde_yaml::Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
+}
+
+pub(crate) fn telegram_identity_links(
+) -> anyhow::Result<Vec<moltis_telegram::config::TelegramIdentityLink>> {
+    let doc = load_people_md()?;
+    let Some(map) = doc.frontmatter.as_mapping() else {
+        return Ok(Vec::new());
+    };
+    let people = map
+        .get(&serde_yaml::Value::String("people".to_string()))
+        .and_then(|value| value.as_sequence())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut links = Vec::new();
+    for person in people {
+        let Some(entry) = person.as_mapping() else {
+            continue;
+        };
+        let agent_id = entry
+            .get(&serde_yaml::Value::String("name".to_string()))
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if agent_id.is_empty() {
+            continue;
+        }
+
+        let telegram_user_id = entry
+            .get(&serde_yaml::Value::String("telegram_user_id".to_string()))
+            .and_then(yaml_scalar_to_string)
+            .and_then(|value| match value.trim().parse::<u64>() {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    warn!(
+                        event = "telegram.identity_link.invalid",
+                        reason_code = "telegram_user_id_invalid",
+                        decision = "skip_field",
+                        policy = "tg_gst_v1_speaker",
+                        agent_id,
+                        raw_value = value,
+                        error = %error,
+                        "invalid telegram_user_id in PEOPLE.md; skipping field"
+                    );
+                    None
+                },
+            });
+
+        links.push(moltis_telegram::config::TelegramIdentityLink {
+            agent_id,
+            display_name: entry
+                .get(&serde_yaml::Value::String("display_name".to_string()))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            telegram_user_id,
+            telegram_user_name: entry
+                .get(&serde_yaml::Value::String("telegram_user_name".to_string()))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            telegram_display_name: entry
+                .get(&serde_yaml::Value::String("telegram_display_name".to_string()))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        });
+    }
+
+    Ok(links)
 }
 
 pub(crate) fn people_get() -> anyhow::Result<serde_json::Value> {
@@ -325,6 +400,30 @@ pub(crate) fn people_sync_from_identities() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telegram_identity_links_extract_people_fields() {
+        let _guard = crate::test_support::TestDirsGuard::new();
+        moltis_config::ensure_people_md_seeded().unwrap();
+        let path = moltis_config::people_path();
+        std::fs::write(
+            &path,
+            "---\nschema_version: 1\npeople:\n  - name: risk\n    display_name: 风险助手\n    telegram_user_id: 1234567890\n    telegram_user_name: risk_bot_cn\n    telegram_display_name: 风险助手中文\n---\n\n# PEOPLE.md\n",
+        )
+        .unwrap();
+
+        let links = telegram_identity_links().unwrap();
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].agent_id, "risk");
+        assert_eq!(links[0].display_name.as_deref(), Some("风险助手"));
+        assert_eq!(links[0].telegram_user_id, Some(1234567890));
+        assert_eq!(links[0].telegram_user_name.as_deref(), Some("risk_bot_cn"));
+        assert_eq!(
+            links[0].telegram_display_name.as_deref(),
+            Some("风险助手中文")
+        );
+    }
 
     #[test]
     fn people_update_entry_preserves_body() {

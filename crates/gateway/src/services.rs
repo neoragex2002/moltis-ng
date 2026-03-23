@@ -383,6 +383,15 @@ pub trait ChannelService: Send + Sync {
         Vec::new()
     }
 
+    /// Replace the Telegram speaker identity links held by the live plugin.
+    ///
+    /// Default implementation is a no-op for non-Telegram/noop services.
+    async fn set_telegram_identity_links(
+        &self,
+        _links: Vec<moltis_telegram::config::TelegramIdentityLink>,
+    ) {
+    }
+
     /// Resolve the configured agent_id for a Telegram account, if any.
     ///
     /// Default implementation returns `None` for non-live/noop services.

@@ -339,11 +339,9 @@ function AddChannelModal() {
 			var addConfig = {
 				token: token,
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
-				mention_mode: form.querySelector("[data-field=mentionMode]").value,
+				group_line_start_mention_dispatch: form.querySelector("[data-field=groupLineStartMentionDispatch]").checked,
+				group_reply_to_dispatch: form.querySelector("[data-field=groupReplyToDispatch]").checked,
 				allowlist: allowlistItems.value,
-				relay_strictness: form.querySelector("[data-field=relayStrictness]").value,
-				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
-				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
 			if (agentName) {
 				addConfig.agent_id = agentName;
@@ -416,23 +414,15 @@ function AddChannelModal() {
         <option value="allowlist">Allowlist only</option>
         <option value="disabled">Disabled</option>
       </select>
-	      <label class="text-xs text-[var(--muted)]">Group Mention Mode</label>
-	      <select data-field="mentionMode" style=${selectStyle}>
-	        <option value="mention">Must @mention bot</option>
-	        <option value="always">Always respond</option>
-	      </select>
-      <label class="text-xs text-[var(--muted)]">Group Relay Strictness</label>
-      <select data-field="relayStrictness" style=${selectStyle}>
-        <option value="strict">Strict (avoid false triggers)</option>
-        <option value="loose">Loose (more permissive)</option>
-      </select>
-      <label class="text-xs text-[var(--muted)]">Relay Chain</label>
+	      <label class="text-xs text-[var(--muted)]">Group Dispatch</label>
       <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
-        <input type="checkbox" data-field="relayChainEnabled" checked=${true} />
-        Allow bot-to-bot chained delegations
+        <input type="checkbox" data-field="groupLineStartMentionDispatch" checked=${true} />
+        Dispatch on line-start mentions
       </label>
-      <label class="text-xs text-[var(--muted)]">Relay Hop Limit</label>
-      <input data-field="relayHopLimit" type="number" min="1" max="65536" value="3" style=${inputStyle} />
+      <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+        <input type="checkbox" data-field="groupReplyToDispatch" checked=${true} />
+        Dispatch on reply-to bot
+      </label>
 	      <label class="text-xs text-[var(--muted)]">Default Model</label>
 	      <${ModelSelect} models=${modelsSig.value} value=${addModel.value}
 	        onChange=${(v) => {
@@ -475,11 +465,9 @@ function EditChannelModal() {
 			var updateConfig = {
 				token: cfg.token || "",
 				dm_policy: form.querySelector("[data-field=dmPolicy]").value,
-				mention_mode: form.querySelector("[data-field=mentionMode]").value,
+				group_line_start_mention_dispatch: form.querySelector("[data-field=groupLineStartMentionDispatch]").checked,
+				group_reply_to_dispatch: form.querySelector("[data-field=groupReplyToDispatch]").checked,
 				allowlist: allowlistItems.value,
-				relay_strictness: form.querySelector("[data-field=relayStrictness]").value,
-				relay_chain_enabled: form.querySelector("[data-field=relayChainEnabled]").checked,
-				relay_hop_limit: parseInt(form.querySelector("[data-field=relayHopLimit]").value, 10) || 3,
 			};
 			// Allow clearing agent binding by sending explicit null.
 			updateConfig.agent_id = agentName ? agentName : null;
@@ -538,23 +526,15 @@ function EditChannelModal() {
         <option value="allowlist">Allowlist only</option>
         <option value="disabled">Disabled</option>
       </select>
-	      <label class="text-xs text-[var(--muted)]">Group Mention Mode</label>
-	      <select data-field="mentionMode" style=${selectStyle} value=${cfg.mention_mode || "mention"}>
-	        <option value="mention">Must @mention bot</option>
-	        <option value="always">Always respond</option>
-	      </select>
-      <label class="text-xs text-[var(--muted)]">Group Relay Strictness</label>
-      <select data-field="relayStrictness" style=${selectStyle} value=${cfg.relay_strictness || "strict"}>
-        <option value="strict">Strict (avoid false triggers)</option>
-        <option value="loose">Loose (more permissive)</option>
-      </select>
-      <label class="text-xs text-[var(--muted)]">Relay Chain</label>
+	      <label class="text-xs text-[var(--muted)]">Group Dispatch</label>
       <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
-        <input type="checkbox" data-field="relayChainEnabled" checked=${cfg.relay_chain_enabled !== false} />
-        Allow bot-to-bot chained delegations
+        <input type="checkbox" data-field="groupLineStartMentionDispatch" checked=${cfg.group_line_start_mention_dispatch !== false} />
+        Dispatch on line-start mentions
       </label>
-      <label class="text-xs text-[var(--muted)]">Relay Hop Limit</label>
-      <input data-field="relayHopLimit" type="number" min="1" max="65536" value=${cfg.relay_hop_limit || 3} style="font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;" />
+      <label class="text-xs text-[var(--muted)]" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+        <input type="checkbox" data-field="groupReplyToDispatch" checked=${cfg.group_reply_to_dispatch !== false} />
+        Dispatch on reply-to bot
+      </label>
 	      <label class="text-xs text-[var(--muted)]">Default Model</label>
 	      <${ModelSelect} models=${modelsSig.value} value=${editModel.value}
 	        onChange=${(v) => {

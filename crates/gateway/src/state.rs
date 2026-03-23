@@ -207,14 +207,6 @@ impl DedupeCache {
     }
 }
 
-// ── Telegram relay epoch budget ───────────────────────────────────────────────
-
-pub(crate) struct TelegramRelayEpochBudgetEntry {
-    pub used: u32,
-    pub exhausted_logged: bool,
-    pub updated_at: Instant,
-}
-
 // ── Pending node invoke ─────────────────────────────────────────────────────
 
 /// A pending RPC invocation waiting for a node to respond.
@@ -261,8 +253,6 @@ pub struct GatewayInner {
     pub clients: HashMap<String, ConnectedClient>,
     /// Idempotency cache.
     pub dedupe: DedupeCache,
-    /// Telegram relay epoch budget usage (per relayChainId).
-    pub(crate) telegram_relay_epoch_budget: HashMap<String, TelegramRelayEpochBudgetEntry>,
     /// Connected device nodes.
     pub nodes: NodeRegistry,
     /// Device pairing state.
@@ -317,7 +307,6 @@ impl GatewayInner {
         Self {
             clients: HashMap::new(),
             dedupe: DedupeCache::new(),
-            telegram_relay_epoch_budget: HashMap::new(),
             nodes: NodeRegistry::new(),
             pairing: PairingState::new(),
             pending_invokes: HashMap::new(),

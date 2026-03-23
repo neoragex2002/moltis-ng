@@ -448,9 +448,7 @@ pub async fn start_polling(
     let cancel = CancellationToken::new();
     let supervisor = Arc::new(std::sync::Mutex::new(None));
 
-    let outbound = Arc::new(TelegramOutbound {
-        accounts: Arc::clone(&accounts),
-    });
+    let outbound = Arc::new(TelegramOutbound::new(Arc::clone(&accounts)));
 
     let otp_cooldown = config.otp_cooldown_secs;
     let polling = Arc::new(std::sync::Mutex::new(PollingRuntimeState::new(

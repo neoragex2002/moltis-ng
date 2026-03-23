@@ -2028,6 +2028,24 @@ mod tests {
         }
     }
 
+    fn telegram_dm_bucket_key(chan_account_key: &str, chat_id: &str) -> String {
+        moltis_telegram::adapter::resolve_dm_bucket_key(
+            &moltis_telegram::config::DmScope::PerAccount,
+            chan_account_key,
+            chat_id,
+        )
+    }
+
+    fn telegram_group_bucket_key(chan_account_key: &str, chat_id: &str) -> String {
+        moltis_telegram::adapter::resolve_group_bucket_key(
+            &moltis_telegram::config::GroupScope::Group,
+            chan_account_key,
+            chat_id,
+            None,
+            None,
+        )
+    }
+
     #[test]
     fn format_context_v1_payload_wraps_payload_with_versioned_contract() {
         let payload = serde_json::json!({
@@ -2583,6 +2601,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_to_chat_immediate_failure_drains_reply_targets_and_logbook() {
+        let bucket_key = telegram_dm_bucket_key("telegram:acct", "123");
         let rec = Arc::new(RecordingOutbound::default());
         let outbound: Arc<dyn ChannelOutbound> = rec.clone();
 
@@ -2611,7 +2630,13 @@ mod tests {
 
         sink.dispatch_to_chat(
             "hi",
-            telegram_inbound_ctx("telegram:acct", "123", Some("1"), None, None),
+            telegram_inbound_ctx(
+                "telegram:acct",
+                "123",
+                Some("1"),
+                None,
+                Some(bucket_key.as_str()),
+            ),
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
                 sender_name: None,
@@ -2869,6 +2894,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_to_chat_keeps_typing_for_entire_run() {
+        let bucket_key = telegram_dm_bucket_key("telegram:acct", "123");
         let rec = Arc::new(RecordingOutbound::default());
         let outbound: Arc<dyn ChannelOutbound> = rec.clone();
         let chat = Arc::new(AsyncRunChatService {
@@ -2898,7 +2924,13 @@ mod tests {
             tokio::spawn(async move {
                 sink.dispatch_to_chat(
                     "hi",
-                    telegram_inbound_ctx("telegram:acct", "123", Some("1"), None, None),
+                    telegram_inbound_ctx(
+                        "telegram:acct",
+                        "123",
+                        Some("1"),
+                        None,
+                        Some(bucket_key.as_str()),
+                    ),
                     ChannelMessageMeta {
                         chan_type: ChannelType::Telegram,
                         sender_name: None,
@@ -2949,6 +2981,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_to_chat_failure_keeps_typing_until_error_feedback_finishes() {
+        let bucket_key = telegram_dm_bucket_key("telegram:acct", "123");
         let outbound = Arc::new(DelayedErrorFeedbackOutbound {
             typings: AtomicUsize::new(0),
             text_calls: AtomicUsize::new(0),
@@ -2980,7 +3013,13 @@ mod tests {
             tokio::spawn(async move {
                 sink.dispatch_to_chat(
                     "hi",
-                    telegram_inbound_ctx("telegram:acct", "123", Some("1"), None, None),
+                    telegram_inbound_ctx(
+                        "telegram:acct",
+                        "123",
+                        Some("1"),
+                        None,
+                        Some(bucket_key.as_str()),
+                    ),
                     ChannelMessageMeta {
                         chan_type: ChannelType::Telegram,
                         sender_name: None,
@@ -3049,6 +3088,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_to_chat_run_is_not_blocked_by_slow_typing_request() {
+        let bucket_key = telegram_dm_bucket_key("telegram:acct", "123");
         let outbound = Arc::new(BlockingTypingOutbound {
             send_typing_started: tokio::sync::Notify::new(),
         });
@@ -3083,7 +3123,13 @@ mod tests {
             tokio::spawn(async move {
                 sink.dispatch_to_chat(
                     "hi",
-                    telegram_inbound_ctx("telegram:acct", "123", Some("1"), None, None),
+                    telegram_inbound_ctx(
+                        "telegram:acct",
+                        "123",
+                        Some("1"),
+                        None,
+                        Some(bucket_key.as_str()),
+                    ),
                     ChannelMessageMeta {
                         chan_type: ChannelType::Telegram,
                         sender_name: None,
@@ -3173,6 +3219,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_to_chat_with_attachments_accepts_image_media_types() {
+        let bucket_key = telegram_dm_bucket_key("telegram:acct", "123");
         let chat = Arc::new(RecordingChatService {
             last_params: tokio::sync::Mutex::new(None),
         });
@@ -3200,7 +3247,13 @@ mod tests {
                 media_type: "image/png".into(),
                 data: vec![137, 80, 78, 71],
             }],
-            telegram_inbound_ctx("telegram:acct", "123", Some("1"), None, None),
+            telegram_inbound_ctx(
+                "telegram:acct",
+                "123",
+                Some("1"),
+                None,
+                Some(bucket_key.as_str()),
+            ),
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
                 sender_name: None,
@@ -3241,6 +3294,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_to_chat_with_attachments_does_not_format_text_in_core() {
+        let bucket_key = telegram_group_bucket_key("telegram:acct", "-100");
         let chat = Arc::new(RecordingChatService {
             last_params: tokio::sync::Mutex::new(None),
         });
@@ -3266,7 +3320,13 @@ mod tests {
                 media_type: "image/png".into(),
                 data: vec![137, 80, 78, 71],
             }],
-            telegram_inbound_ctx("telegram:acct", "-100", Some("1"), None, None),
+            telegram_inbound_ctx(
+                "telegram:acct",
+                "-100",
+                Some("1"),
+                None,
+                Some(bucket_key.as_str()),
+            ),
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
                 sender_name: Some("Alice".into()),
@@ -3340,6 +3400,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_to_chat_labels_telegram_session_with_bot_username_and_dm_chat_id() {
+        let bucket_key = telegram_dm_bucket_key("telegram:845", "123");
         let metadata = sqlite_metadata().await;
         metadata
             .upsert("session:test", Some("ok".into()))
@@ -3356,13 +3417,12 @@ mod tests {
         services.channel = Arc::new(SnapshotChannelService {
             snapshots: vec![TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
+                agent_id: None,
+                chan_user_id: None,
                 chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
                 dm_scope: moltis_telegram::config::DmScope::Main,
                 group_scope: moltis_telegram::config::GroupScope::Group,
-                relay_chain_enabled: false,
-                relay_hop_limit: 0,
-                epoch_relay_budget: 128,
-                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
             }],
         });
 
@@ -3387,7 +3447,7 @@ mod tests {
 
         sink.dispatch_to_chat(
             "hi",
-            telegram_inbound_ctx("telegram:845", "123", None, None, None),
+            telegram_inbound_ctx("telegram:845", "123", None, None, Some(bucket_key.as_str())),
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
                 sender_name: None,
@@ -3411,6 +3471,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_to_chat_labels_telegram_session_group_chat_as_grp() {
+        let bucket_key = telegram_group_bucket_key("telegram:845", "-100");
         let metadata = sqlite_metadata().await;
 
         let mut services = crate::services::GatewayServices::noop()
@@ -3419,13 +3480,12 @@ mod tests {
         services.channel = Arc::new(SnapshotChannelService {
             snapshots: vec![TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
+                agent_id: None,
+                chan_user_id: None,
                 chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
                 dm_scope: moltis_telegram::config::DmScope::Main,
                 group_scope: moltis_telegram::config::GroupScope::Group,
-                relay_chain_enabled: false,
-                relay_hop_limit: 0,
-                epoch_relay_budget: 128,
-                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
             }],
         });
 
@@ -3446,7 +3506,7 @@ mod tests {
 
         sink.dispatch_to_chat(
             "hi",
-            telegram_inbound_ctx("telegram:845", "-100", None, None, None),
+            telegram_inbound_ctx("telegram:845", "-100", None, None, Some(bucket_key.as_str())),
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
                 sender_name: None,
@@ -3471,6 +3531,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_to_chat_labels_telegram_session_falls_back_to_chan_user_id_when_username_missing()
      {
+        let bucket_key = telegram_dm_bucket_key("telegram:845", "123");
         let metadata = sqlite_metadata().await;
 
         let mut services = crate::services::GatewayServices::noop()
@@ -3479,13 +3540,12 @@ mod tests {
         services.channel = Arc::new(SnapshotChannelService {
             snapshots: vec![TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
+                agent_id: None,
+                chan_user_id: None,
                 chan_user_name: None,
+                chan_nickname: None,
                 dm_scope: moltis_telegram::config::DmScope::Main,
                 group_scope: moltis_telegram::config::GroupScope::Group,
-                relay_chain_enabled: false,
-                relay_hop_limit: 0,
-                epoch_relay_budget: 128,
-                relay_strictness: moltis_telegram::config::RelayStrictness::Strict,
             }],
         });
 
@@ -3506,7 +3566,7 @@ mod tests {
 
         sink.dispatch_to_chat(
             "hi",
-            telegram_inbound_ctx("telegram:845", "123", None, None, None),
+            telegram_inbound_ctx("telegram:845", "123", None, None, Some(bucket_key.as_str())),
             ChannelMessageMeta {
                 chan_type: ChannelType::Telegram,
                 sender_name: None,

@@ -1823,6 +1823,17 @@ pub async fn start_gateway(
             .with_message_log(Arc::clone(&message_log))
             .with_event_sink(channel_sink.clone())
             .with_core_bridge(channel_sink);
+        match crate::people::telegram_identity_links() {
+            Ok(links) => tg_plugin.set_identity_links(links),
+            Err(error) => warn!(
+                event = "telegram.identity_link.refresh_failed",
+                reason_code = "people_load_failed",
+                decision = "skip_refresh",
+                policy = "tg_gst_v1_speaker",
+                error = %error,
+                "failed to load telegram identity links during startup"
+            ),
+        }
 
         // Start channels from config file (these take precedence).
         let tg_accounts = &config.channels.telegram;

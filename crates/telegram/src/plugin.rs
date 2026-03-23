@@ -21,7 +21,7 @@ use moltis_channels::{
 use crate::{
     adapter::TelegramCoreBridge,
     bot,
-    config::{TelegramAccountConfig, TelegramBusAccountSnapshot},
+    config::{TelegramAccountConfig, TelegramBusAccountSnapshot, TelegramIdentityLink},
     outbound::TelegramOutbound,
     state::AccountStateMap,
 };
@@ -42,9 +42,7 @@ pub struct TelegramPlugin {
 impl TelegramPlugin {
     pub fn new() -> Self {
         let accounts: AccountStateMap = Arc::new(RwLock::new(HashMap::new()));
-        let outbound = TelegramOutbound {
-            accounts: Arc::clone(&accounts),
-        };
+        let outbound = TelegramOutbound::new(Arc::clone(&accounts));
         Self {
             accounts,
             outbound,
@@ -72,9 +70,7 @@ impl TelegramPlugin {
 
     /// Get a shared reference to the outbound sender (for use outside the plugin).
     pub fn shared_outbound(&self) -> Arc<dyn moltis_channels::ChannelOutbound> {
-        Arc::new(TelegramOutbound {
-            accounts: Arc::clone(&self.accounts),
-        })
+        Arc::new(TelegramOutbound::new(Arc::clone(&self.accounts)))
     }
 
     pub fn account_handles(&self) -> Vec<String> {
@@ -103,15 +99,18 @@ impl TelegramPlugin {
             .iter()
             .map(|(account_handle, s)| TelegramBusAccountSnapshot {
                 account_handle: account_handle.clone(),
-                chan_user_name: s.bot_username.clone(),
+                agent_id: s.config.agent_id.clone(),
+                chan_user_id: crate::state::effective_bot_user_id(s),
+                chan_user_name: crate::state::effective_bot_username(s),
+                chan_nickname: s.config.chan_nickname.clone(),
                 dm_scope: s.config.dm_scope.clone(),
                 group_scope: s.config.group_scope.clone(),
-                relay_chain_enabled: s.config.relay_chain_enabled,
-                relay_hop_limit: s.config.relay_hop_limit,
-                epoch_relay_budget: s.config.epoch_relay_budget,
-                relay_strictness: s.config.relay_strictness.clone(),
             })
             .collect()
+    }
+
+    pub fn set_identity_links(&self, links: Vec<TelegramIdentityLink>) {
+        crate::state::replace_telegram_identity_links(&self.accounts, links);
     }
 
     /// Update the in-memory config for an account without restarting the

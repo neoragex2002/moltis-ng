@@ -32,8 +32,9 @@ use crate::{
     adapter::{
         TgAttachment, TgContent, TgFollowUpTarget, TgInbound, TgInboundKind, TgInboundMode,
         TgInboundRequest, TgPrivateSource, TgPrivateTarget, TgRoute, TgTranscriptFormat,
-        resolve_dm_bucket_key, resolve_group_bucket_key, resolve_tg_route,
+        plan_group_target_action, resolve_dm_bucket_key, resolve_group_bucket_key, resolve_tg_route,
     },
+    config::TelegramBusAccountSnapshot,
     otp::{OtpInitResult, OtpVerifyResult},
     outbound::{TypingRequestError, send_chat_action_typing},
     state::AccountStateMap,
@@ -443,47 +444,7 @@ pub async fn handle_message_direct(
     }
 
     if let Err(reason) = access_result {
-        if reason == AccessDenied::NotMentioned {
-            let (entities_count, caption_entities_count) = match &msg.kind {
-                MessageKind::Common(common) => match &common.media_kind {
-                    MediaKind::Text(t) => (t.entities.len(), 0),
-                    MediaKind::Animation(a) => (0, a.caption_entities.len()),
-                    MediaKind::Audio(a) => (0, a.caption_entities.len()),
-                    MediaKind::Document(d) => (0, d.caption_entities.len()),
-                    MediaKind::Photo(p) => (0, p.caption_entities.len()),
-                    MediaKind::Video(v) => (0, v.caption_entities.len()),
-                    MediaKind::Voice(v) => (0, v.caption_entities.len()),
-                    _ => (0, 0),
-                },
-                _ => (0, 0),
-            };
-            let is_reply = msg.reply_to_message().is_some();
-            let reply_from = msg
-                .reply_to_message()
-                .and_then(|m| m.from.as_ref())
-                .map(|u| u.id.0);
-            let text_has_at_sign = extract_text(&msg).is_some_and(|t| t.contains('@'));
-
-            warn!(
-                account_handle,
-                %reason,
-                peer_id,
-                username = ?username,
-                chat_id = msg.chat.id.0,
-                message_id = msg.id.0,
-                ?chat_type,
-                bot_username = ?bot_username,
-                bot_user_id = ?bot_user_id.map(|id| id.0),
-                entities_count,
-                caption_entities_count,
-                is_reply,
-                reply_from,
-                text_has_at_sign,
-                "handler: access denied"
-            );
-        } else {
-            warn!(account_handle, %reason, peer_id, username = ?username, "handler: access denied");
-        }
+        warn!(account_handle, %reason, peer_id, username = ?username, "handler: access denied");
         #[cfg(feature = "metrics")]
         counter!(tg_metrics::ACCESS_CONTROL_DENIALS_TOTAL).increment(1);
 
@@ -503,64 +464,6 @@ pub async fn handle_message_direct(
                 event_sink.as_deref(),
             )
             .await;
-        }
-
-        // Group listen/sidecar mode (always enabled): ingest unaddressed messages into
-        // session history without replying or triggering an LLM run.
-        if chat_type == ChatType::Group
-            && matches!(reason, AccessDenied::NotMentioned)
-            && let Some(ref bridge) = core_bridge
-        {
-            let tg_gst_v1 = true;
-            let mut body = text.clone().unwrap_or_default();
-            let inbound_message_kind = message_kind(&msg);
-            let sender_id = msg.from.as_ref().map(|u| u.id.0 as u64);
-            let sender_is_bot = msg.from.as_ref().is_some_and(|u| u.is_bot);
-            if !tg_gst_v1 && let Some(ref bot_username) = bot_username {
-                let (rewritten, stripped) =
-                    strip_self_mention_from_message(&msg, &body, bot_user_id, bot_username);
-                if stripped {
-                    body = rewritten;
-                }
-            }
-            let emits_transcript_placeholder = tg_gst_v1
-                && inbound_message_kind.is_some_and(|kind| kind != ChannelMessageKind::Text);
-            if !body.trim().is_empty() || emits_transcript_placeholder {
-                let inbound = build_tg_inbound(
-                    &config,
-                    account_handle,
-                    &chat_type,
-                    TgInboundMode::RecordOnly,
-                    &body,
-                    false,
-                    false,
-                    &msg,
-                    false,
-                    &peer_id,
-                );
-                let route = resolve_tg_route(&config, &inbound);
-                let request = build_tg_inbound_request(
-                    &inbound,
-                    route,
-                    build_tg_private_target(account_handle, &msg),
-                    sender_name.clone(),
-                    username.clone(),
-                    sender_id,
-                    sender_is_bot,
-                    inbound_message_kind,
-                    config.model.clone(),
-                    Vec::new(),
-                );
-                info!(
-                    account_handle,
-                    chat_id = %request.private_target.chat_id,
-                    message_id = ?request.private_target.message_id,
-                    bucket_key = %request.route.bucket_key,
-                    body_len = body.len(),
-                    "telegram inbound ingested (listen-only)"
-                );
-                bridge.handle_inbound(request).await;
-            }
         }
 
         return Ok(());
@@ -939,25 +842,80 @@ pub async fn handle_message_direct(
 
     // Dispatch to the chat session (per-channel session key derived by the core bridge).
     if let Some(ref bridge) = core_bridge {
-        let mode = match chat_type {
-            ChatType::Group
-                if !bot_mentioned
-                    && config.mention_mode != moltis_channels::gating::MentionMode::Always =>
-            {
-                TgInboundMode::RecordOnly
+        let sender_id = msg.from.as_ref().map(|u| u.id.0 as u64);
+        let sender_is_bot = msg.from.as_ref().is_some_and(|u| u.is_bot);
+        let managed_snapshots = managed_account_snapshots(accounts);
+        let identity_links = crate::state::telegram_identity_links_snapshot(accounts);
+        let planned_action = match chat_type {
+            ChatType::Dm => crate::adapter::TgGroupTargetAction {
+                mode: TgInboundMode::Dispatch,
+                body: body.clone(),
+                addressed: true,
+                reason_code: "tg_dispatch_dm",
             },
-            _ => TgInboundMode::Dispatch,
+            ChatType::Group | ChatType::Channel => {
+                register_group_runtime_native_context(accounts, outbound.as_ref(), account_handle, &msg);
+                let reply_to_target_account_handle =
+                    resolve_reply_to_target_account_handle(accounts, outbound.as_ref(), &msg);
+                let Some(action) = plan_group_target_action(
+                    &body,
+                    &managed_snapshots,
+                    account_handle,
+                    bot_username.as_deref(),
+                    reply_to_target_account_handle.as_deref(),
+                    config.group_line_start_mention_dispatch,
+                    config.group_reply_to_dispatch,
+                    !attachments.is_empty() || inbound_kind.is_some_and(|kind| kind != ChannelMessageKind::Text),
+                ) else {
+                    info!(
+                        event = "telegram.group.plan",
+                        account_handle,
+                        chat_id = msg.chat.id.0,
+                        message_id = msg.id.0,
+                        reason_code = "tg_noise_drop",
+                        decision = "drop",
+                        policy = "group_record_dispatch_v3",
+                        "telegram group event dropped before gateway handoff"
+                    );
+                    return Ok(());
+                };
+
+                let dedupe_key = group_action_dedupe_key(
+                    account_handle,
+                    &msg.chat.id.0.to_string(),
+                    &msg.id.0.to_string(),
+                );
+                let is_dup = crate::outbound::shared_group_runtime(accounts)
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .check_and_insert_action(&dedupe_key);
+                if is_dup {
+                    info!(
+                        event = "telegram.group.plan",
+                        account_handle,
+                        chat_id = msg.chat.id.0,
+                        message_id = msg.id.0,
+                        reason_code = "tg_dedup_hit",
+                        decision = "drop",
+                        policy = "group_record_dispatch_v3",
+                        "telegram group event deduped before gateway handoff"
+                    );
+                    return Ok(());
+                }
+
+                action
+            },
         };
         let inbound = build_tg_inbound(
             &config,
             account_handle,
             &chat_type,
-            mode,
-            &body,
+            planned_action.mode,
+            &planned_action.body,
             !attachments.is_empty(),
             false,
             &msg,
-            bot_mentioned,
+            planned_action.addressed,
             &peer_id,
         );
         let route = resolve_tg_route(&config, &inbound);
@@ -975,9 +933,10 @@ pub async fn handle_message_direct(
             message_id = ?reply_target.message_id,
             bucket_key = %route.bucket_key,
             addressed = route.addressed,
-            body_len = body.len(),
+            body_len = planned_action.body.len(),
             attachment_count = attachments.len(),
             message_kind = ?inbound_kind,
+            reason_code = planned_action.reason_code,
             "telegram inbound dispatched to chat"
         );
 
@@ -987,8 +946,8 @@ pub async fn handle_message_direct(
         // We treat unaddressed commands in Group/Channel as ambiguous and ignore them
         // (avoid multi-bot spam), even if the account is configured with a permissive
         // `mention_mode`.
-        if body.trim_start().starts_with('/') {
-            let body_trim = body.trim_start();
+        if planned_action.body.trim_start().starts_with('/') {
+            let body_trim = planned_action.body.trim_start();
             let cmd_text_full = body_trim.trim_start_matches('/').trim();
             let first = cmd_text_full.split_whitespace().next().unwrap_or("");
             let (cmd_name_raw, addressed_raw) = first
@@ -1407,9 +1366,8 @@ pub async fn handle_message_direct(
         }
 
         let inbound_message_kind = message_kind(&msg);
-        let sender_id = msg.from.as_ref().map(|u| u.id.0 as u64);
-        let sender_is_bot = msg.from.as_ref().is_some_and(|u| u.is_bot);
         let tg_gst_v1 = chat_type == ChatType::Group;
+        let mut final_body = planned_action.body.clone();
 
         if tg_gst_v1 {
             if let Some(ref bot_username) = bot_username
@@ -1430,6 +1388,8 @@ pub async fn handle_message_direct(
                     &presence_inbound,
                     route.clone(),
                     private_target.clone(),
+                    &managed_snapshots,
+                    &identity_links,
                     sender_name.clone(),
                     username.clone(),
                     sender_id,
@@ -1502,6 +1462,7 @@ pub async fn handle_message_direct(
                         }
                         return Ok(());
                     }
+                    final_body = body.clone();
                 }
             }
         }
@@ -1514,9 +1475,9 @@ pub async fn handle_message_direct(
             })
             .collect::<Vec<_>>();
         let final_inbound = TgInbound {
-            mode,
+            mode: planned_action.mode,
             body: TgContent {
-                text: body.clone(),
+                text: final_body,
                 has_attachments: !attachments.is_empty(),
                 has_location: false,
             },
@@ -1526,6 +1487,8 @@ pub async fn handle_message_direct(
             &final_inbound,
             route,
             private_target,
+            &managed_snapshots,
+            &identity_links,
             sender_name.clone(),
             username.clone(),
             sender_id,
@@ -2447,20 +2410,19 @@ Next (estimate, method={}): prompt={} · threshold={} · progress={}%
         "off".to_string()
     };
 
-    let group_reply_mode = match config.mention_mode {
-        moltis_channels::gating::MentionMode::Mention => "mention_only",
-        moltis_channels::gating::MentionMode::Always => "always",
-    };
-    let relay_strictness = match config.relay_strictness {
-        crate::config::RelayStrictness::Strict => "strict",
-        crate::config::RelayStrictness::Loose => "loose",
-    };
     let group_scope_note = match chat_type {
         ChatType::Group => format!(
-            "reply=<code>{}</code> · listen=<code>on</code> · mirror=<code>on</code> · relay=<code>on</code> · hop_limit=<code>{}</code> · strictness=<code>{}</code>",
-            escape_html_simple(group_reply_mode),
-            config.relay_hop_limit,
-            escape_html_simple(relay_strictness),
+            "line_start_dispatch=<code>{}</code> · reply_dispatch=<code>{}</code> · record=<code>on</code>",
+            if config.group_line_start_mention_dispatch {
+                "on"
+            } else {
+                "off"
+            },
+            if config.group_reply_to_dispatch {
+                "on"
+            } else {
+                "off"
+            },
         ),
         _ => "<i>(n/a)</i>".to_string(),
     };
@@ -3474,6 +3436,8 @@ fn build_tg_inbound_request(
     inbound: &TgInbound,
     route: TgRoute,
     private_target: TgPrivateTarget,
+    managed_snapshots: &[TelegramBusAccountSnapshot],
+    identity_links: &[crate::config::TelegramIdentityLink],
     sender_name: Option<String>,
     username: Option<String>,
     sender_id: Option<u64>,
@@ -3484,19 +3448,32 @@ fn build_tg_inbound_request(
 ) -> TgInboundRequest {
     let transcript_format = TgTranscriptFormat::TgGstV1;
     let addressed = route.addressed;
-    let username_ref = username.as_deref();
-    let sender_name_ref = sender_name.as_deref();
     let mut inbound = inbound.clone();
     if inbound.kind == TgInboundKind::Group && transcript_format == TgTranscriptFormat::TgGstV1 {
-        inbound.body.text = crate::adapter::tg_gst_v1_format_inbound_text(
+        let rendered = crate::adapter::tg_gst_v1_render_text(
             inbound.body.text.as_str(),
             message_kind,
-            username_ref,
+            managed_snapshots,
+            identity_links,
+            username.as_deref(),
             sender_id,
-            sender_name_ref,
+            sender_name.as_deref(),
             sender_is_bot,
             addressed,
         );
+        if rendered.degraded {
+            info!(
+                event = "telegram.speaker_resolution",
+                account_handle = inbound.private_source.account_handle,
+                reason_code = rendered.reason_code,
+                decision = "degraded",
+                policy = "tg_gst_v1_speaker",
+                match_method = rendered.match_method,
+                sender_short_id = sender_id.map(|id| id % 100000),
+                "telegram speaker rendering degraded to technical fallback"
+            );
+        }
+        inbound.body.text = rendered.text;
     }
 
     TgInboundRequest {
@@ -3661,6 +3638,95 @@ fn fallback_contains_at_username(text: &str, bot_username_norm: &str) -> bool {
         i += 1;
     }
     false
+}
+
+fn managed_account_snapshots(accounts: &AccountStateMap) -> Vec<TelegramBusAccountSnapshot> {
+    let map = accounts.read().unwrap_or_else(|e| e.into_inner());
+    map.iter()
+        .map(|(account_handle, state)| TelegramBusAccountSnapshot {
+            account_handle: account_handle.clone(),
+            agent_id: state.config.agent_id.clone(),
+            chan_user_id: crate::state::effective_bot_user_id(state),
+            chan_user_name: crate::state::effective_bot_username(state),
+            chan_nickname: state.config.chan_nickname.clone(),
+            dm_scope: state.config.dm_scope.clone(),
+            group_scope: state.config.group_scope.clone(),
+        })
+        .collect()
+}
+
+fn resolve_managed_account_handle_for_user(
+    accounts: &AccountStateMap,
+    user_id: Option<u64>,
+    username: Option<&str>,
+) -> Option<String> {
+    let username_norm = username.map(normalize_username);
+    let map = accounts.read().unwrap_or_else(|e| e.into_inner());
+    map.iter().find_map(|(account_handle, state)| {
+        let id_matches =
+            user_id.is_some_and(|value| crate::state::effective_bot_user_id(state) == Some(value));
+        let username_matches = username_norm.as_deref().is_some_and(|value| {
+            crate::state::effective_bot_username(state)
+                .as_deref()
+                .map(normalize_username)
+                .as_deref()
+                == Some(value)
+        });
+        (id_matches || username_matches).then(|| account_handle.clone())
+    })
+}
+
+fn resolve_reply_to_target_account_handle(
+    accounts: &AccountStateMap,
+    _outbound: &crate::outbound::TelegramOutbound,
+    msg: &Message,
+) -> Option<String> {
+    let reply = msg.reply_to_message()?;
+    let from_user = reply.from.as_ref();
+    let resolved = resolve_managed_account_handle_for_user(
+        accounts,
+        from_user.map(|user| user.id.0 as u64),
+        from_user.and_then(|user| user.username.as_deref()),
+    );
+    if resolved.is_some() {
+        return resolved;
+    }
+    let binding = crate::outbound::shared_group_runtime(accounts);
+    let mut runtime = binding
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    runtime.message_author(
+        &msg.chat.id.0.to_string(),
+        &reply.id.0.to_string(),
+    )
+}
+
+fn register_group_runtime_native_context(
+    accounts: &AccountStateMap,
+    _outbound: &crate::outbound::TelegramOutbound,
+    account_handle: &str,
+    msg: &Message,
+) {
+    let chat_id = msg.chat.id.0.to_string();
+    let message_id = msg.id.0.to_string();
+    let sender_account_handle = resolve_managed_account_handle_for_user(
+        accounts,
+        msg.from.as_ref().map(|user| user.id.0 as u64),
+        msg.from.as_ref().and_then(|user| user.username.as_deref()),
+    );
+    let binding = crate::outbound::shared_group_runtime(accounts);
+    let mut runtime = binding
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    runtime.register_participant(&chat_id, account_handle);
+    if let Some(sender_account_handle) = sender_account_handle {
+        runtime.register_participant(&chat_id, &sender_account_handle);
+        runtime.register_message_author(&chat_id, &message_id, &sender_account_handle);
+    }
+}
+
+fn group_action_dedupe_key(account_handle: &str, chat_id: &str, message_id: &str) -> String {
+    format!("telegram.group.action|account:{account_handle}|chat:{chat_id}|message:{message_id}")
 }
 
 /// Check if the bot was @mentioned (or otherwise explicitly activated) in the message.
@@ -4169,7 +4235,7 @@ mod tests {
     };
 
     use crate::{
-        config::TelegramAccountConfig,
+        config::{TelegramAccountConfig, TelegramIdentityLink},
         otp::OtpState,
         outbound::TelegramOutbound,
         state::{AccountState, AccountStateMap},
@@ -4779,7 +4845,7 @@ mod tests {
         );
         assert_eq!(request.private_target.chat_id, "-100123");
         assert_eq!(request.private_target.thread_id.as_deref(), Some("9"));
-        assert_eq!(request.inbound.body.text, "alice -> you: @test_bot hello");
+        assert_eq!(request.inbound.body.text, "Alice -> you: @test_bot hello");
     }
 
     #[tokio::test]
@@ -5460,7 +5526,7 @@ mod tests {
             1
         );
         let last = sink.last_ingest_text.lock().unwrap().clone();
-        assert_eq!(last.as_deref(), Some("alice: hello everyone"));
+        assert_eq!(last.as_deref(), Some("Alice: hello everyone"));
     }
 
     #[tokio::test]
@@ -5532,7 +5598,83 @@ mod tests {
             1
         );
         let last = sink.last_ingest_text.lock().unwrap().clone();
-        assert_eq!(last.as_deref(), Some("alice: hello everyone"));
+        assert_eq!(last.as_deref(), Some("Alice: hello everyone"));
+    }
+
+    #[tokio::test]
+    async fn group_not_mentioned_tg_gst_v1_prefers_people_display_name() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        crate::state::replace_telegram_identity_links(
+            &accounts,
+            vec![TelegramIdentityLink {
+                agent_id: "alice".into(),
+                display_name: Some("Alice Zhang".into()),
+                telegram_user_id: Some(1001),
+                telegram_user_name: Some("alice".into()),
+                telegram_display_name: Some("Alice TG".into()),
+            }],
+        );
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_handle = "telegram:test-account";
+        let bot = teloxide::Bot::new("test-token");
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            let cfg = TelegramAccountConfig {
+                token: Secret::new("test-token".to_string()),
+                ..Default::default()
+            };
+            map.insert(
+                account_handle.to_string(),
+                AccountState {
+                    bot: bot.clone(),
+                    bot_user_id: None,
+                    bot_username: Some("test_bot".into()),
+                    account_handle: account_handle.to_string(),
+                    config: cfg,
+                    outbound: Arc::clone(&outbound),
+                    cancel: CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                    core_bridge: Some(
+                        Arc::clone(&sink) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(OtpState::new(300)),
+                },
+            );
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 1,
+            "date": 1,
+            "chat": { "id": -1001, "type": "supergroup", "title": "Test Group" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "text": "hello everyone"
+        }))
+        .expect("deserialize message");
+
+        handle_message_direct(msg, &bot, account_handle, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.ingest_calls.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let last = sink.last_ingest_text.lock().unwrap().clone();
+        assert_eq!(last.as_deref(), Some("Alice Zhang: hello everyone"));
     }
 
     #[tokio::test]
@@ -5606,7 +5748,7 @@ mod tests {
             0
         );
         let last = sink.last_dispatch_text.lock().unwrap().clone();
-        assert_eq!(last.as_deref(), Some("alice -> you: @test_bot hi"));
+        assert_eq!(last.as_deref(), Some("Alice -> you: @test_bot hi"));
     }
 
     #[tokio::test]
@@ -5680,7 +5822,7 @@ mod tests {
             0
         );
         let last = sink.last_dispatch_text.lock().unwrap().clone();
-        assert_eq!(last.as_deref(), Some("alice -> you: @test_bot hi"));
+        assert_eq!(last.as_deref(), Some("Alice -> you: @test_bot hi"));
     }
 
     #[tokio::test]
@@ -5747,7 +5889,7 @@ mod tests {
             .expect("handle message");
 
         let last = sink.last_dispatch_text.lock().unwrap().clone();
-        assert_eq!(last.as_deref(), Some("alice -> you: @a @test_bot @c do X"));
+        assert_eq!(last.as_deref(), Some("Alice -> you: @a @test_bot @c do X"));
 
         let msg2: Message = serde_json::from_value(json!({
             "message_id": 2,
@@ -5773,7 +5915,7 @@ mod tests {
         let last2 = sink.last_dispatch_text.lock().unwrap().clone();
         assert_eq!(
             last2.as_deref(),
-            Some("alice -> you: @test_bot\n\n你处理下X")
+            Some("Alice -> you: @test_bot\n\n你处理下X")
         );
     }
 
@@ -5882,7 +6024,7 @@ mod tests {
             "presence reply path must ingest transcript context"
         );
         let last = sink.last_ingest_text.lock().unwrap().clone();
-        assert_eq!(last.as_deref(), Some("alice -> you: @test_bot"));
+        assert_eq!(last.as_deref(), Some("Alice -> you: @test_bot"));
 
         {
             let requests = recorded_requests.lock().expect("requests lock");
@@ -5903,11 +6045,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_not_mentioned_always_respond_tg_gst_v1_dispatches_without_you_flag() {
+    async fn group_unaddressed_tg_gst_v1_records_without_you_flag() {
         let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let outbound = Arc::new(TelegramOutbound {
-            accounts: Arc::clone(&accounts),
-        });
+        let outbound = Arc::new(TelegramOutbound::new(Arc::clone(&accounts)));
         let sink = Arc::new(MockSink::default());
         let account_handle = "telegram:test-account";
         let bot = teloxide::Bot::new("test-token");
@@ -5916,7 +6056,6 @@ mod tests {
             let mut map = accounts.write().expect("accounts write lock");
             let cfg = TelegramAccountConfig {
                 token: Secret::new("test-token".to_string()),
-                mention_mode: moltis_channels::gating::MentionMode::Always,
                 ..Default::default()
             };
             map.insert(
@@ -5964,11 +6103,14 @@ mod tests {
         assert_eq!(
             sink.dispatch_calls
                 .load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "always-respond must dispatch even when not mentioned"
+            0
         );
-        let last = sink.last_dispatch_text.lock().unwrap().clone();
-        assert_eq!(last.as_deref(), Some("alice: hello everyone"));
+        assert_eq!(
+            sink.ingest_calls.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let last = sink.last_ingest_text.lock().unwrap().clone();
+        assert_eq!(last.as_deref(), Some("Alice: hello everyone"));
     }
 
     #[tokio::test]
