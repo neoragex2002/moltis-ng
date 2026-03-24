@@ -4472,6 +4472,14 @@ Create git commits
 &lt;/skill&gt;
 &lt;/available_skills&gt;
 </code></pre>
+<p>Sandbox contract:</p>
+<ul>
+<li>Non-sandbox runtime keeps host-readable paths.</li>
+<li>Sandbox runtime rewrites only <code>data_dir/skills/&lt;skill&gt;/SKILL.md</code> entries to
+guest paths under <code>/moltis/data/skills/&lt;skill&gt;/SKILL.md</code>.</li>
+<li>Sandbox runtime filters <code>project</code>, <code>registry</code>, <code>plugin</code>, and unknown-source
+entries instead of emitting host paths the agent cannot read.</li>
+</ul>
 <h3 id="workspace-files"><a class="header" href="#workspace-files">Workspace Files</a></h3>
 <p>Optional markdown files from the default data directory (<code>~/.moltis/data/</code>):</p>
 <ul>
