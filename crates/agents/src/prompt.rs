@@ -265,6 +265,21 @@ fn map_host_privilege_policy_zh(runtime: Option<&PromptRuntimeContext>) -> Strin
     }
 }
 
+fn render_skills_prompt(
+    skills: &[SkillMetadata],
+    runtime: Option<&PromptRuntimeContext>,
+) -> String {
+    let prompt_runtime = if runtime
+        .and_then(|ctx| ctx.sandbox.as_ref())
+        .is_some_and(|sandbox| sandbox.exec_sandboxed)
+    {
+        moltis_skills::prompt_gen::SkillsPromptRuntime::Sandbox
+    } else {
+        moltis_skills::prompt_gen::SkillsPromptRuntime::Host
+    };
+    moltis_skills::prompt_gen::generate_skills_prompt_for_runtime(skills, prompt_runtime)
+}
+
 fn build_template_vars_v1(
     tools: &ToolRegistry,
     supports_tools: bool,
@@ -292,9 +307,7 @@ fn build_template_vars_v1(
             .iter()
             .any(|s| s["name"].as_str() == Some("memory_search"));
 
-    let skills_md = ensure_md_paragraph(moltis_skills::prompt_gen::generate_skills_prompt(
-        project_skills,
-    ));
+    let skills_md = ensure_md_paragraph(render_skills_prompt(project_skills, runtime));
 
     let native_tools_index_md = if native_tool_calling {
         render_native_tools_index_md(&tool_schemas)
@@ -693,9 +706,10 @@ pub fn build_openai_responses_developer_prompts(
     runtime_snapshot.push_str("\n\n");
 
     runtime_snapshot.push_str("## 4. 项目级可用技能 (Available Skills)\n");
-    if !skills.is_empty() {
+    let skills_prompt = render_skills_prompt(skills, runtime_context);
+    if !skills_prompt.is_empty() {
         runtime_snapshot.push('\n');
-        runtime_snapshot.push_str(&moltis_skills::prompt_gen::generate_skills_prompt(skills));
+        runtime_snapshot.push_str(&skills_prompt);
         runtime_snapshot.push('\n');
     } else {
         runtime_snapshot.push_str("（无）\n\n");
@@ -985,7 +999,7 @@ fn build_system_prompt_full(
     // Inject available skills so the LLM knows what skills can be activated.
     // Skip for minimal prompts since skills require tool calling.
     if include_tools && !skills.is_empty() {
-        prompt.push_str(&moltis_skills::prompt_gen::generate_skills_prompt(skills));
+        prompt.push_str(&render_skills_prompt(skills, runtime_context));
     }
 
     let has_workspace_files = agents_text.is_some() || tools_text.is_some();
@@ -1201,7 +1215,87 @@ fn format_sandbox_runtime_line(sandbox: &PromptSandboxRuntimeContext) -> String 
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                buffer: Arc::clone(&self.buffer),
+            }
+        }
+    }
+
+    fn capture_json_logs<T>(operation: impl FnOnce() -> T) -> (Vec<serde_json::Value>, T) {
+        let writer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .json()
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, operation);
+        let raw = String::from_utf8(
+            writer
+                .buffer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        )
+        .unwrap();
+        let logs = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect();
+        (logs, result)
+    }
+
+    fn sample_skill(
+        name: &str,
+        path: &str,
+        source: Option<moltis_skills::types::SkillSource>,
+    ) -> SkillMetadata {
+        SkillMetadata {
+            name: name.into(),
+            description: format!("{name} description"),
+            license: None,
+            compatibility: None,
+            allowed_tools: vec![],
+            homepage: None,
+            dockerfile: None,
+            requires: Default::default(),
+            path: std::path::PathBuf::from(path),
+            source,
+        }
+    }
 
     #[test]
     fn test_native_prompt_does_not_include_tool_call_format() {
@@ -1289,6 +1383,103 @@ mod tests {
         );
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("commit"));
+    }
+
+    #[test]
+    fn test_sandbox_prompt_projects_guest_paths_and_filters_unavailable_sources() {
+        let tools = ToolRegistry::new();
+        let skills = vec![
+            sample_skill(
+                "friendly-name",
+                "/host/data/skills/dir-basename",
+                Some(moltis_skills::types::SkillSource::Personal),
+            ),
+            sample_skill(
+                "project-skill",
+                "/workspace/.moltis/skills/project-skill",
+                Some(moltis_skills::types::SkillSource::Project),
+            ),
+            sample_skill(
+                "registry-skill",
+                "/host/data/installed-skills/registry-skill",
+                Some(moltis_skills::types::SkillSource::Registry),
+            ),
+            sample_skill(
+                "plugin-skill",
+                "/host/data/installed-plugins/plugin-skill/README.md",
+                Some(moltis_skills::types::SkillSource::Plugin),
+            ),
+            sample_skill("unknown-skill", "/host/unknown-skill", None),
+        ];
+        let runtime = PromptRuntimeContext {
+            sandbox: Some(PromptSandboxRuntimeContext {
+                exec_sandboxed: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let (logs, prompt) = capture_json_logs(|| {
+            build_system_prompt_with_session_runtime(
+                &tools,
+                true,
+                None,
+                &skills,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&runtime),
+            )
+        });
+
+        assert!(prompt.contains("/moltis/data/skills/dir-basename/SKILL.md"));
+        assert!(!prompt.contains("/host/data/skills/dir-basename/SKILL.md"));
+        assert!(!prompt.contains("project-skill description"));
+        assert!(!prompt.contains("registry-skill description"));
+        assert!(!prompt.contains("plugin-skill description"));
+        assert!(!prompt.contains("unknown-skill description"));
+        assert!(logs.iter().any(|entry| {
+            entry["fields"]["event"] == "skills_prompt_entry_filtered"
+                && entry["fields"]["reason_code"] == "skill_source_not_exposed_in_sandbox"
+                && entry["fields"]["decision"] == "filter"
+                && entry["fields"]["policy"] == "sandbox_skill_path_contract"
+        }));
+        assert!(logs.iter().any(|entry| {
+            entry["fields"]["event"] == "skills_prompt_entry_filtered"
+                && entry["fields"]["reason_code"] == "unknown_skill_source_for_prompt_path"
+        }));
+    }
+
+    #[test]
+    fn test_host_prompt_preserves_existing_skill_paths() {
+        let tools = ToolRegistry::new();
+        let skills = vec![
+            sample_skill(
+                "personal-skill",
+                "/host/data/skills/personal-skill",
+                Some(moltis_skills::types::SkillSource::Personal),
+            ),
+            sample_skill(
+                "project-skill",
+                "/workspace/.moltis/skills/project-skill",
+                Some(moltis_skills::types::SkillSource::Project),
+            ),
+            sample_skill(
+                "plugin-skill",
+                "/host/data/installed-plugins/plugin-skill/README.md",
+                Some(moltis_skills::types::SkillSource::Plugin),
+            ),
+        ];
+
+        let prompt = build_system_prompt_with_session_runtime(
+            &tools, true, None, &skills, None, None, None, None, None, None,
+        );
+
+        assert!(prompt.contains("/host/data/skills/personal-skill/SKILL.md"));
+        assert!(prompt.contains("/workspace/.moltis/skills/project-skill/SKILL.md"));
+        assert!(prompt.contains("/host/data/installed-plugins/plugin-skill/README.md"));
     }
 
     #[test]
@@ -1613,8 +1804,8 @@ mod tests {
             homepage: None,
             dockerfile: None,
             requires: Default::default(),
-            path: std::path::PathBuf::from("/skills/tmux"),
-            source: None,
+            path: std::path::PathBuf::from("/host/data/skills/tmux"),
+            source: Some(moltis_skills::types::SkillSource::Personal),
         }];
 
         let runtime = PromptRuntimeContext {
@@ -1705,6 +1896,16 @@ mod tests {
         assert!(prompts.runtime_snapshot.contains("- `exec`"));
         assert!(prompts.runtime_snapshot.contains("- `memory_search`"));
         assert!(prompts.runtime_snapshot.contains("tmux"));
+        assert!(
+            prompts
+                .runtime_snapshot
+                .contains("/moltis/data/skills/tmux/SKILL.md")
+        );
+        assert!(
+            !prompts
+                .runtime_snapshot
+                .contains("/host/data/skills/tmux/SKILL.md")
+        );
     }
 
     #[test]
@@ -1726,6 +1927,104 @@ mod tests {
         assert!(prompts.persona.contains("# IDENTITY.md"));
         assert!(prompts.persona.contains("Hello."));
         assert!(!prompts.persona.contains("name: Rex"));
+    }
+
+    #[test]
+    fn canonical_v1_skills_md_uses_sandbox_paths_and_filters_unavailable_sources() {
+        let tools = ToolRegistry::new();
+        let runtime = PromptRuntimeContext {
+            sandbox: Some(PromptSandboxRuntimeContext {
+                exec_sandboxed: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let skills = vec![
+            sample_skill(
+                "friendly-name",
+                "/host/data/skills/dir-basename",
+                Some(moltis_skills::types::SkillSource::Personal),
+            ),
+            sample_skill(
+                "project-skill",
+                "/workspace/.moltis/skills/project-skill",
+                Some(moltis_skills::types::SkillSource::Project),
+            ),
+        ];
+
+        let canonical = build_canonical_system_prompt_v1(
+            &tools,
+            true,
+            false,
+            None,
+            &skills,
+            "default",
+            Some("# IDENTITY.md\n\n{{skills_md}}\n"),
+            Some("# SOUL.md\n\n"),
+            None,
+            None,
+            PromptReplyMedium::Text,
+            Some(&runtime),
+            "main",
+        )
+        .expect("canonical prompt should build");
+
+        assert!(
+            canonical
+                .system_prompt
+                .contains("/moltis/data/skills/dir-basename/SKILL.md")
+        );
+        assert!(
+            !canonical
+                .system_prompt
+                .contains("/host/data/skills/dir-basename/SKILL.md")
+        );
+        assert!(
+            !canonical
+                .system_prompt
+                .contains("project-skill description")
+        );
+    }
+
+    #[test]
+    fn openai_responses_runtime_snapshot_shows_no_skills_when_all_sources_are_filtered() {
+        let tools = ToolRegistry::new();
+        let runtime = PromptRuntimeContext {
+            sandbox: Some(PromptSandboxRuntimeContext {
+                exec_sandboxed: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let skills = vec![sample_skill(
+            "project-skill",
+            "/workspace/.moltis/skills/project-skill",
+            Some(moltis_skills::types::SkillSource::Project),
+        )];
+
+        let prompts = build_openai_responses_developer_prompts(
+            &tools,
+            true,
+            None,
+            &skills,
+            "default",
+            Some("# IDENTITY.md\n\nYou are a robot.\n"),
+            Some("# SOUL.md\n\nBe helpful.\n"),
+            None,
+            None,
+            Some(&runtime),
+        );
+
+        assert!(
+            prompts
+                .runtime_snapshot
+                .contains("## 4. 项目级可用技能 (Available Skills)\n（无）")
+        );
+        assert!(
+            !prompts
+                .runtime_snapshot
+                .contains("project-skill description")
+        );
     }
 
     #[test]

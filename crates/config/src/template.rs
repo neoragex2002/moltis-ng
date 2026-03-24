@@ -237,7 +237,7 @@ data_mount = "ro"                 # How to mount Moltis data_dir into sandbox (g
 #
 # Docker backend requires both of these when `data_mount != "none"`:
 # data_mount_type = "bind"        # "bind" (host path) or "volume" (named volume)
-# data_mount_source = "/srv/moltis-data"  # bind: absolute host path | volume: volume name
+# data_mount_source = "/srv/moltis-data"  # bind: absolute host path and must resolve to effective data_dir | volume: volume name
 backend = "auto"                  # Container backend:
                                   #   "auto"            - Auto-detect (uses Docker when available)
                                   #   "docker"          - Use Docker

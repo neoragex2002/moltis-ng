@@ -409,6 +409,10 @@ fn prepare_public_data_view(
     Ok(view_dir)
 }
 
+fn normalize_existing_mount_contract_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Sandbox mode controlling when sandboxing is applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1021,6 +1025,27 @@ impl DockerSandbox {
                     anyhow::bail!(
                         "SANDBOX_DATA_MOUNT_INVALID: tools.exec.sandbox.data_mount_source must not contain ':' \
                          when tools.exec.sandbox.data_mount_type=bind"
+                    );
+                }
+                let configured_source = std::path::PathBuf::from(mount_source);
+                let effective_data_dir = moltis_config::data_dir();
+                if normalize_existing_mount_contract_path(&configured_source)
+                    != normalize_existing_mount_contract_path(&effective_data_dir)
+                {
+                    warn!(
+                        event = "sandbox_data_mount_rejected",
+                        reason_code = "sandbox_bind_source_must_equal_data_dir",
+                        decision = "reject",
+                        policy = "sandbox_data_mount_contract",
+                        configured_source = %configured_source.display(),
+                        effective_data_dir = %effective_data_dir.display(),
+                        "rejecting sandbox bind source outside effective data_dir contract"
+                    );
+                    anyhow::bail!(
+                        "SANDBOX_DATA_MOUNT_INVALID: tools.exec.sandbox.data_mount_source must resolve to the \
+                         effective Moltis data_dir (reason_code=sandbox_bind_source_must_equal_data_dir); \
+                         set tools.exec.sandbox.data_mount_source=\"{}\"",
+                        effective_data_dir.display()
                     );
                 }
                 let view_dir = prepare_public_data_view(mount_source, &id.key)?;
@@ -2633,9 +2658,71 @@ impl SandboxRouter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
+
+    static DATA_DIR_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                buffer: Arc::clone(&self.buffer),
+            }
+        }
+    }
+
+    fn capture_json_logs<T>(operation: impl FnOnce() -> T) -> (Vec<serde_json::Value>, T) {
+        let writer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .json()
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, operation);
+        let raw = String::from_utf8(
+            writer
+                .buffer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        )
+        .unwrap();
+        let logs = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect();
+        (logs, result)
+    }
 
     struct TestSandbox {
         name: &'static str,
@@ -2797,6 +2884,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("USER.md"), "user\n").unwrap();
         std::fs::write(dir.path().join("PEOPLE.md"), "people\n").unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        moltis_config::set_data_dir(dir.path().to_path_buf());
         let config = SandboxConfig {
             data_mount: WorkspaceMount::Ro,
             data_mount_type: Some(DataMountType::Bind),
@@ -2817,6 +2906,7 @@ mod tests {
                 format!("{}:/moltis/data:ro", view.display())
             ]
         );
+        moltis_config::clear_data_dir();
     }
 
     #[test]
@@ -2889,6 +2979,69 @@ mod tests {
     }
 
     #[test]
+    fn test_docker_data_mount_args_rejects_bind_source_outside_effective_data_dir() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data_dir = tempfile::tempdir().unwrap();
+        std::fs::write(data_dir.path().join("USER.md"), "user\n").unwrap();
+        std::fs::write(data_dir.path().join("PEOPLE.md"), "people\n").unwrap();
+        let wrong_dir = tempfile::tempdir().unwrap();
+        std::fs::write(wrong_dir.path().join("USER.md"), "user\n").unwrap();
+        std::fs::write(wrong_dir.path().join("PEOPLE.md"), "people\n").unwrap();
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+
+        let config = SandboxConfig {
+            data_mount: WorkspaceMount::Ro,
+            data_mount_type: Some(DataMountType::Bind),
+            data_mount_source: Some(wrong_dir.path().display().to_string()),
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let id = SandboxId {
+            scope_key: SandboxScopeKey::SessionId,
+            key: "main".into(),
+        };
+
+        let (logs, result) = capture_json_logs(|| docker.data_mount_args(&id));
+        moltis_config::clear_data_dir();
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("sandbox_bind_source_must_equal_data_dir"));
+        assert!(logs.iter().any(|entry| {
+            entry["fields"]["event"] == "sandbox_data_mount_rejected"
+                && entry["fields"]["reason_code"] == "sandbox_bind_source_must_equal_data_dir"
+                && entry["fields"]["decision"] == "reject"
+                && entry["fields"]["policy"] == "sandbox_data_mount_contract"
+        }));
+    }
+
+    #[test]
+    fn test_docker_data_mount_args_accepts_canonicalized_equivalent_bind_source() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data_dir = tempfile::tempdir().unwrap();
+        std::fs::write(data_dir.path().join("USER.md"), "user\n").unwrap();
+        std::fs::write(data_dir.path().join("PEOPLE.md"), "people\n").unwrap();
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+
+        let config = SandboxConfig {
+            data_mount: WorkspaceMount::Ro,
+            data_mount_type: Some(DataMountType::Bind),
+            data_mount_source: Some(data_dir.path().join(".").display().to_string()),
+            ..Default::default()
+        };
+        let docker = DockerSandbox::new(config);
+        let id = SandboxId {
+            scope_key: SandboxScopeKey::SessionId,
+            key: "main".into(),
+        };
+
+        let args = docker.data_mount_args(&id).unwrap();
+        moltis_config::clear_data_dir();
+
+        assert_eq!(args.len(), 2);
+        assert!(args[1].ends_with(":/moltis/data:ro"));
+    }
+
+    #[test]
     fn test_docker_data_mount_args_invalid_volume_source_fails_fast() {
         let config = SandboxConfig {
             data_mount: WorkspaceMount::Ro,
@@ -2927,6 +3080,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("USER.md"), "user\n").unwrap();
         std::fs::write(dir.path().join("PEOPLE.md"), "people\n").unwrap();
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        moltis_config::set_data_dir(dir.path().to_path_buf());
         let config = SandboxConfig {
             data_mount: WorkspaceMount::Ro,
             data_mount_type: Some(DataMountType::Bind),
@@ -2947,6 +3102,7 @@ mod tests {
             ".sandbox_views/{}:{SANDBOX_GUEST_DATA_DIR}:ro",
             id.key
         ))));
+        moltis_config::clear_data_dir();
     }
 
     #[test]
