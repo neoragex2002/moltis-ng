@@ -1,6 +1,6 @@
 # Overall Issues (<v?>) — <主题>（Audit + Roadmap）
 
-Updated: <YYYY-MM-DD>
+Updated: <YYYY-MM-DD>（必填；每次增量更新都要改。若某个子 issue 已收口为 DONE，对应 issue 文档/小节也必须保留最近完成日期）
 
 ## 范围与约束（Scope & Constraints）
 - 覆盖范围：<模块/路径/场景>
@@ -42,11 +42,12 @@ Updated: <YYYY-MM-DD>
 > - `Evidence` 至少 1 条可定位证据：`path/to/file:line` / 测试 / 日志关键词。
 > - `Tests` 必须写“已有/新增/缺口”（不能为空）。
 > - P0/P1 的 TODO 必须有 `Doc` 指向独立 issue 文档（避免长文埋雷）。
+> - 每个 issue 必须有可见的最近更新时间；DONE issue 必须能看出完成/收口日期。
 
-| ID | Status | Pri | Title | Owner | Component | Depends On | Evidence | Tests | Doc |
-|---:|:---:|:---:|---|---|---|---|---|---|---|
-| 1 | TODO | P0 | <标题> | <owner> | <component> | <ids> | <file:line/log> | <unit/e2e/缺口> | `issues/issue-xxx.md` |
-| 2 | DONE | P1 | <标题> | <owner> | <component> | <ids> | <file:line> | <tests> | `issues/issue-yyy.md` |
+| ID | Status | Pri | Updated | Title | Owner | Component | Depends On | Evidence | Tests | Doc |
+|---:|:---:|:---:|:---:|---|---|---|---|---|---|---|
+| 1 | TODO | P0 | <YYYY-MM-DD> | <标题> | <owner> | <component> | <ids> | <file:line/log> | <unit/e2e/缺口> | `issues/issue-xxx.md` |
+| 2 | DONE | P1 | <YYYY-MM-DD> | <标题> | <owner> | <component> | <ids> | <file:line> | <tests> | `issues/issue-yyy.md` |
 
 ---
 
@@ -69,6 +70,7 @@ Updated: <YYYY-MM-DD>
 ## <ID>) [STATUS] <标题>
 ### Metadata
 - Priority:
+- Updated: <YYYY-MM-DD>（必填；若本小节已 DONE，这里必须是最近完成/收口日期）
 - Owner:
 - Component:
 - Affected paths/providers/models:
@@ -125,7 +127,7 @@ Updated: <YYYY-MM-DD>
 
 ### Progress（实施现状）
 - 当前状态：
-- 已完成证据：
+- 已完成证据（逐条带日期）：
 - 已知差异/后续优化（非阻塞）：
 
 ### Close Checklist（关单清单）【不可省略】

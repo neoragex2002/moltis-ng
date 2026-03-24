@@ -3,14 +3,14 @@
 ## 实施现状（Status）【增量更新主入口】
 - Status: [TODO|IN-PROGRESS|DONE|SURVEY]
 - Priority: [P0|P1|P2|P3]
-- Updated: <YYYY-MM-DD>
+- Updated: <YYYY-MM-DD>（必填；每次增量更新都要改。若 `Status: DONE`，这里必须是本单最近完成/收口日期）
 - Owners: <人/组，可选>
 - Components: <gateway/agents/sessions/ui/telegram/...>
 - Affected providers/models: <如 openai-responses::gpt-5.2，可选>
 
-**已实现（如有，写日期）**
-- <实现点一句话>：`path/to/file:line`
-- <实现点一句话>：`path/to/file:line`
+**已实现（如有，必须逐条写日期）**
+- <YYYY-MM-DD>：<实现点一句话>：`path/to/file:line`
+- <YYYY-MM-DD>：<实现点一句话>：`path/to/file:line`
 
 **已覆盖测试（如有）**
 - <test 名称/覆盖点>：`path/to/file:line`

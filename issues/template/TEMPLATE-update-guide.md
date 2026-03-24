@@ -8,7 +8,15 @@
 1) 先更新 **证据**（`path/to/file:line`、测试名、日志关键词）
 2) 再更新 **状态**（TODO → IN-PROGRESS → DONE）
    - 同步更新文档顶部的 `Updated: YYYY-MM-DD`（或 Status 区块的 `Updated:` 字段）
+   - 若已标 `DONE`，`Updated` 必须体现最近完成/收口日期，不能留旧日期
 3) 最后更新 **交叉引用**（Doc/Index/Related issues）
+
+### 0.1.1 时间字段纪律（强制）
+- 单 issue / overall issue 都必须维护可见的 `Updated: YYYY-MM-DD`
+- `已实现` 条目必须逐条带日期，禁止无日期 bullet 混入已实现区块
+- DONE 口径必须同时满足：
+  - issue 级 `Updated` 存在且为最近完成/收口日期
+  - `已实现` 至少有 1 条带日期的实现记录
 
 ### 0.2 术语/口径变更
 - 如果出现新概念或需要改口径：**只改 Glossary & Semantics**（权威位置），正文只引用，不重复定义。
@@ -27,7 +35,7 @@
 
 ### 1.1 日常更新只改这块：`实施现状（Status）`
 当你完成一个实现点：
-- 在“已实现”里追加一条：`path/to/file:line`
+- 在“已实现”里追加一条：`YYYY-MM-DD：...：path/to/file:line`
 当你补了测试：
 - 在“已覆盖测试”里追加：`path/to/test:line`
 当你发现非阻塞缺口：
@@ -41,8 +49,9 @@
 
 ### 1.3 关单前的最小动作
 1) 勾完 `Close Checklist`
-2) 在 Evidence 里补齐关键 `file:line`
-3) 如果缺自动化：写“手工验收步骤 + 原因 + 后续补测计划”
+2) 确认 `Updated` 已改到最近完成/收口日期，且“已实现”区块不存在无日期条目
+3) 在 Evidence 里补齐关键 `file:line`
+4) 如果缺自动化：写“手工验收步骤 + 原因 + 后续补测计划”
 
 ---
 
@@ -51,6 +60,7 @@
 ### 2.1 每次改动必须先改 `Issue Index`
 你每完成一个 issue 的一个阶段，都应该在 Index 表里同步：
 - Status（TODO/IN-PROGRESS/DONE）
+- Updated（最近更新时间；DONE 时即最近完成/收口日期）
 - Evidence（新增 `file:line` 或日志关键词）
 - Tests（新增 test refs，或把“缺口”写清楚）
 - Doc（如果拆分出独立 issue，填 `issues/issue-xxx.md`）
@@ -73,8 +83,8 @@
 
 ### 2.4 关单同步动作
 当某个 issue 标 DONE：
-1) Index：Status→DONE，补齐 Evidence/Tests/Doc
-2) Issue 小节：勾完 Close Checklist
+1) Index：Status→DONE，并同步 `Updated`，补齐 Evidence/Tests/Doc
+2) Issue 小节：勾完 Close Checklist，并补最近完成/收口日期
 3) Validation Matrix：必要时补一条回归项
 
 ---

@@ -15,6 +15,12 @@
   - 或明确的复现步骤/日志关键词（当自动化不可行时）
 - 禁止“无证据 DONE”。
 
+### 2.1) 时间可审计（Timestamped progress）
+- 每个 issue 文档都必须有 issue 级 `Updated: YYYY-MM-DD`
+- 当 issue 进入 `DONE` 时，`Updated` 必须体现最近完成/收口日期
+- `已实现` 区块中的实现记录必须逐条带日期；禁止只写文件位置、不写日期
+- overall / audit 文档中的 issue 索引与 issue 小节，也必须能看到最近更新时间
+
 ### 3) 口径清晰、避免歧义（Semantics clarity）
 - 必须显式标注来源/口径：
   - authoritative（权威值：provider 返回 usage / 回包）
@@ -39,6 +45,7 @@
 
 ### 1) 顶部 `实施现状（Status）` 为增量更新主入口
 - 日常更新应优先只改该块：实现点、测试点、已知差异。
+- `Updated` 为强制字段，不得留空；DONE 单子必须用它表达最近完成/收口日期。
 
 ### 2) Spec 尽量冻结
 - Spec 用“必须/不得/应当”写清；后续更新优先改实现与测试，不频繁改 Spec。
@@ -51,6 +58,7 @@
 
 ### 1) Issue Index（总控表）强制维护
 - 每次增量更新优先改 Index：Status / Evidence / Tests / Doc / Depends。
+- Index 必须包含 `Updated` 或等效时间字段，保证每个 issue 都可审计最近更新时间。
 - P0/P1 的 TODO 必须有独立 issue 文档链接（Doc 列），避免长文埋雷。
 
 ### 2) 每个 issue 小节的不可省略字段
