@@ -10,15 +10,24 @@
 
 **已实现（如有，写日期）**
 - 2026-03-24：`channels.telegram` 已 hard-cut 收口为 typed `TelegramChannelsConfig { bot_dispatch_cycle_budget, accounts }`，默认预算 `128`，`0` 在配置校验阶段直接拒绝
-- 2026-03-24：`crates/telegram/src/state.rs` 已重构为 per-chat 群运行时管理器，统一收口 `participants`、`dedupe_actions`、`message_contexts`、`root_budgets`
+- 2026-03-24：`crates/telegram/src/state.rs` 已重构为 Telegram 群运行时单点 owner：稳定 `participants` 单独持有，`dedupe_actions`、`message_contexts`、`root_budgets` 继续收口在 per-chat transient runtime 内
 - 2026-03-24：`crates/telegram/src/handlers.rs` 与 `crates/telegram/src/outbound.rs` 已接入 `root_message_id` 懒创建、bot-to-bot 准入即扣减、缺根 fail-close、稳定顺序与 chunk 上下文传播
 - 2026-03-24：`crates/gateway/src/server.rs` 启动路径已只遍历 `.accounts`，并把共享预算下发到 Telegram plugin 运行时
 - 2026-03-24：已补齐 hard-cut 拒绝测试与结构化日志自动化校验，覆盖 `root_dispatch_budget_exceeded` 的 `warn -> info` 级别冻结，以及 `root_dispatch_context_missing` 的 `warn` 语义
+- 2026-03-24：`crates/telegram/src/outbound.rs` 已把 Telegram reply 展示目标与协作链 lineage 解耦；非 reply 的受管 bot 群消息只要显式携带 lineage，成功发送后仍会登记到原 `root_message_id`
+- 2026-03-24：`crates/telegram/src/state.rs` 已把稳定 `participants` 从 transient per-chat 协作链容器中拆出，继续由同一 runtime owner 单点持有；whole-chat TTL 与 transient chat 容量淘汰都不再连带删除群成员事实
 
 **已覆盖测试（如有）**
 - 2026-03-24：`cargo test -p moltis-config --lib -- --nocapture`
 - 2026-03-24：`cargo test -p moltis-telegram --lib -- --nocapture`
 - 2026-03-24：`cargo test -p moltis-gateway --lib configured_telegram_accounts_uses_typed_accounts_only -- --nocapture`
+- 2026-03-24：`cargo test -p moltis-gateway --lib deliver_channel_replies_waits_for_outbound_sends -- --nocapture`
+- 2026-03-24：`git diff --check`
+
+**本轮 review 阻塞（已修复）**
+- 2026-03-24：`crates/telegram/src/outbound.rs` 已改为显式 lineage 传播；`reply_to_message_id` 只负责 reply 展示/目标识别，不再决定 `sent_message_id -> root_message_id` 是否登记
+- 2026-03-24：`crates/telegram/src/state.rs` 已把 `participants` 与 transient chat 容器彻底解耦；whole-chat TTL 与 transient chat 容量淘汰都不会再静默压缩 sibling bot fanout 事实
+- 2026-03-24：新增并通过两条阻塞回归单测，issue 恢复完成状态
 
 **已知差异/后续优化（非阻塞）**
 - 本单只补 Telegram 群聊 bot-to-bot 扩散保险丝，不恢复旧 relay-chain 机制全集
@@ -66,8 +75,8 @@
   - Source/Method：effective
   - Aliases（仅记录，不在正文使用）：message context / message binding
 
-- **群运行时管理器**（主称呼）：按 `chat_id` 收口 Telegram 群聊运行时状态的唯一拥有者；同一 chat 内集中持有 `participants`、`dedupe_actions`、`message_contexts`、`root_budgets`。
-  - Why：这能把预算、上下文、去重、参与者集合关在同一责任边界里，避免分散状态与竞态放大。
+- **群运行时管理器**（主称呼）：Telegram 适配层内持有群聊运行时事实的唯一 owner；其中 `participants` 是按 `chat_id` 单独索引的稳定群成员事实，`dedupe_actions`、`message_contexts`、`root_budgets` 收口在 per-chat transient runtime。
+  - Why：这能把预算、上下文、去重、参与者集合关在同一责任边界里，同时避免把稳定事实和临时协作链状态绑进同一淘汰语义。
   - Not：不是跨渠道通用框架，不是新的 gateway/core 抽象，也不是必须新增 actor / 事件总线 / 后台任务。
   - Source/Method：effective
   - Aliases（仅记录，不在正文使用）：per-chat runtime manager
@@ -105,12 +114,15 @@
   - 必须让同一条外部根消息下的所有 bot 分支共享同一个根预算桶
   - 必须懒创建根预算；外部消息若最终没有放行任何 `Dispatch`，不得分配保险丝状态
   - 必须只追踪两类消息：实际开启协作链的外部根消息、以及由本系统成功发出的受管 bot 群消息
+  - 必须把“受管 bot 群消息属于哪个 `root_message_id`”视为显式协作事实；不得再把 Telegram `reply_to_message_id` 形态误当成根传播的唯一事实源
+  - 必须保证受管 bot 在群里的非 reply 可见消息，只要它逻辑上仍属于当前协作链，就能继承同一个 `root_message_id`
   - 必须让多目标处理顺序稳定且单次遍历，不能再受 `HashSet` 迭代顺序影响
   - 必须在 Telegram 适配层单点完成根创建、根传播、预算扣减、降级与日志
   - 不得依赖通用 Telegram `reply_to_message_id` 链条去追历史根
   - 不得恢复 hop/depth/path/relay-chain 旧机制
   - 不得把 Telegram 渠道专属复杂性扩散到 gateway/core
   - 不得引入 reserve / commit / rollback 或 handoff 成功回补预算语义
+  - 不得把 `participants` 这种稳定群成员事实与 `message_contexts/root_budgets` 这种临时协作链状态绑定到同一个淘汰语义
 - 兼容性：
   - 本单为 hard cut 重构；不保留 raw `HashMap<String, Value>` + 保留 key 的旧配置语义
   - 命中 legacy/冲突形状时直接报错，不做 silent degrade
@@ -170,6 +182,31 @@
 - E. 当前参与者顺序不稳定；如果预算扣减挂在这条链上，局部耗尽时的放行结果会变成非确定性
 - F. 试图通过 generic `reply_to_message_id` 历史链去追根，会把 Telegram 客户端表现差异带进保险丝主路径，机制脆弱且不必要
 
+## 2026-03-24 Review 复盘与修复口径（Blocking Follow-up）
+### 回归 1：非 reply 的受管 bot 群消息丢失根传播
+- 现象：
+  - 当前出站根传播在 `crates/telegram/src/outbound.rs` 上把 `reply_to_message_id` 当成前置条件。
+  - 一旦受管 bot 在群里发送“不是 reply，但逻辑上仍属于当前协作链”的可见消息，新 `sent_message_id` 就不会登记 `root_message_id`。
+  - 后续这条 bot 消息再正式点名其他 bot 时，会因 `root_dispatch_context_missing` 被错误降级为 `RecordOnly`。
+- 第一性判断：
+  - `root_message_id` 是协作链事实，不是 Telegram 展示形态。
+  - `reply_to_message_id` 只负责 reply 目标识别与线程呈现，不得再承担根传播事实源职责。
+- 冻结决策：
+  - 根传播必须改为显式 lineage 传递；Telegram 出站主路径要么拿到当前协作链的显式 `root_message_id`，要么严格 fail-close。
+  - 禁止在 `reply_to_message_id = None` 时通过“最近一条消息”“thread id”“最后一次发言 bot”等启发式方式猜根。
+
+### 回归 2：whole-chat TTL 误删稳定 `participants`
+- 现象：
+  - 当前 per-chat runtime 把 `participants`、`message_contexts`、`root_budgets` 绑在同一个 chat 容器里，并按 whole-chat TTL 整体回收。
+  - 低活跃共享群一旦超过 TTL，系统会忘掉该群里已有的 sibling bots；之后 source bot 再发消息时，只会重新登记自己，跨 bot fanout 被错误收缩。
+- 第一性判断：
+  - `participants` 是群内受管 bot 拓扑事实；`message_contexts/root_budgets` 是协作链临时状态。
+  - 二者可以继续由同一个 runtime owner 持有，但不得共享同一淘汰语义。
+- 冻结决策：
+  - 保留 runtime 单点所有权，不新增外部通用抽象。
+  - 取消“chat 整体过期 = participants 一并消失”的现实现状；只允许对临时协作链状态做 TTL/上限清理。
+  - 禁止为了保住 whole-chat TTL 再引入 participant restore/fallback/猜测恢复逻辑。
+
 ## 期望行为（Desired Behavior / Spec）【尽量冻结】
 > 用“必须/不得/应当”写清楚最终口径；后续更新优先改“实现/测试/进度”，避免频繁改 Spec。
 
@@ -188,11 +225,13 @@
   - 受管 bot 下游派发必须采用“准入即扣减”：某个目标被放行为 `Dispatch` 的当下，立即把该根预算 `used += 1`
   - 下游 handoff 后续即使失败，也不得回补预算；这是保险丝，不是成功结算器
   - 受管 bot 群消息一旦发送成功，必须立即登记 `(chat_id, sent_message_id) -> { root_message_id, managed_author_account_handle }`
+  - 上述登记必须由显式 lineage 上下文驱动，而不是以 `reply_to_message_id` 是否存在作为前置条件
   - 若一次发送因分片/分块产生多个 Telegram `message_id`，则每个成功返回的 `message_id` 都必须登记到同一个 `root_message_id`；不得只登记首条
   - Telegram 分片/分块只影响消息上下文登记，不改变预算计费单位；同一次 source->target 放行无论拆成多少片，都只扣 1 次预算
   - 后续任何由受管 bot 发出的群消息，若要继续触发下游派发，必须优先从“这条消息自己的 `(chat_id, message_id)`”读取 `root_message_id`
   - 这里禁止的是“用 generic reply 历史链追根”，不是禁止现有 reply 目标识别；reply 语义仍只负责判定目标，不负责决定属于哪个根
   - 保险丝追踪范围必须只包含两类消息：实际开启协作链的外部根消息、以及由本系统成功发出的受管 bot 群消息
+  - `participants` 必须作为 runtime 持有的稳定群成员事实保留；低活跃或临时协作链状态过期，不得导致 sibling bots 从 fanout 视图中消失
   - 多目标处理必须采用稳定顺序并单次遍历；同一条消息预算不够时，必须稳定地“前面的目标继续 `Dispatch`、后面的目标降级为 `RecordOnly`”
   - 为收敛口径，稳定顺序冻结为：目标账号句柄按字典序升序处理
   - 稳定顺序的产出必须只有一个事实源；实现上应集中在单一 helper 或运行时快照出口完成，禁止在多个调用点各自排序各自解释
@@ -208,7 +247,7 @@
   - 不得在 raw `HashMap<String, Value>` 上继续做“保留 key + 启动时跳过”的旧方案
   - 不得在预算耗尽或上下文缺失时 drop 消息、裁剪正文、伪造新的 session/system message、或静默绕过保险丝
 - 应当：
-  - 应当把 `participants`、`dedupe_actions`、`message_contexts`、`root_budgets` 收口到同一个 per-chat 运行时管理器中
+  - 应当把 `participants` 与 transient 协作链状态继续收口在同一个 Telegram runtime owner 内，但 `participants` 不得再和 `dedupe_actions`、`message_contexts`、`root_budgets` 共用 per-chat transient 容器
   - 应当沿用现有 Telegram 出站成功拿到 `MessageId` 的主路径做根传播，而不是额外追 Telegram reply 历史链
   - 应当为 `message_contexts` 与 `root_budgets` 提供统一的 TTL / 上限清理，确保进程内状态有界
 
@@ -217,7 +256,7 @@
 #### 方案 1（推荐：`root_message_id` 共享预算）
 - 核心思路：
   - 用外部根消息自己的 `message_id` 当作唯一根身份
-  - 用每个 chat 一个运行时管理器，集中持有参与者集合、去重、消息上下文、根预算桶
+  - 用 Telegram runtime 单点 owner 持有稳定参与者集合，并为每个 chat 持有 transient 去重、消息上下文、根预算桶
   - 外部根消息在“首次真的放行了某个 `Dispatch`”时懒创建根预算桶
   - bot-to-bot 目标一旦被放行就立即扣减预算，不再做成功回补
   - 受管 bot 消息发送成功后立刻把新 `message_id` 绑定到同一个 `root_message_id`
@@ -263,6 +302,10 @@
 - API/RPC：
   - 无新增外部 API
   - `TelegramCoreBridge::handle_inbound(...)` 不做成功/失败返回值改造；预算语义不依赖它
+- Telegram 内部出站协作上下文：
+  - Telegram 出站内部主路径必须显式携带“当前消息属于哪个 `root_message_id`”的 lineage 上下文
+  - 该上下文是 Telegram 适配层内部 contract，不向 gateway/core 扩散新的通用概念
+  - `reply_to_message_id` 继续用于 Telegram reply 展示/目标识别，但不得再充当 lineage 唯一事实源
 - 配置：
   - 外部 TOML：
     - `[channels.telegram]`
@@ -270,12 +313,11 @@
   - 内部 typed config：`TelegramChannelsConfig { bot_dispatch_cycle_budget, accounts }`
   - `accounts` 是 Telegram 账号唯一来源；共享保险丝配置不得继续混在 raw map 枚举路径里
 - 运行时状态：
-  - `TelegramGroupRuntime` 应重构为按 `chat_id` 聚合的运行时管理器
-  - 每个 chat 统一持有：
-    - `participants`
-    - `dedupe_actions`
-    - `message_contexts`
-    - `root_budgets`
+  - `TelegramGroupRuntime` 应重构为 Telegram 群运行时单点 owner
+  - 其中：
+    - `participants` 是按 `chat_id` 索引的稳定群成员事实
+    - `dedupe_actions`、`message_contexts`、`root_budgets` 是 per-chat transient 协作链状态
+  - 允许它们继续由同一 runtime owner 持有，但不得共享“chat 整体 TTL 到期后一并删掉”或“transient chat 容量淘汰连带删除”的淘汰语义
   - `message_contexts[(chat_id, message_id)]` 至少表达：
     - `root_message_id`
     - `managed_author_account_handle: Option<String>`（外部根消息为 `None`，受管 bot 消息为 `Some(...)`）
@@ -334,9 +376,11 @@
 - [x] bot-to-bot 单链派发按“每个放行目标 1 次”扣减
 - [x] 同一条 bot 消息多目标处理时，顺序稳定且预算不足时会稳定地前放后拦
 - [x] 下游 handoff 失败不会回补预算；该行为有明确测试和文档冻结
-- [x] 受管 bot 消息发送成功后，新的 `sent_message_id` 会被立即绑定到正确的 `root_message_id`
+- [x] 受管 bot 群消息即使不是 reply 发送，只要逻辑上仍属于当前协作链，也会用显式 lineage 继承同一个 `root_message_id`
+- [x] 根传播 contract 已与 `reply_to_message_id` 解耦；reply 形态不再决定是否登记 `sent_message_id -> root_message_id`
 - [x] 继续派发时读取的是“当前消息自己的上下文”，而不是 generic reply 历史链
 - [x] 受管 bot 消息缺失有效根上下文或根预算桶时，会 fail-close 为 `RecordOnly`
+- [x] 低活跃共享群即使临时协作链状态过期，`participants` 仍保留 sibling bot fanout 所需事实，不会因 whole-chat TTL 被静默压缩
 - [x] 进程重启/状态淘汰后的旧链消息不会绕过保险丝，而是按上下文缺失处理
 - [x] 预算耗尽时，正文与 `addressed` 保持不变，只降级 `mode`
 - [x] 同一根预算首次命中日志为 `warn`，后续命中为 `info`
@@ -356,6 +400,9 @@
 - [x] `crates/telegram/src/state.rs`：覆盖单次 source->target 派发即使被 Telegram 分成多片，也只扣 1 次预算
 - [x] `crates/telegram/src/outbound.rs` 或相邻单测：覆盖受管 bot 消息缺失根上下文/根预算桶时 fail-close 为 `RecordOnly`
 - [x] `crates/telegram/src/outbound.rs` / `crates/telegram/src/handlers.rs`：覆盖 `root_dispatch_budget_exceeded` 与 `root_dispatch_context_missing` 的日志级别和 `reason_code`
+- [x] `crates/telegram/src/outbound.rs`：新增单测覆盖“受管 bot 群消息在 `reply_to_message_id = None` 时，只要显式 lineage 存在，新的 `sent_message_id` 仍会继承正确 `root_message_id` 并继续下游 fanout”
+- [x] `crates/telegram/src/state.rs` / `crates/telegram/src/outbound.rs`：新增单测覆盖“临时协作链状态过期后，低活跃共享群仍保留 `participants`，source bot 后续出站仍能看到 sibling bots 并继续稳定 fanout”
+- [x] `crates/telegram/src/state.rs` / `crates/telegram/src/outbound.rs`：新增单测覆盖“transient chat 命中容量淘汰后，稳定 `participants` 仍保留，群可见出站不会因 runtime chat 回收而丢失 sibling bot fanout”
 
 ### Integration
 - [x] `cargo test -p moltis-config --lib -- --nocapture`
@@ -379,11 +426,11 @@
 - 上线观测：重点观察 `event = "telegram.group.dispatch_fuse"`、`reason_code = "root_dispatch_budget_exceeded"`、`reason_code = "root_dispatch_context_missing"`
 
 ## 实施拆分（Implementation Outline）
-- Step 1: 在 `crates/config/src/schema.rs`、`crates/config/src/validate.rs`、`crates/config/src/template.rs` 接入 typed `TelegramChannelsConfig` 与 `bot_dispatch_cycle_budget`
-- Step 2: 在 `crates/gateway/src/server.rs` 与相邻 Telegram 启动路径只遍历 `.accounts`，彻底删除 raw-map 保留键方案
-- Step 3: 在 `crates/telegram/src/state.rs` 把群运行时重构为 per-chat 管理器，统一持有 `participants`、`dedupe_actions`、`message_contexts`、`root_budgets`
-- Step 4: 在 Telegram 群聊外部首轮与 bot-to-bot 主路径接入 `root_message_id` 的懒创建、即时传播、准入即扣减与 fail-close
-- Step 5: 补齐结构化日志、自动化测试与配置模板文档，冻结最终行为口径
+- Step 1: 在 `crates/telegram/src/outbound.rs` 盘点所有“群可见出站后会调用 `register_group_visible_outbound_contexts()` / `emit_group_visible_outbound_event()`”的主路径，冻结唯一内部 lineage contract，禁止继续由 `reply_to_message_id` 隐式决定根传播
+- Step 2: 在 `crates/telegram/src/handlers.rs`、`crates/telegram/src/outbound.rs` 与相邻调用点接入显式 lineage 传递；保证受管 bot 的非 reply 群消息只要仍属于当前协作链，就能登记 `sent_message_id -> root_message_id`
+- Step 3: 在 `crates/telegram/src/state.rs` 把 `participants` 与临时协作链状态的淘汰语义拆开；继续保持 runtime 单点所有权，但删除“whole-chat TTL 连带删除 participants”的现实现状
+- Step 4: 先补两条阻塞回归的 failing tests，再做最小实现，再补日志/回归验证；禁止顺手引入新的通用抽象、fallback 或 legacy guard
+- Step 5: 通过 review 复核“唯一事实源是否只剩显式 lineage + runtime participants”“是否仍保持 Telegram 适配层单点闭环”，再恢复 issue 完成状态
 - 受影响文件：
   - `crates/config/src/schema.rs`
   - `crates/config/src/validate.rs`
@@ -394,6 +441,12 @@
   - `crates/telegram/src/outbound.rs`
   - `crates/telegram/src/adapter.rs`
   - `crates/telegram/src/plugin.rs`
+- 本轮阻塞回归修复的直接触点应收敛为：
+  - `crates/telegram/src/outbound.rs`
+  - `crates/telegram/src/state.rs`
+  - `crates/telegram/src/handlers.rs`
+  - 相邻 Telegram 单测
+- 除非在实施中发现显式 lineage contract 无法在 Telegram 适配层内闭合，否则不得再把本轮修复扩散回 `crates/config` 或 `crates/gateway`
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
@@ -406,7 +459,10 @@
   - N/A
 
 ## 未决问题（Open Questions）
-- 无。经本轮收口后，根身份、预算语义、传播路径、fail-close、日志与配置边界都已冻结；剩余仅是按 issue 实施。
+- 无新的产品/架构未决项。本轮 review 后，待实现项已收敛为两条阻塞性回归修复：
+  - 显式 lineage 根传播替代 `reply_to_message_id` 前置
+  - `participants` 与临时协作链状态淘汰语义拆分
+- 除此之外，不再扩写新概念，不新增兼容层，不扩大到 Telegram 之外。
 
 ## Close Checklist（关单清单）【不可省略】
 - [x] 行为已按 Spec 实现（口径一致）

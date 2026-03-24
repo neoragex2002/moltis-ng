@@ -960,6 +960,14 @@ struct TelegramReplyTargetRefV1 {
     thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lineage_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TelegramOutboundTargetRef {
+    pub target: moltis_channels::ChannelReplyTarget,
+    pub lineage_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -991,11 +999,12 @@ pub fn telegram_binding_uses_legacy_shape(binding: &str) -> bool {
         })
 }
 
-pub fn reply_target_ref_for_target(
+pub fn reply_target_ref_for_target_with_lineage(
     account_key: &str,
     chat_id: &str,
     thread_id: Option<&str>,
     message_id: Option<&str>,
+    lineage_message_id: Option<&str>,
 ) -> Option<String> {
     let v1 = TelegramReplyTargetRefV1 {
         v: 1,
@@ -1004,8 +1013,24 @@ pub fn reply_target_ref_for_target(
         chat_id: chat_id.to_string(),
         thread_id: thread_id.map(str::to_string),
         message_id: message_id.map(str::to_string),
+        lineage_message_id: lineage_message_id.map(str::to_string),
     };
     serde_json::to_string(&v1).ok()
+}
+
+pub fn reply_target_ref_for_target(
+    account_key: &str,
+    chat_id: &str,
+    thread_id: Option<&str>,
+    message_id: Option<&str>,
+) -> Option<String> {
+    reply_target_ref_for_target_with_lineage(
+        account_key,
+        chat_id,
+        thread_id,
+        message_id,
+        message_id,
+    )
 }
 
 pub fn reply_target_ref_from_inbound_target(
@@ -1025,18 +1050,27 @@ pub fn reply_target_ref_from_inbound_target(
 pub fn inbound_target_from_reply_target_ref(
     reply_target_ref: &str,
 ) -> Option<moltis_channels::ChannelReplyTarget> {
+    telegram_outbound_target_from_reply_target_ref(reply_target_ref).map(|parsed| parsed.target)
+}
+
+pub fn telegram_outbound_target_from_reply_target_ref(
+    reply_target_ref: &str,
+) -> Option<TelegramOutboundTargetRef> {
     let v1: TelegramReplyTargetRefV1 = serde_json::from_str(reply_target_ref).ok()?;
     if v1.v != 1 || v1.channel_type != "telegram" {
         return None;
     }
-    Some(moltis_channels::ChannelReplyTarget {
-        chan_type: moltis_channels::ChannelType::Telegram,
-        chan_account_key: v1.account_key,
-        chan_user_name: None,
-        chat_id: v1.chat_id,
-        message_id: v1.message_id,
-        thread_id: v1.thread_id,
-        bucket_key: None,
+    Some(TelegramOutboundTargetRef {
+        lineage_message_id: v1.lineage_message_id.or(v1.message_id.clone()),
+        target: moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: v1.account_key,
+            chan_user_name: None,
+            chat_id: v1.chat_id,
+            message_id: v1.message_id,
+            thread_id: v1.thread_id,
+            bucket_key: None,
+        },
     })
 }
 

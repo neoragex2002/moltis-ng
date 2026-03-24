@@ -95,7 +95,6 @@ struct GroupRuntimeRootBudgetEntry {
 }
 
 struct GroupChatRuntime {
-    participants: BTreeSet<String>,
     message_contexts: HashMap<String, GroupRuntimeMessageContextEntry>,
     root_budgets: HashMap<String, GroupRuntimeRootBudgetEntry>,
     dedupe: GroupRuntimeDedupeCache,
@@ -110,7 +109,6 @@ impl GroupChatRuntime {
 
     fn new(now: Instant) -> Self {
         Self {
-            participants: BTreeSet::new(),
             message_contexts: HashMap::new(),
             root_budgets: HashMap::new(),
             dedupe: GroupRuntimeDedupeCache::default(),
@@ -188,6 +186,7 @@ impl GroupChatRuntime {
 
 pub struct TelegramGroupRuntime {
     bot_dispatch_cycle_budget: u32,
+    participants: HashMap<String, BTreeSet<String>>,
     chats: HashMap<String, GroupChatRuntime>,
 }
 
@@ -198,12 +197,12 @@ impl Default for TelegramGroupRuntime {
 }
 
 impl TelegramGroupRuntime {
-    const CHAT_TTL: std::time::Duration = std::time::Duration::from_secs(86400);
     const MAX_CHATS: usize = 2048;
 
     pub fn new() -> Self {
         Self {
             bot_dispatch_cycle_budget: 128,
+            participants: HashMap::new(),
             chats: HashMap::new(),
         }
     }
@@ -217,22 +216,16 @@ impl TelegramGroupRuntime {
     }
 
     pub fn register_participant(&mut self, chat_id: &str, account_handle: &str) {
-        let now = Instant::now();
-        let chat = self.chat_mut(chat_id, now);
-        chat.participants.insert(account_handle.to_string());
-        chat.touch(now);
+        self.participants
+            .entry(chat_id.to_string())
+            .or_default()
+            .insert(account_handle.to_string());
     }
 
     pub fn participants_for_chat(&mut self, chat_id: &str) -> Vec<String> {
-        let now = Instant::now();
-        self.evict_expired_chats(now);
-        self.chats
-            .get_mut(chat_id)
-            .map(|chat| {
-                chat.evict_expired(now);
-                chat.touch(now);
-                chat.participants.iter().cloned().collect()
-            })
+        self.participants
+            .get(chat_id)
+            .map(|participants| participants.iter().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -413,8 +406,7 @@ impl TelegramGroupRuntime {
     }
 
     fn evict_expired_chats(&mut self, now: Instant) {
-        let cutoff = now - Self::CHAT_TTL;
-        self.chats.retain(|_, chat| chat.updated_at > cutoff);
+        let _ = now;
     }
 }
 
@@ -642,5 +634,41 @@ mod tests {
         let second_overflow = runtime.admit_managed_dispatch("chat-1", "m101").unwrap();
         assert!(!second_overflow.allowed);
         assert!(!second_overflow.first_budget_exceeded);
+    }
+
+    #[test]
+    fn chat_inactivity_does_not_drop_participants() {
+        let mut runtime = TelegramGroupRuntime::new();
+        runtime.register_participant("chat-1", "bot-a");
+        runtime.register_participant("chat-1", "bot-b");
+        runtime.ensure_external_root_dispatch("chat-1", "m-root");
+
+        let cutoff = Instant::now()
+            - std::time::Duration::from_secs(86400)
+            - std::time::Duration::from_secs(1);
+        runtime.chats.get_mut("chat-1").unwrap().updated_at = cutoff;
+
+        assert_eq!(
+            runtime.participants_for_chat("chat-1"),
+            vec!["bot-a".to_string(), "bot-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn chat_capacity_eviction_does_not_drop_participants() {
+        let mut runtime = TelegramGroupRuntime::new();
+        runtime.register_participant("chat-1", "bot-a");
+        runtime.ensure_external_root_dispatch("chat-1", "m-root");
+
+        for index in 0..TelegramGroupRuntime::MAX_CHATS {
+            let chat_id = format!("chat-fill-{index}");
+            let message_id = format!("m-{index}");
+            runtime.ensure_external_root_dispatch(&chat_id, &message_id);
+        }
+
+        assert_eq!(
+            runtime.participants_for_chat("chat-1"),
+            vec!["bot-a".to_string()]
+        );
     }
 }
