@@ -190,6 +190,31 @@ fn build_schema_map() -> KnownKeys {
         ]))
     };
 
+    let telegram_account_entry = || {
+        Struct(HashMap::from([
+            ("token", Leaf),
+            ("dm_policy", Leaf),
+            ("allowlist", Array(Box::new(Leaf))),
+            ("dm_scope", Leaf),
+            ("group_scope", Leaf),
+            ("group_line_start_mention_dispatch", Leaf),
+            ("group_reply_to_dispatch", Leaf),
+            ("stream_mode", Leaf),
+            ("edit_throttle_ms", Leaf),
+            ("outbound_max_attempts", Leaf),
+            ("outbound_retry_base_delay_ms", Leaf),
+            ("outbound_retry_max_delay_ms", Leaf),
+            ("model", Leaf),
+            ("model_provider", Leaf),
+            ("otp_self_approval", Leaf),
+            ("otp_cooldown_secs", Leaf),
+            ("agent_id", Leaf),
+            ("chan_user_id", Leaf),
+            ("chan_user_name", Leaf),
+            ("chan_nickname", Leaf),
+        ]))
+    };
+
     let perplexity = || {
         Struct(HashMap::from([
             ("api_key", Leaf),
@@ -360,7 +385,13 @@ fn build_schema_map() -> KnownKeys {
         ),
         (
             "channels",
-            Struct(HashMap::from([("telegram", Map(Box::new(Leaf)))])),
+            Struct(HashMap::from([(
+                "telegram",
+                MapWithFields {
+                    value: Box::new(telegram_account_entry()),
+                    fields: HashMap::from([("bot_dispatch_cycle_budget", Leaf)]),
+                },
+            )])),
         ),
         (
             "tls",
@@ -1394,6 +1425,15 @@ fn check_semantic_warnings(
             message: "port is 0; a random port will be assigned at startup".into(),
         });
     }
+
+    if config.channels.telegram.bot_dispatch_cycle_budget == 0 {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "breaking-change",
+            path: "channels.telegram.bot_dispatch_cycle_budget".into(),
+            message: "channels.telegram.bot_dispatch_cycle_budget must be > 0".into(),
+        });
+    }
 }
 
 /// Check that file paths referenced in TLS config exist on disk.
@@ -1507,6 +1547,25 @@ bnd = "0.0.0.0"
             result.diagnostics
         );
         assert!(unknown.unwrap().message.contains("bind"));
+    }
+
+    #[test]
+    fn telegram_dispatch_cycle_budget_zero_is_hard_error() {
+        let result = validate_toml_str(
+            r#"
+[channels.telegram]
+bot_dispatch_cycle_budget = 0
+"#,
+        );
+
+        assert!(
+            result.diagnostics.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.path == "channels.telegram.bot_dispatch_cycle_budget"
+            }),
+            "expected hard error for zero telegram dispatch cycle budget: {:?}",
+            result.diagnostics
+        );
     }
 
     #[test]

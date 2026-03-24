@@ -855,14 +855,10 @@ pub async fn handle_message_direct(
                 reason_code: "tg_dispatch_dm",
             },
             ChatType::Group | ChatType::Channel => {
-                register_group_runtime_native_context(
-                    accounts,
-                    outbound.as_ref(),
-                    account_handle,
-                    &msg,
-                );
+                let managed_sender_account_handle =
+                    register_group_runtime_participants(accounts, account_handle, &msg);
                 let reply_to_target_account_handle =
-                    resolve_reply_to_target_account_handle(accounts, outbound.as_ref(), &msg);
+                    resolve_reply_to_target_account_handle(accounts, &msg);
                 let Some(action) = plan_group_target_action(
                     &body,
                     &managed_snapshots,
@@ -892,7 +888,7 @@ pub async fn handle_message_direct(
                     &msg.chat.id.0.to_string(),
                     &msg.id.0.to_string(),
                 );
-                let is_dup = crate::outbound::shared_group_runtime(accounts)
+                let is_dup = crate::state::shared_group_runtime(accounts)
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .check_and_insert_action(&dedupe_key);
@@ -910,7 +906,13 @@ pub async fn handle_message_direct(
                     return Ok(());
                 }
 
-                action
+                apply_group_dispatch_fuse(
+                    accounts,
+                    account_handle,
+                    &msg,
+                    managed_sender_account_handle.as_deref(),
+                    action,
+                )
             },
         };
         let inbound = build_tg_inbound(
@@ -3690,7 +3692,6 @@ fn resolve_managed_account_handle_for_user(
 
 fn resolve_reply_to_target_account_handle(
     accounts: &AccountStateMap,
-    _outbound: &crate::outbound::TelegramOutbound,
     msg: &Message,
 ) -> Option<String> {
     let reply = msg.reply_to_message()?;
@@ -3703,30 +3704,116 @@ fn resolve_reply_to_target_account_handle(
     if resolved.is_some() {
         return resolved;
     }
-    let binding = crate::outbound::shared_group_runtime(accounts);
+    let binding = crate::state::shared_group_runtime(accounts);
     let mut runtime = binding.lock().unwrap_or_else(|e| e.into_inner());
     runtime.message_author(&msg.chat.id.0.to_string(), &reply.id.0.to_string())
 }
 
-fn register_group_runtime_native_context(
+fn register_group_runtime_participants(
     accounts: &AccountStateMap,
-    _outbound: &crate::outbound::TelegramOutbound,
     account_handle: &str,
     msg: &Message,
-) {
+) -> Option<String> {
     let chat_id = msg.chat.id.0.to_string();
-    let message_id = msg.id.0.to_string();
     let sender_account_handle = resolve_managed_account_handle_for_user(
         accounts,
         msg.from.as_ref().map(|user| user.id.0 as u64),
         msg.from.as_ref().and_then(|user| user.username.as_deref()),
     );
-    let binding = crate::outbound::shared_group_runtime(accounts);
+    let binding = crate::state::shared_group_runtime(accounts);
     let mut runtime = binding.lock().unwrap_or_else(|e| e.into_inner());
     runtime.register_participant(&chat_id, account_handle);
-    if let Some(sender_account_handle) = sender_account_handle {
+    if let Some(ref sender_account_handle) = sender_account_handle {
         runtime.register_participant(&chat_id, &sender_account_handle);
-        runtime.register_message_author(&chat_id, &message_id, &sender_account_handle);
+    }
+    sender_account_handle
+}
+
+fn apply_group_dispatch_fuse(
+    accounts: &AccountStateMap,
+    target_account_handle: &str,
+    msg: &Message,
+    managed_sender_account_handle: Option<&str>,
+    action: crate::adapter::TgGroupTargetAction,
+) -> crate::adapter::TgGroupTargetAction {
+    if !matches!(action.mode, TgInboundMode::Dispatch) {
+        return action;
+    }
+
+    let chat_id = msg.chat.id.0.to_string();
+    let message_id = msg.id.0.to_string();
+    let thread_id = message_thread_id_text(msg);
+    let runtime = crate::state::shared_group_runtime(accounts);
+    let mut runtime = runtime.lock().unwrap_or_else(|e| e.into_inner());
+
+    if managed_sender_account_handle.is_none() {
+        runtime.ensure_external_root_dispatch(&chat_id, &message_id);
+        return action;
+    }
+
+    match runtime.admit_managed_dispatch(&chat_id, &message_id) {
+        Some(admission) if admission.allowed => action,
+        Some(admission) => {
+            let source_account_handle = managed_sender_account_handle.unwrap_or_default();
+            if admission.first_budget_exceeded {
+                warn!(
+                    event = "telegram.group.dispatch_fuse",
+                    reason_code = "root_dispatch_budget_exceeded",
+                    decision = "downgrade_to_record",
+                    policy = "group_record_dispatch_v3",
+                    root_message_id = admission.root_message_id,
+                    used = admission.used,
+                    budget = admission.budget,
+                    chat_id,
+                    thread_id = thread_id.as_deref(),
+                    source_account_handle,
+                    target_account_handle,
+                    message_id,
+                    "telegram group inbound dispatch downgraded by root dispatch fuse"
+                );
+            } else {
+                info!(
+                    event = "telegram.group.dispatch_fuse",
+                    reason_code = "root_dispatch_budget_exceeded",
+                    decision = "downgrade_to_record",
+                    policy = "group_record_dispatch_v3",
+                    root_message_id = admission.root_message_id,
+                    used = admission.used,
+                    budget = admission.budget,
+                    chat_id,
+                    thread_id = thread_id.as_deref(),
+                    source_account_handle,
+                    target_account_handle,
+                    message_id,
+                    "telegram group inbound dispatch downgraded by root dispatch fuse"
+                );
+            }
+            crate::adapter::TgGroupTargetAction {
+                mode: TgInboundMode::RecordOnly,
+                ..action
+            }
+        },
+        None => {
+            warn!(
+                event = "telegram.group.dispatch_fuse",
+                reason_code = "root_dispatch_context_missing",
+                decision = "downgrade_to_record",
+                policy = "group_record_dispatch_v3",
+                root_message_id = Option::<&str>::None,
+                used = Option::<u32>::None,
+                budget = Option::<u32>::None,
+                chat_id,
+                thread_id = thread_id.as_deref(),
+                source_account_handle = managed_sender_account_handle,
+                target_account_handle,
+                message_id,
+                "telegram group inbound dispatch downgraded because root context is missing"
+            );
+            crate::adapter::TgGroupTargetAction {
+                mode: TgInboundMode::RecordOnly,
+                ..action
+            }
+        },
     }
 }
 
@@ -4237,6 +4324,7 @@ mod tests {
         serde_json::json,
         tokio::sync::oneshot,
         tokio_util::sync::CancellationToken,
+        tracing_subscriber::fmt::MakeWriter,
     };
 
     use crate::{
@@ -4296,6 +4384,54 @@ mod tests {
     struct SendChatActionRequest {
         chat_id: i64,
         action: String,
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                buffer: Arc::clone(&self.buffer),
+            }
+        }
+    }
+
+    fn capture_json_logs<T>(operation: impl FnOnce() -> T) -> (Vec<serde_json::Value>, T) {
+        let writer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .json()
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, operation);
+        let raw = String::from_utf8(writer.buffer.lock().unwrap().clone()).unwrap();
+        let logs = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect();
+        (logs, result)
     }
 
     #[allow(dead_code)]
@@ -4851,6 +4987,125 @@ mod tests {
         assert_eq!(request.private_target.chat_id, "-100123");
         assert_eq!(request.private_target.thread_id.as_deref(), Some("9"));
         assert_eq!(request.inbound.body.text, "Alice -> you: @test_bot hello");
+    }
+
+    #[test]
+    fn group_record_only_does_not_create_external_root_state() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let msg: Message = serde_json::from_value(serde_json::json!({
+            "message_id": 77,
+            "date": 0,
+            "chat": { "id": -1001, "type": "supergroup", "title": "ops" },
+            "from": {
+                "id": 9001,
+                "is_bot": false,
+                "first_name": "Alice"
+            },
+            "text": "just context"
+        }))
+        .unwrap();
+
+        let action = apply_group_dispatch_fuse(
+            &accounts,
+            "telegram:200",
+            &msg,
+            None,
+            crate::adapter::TgGroupTargetAction {
+                mode: TgInboundMode::RecordOnly,
+                body: "just context".into(),
+                addressed: false,
+                reason_code: "tg_record_context",
+            },
+        );
+
+        assert_eq!(action.mode, TgInboundMode::RecordOnly);
+
+        let binding = crate::state::shared_group_runtime(&accounts);
+        let mut runtime = binding.lock().unwrap();
+        assert!(runtime.message_context("-1001", "77").is_none());
+        assert!(runtime.root_budget_snapshot("-1001", "77").is_none());
+    }
+
+    #[test]
+    fn same_external_group_message_reuses_same_root_across_targets() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let msg: Message = serde_json::from_value(serde_json::json!({
+            "message_id": 88,
+            "date": 0,
+            "chat": { "id": -1001, "type": "supergroup", "title": "ops" },
+            "from": {
+                "id": 9002,
+                "is_bot": false,
+                "first_name": "Bob"
+            },
+            "text": "@alpha_bot @beta_bot do it"
+        }))
+        .unwrap();
+
+        let action = crate::adapter::TgGroupTargetAction {
+            mode: TgInboundMode::Dispatch,
+            body: "@alpha_bot @beta_bot do it".into(),
+            addressed: true,
+            reason_code: "tg_dispatch_line_start_mention",
+        };
+
+        let first =
+            apply_group_dispatch_fuse(&accounts, "telegram:200", &msg, None, action.clone());
+        let second = apply_group_dispatch_fuse(&accounts, "telegram:300", &msg, None, action);
+
+        assert_eq!(first.mode, TgInboundMode::Dispatch);
+        assert_eq!(second.mode, TgInboundMode::Dispatch);
+
+        let binding = crate::state::shared_group_runtime(&accounts);
+        let mut runtime = binding.lock().unwrap();
+        let context = runtime.message_context("-1001", "88").unwrap();
+        let budget = runtime.root_budget_snapshot("-1001", "88").unwrap();
+        assert_eq!(context.root_message_id, "88");
+        assert_eq!(budget.used, 0);
+    }
+
+    #[test]
+    fn managed_dispatch_without_root_context_emits_warn_log_and_record_only() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let msg: Message = serde_json::from_value(serde_json::json!({
+            "message_id": 99,
+            "date": 0,
+            "chat": { "id": -1001, "type": "supergroup", "title": "ops" },
+            "from": {
+                "id": 100,
+                "is_bot": true,
+                "first_name": "Source",
+                "username": "source_bot"
+            },
+            "text": "@alpha_bot continue"
+        }))
+        .unwrap();
+
+        let (logs, action) = capture_json_logs(|| {
+            apply_group_dispatch_fuse(
+                &accounts,
+                "telegram:200",
+                &msg,
+                Some("telegram:100"),
+                crate::adapter::TgGroupTargetAction {
+                    mode: TgInboundMode::Dispatch,
+                    body: "@alpha_bot continue".into(),
+                    addressed: true,
+                    reason_code: "tg_dispatch_line_start_mention",
+                },
+            )
+        });
+
+        assert_eq!(action.mode, TgInboundMode::RecordOnly);
+        let fuse_log = logs
+            .iter()
+            .find(|entry| entry["fields"]["event"] == "telegram.group.dispatch_fuse")
+            .unwrap();
+        assert_eq!(fuse_log["level"], "WARN");
+        assert_eq!(
+            fuse_log["fields"]["reason_code"],
+            "root_dispatch_context_missing"
+        );
     }
 
     #[tokio::test]

@@ -4499,7 +4499,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "moltis-common",
- "moltis-config",
  "moltis-metrics",
  "serde",
  "serde_json",
@@ -4530,6 +4529,7 @@ dependencies = [
  "anyhow",
  "chrono-tz",
  "directories",
+ "moltis-channels",
  "moltis-metrics",
  "secrecy 0.8.0",
  "serde",
@@ -4879,6 +4879,7 @@ dependencies = [
  "moltis-auto-reply",
  "moltis-channels",
  "moltis-common",
+ "moltis-config",
  "moltis-media",
  "moltis-metrics",
  "rand 0.9.2",
@@ -4891,6 +4892,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

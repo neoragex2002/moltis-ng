@@ -11,6 +11,7 @@ futures           = { workspace = true }
 moltis-auto-reply = { workspace = true }
 moltis-channels   = { workspace = true }
 moltis-common     = { workspace = true }
+moltis-config     = { workspace = true }
 moltis-media      = { workspace = true }
 moltis-metrics    = { optional = true, workspace = true }
 rand              = { workspace = true }
@@ -28,9 +29,10 @@ default = []
 metrics = ["dep:moltis-metrics"]
 
 [dev-dependencies]
-axum   = { workspace = true }
-rstest = { workspace = true }
-tokio  = { workspace = true }
+axum               = { workspace = true }
+rstest             = { workspace = true }
+tokio              = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

@@ -4,7 +4,6 @@ use {
     base64::Engine,
     rand::Rng,
     std::future::Future,
-    std::sync::{Arc, Mutex, OnceLock},
     teloxide::{
         payloads::{
             SendAudioSetters, SendChatActionSetters, SendDocumentSetters, SendLocationSetters,
@@ -30,7 +29,7 @@ use crate::{
         TgPrivateTarget, plan_group_target_action, resolve_tg_route,
     },
     markdown::{self, TELEGRAM_MAX_MESSAGE_LEN},
-    state::{AccountStateMap, TelegramGroupRuntime},
+    state::AccountStateMap,
 };
 
 #[cfg(not(test))]
@@ -46,20 +45,6 @@ const TELEGRAM_TYPING_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration
 /// Outbound message sender for Telegram.
 pub struct TelegramOutbound {
     pub(crate) accounts: AccountStateMap,
-}
-
-pub(crate) fn shared_group_runtime(accounts: &AccountStateMap) -> Arc<Mutex<TelegramGroupRuntime>> {
-    static STORE: OnceLock<
-        Mutex<std::collections::HashMap<usize, Arc<Mutex<TelegramGroupRuntime>>>>,
-    > = OnceLock::new();
-    let store = STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    let key = Arc::as_ptr(accounts) as usize;
-    let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
-    Arc::clone(
-        store
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(TelegramGroupRuntime::new()))),
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -707,6 +692,34 @@ impl TelegramOutbound {
         )
     }
 
+    fn register_group_visible_outbound_contexts(
+        &self,
+        account_handle: &str,
+        chat_id: &str,
+        reply_to_message_id: Option<&str>,
+        sent_message_ids: &[String],
+    ) {
+        if !Self::is_group_chat(chat_id) || sent_message_ids.is_empty() {
+            return;
+        }
+        let Some(reply_to_message_id) = reply_to_message_id else {
+            return;
+        };
+        let binding = crate::state::shared_group_runtime(&self.accounts);
+        let mut runtime = binding.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(root_message_id) = runtime.inherited_root_message_id(chat_id, reply_to_message_id)
+        else {
+            return;
+        };
+        runtime.register_participant(chat_id, account_handle);
+        let _ = runtime.register_sent_message_contexts(
+            chat_id,
+            sent_message_ids,
+            account_handle,
+            &root_message_id,
+        );
+    }
+
     async fn emit_group_visible_outbound_event(
         &self,
         source_account_handle: &str,
@@ -724,6 +737,13 @@ impl TelegramOutbound {
         {
             return;
         }
+
+        self.register_group_visible_outbound_contexts(
+            source_account_handle,
+            chat_id,
+            reply_to_message_id,
+            &[sent_message_id.to_string()],
+        );
 
         let (
             snapshots,
@@ -756,10 +776,9 @@ impl TelegramOutbound {
                 )
                 .collect::<Vec<_>>();
             let identity_links = crate::state::telegram_identity_links_snapshot(&self.accounts);
-            let group_runtime = shared_group_runtime(&self.accounts);
+            let group_runtime = crate::state::shared_group_runtime(&self.accounts);
             let mut runtime = group_runtime.lock().unwrap_or_else(|e| e.into_inner());
             runtime.register_participant(chat_id, source_account_handle);
-            runtime.register_message_author(chat_id, sent_message_id, source_account_handle);
             let participants = runtime.participants_for_chat(chat_id);
             (
                 snapshots,
@@ -781,7 +800,7 @@ impl TelegramOutbound {
         }
 
         let reply_to_target_account = reply_to_message_id.and_then(|message_id| {
-            shared_group_runtime(&self.accounts)
+            crate::state::shared_group_runtime(&self.accounts)
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .message_author(chat_id, message_id)
@@ -823,7 +842,7 @@ impl TelegramOutbound {
 
             let dedupe_key =
                 Self::group_action_dedupe_key(&target_account_handle, chat_id, sent_message_id);
-            let is_dup = shared_group_runtime(&self.accounts)
+            let is_dup = crate::state::shared_group_runtime(&self.accounts)
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .check_and_insert_action(&dedupe_key);
@@ -841,6 +860,78 @@ impl TelegramOutbound {
                 );
                 continue;
             }
+
+            let action = if matches!(action.mode, TgInboundMode::Dispatch) {
+                let admission = crate::state::shared_group_runtime(&self.accounts)
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .admit_managed_dispatch(chat_id, sent_message_id);
+                match admission {
+                    Some(admission) if admission.allowed => action,
+                    Some(admission) => {
+                        if admission.first_budget_exceeded {
+                            warn!(
+                                event = "telegram.group.dispatch_fuse",
+                                reason_code = "root_dispatch_budget_exceeded",
+                                decision = "downgrade_to_record",
+                                policy = "group_record_dispatch_v3",
+                                root_message_id = admission.root_message_id,
+                                used = admission.used,
+                                budget = admission.budget,
+                                chat_id,
+                                thread_id = thread_id,
+                                source_account_handle,
+                                target_account_handle,
+                                message_id = sent_message_id,
+                                "telegram group outbound dispatch downgraded by root dispatch fuse"
+                            );
+                        } else {
+                            info!(
+                                event = "telegram.group.dispatch_fuse",
+                                reason_code = "root_dispatch_budget_exceeded",
+                                decision = "downgrade_to_record",
+                                policy = "group_record_dispatch_v3",
+                                root_message_id = admission.root_message_id,
+                                used = admission.used,
+                                budget = admission.budget,
+                                chat_id,
+                                thread_id = thread_id,
+                                source_account_handle,
+                                target_account_handle,
+                                message_id = sent_message_id,
+                                "telegram group outbound dispatch downgraded by root dispatch fuse"
+                            );
+                        }
+                        crate::adapter::TgGroupTargetAction {
+                            mode: TgInboundMode::RecordOnly,
+                            ..action
+                        }
+                    },
+                    None => {
+                        warn!(
+                            event = "telegram.group.dispatch_fuse",
+                            reason_code = "root_dispatch_context_missing",
+                            decision = "downgrade_to_record",
+                            policy = "group_record_dispatch_v3",
+                            root_message_id = Option::<&str>::None,
+                            used = Option::<u32>::None,
+                            budget = Option::<u32>::None,
+                            chat_id,
+                            thread_id = thread_id,
+                            source_account_handle,
+                            target_account_handle,
+                            message_id = sent_message_id,
+                            "telegram group outbound dispatch downgraded because root context is missing"
+                        );
+                        crate::adapter::TgGroupTargetAction {
+                            mode: TgInboundMode::RecordOnly,
+                            ..action
+                        }
+                    },
+                }
+            } else {
+                action
+            };
 
             let inbound = TgInbound {
                 kind: TgInboundKind::Group,
@@ -1224,6 +1315,7 @@ impl TelegramOutbound {
         );
 
         let mut first_id: Option<MessageId> = None;
+        let mut sent_message_ids = Vec::with_capacity(chunks.len());
         for (i, chunk) in chunks.iter().enumerate() {
             let sent = self
                 .send_message_with_retry(
@@ -1252,6 +1344,7 @@ impl TelegramOutbound {
                     None,
                 )
                 .await?;
+            sent_message_ids.push(sent.0.to_string());
             if first_id.is_none() {
                 first_id = Some(sent);
             }
@@ -1267,6 +1360,12 @@ impl TelegramOutbound {
             "telegram outbound text sent"
         );
         if let Some(sent_id) = first_id {
+            self.register_group_visible_outbound_contexts(
+                account_handle,
+                to,
+                reply_to,
+                &sent_message_ids,
+            );
             self.emit_group_visible_outbound_event(
                 account_handle,
                 to,
@@ -1337,6 +1436,7 @@ impl TelegramOutbound {
         );
 
         let mut first_id: Option<MessageId> = None;
+        let mut sent_message_ids = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
             let content = if i == last_idx {
                 // Append suffix to the last chunk. If it would exceed the limit,
@@ -1373,12 +1473,13 @@ impl TelegramOutbound {
                             Some(suffix_html.len()),
                         )
                         .await?;
+                    sent_message_ids.push(sent.0.to_string());
                     if first_id.is_none() {
                         first_id = Some(sent);
                     }
 
                     // Send suffix as the final message (no reply threading).
-                    let _ = self
+                    let suffix_sent = self
                         .send_message_with_retry(
                             &transport,
                             retry_cfg,
@@ -1401,6 +1502,7 @@ impl TelegramOutbound {
                             Some(suffix_html.len()),
                         )
                         .await?;
+                    sent_message_ids.push(suffix_sent.0.to_string());
 
                     info!(
                         account_handle,
@@ -1412,6 +1514,12 @@ impl TelegramOutbound {
                         "telegram outbound text+suffix sent (separate suffix message)"
                     );
                     if let Some(sent_id) = first_id {
+                        self.register_group_visible_outbound_contexts(
+                            account_handle,
+                            to,
+                            reply_to,
+                            &sent_message_ids,
+                        );
                         self.emit_group_visible_outbound_event(
                             account_handle,
                             to,
@@ -1455,6 +1563,7 @@ impl TelegramOutbound {
                     Some(suffix_html.len()),
                 )
                 .await?;
+            sent_message_ids.push(sent.0.to_string());
             if first_id.is_none() {
                 first_id = Some(sent);
             }
@@ -1470,6 +1579,12 @@ impl TelegramOutbound {
             "telegram outbound text+suffix sent"
         );
         if let Some(sent_id) = first_id {
+            self.register_group_visible_outbound_contexts(
+                account_handle,
+                to,
+                reply_to,
+                &sent_message_ids,
+            );
             self.emit_group_visible_outbound_event(
                 account_handle,
                 to,
@@ -2796,6 +2911,7 @@ mod tests {
         teloxide::requests::Requester,
         teloxide::types::Seconds,
         tokio::sync::mpsc,
+        tracing_subscriber::fmt::MakeWriter,
     };
 
     #[derive(Default)]
@@ -2837,6 +2953,54 @@ mod tests {
         ) -> bool {
             false
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                buffer: Arc::clone(&self.buffer),
+            }
+        }
+    }
+
+    fn capture_json_logs<T>(operation: impl FnOnce() -> T) -> (Vec<serde_json::Value>, T) {
+        let writer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .json()
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, operation);
+        let raw = String::from_utf8(writer.buffer.lock().unwrap().clone()).unwrap();
+        let logs = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect();
+        (logs, result)
     }
 
     #[derive(Debug)]
@@ -3108,7 +3272,7 @@ mod tests {
             );
         }
 
-        super::shared_group_runtime(&accounts)
+        crate::state::shared_group_runtime(&accounts)
             .lock()
             .unwrap()
             .register_participant("-1001", "telegram:200");
@@ -3128,6 +3292,401 @@ mod tests {
         let requests = bridge.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].inbound.body.text, "风险助手(bot): done");
+    }
+
+    #[tokio::test]
+    async fn group_visible_outbound_dispatch_fuse_downgrades_without_root_context() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        };
+        let bridge = Arc::new(RecordingBridge::default());
+
+        {
+            let mut map = accounts.write().unwrap();
+            map.insert(
+                "telegram:100".into(),
+                crate::state::AccountState {
+                    bot: teloxide::Bot::new("token-a"),
+                    bot_user_id: Some(UserId(100)),
+                    bot_username: Some("source_bot".into()),
+                    account_handle: "telegram:100".into(),
+                    config: crate::config::TelegramAccountConfig {
+                        chan_user_id: Some(100),
+                        chan_user_name: Some("source_bot".into()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::new(TelegramOutbound {
+                        accounts: Arc::clone(&accounts),
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: None,
+                    core_bridge: None,
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                },
+            );
+            map.insert(
+                "telegram:200".into(),
+                crate::state::AccountState {
+                    bot: teloxide::Bot::new("token-b"),
+                    bot_user_id: Some(UserId(200)),
+                    bot_username: Some("listener_bot".into()),
+                    account_handle: "telegram:200".into(),
+                    config: crate::config::TelegramAccountConfig {
+                        chan_user_id: Some(200),
+                        chan_user_name: Some("listener_bot".into()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::new(TelegramOutbound {
+                        accounts: Arc::clone(&accounts),
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: None,
+                    core_bridge: Some(
+                        Arc::clone(&bridge) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                },
+            );
+        }
+
+        crate::state::shared_group_runtime(&accounts)
+            .lock()
+            .unwrap()
+            .register_participant("-1001", "telegram:200");
+
+        outbound
+            .emit_group_visible_outbound_event(
+                "telegram:100",
+                "-1001",
+                None,
+                None,
+                "@listener_bot take this",
+                Some(moltis_channels::ChannelMessageKind::Text),
+                "50",
+            )
+            .await;
+
+        let requests = bridge.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].inbound.mode,
+            crate::adapter::TgInboundMode::RecordOnly
+        );
+        assert!(requests[0].inbound.private_source.addressed);
+    }
+
+    #[test]
+    fn register_group_visible_outbound_contexts_propagates_root_to_all_sent_chunk_ids() {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        };
+
+        {
+            let binding = crate::state::shared_group_runtime(&accounts);
+            let mut runtime = binding.lock().unwrap();
+            runtime.ensure_external_root_dispatch("-1001", "m100");
+        }
+
+        outbound.register_group_visible_outbound_contexts(
+            "telegram:100",
+            "-1001",
+            Some("m100"),
+            &["m101".to_string(), "m102".to_string(), "m103".to_string()],
+        );
+
+        let binding = crate::state::shared_group_runtime(&accounts);
+        let mut runtime = binding.lock().unwrap();
+        for message_id in ["m101", "m102", "m103"] {
+            let context = runtime.message_context("-1001", message_id).unwrap();
+            assert_eq!(context.root_message_id, "m100");
+            assert_eq!(
+                context.managed_author_account_handle.as_deref(),
+                Some("telegram:100")
+            );
+        }
+    }
+
+    #[test]
+    fn budget_exhaustion_logs_warn_then_info_with_fixed_reason_code() {
+        let (logs, ()) = capture_json_logs(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+                let outbound = TelegramOutbound {
+                    accounts: Arc::clone(&accounts),
+                };
+                let bridge = Arc::new(RecordingBridge::default());
+
+                {
+                    let mut map = accounts.write().unwrap();
+                    map.insert(
+                        "telegram:100".into(),
+                        crate::state::AccountState {
+                            bot: teloxide::Bot::new("token-a"),
+                            bot_user_id: Some(UserId(100)),
+                            bot_username: Some("source_bot".into()),
+                            account_handle: "telegram:100".into(),
+                            config: crate::config::TelegramAccountConfig {
+                                chan_user_id: Some(100),
+                                chan_user_name: Some("source_bot".into()),
+                                ..Default::default()
+                            },
+                            outbound: Arc::new(TelegramOutbound {
+                                accounts: Arc::clone(&accounts),
+                            }),
+                            cancel: tokio_util::sync::CancellationToken::new(),
+                            supervisor: Arc::new(std::sync::Mutex::new(None)),
+                            message_log: None,
+                            event_sink: None,
+                            core_bridge: None,
+                            polling: Arc::new(std::sync::Mutex::new(
+                                crate::state::PollingRuntimeState::new(90),
+                            )),
+                            otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                        },
+                    );
+                    map.insert(
+                        "telegram:200".into(),
+                        crate::state::AccountState {
+                            bot: teloxide::Bot::new("token-b"),
+                            bot_user_id: Some(UserId(200)),
+                            bot_username: Some("alpha_bot".into()),
+                            account_handle: "telegram:200".into(),
+                            config: crate::config::TelegramAccountConfig {
+                                chan_user_id: Some(200),
+                                chan_user_name: Some("alpha_bot".into()),
+                                ..Default::default()
+                            },
+                            outbound: Arc::new(TelegramOutbound {
+                                accounts: Arc::clone(&accounts),
+                            }),
+                            cancel: tokio_util::sync::CancellationToken::new(),
+                            supervisor: Arc::new(std::sync::Mutex::new(None)),
+                            message_log: None,
+                            event_sink: None,
+                            core_bridge: Some(
+                                Arc::clone(&bridge) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                            ),
+                            polling: Arc::new(std::sync::Mutex::new(
+                                crate::state::PollingRuntimeState::new(90),
+                            )),
+                            otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                        },
+                    );
+                }
+
+                {
+                    let shared = crate::state::shared_group_runtime(&accounts);
+                    let mut group_runtime = shared.lock().unwrap();
+                    group_runtime.set_bot_dispatch_cycle_budget(1);
+                    group_runtime.register_participant("-1001", "telegram:200");
+                    group_runtime.ensure_external_root_dispatch("-1001", "m-root");
+                    group_runtime.register_sent_message_contexts(
+                        "-1001",
+                        &["50".to_string(), "51".to_string(), "52".to_string()],
+                        "telegram:100",
+                        "m-root",
+                    );
+                }
+
+                outbound
+                    .emit_group_visible_outbound_event(
+                        "telegram:100",
+                        "-1001",
+                        None,
+                        None,
+                        "@alpha_bot one",
+                        Some(moltis_channels::ChannelMessageKind::Text),
+                        "50",
+                    )
+                    .await;
+                outbound
+                    .emit_group_visible_outbound_event(
+                        "telegram:100",
+                        "-1001",
+                        None,
+                        None,
+                        "@alpha_bot two",
+                        Some(moltis_channels::ChannelMessageKind::Text),
+                        "51",
+                    )
+                    .await;
+                outbound
+                    .emit_group_visible_outbound_event(
+                        "telegram:100",
+                        "-1001",
+                        None,
+                        None,
+                        "@alpha_bot three",
+                        Some(moltis_channels::ChannelMessageKind::Text),
+                        "52",
+                    )
+                    .await;
+            });
+        });
+
+        let fuse_logs = logs
+            .iter()
+            .filter(|entry| {
+                entry["fields"]["event"] == "telegram.group.dispatch_fuse"
+                    && entry["fields"]["reason_code"] == "root_dispatch_budget_exceeded"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fuse_logs.len(), 2);
+        assert_eq!(fuse_logs[0]["level"], "WARN");
+        assert_eq!(fuse_logs[1]["level"], "INFO");
+    }
+
+    #[tokio::test]
+    async fn group_visible_outbound_uses_stable_target_order_and_downgrades_after_budget_exhaustion()
+     {
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        };
+        let bridge_a = Arc::new(RecordingBridge::default());
+        let bridge_b = Arc::new(RecordingBridge::default());
+
+        {
+            let mut map = accounts.write().unwrap();
+            map.insert(
+                "telegram:100".into(),
+                crate::state::AccountState {
+                    bot: teloxide::Bot::new("token-a"),
+                    bot_user_id: Some(UserId(100)),
+                    bot_username: Some("source_bot".into()),
+                    account_handle: "telegram:100".into(),
+                    config: crate::config::TelegramAccountConfig {
+                        chan_user_id: Some(100),
+                        chan_user_name: Some("source_bot".into()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::new(TelegramOutbound {
+                        accounts: Arc::clone(&accounts),
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: None,
+                    core_bridge: None,
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                },
+            );
+            map.insert(
+                "telegram:200".into(),
+                crate::state::AccountState {
+                    bot: teloxide::Bot::new("token-b"),
+                    bot_user_id: Some(UserId(200)),
+                    bot_username: Some("alpha_bot".into()),
+                    account_handle: "telegram:200".into(),
+                    config: crate::config::TelegramAccountConfig {
+                        chan_user_id: Some(200),
+                        chan_user_name: Some("alpha_bot".into()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::new(TelegramOutbound {
+                        accounts: Arc::clone(&accounts),
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: None,
+                    core_bridge: Some(
+                        Arc::clone(&bridge_a) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                },
+            );
+            map.insert(
+                "telegram:300".into(),
+                crate::state::AccountState {
+                    bot: teloxide::Bot::new("token-c"),
+                    bot_user_id: Some(UserId(300)),
+                    bot_username: Some("beta_bot".into()),
+                    account_handle: "telegram:300".into(),
+                    config: crate::config::TelegramAccountConfig {
+                        chan_user_id: Some(300),
+                        chan_user_name: Some("beta_bot".into()),
+                        ..Default::default()
+                    },
+                    outbound: Arc::new(TelegramOutbound {
+                        accounts: Arc::clone(&accounts),
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    supervisor: Arc::new(std::sync::Mutex::new(None)),
+                    message_log: None,
+                    event_sink: None,
+                    core_bridge: Some(
+                        Arc::clone(&bridge_b) as Arc<dyn crate::adapter::TelegramCoreBridge>
+                    ),
+                    polling: Arc::new(std::sync::Mutex::new(
+                        crate::state::PollingRuntimeState::new(90),
+                    )),
+                    otp: std::sync::Mutex::new(crate::otp::OtpState::new(300)),
+                },
+            );
+        }
+
+        {
+            let shared = crate::state::shared_group_runtime(&accounts);
+            let mut runtime = shared.lock().unwrap();
+            runtime.set_bot_dispatch_cycle_budget(1);
+            runtime.register_participant("-1001", "telegram:300");
+            runtime.register_participant("-1001", "telegram:200");
+            runtime.ensure_external_root_dispatch("-1001", "m-root");
+            runtime.register_sent_message_contexts(
+                "-1001",
+                &["50".to_string()],
+                "telegram:100",
+                "m-root",
+            );
+        }
+
+        outbound
+            .emit_group_visible_outbound_event(
+                "telegram:100",
+                "-1001",
+                None,
+                None,
+                "@alpha_bot @beta_bot take this",
+                Some(moltis_channels::ChannelMessageKind::Text),
+                "50",
+            )
+            .await;
+
+        let requests_a = bridge_a.requests.lock().unwrap();
+        let requests_b = bridge_b.requests.lock().unwrap();
+        assert_eq!(requests_a.len(), 1);
+        assert_eq!(requests_b.len(), 1);
+        assert_eq!(
+            requests_a[0].inbound.mode,
+            crate::adapter::TgInboundMode::Dispatch
+        );
+        assert_eq!(
+            requests_b[0].inbound.mode,
+            crate::adapter::TgInboundMode::RecordOnly
+        );
     }
 
     #[test]

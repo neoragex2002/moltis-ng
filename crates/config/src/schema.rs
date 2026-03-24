@@ -7,6 +7,8 @@ use {
     serde::{Deserialize, Serialize},
 };
 
+use crate::telegram::TelegramChannelsConfig;
+
 /// Agent identity (name, emoji, creature, vibe).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -940,9 +942,9 @@ pub struct McpServerEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    /// Telegram bot accounts, keyed by account ID.
+    /// Telegram channel-wide config plus typed bot accounts.
     #[serde(default)]
-    pub telegram: HashMap<String, serde_json::Value>,
+    pub telegram: TelegramChannelsConfig,
 }
 
 /// TLS configuration for the gateway HTTPS server.
@@ -1848,6 +1850,40 @@ impl ProvidersConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telegram_channels_config_defaults_budget_to_128() {
+        let cfg = MoltisConfig::default();
+        assert_eq!(cfg.channels.telegram.bot_dispatch_cycle_budget, 128);
+        assert!(cfg.channels.telegram.accounts.is_empty());
+    }
+
+    #[test]
+    fn telegram_channels_config_deserializes_budget_and_accounts() {
+        let config: MoltisConfig = toml::from_str(
+            r#"
+[channels.telegram]
+bot_dispatch_cycle_budget = 7
+
+[channels.telegram.ops_bot]
+token = "123:ABC"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.channels.telegram.bot_dispatch_cycle_budget, 7);
+        assert_eq!(
+            config
+                .channels
+                .telegram
+                .accounts
+                .get("ops_bot")
+                .unwrap()
+                .token
+                .expose_secret(),
+            "123:ABC"
+        );
+    }
 
     #[test]
     fn geolocation_display_with_place() {

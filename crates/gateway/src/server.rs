@@ -499,6 +499,18 @@ fn approval_manager_from_config(config: &moltis_config::MoltisConfig) -> Approva
     manager
 }
 
+fn configured_telegram_accounts(
+    config: &moltis_config::MoltisConfig,
+) -> Vec<(String, moltis_config::TelegramAccountConfig)> {
+    config
+        .channels
+        .telegram
+        .accounts
+        .iter()
+        .map(|(account_handle, account_config)| (account_handle.clone(), account_config.clone()))
+        .collect()
+}
+
 // ── Shared app state ─────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1836,18 +1848,19 @@ pub async fn start_gateway(
                 "failed to load telegram identity links during startup"
             ),
         }
+        tg_plugin
+            .set_group_dispatch_cycle_budget(config.channels.telegram.bot_dispatch_cycle_budget);
 
         // Start channels from config file (these take precedence).
-        let tg_accounts = &config.channels.telegram;
         let mut started: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (account_handle, account_config) in tg_accounts {
+        for (account_handle, account_config) in configured_telegram_accounts(&config) {
             if let Err(e) = tg_plugin
-                .start_account(account_handle, account_config.clone())
+                .start_account(&account_handle, serde_json::to_value(&account_config)?)
                 .await
             {
                 tracing::warn!(account_handle, "failed to start telegram account: {e}");
             } else {
-                started.insert(account_handle.clone());
+                started.insert(account_handle);
             }
         }
 
@@ -6396,5 +6409,23 @@ mod tests {
 
             moltis_config::clear_data_dir();
         });
+    }
+
+    #[test]
+    fn configured_telegram_accounts_uses_typed_accounts_only() {
+        let mut cfg = moltis_config::MoltisConfig::default();
+        cfg.channels.telegram.bot_dispatch_cycle_budget = 7;
+        cfg.channels.telegram.accounts.insert(
+            "ops-bot".into(),
+            moltis_config::TelegramAccountConfig {
+                token: secrecy::Secret::new("123:ABC".into()),
+                ..Default::default()
+            },
+        );
+
+        let accounts = configured_telegram_accounts(&cfg);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].0, "ops-bot");
+        assert_eq!(accounts[0].1.token.expose_secret(), "123:ABC");
     }
 }

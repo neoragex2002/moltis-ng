@@ -10,6 +10,7 @@ pub mod loader;
 pub mod migrate;
 pub mod prompt_subst;
 pub mod schema;
+pub mod telegram;
 pub mod template;
 pub mod validate;
 
@@ -30,6 +31,10 @@ pub use {
         AgentIdentity, AuthConfig, ChatConfig, GeoLocation, MessageQueueMode, MoltisConfig,
         ResolvedIdentity, Timezone, UserProfile, VoiceConfig, VoiceElevenLabsConfig,
         VoiceOpenAiConfig, VoiceSttConfig, VoiceSttProvider, VoiceTtsConfig, VoiceWhisperConfig,
+    },
+    telegram::{
+        DmScope, GroupScope, StreamMode, TelegramAccountConfig, TelegramBusAccountSnapshot,
+        TelegramChannelsConfig, TelegramIdentityLink,
     },
     validate::{Diagnostic, Severity, ValidationResult},
 };
