@@ -16,6 +16,7 @@
 - 2026-03-24：已补齐 hard-cut 拒绝测试与结构化日志自动化校验，覆盖 `root_dispatch_budget_exceeded` 的 `warn -> info` 级别冻结，以及 `root_dispatch_context_missing` 的 `warn` 语义
 - 2026-03-24：`crates/telegram/src/outbound.rs` 已把 Telegram reply 展示目标与协作链 lineage 解耦；非 reply 的受管 bot 群消息只要显式携带 lineage，成功发送后仍会登记到原 `root_message_id`
 - 2026-03-24：`crates/telegram/src/state.rs` 已把稳定 `participants` 从 transient per-chat 协作链容器中拆出，继续由同一 runtime owner 单点持有；whole-chat TTL 与 transient chat 容量淘汰都不再连带删除群成员事实
+- 2026-03-24：本 issue 已吸收原独立 spec 的冻结规则、人话例子与边界约束；删除重复设计文档，保持本单为唯一事实源
 
 **已覆盖测试（如有）**
 - 2026-03-24：`cargo test -p moltis-config --lib -- --nocapture`
@@ -367,6 +368,60 @@
   - token
   - 其他敏感认证信息
 
+## 人话例子（Examples）
+### 例子 A：最基本单链
+```text
+人类消息 m100 -> A
+A 发消息 m101 -> B
+B 发消息 m102 -> A
+A 发消息 m103 -> C
+```
+
+- 若 `bot_dispatch_cycle_budget = 2`，则 `m100` 首轮放行给 A 不扣预算
+- `m101 -> B` 放行，扣 1
+- `m102 -> A` 放行，扣 1
+- `m103 -> C` 再想放行时，预算已满，只能降级为 `RecordOnly`
+
+### 例子 B：为什么根传播不靠 reply-to
+```text
+人类消息 m100 -> A
+A 成功发出 m101，并在正文里点名 B
+```
+
+- send 成功那一刻就登记 `m101 -> root = m100`
+- 后面看到 `m101` 时，直接查 `m101` 自己的上下文
+- 查到 `root = m100`，就从 `m100` 这桶预算里继续扣
+- 整个过程不需要依赖 `m101.reply_to_message_id`
+
+### 例子 C：一次性点名多个 bot
+```text
+人类消息 m100 -> A
+A 发消息 m101，正文同时点名 C、B、D
+```
+
+- 假设此时根预算只剩 `2`
+- 稳定顺序冻结为 `B / C / D`
+- 所以结果必须稳定为：`B -> Dispatch`、`C -> Dispatch`、`D -> RecordOnly`
+
+### 例子 D：进程重启后的旧链
+```text
+人类消息 m100 -> A
+A 成功发出 m101 -> B
+此时进程重启
+稍后 Telegram 又把 m101 相关后续事件送到系统
+```
+
+- 重启后内存状态已清空，系统已不知道 `m101` 属于哪个 `root_message_id`
+- 所以后续不能继续 bot-to-bot 放行
+- 正确行为是：`RecordOnly + root_dispatch_context_missing`
+
+## 并发与回收边界（Concurrency & Eviction Boundaries）
+- 同一 `chat` 的运行时状态必须由同一个 runtime owner 串行化访问
+- 根预算、消息上下文、参与者集合、dedupe 必须在这个边界内统一更新
+- 不允许把“写消息上下文”和“扣预算”分散到多个互不知情的锁或缓存里
+- `message_contexts` 与 `root_budgets` 必须共享统一的 `touched_at` 刷新与淘汰策略
+- 淘汰后的行为统一按 fail-close 处理，不做磁盘持久化，也不跨重启恢复
+
 ## 验收标准（Acceptance Criteria）【不可省略】
 - [x] `channels.telegram` 已收口为 typed `TelegramChannelsConfig`，Telegram 账号枚举只来自 `.accounts`
 - [x] `bot_dispatch_cycle_budget` 默认值为 `128`，且 `0` 会被明确拒绝
@@ -450,7 +505,6 @@
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
-  - `docs/plans/2026-03-23-telegram-group-dispatch-fuse-spec.md`
   - `issues/issue-telegram-group-body-integrity.md`
   - `issues/issue-telegram-group-relay-hop-limit-blocks-return-activation.md`
 - Related commits/PRs：
