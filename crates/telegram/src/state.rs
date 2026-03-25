@@ -59,58 +59,47 @@ impl GroupRuntimeDedupeCache {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupMessageContextSnapshot {
-    pub managed_author_account_handle: Option<String>,
-    pub root_message_id: String,
+pub struct GroupLocalMessageRef {
+    pub account_handle: String,
+    pub chat_id: String,
+    pub message_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupRootBudgetSnapshot {
-    pub used: u32,
-    pub budget: u32,
-    pub warned: bool,
+impl GroupLocalMessageRef {
+    pub fn new(account_handle: &str, chat_id: &str, message_id: &str) -> Self {
+        Self {
+            account_handle: account_handle.to_string(),
+            chat_id: chat_id.to_string(),
+            message_id: message_id.to_string(),
+        }
+    }
+
+    pub fn log_value(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            self.account_handle, self.chat_id, self.message_id
+        )
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupDispatchAdmission {
-    pub managed_author_account_handle: Option<String>,
-    pub root_message_id: String,
-    pub allowed: bool,
-    pub used: u32,
-    pub budget: u32,
-    pub first_budget_exceeded: bool,
-}
-
-struct GroupRuntimeMessageContextEntry {
-    managed_author_account_handle: Option<String>,
-    root_message_id: String,
-    updated_at: Instant,
-}
-
-struct GroupRuntimeRootBudgetEntry {
-    used: u32,
-    budget: u32,
-    warned: bool,
+struct GroupRuntimeAuthorBindingEntry {
+    managed_author_account_handle: String,
     updated_at: Instant,
 }
 
 struct GroupChatRuntime {
-    message_contexts: HashMap<String, GroupRuntimeMessageContextEntry>,
-    root_budgets: HashMap<String, GroupRuntimeRootBudgetEntry>,
+    author_bindings: HashMap<String, GroupRuntimeAuthorBindingEntry>,
     dedupe: GroupRuntimeDedupeCache,
     updated_at: Instant,
 }
 
 impl GroupChatRuntime {
-    const MESSAGE_CONTEXT_TTL: std::time::Duration = std::time::Duration::from_secs(86400);
-    const ROOT_BUDGET_TTL: std::time::Duration = std::time::Duration::from_secs(86400);
-    const MAX_MESSAGE_CONTEXTS: usize = 16384;
-    const MAX_ROOT_BUDGETS: usize = 4096;
+    const AUTHOR_BINDING_TTL: std::time::Duration = std::time::Duration::from_secs(86400);
+    const MAX_AUTHOR_BINDINGS: usize = 16384;
 
     fn new(now: Instant) -> Self {
         Self {
-            message_contexts: HashMap::new(),
-            root_budgets: HashMap::new(),
+            author_bindings: HashMap::new(),
             dedupe: GroupRuntimeDedupeCache::default(),
             updated_at: now,
         }
@@ -121,71 +110,64 @@ impl GroupChatRuntime {
     }
 
     fn evict_expired(&mut self, now: Instant) {
-        let message_cutoff = now - Self::MESSAGE_CONTEXT_TTL;
-        self.message_contexts
-            .retain(|_, value| value.updated_at > message_cutoff);
-
-        let root_cutoff = now - Self::ROOT_BUDGET_TTL;
-        self.root_budgets
-            .retain(|_, value| value.updated_at > root_cutoff);
+        let author_cutoff = now - Self::AUTHOR_BINDING_TTL;
+        self.author_bindings
+            .retain(|_, value| value.updated_at > author_cutoff);
 
         self.dedupe.evict_expired();
     }
 
-    fn insert_message_context(
+    fn author_binding_key(account_handle: &str, message_id: &str) -> String {
+        format!("{account_handle}|{message_id}")
+    }
+
+    fn insert_author_binding(
         &mut self,
+        account_handle: &str,
         message_id: &str,
-        managed_author_account_handle: Option<String>,
-        root_message_id: &str,
+        managed_author_account_handle: &str,
         now: Instant,
     ) {
         self.evict_expired(now);
-        if self.message_contexts.len() >= Self::MAX_MESSAGE_CONTEXTS
+        if self.author_bindings.len() >= Self::MAX_AUTHOR_BINDINGS
             && let Some(oldest_key) = self
-                .message_contexts
+                .author_bindings
                 .iter()
                 .min_by_key(|(_, value)| value.updated_at)
                 .map(|(key, _)| key.clone())
         {
-            self.message_contexts.remove(&oldest_key);
+            self.author_bindings.remove(&oldest_key);
         }
-        self.message_contexts.insert(
-            message_id.to_string(),
-            GroupRuntimeMessageContextEntry {
-                managed_author_account_handle,
-                root_message_id: root_message_id.to_string(),
+        self.author_bindings.insert(
+            Self::author_binding_key(account_handle, message_id),
+            GroupRuntimeAuthorBindingEntry {
+                managed_author_account_handle: managed_author_account_handle.to_string(),
                 updated_at: now,
             },
         );
         self.touch(now);
     }
 
-    fn ensure_root_budget(&mut self, root_message_id: &str, budget: u32, now: Instant) {
+    fn message_author(
+        &mut self,
+        account_handle: &str,
+        message_id: &str,
+        now: Instant,
+    ) -> Option<String> {
         self.evict_expired(now);
-        if self.root_budgets.len() >= Self::MAX_ROOT_BUDGETS
-            && let Some(oldest_key) = self
-                .root_budgets
-                .iter()
-                .min_by_key(|(_, value)| value.updated_at)
-                .map(|(key, _)| key.clone())
-        {
-            self.root_budgets.remove(&oldest_key);
-        }
-        self.root_budgets
-            .entry(root_message_id.to_string())
-            .and_modify(|entry| entry.updated_at = now)
-            .or_insert(GroupRuntimeRootBudgetEntry {
-                used: 0,
-                budget,
-                warned: false,
-                updated_at: now,
-            });
+        let author = self
+            .author_bindings
+            .get_mut(&Self::author_binding_key(account_handle, message_id))
+            .map(|binding| {
+                binding.updated_at = now;
+                binding.managed_author_account_handle.clone()
+            })?;
         self.touch(now);
+        Some(author)
     }
 }
 
 pub struct TelegramGroupRuntime {
-    bot_dispatch_cycle_budget: u32,
     participants: HashMap<String, BTreeSet<String>>,
     chats: HashMap<String, GroupChatRuntime>,
 }
@@ -201,18 +183,9 @@ impl TelegramGroupRuntime {
 
     pub fn new() -> Self {
         Self {
-            bot_dispatch_cycle_budget: 128,
             participants: HashMap::new(),
             chats: HashMap::new(),
         }
-    }
-
-    pub fn set_bot_dispatch_cycle_budget(&mut self, budget: u32) {
-        self.bot_dispatch_cycle_budget = budget;
-    }
-
-    pub fn bot_dispatch_cycle_budget(&self) -> u32 {
-        self.bot_dispatch_cycle_budget
     }
 
     pub fn register_participant(&mut self, chat_id: &str, account_handle: &str) {
@@ -229,157 +202,44 @@ impl TelegramGroupRuntime {
             .unwrap_or_default()
     }
 
-    pub fn ensure_external_root_dispatch(
+    pub fn register_message_author(
         &mut self,
-        chat_id: &str,
-        root_message_id: &str,
-    ) -> String {
-        let now = Instant::now();
-        let budget = self.bot_dispatch_cycle_budget;
-        let chat = self.chat_mut(chat_id, now);
-        chat.ensure_root_budget(root_message_id, budget, now);
-        chat.insert_message_context(root_message_id, None, root_message_id, now);
-        root_message_id.to_string()
-    }
-
-    pub fn register_sent_message_contexts(
-        &mut self,
+        observer_account_handle: &str,
         chat_id: &str,
         message_ids: &[String],
         managed_author_account_handle: &str,
-        root_message_id: &str,
     ) -> bool {
         if message_ids.is_empty() {
             return false;
         }
         let now = Instant::now();
         let chat = self.chat_mut(chat_id, now);
-        if !chat.root_budgets.contains_key(root_message_id) {
-            return false;
-        }
         for message_id in message_ids {
-            chat.insert_message_context(
+            chat.insert_author_binding(
+                observer_account_handle,
                 message_id,
-                Some(managed_author_account_handle.to_string()),
-                root_message_id,
+                managed_author_account_handle,
                 now,
             );
         }
         true
     }
 
-    pub fn message_author(&mut self, chat_id: &str, message_id: &str) -> Option<String> {
-        self.message_context(chat_id, message_id)
-            .and_then(|context| context.managed_author_account_handle)
-    }
-
-    pub fn message_context(
+    pub fn message_author(
         &mut self,
+        observer_account_handle: &str,
         chat_id: &str,
         message_id: &str,
-    ) -> Option<GroupMessageContextSnapshot> {
-        let now = Instant::now();
-        self.evict_expired_chats(now);
-        let chat = self.chats.get_mut(chat_id)?;
-        chat.evict_expired(now);
-        let snapshot = {
-            let context = chat.message_contexts.get_mut(message_id)?;
-            context.updated_at = now;
-            GroupMessageContextSnapshot {
-                managed_author_account_handle: context.managed_author_account_handle.clone(),
-                root_message_id: context.root_message_id.clone(),
-            }
-        };
-        chat.touch(now);
-        Some(snapshot)
-    }
-
-    pub fn root_budget_snapshot(
-        &mut self,
-        chat_id: &str,
-        root_message_id: &str,
-    ) -> Option<GroupRootBudgetSnapshot> {
-        let now = Instant::now();
-        self.evict_expired_chats(now);
-        let chat = self.chats.get_mut(chat_id)?;
-        chat.evict_expired(now);
-        let snapshot = {
-            let budget = chat.root_budgets.get_mut(root_message_id)?;
-            budget.updated_at = now;
-            GroupRootBudgetSnapshot {
-                used: budget.used,
-                budget: budget.budget,
-                warned: budget.warned,
-            }
-        };
-        chat.touch(now);
-        Some(snapshot)
-    }
-
-    pub fn inherited_root_message_id(
-        &mut self,
-        chat_id: &str,
-        reply_to_message_id: &str,
     ) -> Option<String> {
-        self.message_context(chat_id, reply_to_message_id)
-            .map(|context| context.root_message_id)
-    }
-
-    pub fn admit_managed_dispatch(
-        &mut self,
-        chat_id: &str,
-        message_id: &str,
-    ) -> Option<GroupDispatchAdmission> {
         let now = Instant::now();
         self.evict_expired_chats(now);
         let chat = self.chats.get_mut(chat_id)?;
         chat.evict_expired(now);
-        let (managed_author_account_handle, root_message_id) = {
-            let context = chat.message_contexts.get_mut(message_id)?;
-            context.updated_at = now;
-            (
-                context.managed_author_account_handle.clone(),
-                context.root_message_id.clone(),
-            )
-        };
-        let budget = chat.root_budgets.get_mut(&root_message_id)?;
-        budget.updated_at = now;
-        if budget.used < budget.budget {
-            budget.used += 1;
-            let admission = GroupDispatchAdmission {
-                managed_author_account_handle,
-                root_message_id,
-                allowed: true,
-                used: budget.used,
-                budget: budget.budget,
-                first_budget_exceeded: false,
-            };
-            chat.touch(now);
-            return Some(admission);
-        }
-
-        let first_budget_exceeded = !budget.warned;
-        budget.warned = true;
-        let admission = GroupDispatchAdmission {
-            managed_author_account_handle,
-            root_message_id,
-            allowed: false,
-            used: budget.used,
-            budget: budget.budget,
-            first_budget_exceeded,
-        };
-        chat.touch(now);
-        Some(admission)
+        chat.message_author(observer_account_handle, message_id, now)
     }
 
-    pub fn check_and_insert_action(&mut self, key: &str) -> bool {
+    pub fn check_and_insert_action(&mut self, chat_id: &str, key: &str) -> bool {
         let now = Instant::now();
-        let mut parts = key.split('|');
-        let chat_segment = parts.find(|segment| segment.starts_with("chat:"));
-        let Some(chat_segment) = chat_segment else {
-            return false;
-        };
-        let chat_id = chat_segment.trim_start_matches("chat:");
         let chat = self.chat_mut(chat_id, now);
         chat.dedupe.check_and_insert(key)
     }
@@ -562,78 +422,58 @@ mod tests {
     }
 
     #[test]
-    fn external_root_dispatch_is_lazy_and_non_charging() {
+    fn author_bindings_are_scoped_by_local_message_ref() {
         let mut runtime = TelegramGroupRuntime::new();
-        runtime.set_bot_dispatch_cycle_budget(4);
-
-        assert!(runtime.message_context("chat-1", "m100").is_none());
-        assert!(runtime.root_budget_snapshot("chat-1", "m100").is_none());
-
-        let root_message_id = runtime.ensure_external_root_dispatch("chat-1", "m100");
-        assert_eq!(root_message_id, "m100");
-
-        let context = runtime.message_context("chat-1", "m100").unwrap();
-        assert_eq!(context.root_message_id, "m100");
-        assert_eq!(context.managed_author_account_handle, None);
-
-        let budget = runtime.root_budget_snapshot("chat-1", "m100").unwrap();
-        assert_eq!(budget.used, 0);
-        assert_eq!(budget.budget, 4);
-    }
-
-    #[test]
-    fn managed_dispatch_consumes_budget_once_and_chunk_ids_share_root() {
-        let mut runtime = TelegramGroupRuntime::new();
-        runtime.set_bot_dispatch_cycle_budget(1);
-        runtime.ensure_external_root_dispatch("chat-1", "m100");
-        runtime.register_sent_message_contexts(
+        runtime.register_message_author(
+            "telegram:100",
             "chat-1",
-            &["m101".to_string(), "m102".to_string(), "m103".to_string()],
-            "bot-a",
-            "m100",
+            &["m100".to_string()],
+            "telegram:source-a",
+        );
+        runtime.register_message_author(
+            "telegram:200",
+            "chat-1",
+            &["m100".to_string()],
+            "telegram:source-b",
         );
 
-        let chunk_context = runtime.message_context("chat-1", "m103").unwrap();
-        assert_eq!(chunk_context.root_message_id, "m100");
         assert_eq!(
-            chunk_context.managed_author_account_handle.as_deref(),
-            Some("bot-a")
+            runtime.message_author("telegram:100", "chat-1", "m100"),
+            Some("telegram:source-a".to_string())
         );
-
-        let first = runtime.admit_managed_dispatch("chat-1", "m101").unwrap();
-        assert!(first.allowed);
-        assert_eq!(first.root_message_id, "m100");
-        assert_eq!(first.used, 1);
-        assert_eq!(first.budget, 1);
-
-        let second = runtime.admit_managed_dispatch("chat-1", "m102").unwrap();
-        assert!(!second.allowed);
-        assert_eq!(second.root_message_id, "m100");
-        assert_eq!(second.used, 1);
-        assert_eq!(second.budget, 1);
+        assert_eq!(
+            runtime.message_author("telegram:200", "chat-1", "m100"),
+            Some("telegram:source-b".to_string())
+        );
+        assert_eq!(
+            runtime.message_author("telegram:300", "chat-1", "m100"),
+            None
+        );
     }
 
     #[test]
-    fn budget_exhaustion_only_marks_first_overflow_once() {
+    fn namespaced_dedupe_separates_outbound_plan_then_inbound_collision() {
         let mut runtime = TelegramGroupRuntime::new();
-        runtime.set_bot_dispatch_cycle_budget(1);
-        runtime.ensure_external_root_dispatch("chat-1", "m100");
-        runtime.register_sent_message_contexts("chat-1", &["m101".to_string()], "bot-a", "m100");
 
-        assert!(
-            runtime
-                .admit_managed_dispatch("chat-1", "m101")
-                .unwrap()
-                .allowed
-        );
+        let outbound_key = "telegram.group.outbound_plan|source:telegram:100|target:telegram:200|chat:chat-1|message:1953";
+        let inbound_key = "telegram.group.inbound|observer:telegram:200|chat:chat-1|message:1953";
 
-        let first_overflow = runtime.admit_managed_dispatch("chat-1", "m101").unwrap();
-        assert!(!first_overflow.allowed);
-        assert!(first_overflow.first_budget_exceeded);
+        assert!(!runtime.check_and_insert_action("chat-1", outbound_key));
+        assert!(!runtime.check_and_insert_action("chat-1", inbound_key));
+        assert!(runtime.check_and_insert_action("chat-1", outbound_key));
+        assert!(runtime.check_and_insert_action("chat-1", inbound_key));
+    }
 
-        let second_overflow = runtime.admit_managed_dispatch("chat-1", "m101").unwrap();
-        assert!(!second_overflow.allowed);
-        assert!(!second_overflow.first_budget_exceeded);
+    #[test]
+    fn namespaced_dedupe_separates_inbound_then_outbound_plan_collision() {
+        let mut runtime = TelegramGroupRuntime::new();
+        let inbound_key = "telegram.group.inbound|observer:telegram:200|chat:chat-1|message:1955";
+        let outbound_key = "telegram.group.outbound_plan|source:telegram:100|target:telegram:200|chat:chat-1|message:1955";
+
+        assert!(!runtime.check_and_insert_action("chat-1", inbound_key));
+        assert!(!runtime.check_and_insert_action("chat-1", outbound_key));
+        assert!(runtime.check_and_insert_action("chat-1", inbound_key));
+        assert!(runtime.check_and_insert_action("chat-1", outbound_key));
     }
 
     #[test]
@@ -641,7 +481,7 @@ mod tests {
         let mut runtime = TelegramGroupRuntime::new();
         runtime.register_participant("chat-1", "bot-a");
         runtime.register_participant("chat-1", "bot-b");
-        runtime.ensure_external_root_dispatch("chat-1", "m-root");
+        runtime.register_message_author("telegram:100", "chat-1", &["m-root".to_string()], "bot-a");
 
         let cutoff = Instant::now()
             - std::time::Duration::from_secs(86400)
@@ -658,12 +498,17 @@ mod tests {
     fn chat_capacity_eviction_does_not_drop_participants() {
         let mut runtime = TelegramGroupRuntime::new();
         runtime.register_participant("chat-1", "bot-a");
-        runtime.ensure_external_root_dispatch("chat-1", "m-root");
+        runtime.register_message_author("telegram:100", "chat-1", &["m-root".to_string()], "bot-a");
 
         for index in 0..TelegramGroupRuntime::MAX_CHATS {
             let chat_id = format!("chat-fill-{index}");
             let message_id = format!("m-{index}");
-            runtime.ensure_external_root_dispatch(&chat_id, &message_id);
+            runtime.register_message_author(
+                "telegram:fill",
+                &chat_id,
+                &[message_id],
+                "telegram:fill",
+            );
         }
 
         assert_eq!(

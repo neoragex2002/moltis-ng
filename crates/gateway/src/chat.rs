@@ -896,7 +896,10 @@ async fn build_prompt_runtime_context(
     let sandbox_fut = async {
         if let Some(ref router) = state.sandbox_router {
             let is_sandboxed = router
-                .is_sandboxed(session_id, session_key_from_session_entry(session_entry).as_deref())
+                .is_sandboxed(
+                    session_id,
+                    session_key_from_session_entry(session_entry).as_deref(),
+                )
                 .await
                 .unwrap_or(false);
             let config = router.config();
@@ -1937,14 +1940,19 @@ impl LiveChatService {
         explicit_session_id: Option<&str>,
         conn_id: Option<&str>,
     ) -> Result<String, String> {
-        if let Some(session_id) = explicit_session_id.map(str::trim).filter(|value| !value.is_empty())
+        if let Some(session_id) = explicit_session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
         {
             return Ok(session_id.to_string());
         }
         if let Some(session_id) = self.active_session_id_for(conn_id).await {
             return Ok(session_id);
         }
-        Err("missing session context: provide _sessionId or switch to an active session first".into())
+        Err(
+            "missing session context: provide _sessionId or switch to an active session first"
+                .into(),
+        )
     }
 
     /// Resolve the project context prompt section for a session.
@@ -2389,7 +2397,8 @@ impl ChatService for LiveChatService {
                     "skipping web-originated channel echo for legacy or incomplete binding"
                 );
             }
-            let session_key_for_turn = (!binding_rejected).then(|| session_entry.session_key.clone());
+            let session_key_for_turn =
+                (!binding_rejected).then(|| session_entry.session_key.clone());
             let reply_target_ref = (!binding_rejected)
                 .then(|| moltis_telegram::adapter::reply_target_ref_from_binding(binding_json))
                 .flatten();
@@ -2474,13 +2483,23 @@ impl ChatService for LiveChatService {
             );
         }
 
+        let reply_target_ref_hash =
+            first_reply_target_ref_hash(&self.state, &session_key, &channel_turn_id).await;
+        let channel_type = channel_field_as_string(&params, "channelType");
+        let bucket_key = channel_field_as_string(&params, "bucketKey");
+
         info!(
             run_id = %run_id,
             trigger_id = %trigger_id,
-            user_message = %text,
+            channel_turn_id = %channel_turn_id,
+            session_id = %session_key,
+            channel_type = channel_type.as_deref(),
+            bucket_key = bucket_key.as_deref(),
+            reply_target_ref_hash = reply_target_ref_hash.as_deref(),
+            text_len = text.len(),
+            text_preview = %log_text_preview(&text, 240),
             model = provider.id(),
             stream_only,
-            session = %session_key,
             reply_medium = ?desired_reply_medium,
             client_seq = ?client_seq,
             "chat.send"
@@ -3298,13 +3317,23 @@ impl ChatService for LiveChatService {
         let model_id = provider.id().to_string();
         let model_store = Arc::clone(&self.model_store);
         let user_message_index = history.len();
+        let reply_target_ref_hash =
+            first_reply_target_ref_hash(&state, &session_key, &channel_turn_id).await;
+        let channel_type = channel_field_as_string(&params, "channelType");
+        let bucket_key = channel_field_as_string(&params, "bucketKey");
 
         info!(
             run_id = %run_id,
-            user_message = %text,
+            trigger_id = %trigger_id,
+            channel_turn_id = %channel_turn_id,
+            session_id = %session_key,
+            channel_type = channel_type.as_deref(),
+            bucket_key = bucket_key.as_deref(),
+            reply_target_ref_hash = reply_target_ref_hash.as_deref(),
+            text_len = text.len(),
+            text_preview = %log_text_preview(&text, 240),
             model = %model_id,
             stream_only,
-            session = %session_key,
             reply_medium = ?desired_reply_medium,
             "chat.send_sync"
         );
@@ -5363,12 +5392,23 @@ async fn run_with_tools(
             }
 
             let is_silent = display_text.trim().is_empty();
+            let reply_target_ref_hash =
+                first_reply_target_ref_hash(state, session_key, &trigger_id).await;
+            let (channel_type, bucket_key) =
+                session_channel_binding_fields(state, session_key).await;
 
             info!(
                 run_id,
+                trigger_id = %trigger_id,
+                channel_turn_id = %trigger_id,
+                session_id = %session_key,
+                channel_type = channel_type.as_deref(),
+                bucket_key = bucket_key.as_deref(),
+                reply_target_ref_hash = reply_target_ref_hash.as_deref(),
                 iterations = result.iterations,
                 tool_calls = result.tool_calls_made,
-                response = %display_text,
+                output_text_len = display_text.len(),
+                output_preview = %log_text_preview(&display_text, 240),
                 silent = is_silent,
                 "agent run complete"
             );
@@ -6258,12 +6298,23 @@ async fn run_streaming(
                 }
 
                 let is_silent = accumulated.trim().is_empty();
+                let reply_target_ref_hash =
+                    first_reply_target_ref_hash(state, session_key, trigger_id).await;
+                let (channel_type, bucket_key) =
+                    session_channel_binding_fields(state, session_key).await;
 
                 info!(
                     run_id,
+                    trigger_id = %trigger_id,
+                    channel_turn_id = %trigger_id,
+                    session_id = %session_key,
+                    channel_type = channel_type.as_deref(),
+                    bucket_key = bucket_key.as_deref(),
+                    reply_target_ref_hash = reply_target_ref_hash.as_deref(),
                     input_tokens = usage.input_tokens,
                     output_tokens = usage.output_tokens,
-                    response = %accumulated,
+                    output_text_len = accumulated.len(),
+                    output_preview = %log_text_preview(&accumulated, 240),
                     silent = is_silent,
                     "chat stream done"
                 );
@@ -6466,9 +6517,7 @@ async fn deliver_channel_replies(
     // Always drain buffered status logs when closing out a channel delivery attempt.
     // Otherwise, early returns (empty text, outbound unavailable, etc.) can cause
     // logbook entries to leak into later successful replies.
-    let status_log = state
-        .drain_channel_status_log(session_id, trigger_id)
-        .await;
+    let status_log = state.drain_channel_status_log(session_id, trigger_id).await;
     if targets.is_empty() {
         info!(
             session_id,
@@ -6487,11 +6536,20 @@ async fn deliver_channel_replies(
         );
         return;
     }
+    let reply_target_ref_hash = targets
+        .first()
+        .map(|reply_target_ref| sha256_hex(reply_target_ref));
+    let (channel_type, bucket_key) = session_channel_binding_fields(state, session_id).await;
     info!(
         session_id,
         trigger_id,
+        channel_turn_id = trigger_id,
+        channel_type = channel_type.as_deref(),
+        bucket_key = bucket_key.as_deref(),
         target_count = targets.len(),
+        reply_target_ref_hash = reply_target_ref_hash.as_deref(),
         text_len = text.len(),
+        text_preview = %log_text_preview(text, 240),
         reply_medium = ?desired_reply_medium,
         "channel reply delivery starting"
     );
@@ -6547,6 +6605,61 @@ fn sha256_hex(input: &str) -> String {
     hasher.update(input.as_bytes());
     let bytes = hasher.finalize();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn log_text_preview(text: &str, max_chars: usize) -> String {
+    let mut preview = text
+        .replace(['\r', '\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if preview.chars().count() > max_chars {
+        preview = preview
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+        preview.push('…');
+    }
+    preview
+}
+
+fn channel_field_as_string(params: &Value, key: &str) -> Option<String> {
+    params
+        .get("channel")
+        .and_then(|channel| channel.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+async fn first_reply_target_ref_hash(
+    state: &Arc<GatewayState>,
+    session_id: &str,
+    channel_turn_id: &str,
+) -> Option<String> {
+    state
+        .channel_turn_context(session_id, channel_turn_id)
+        .await
+        .and_then(|context| context.reply_target_refs.into_iter().next())
+        .map(|reply_target_ref| sha256_hex(&reply_target_ref))
+}
+
+async fn session_channel_binding_fields(
+    state: &Arc<GatewayState>,
+    session_id: &str,
+) -> (Option<String>, Option<String>) {
+    let Some(metadata) = state.services.session_metadata.as_ref() else {
+        return (None, None);
+    };
+    let Some(entry) = metadata.get(session_id).await else {
+        return (None, None);
+    };
+    let Some(binding) = entry.channel_binding.as_deref() else {
+        return (None, None);
+    };
+    let channel_type =
+        moltis_telegram::adapter::channel_target_from_binding(binding).map(|target| target.channel_type);
+    let bucket_key = moltis_telegram::adapter::bucket_key_from_binding(binding);
+    (channel_type, bucket_key)
 }
 
 fn sanitize_reason_preview(reason: &str) -> String {
@@ -6684,8 +6797,12 @@ async fn ensure_channel_bound_session(
             bot_username,
             chat_id,
         );
-        let session_key = session_key.clone().unwrap_or_else(|| session_id.to_string());
-        let _ = session_meta.upsert(session_id, &session_key, Some(label)).await;
+        let session_key = session_key
+            .clone()
+            .unwrap_or_else(|| session_id.to_string());
+        let _ = session_meta
+            .upsert(session_id, &session_key, Some(label))
+            .await;
     }
 
     if needs_binding_update {
@@ -7543,6 +7660,79 @@ mod tests {
         assert_eq!(meta.outbound_op, "send_message");
         assert_eq!(meta.outcome_kind, "non_retryable_failure");
         assert_eq!(meta.delivery_state, "partial_sent");
+    }
+
+    #[test]
+    fn gateway_log_text_preview_collapses_whitespace_and_truncates() {
+        let preview = log_text_preview("hello\tworld\nsecond line", 12);
+        assert_eq!(preview, "hello world…");
+    }
+
+    #[tokio::test]
+    async fn first_reply_target_ref_hash_uses_channel_turn_context() {
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop(),
+        );
+        let reply_target_ref =
+            telegram_reply_target_ref("telegram:test", "-1001", Some("77"), Some("7"));
+
+        state
+            .ensure_channel_turn_context("turn:test", "session:test", Some("sess-key".into()))
+            .await;
+        state
+            .push_channel_reply("session:test", "turn:test", reply_target_ref.clone())
+            .await;
+
+        assert_eq!(
+            first_reply_target_ref_hash(&state, "session:test", "turn:test").await,
+            Some(sha256_hex(&reply_target_ref))
+        );
+    }
+
+    #[tokio::test]
+    async fn session_channel_binding_fields_reads_channel_type_and_bucket_key() {
+        let metadata = sqlite_metadata().await;
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop().with_session_metadata(metadata.clone()),
+        );
+
+        metadata
+            .upsert("session:test", "sess-key", Some("test".into()))
+            .await
+            .expect("session metadata upsert");
+        let binding = moltis_channels::ChannelReplyTarget {
+            chan_type: moltis_channels::ChannelType::Telegram,
+            chan_account_key: "telegram:test".to_string(),
+            chan_user_name: Some("@bot".to_string()),
+            chat_id: "-1001".to_string(),
+            message_id: Some("77".to_string()),
+            thread_id: Some("7".to_string()),
+            bucket_key: Some("group-peer-tgchat.n1001-branch-topic.7".to_string()),
+        };
+        metadata
+            .set_channel_binding(
+                "session:test",
+                Some(serde_json::to_string(&binding).expect("serialize binding")),
+            )
+            .await;
+
+        assert_eq!(
+            session_channel_binding_fields(&state, "session:test").await,
+            (
+                Some("telegram".to_string()),
+                Some("group-peer-tgchat.n1001-branch-topic.7".to_string())
+            )
+        );
     }
 
     async fn sqlite_metadata() -> Arc<moltis_sessions::metadata::SqliteSessionMetadata> {
@@ -11439,7 +11629,11 @@ mod tests {
 
         let session_id = "sess_group";
         metadata
-            .upsert(session_id, "agent:zhuzhu:group-peer-tgchat.n100", Some("ok".into()))
+            .upsert(
+                session_id,
+                "agent:zhuzhu:group-peer-tgchat.n100",
+                Some("ok".into()),
+            )
             .await
             .unwrap();
         let binding = moltis_channels::ChannelReplyTarget {

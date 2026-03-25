@@ -1,5 +1,7 @@
 # Telegram Adapter Boundary
 
+> 2026-03-25 注：本文部分历史表述已过时；涉及 Telegram 群协作中的 `hop limit` / budget / fuse / root 语义，请以 `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md` 为准。
+
 本文档只定义一件事：
 
 - Telegram 渠道适配层在第三版早期阶段，应当如何与 core 切边界

@@ -1852,26 +1852,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn telegram_channels_config_defaults_budget_to_128() {
+    fn telegram_channels_config_defaults_to_accounts_only() {
         let cfg = MoltisConfig::default();
-        assert_eq!(cfg.channels.telegram.bot_dispatch_cycle_budget, 128);
         assert!(cfg.channels.telegram.accounts.is_empty());
     }
 
     #[test]
-    fn telegram_channels_config_deserializes_budget_and_accounts() {
+    fn telegram_channels_config_deserializes_accounts_only() {
         let config: MoltisConfig = toml::from_str(
             r#"
-[channels.telegram]
-bot_dispatch_cycle_budget = 7
-
 [channels.telegram.ops_bot]
 token = "123:ABC"
 "#,
         )
         .unwrap();
 
-        assert_eq!(config.channels.telegram.bot_dispatch_cycle_budget, 7);
         assert_eq!(
             config
                 .channels

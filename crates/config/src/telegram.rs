@@ -46,15 +46,10 @@ pub enum StreamMode {
     Off,
 }
 
-fn default_bot_dispatch_cycle_budget() -> u32 {
-    128
-}
-
 /// Telegram channel-wide configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelegramChannelsConfig {
-    pub bot_dispatch_cycle_budget: u32,
     #[serde(flatten)]
     pub accounts: HashMap<String, TelegramAccountConfig>,
 }
@@ -62,7 +57,6 @@ pub struct TelegramChannelsConfig {
 impl Default for TelegramChannelsConfig {
     fn default() -> Self {
         Self {
-            bot_dispatch_cycle_budget: default_bot_dispatch_cycle_budget(),
             accounts: HashMap::new(),
         }
     }

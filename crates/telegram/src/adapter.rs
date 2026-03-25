@@ -952,6 +952,7 @@ pub fn channel_target_from_binding(binding: &str) -> Option<moltis_common::types
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct TelegramReplyTargetRefV1 {
     v: u8,
     #[serde(rename = "type")]
@@ -962,14 +963,11 @@ struct TelegramReplyTargetRefV1 {
     thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    lineage_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TelegramOutboundTargetRef {
     pub target: moltis_channels::ChannelReplyTarget,
-    pub lineage_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1001,12 +999,11 @@ pub fn telegram_binding_uses_legacy_shape(binding: &str) -> bool {
         })
 }
 
-pub fn reply_target_ref_for_target_with_lineage(
+pub fn reply_target_ref_for_target(
     account_key: &str,
     chat_id: &str,
     thread_id: Option<&str>,
     message_id: Option<&str>,
-    lineage_message_id: Option<&str>,
 ) -> Option<String> {
     let v1 = TelegramReplyTargetRefV1 {
         v: 1,
@@ -1015,24 +1012,8 @@ pub fn reply_target_ref_for_target_with_lineage(
         chat_id: chat_id.to_string(),
         thread_id: thread_id.map(str::to_string),
         message_id: message_id.map(str::to_string),
-        lineage_message_id: lineage_message_id.map(str::to_string),
     };
     serde_json::to_string(&v1).ok()
-}
-
-pub fn reply_target_ref_for_target(
-    account_key: &str,
-    chat_id: &str,
-    thread_id: Option<&str>,
-    message_id: Option<&str>,
-) -> Option<String> {
-    reply_target_ref_for_target_with_lineage(
-        account_key,
-        chat_id,
-        thread_id,
-        message_id,
-        message_id,
-    )
 }
 
 pub fn reply_target_ref_from_inbound_target(
@@ -1063,7 +1044,6 @@ pub fn telegram_outbound_target_from_reply_target_ref(
         return None;
     }
     Some(TelegramOutboundTargetRef {
-        lineage_message_id: v1.lineage_message_id.or(v1.message_id.clone()),
         target: moltis_channels::ChannelReplyTarget {
             chan_type: moltis_channels::ChannelType::Telegram,
             chan_account_key: v1.account_key,
@@ -1084,6 +1064,22 @@ pub fn reply_target_ref_from_binding(binding: &str) -> Option<String> {
 pub fn bucket_key_from_binding(binding: &str) -> Option<String> {
     let target = telegram_reply_target_from_binding(binding)?;
     target.bucket_key
+}
+
+pub fn log_text_preview(text: &str, max_chars: usize) -> String {
+    let mut preview = text
+        .replace(['\r', '\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if preview.chars().count() > max_chars {
+        preview = preview
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+        preview.push('…');
+    }
+    preview
 }
 
 pub fn tguser_key(telegram_user_id: u64) -> String {
@@ -1222,14 +1218,22 @@ pub fn resolve_group_bucket_route(
     Some(TgRoute {
         peer: tgchat_key(chat_id)?,
         sender: sender_account_key
-            .and_then(|value| snapshots.iter().find(|snapshot| snapshot.account_handle == value))
+            .and_then(|value| {
+                snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.account_handle == value)
+            })
             .and_then(account_key_from_snapshot),
         bucket_key: resolve_group_bucket_key(
             &snapshot.group_scope,
             account_key_from_snapshot(snapshot).as_deref(),
             &tgchat_key(chat_id)?,
             sender_account_key
-                .and_then(|value| snapshots.iter().find(|snapshot| snapshot.account_handle == value))
+                .and_then(|value| {
+                    snapshots
+                        .iter()
+                        .find(|snapshot| snapshot.account_handle == value)
+                })
                 .and_then(account_key_from_snapshot)
                 .as_deref(),
             resolve_branch_key(thread_id, None).as_deref(),
@@ -1251,11 +1255,7 @@ pub fn resolve_tg_route(config: &TelegramAccountConfig, inbound: &TgInbound) -> 
         inbound.private_source.reply_to_message_id.as_deref(),
     );
     let bucket_key = match inbound.kind {
-        TgInboundKind::Dm => resolve_dm_bucket_key(
-            &config.dm_scope,
-            account_key.as_deref(),
-            &peer,
-        ),
+        TgInboundKind::Dm => resolve_dm_bucket_key(&config.dm_scope, account_key.as_deref(), &peer),
         TgInboundKind::Group => resolve_group_bucket_key(
             &config.group_scope,
             account_key.as_deref(),
@@ -1278,10 +1278,9 @@ pub fn resolve_dm_bucket_key(dm_scope: &DmScope, account_key: Option<&str>, peer
         DmScope::Main => "dm-main".to_string(),
         DmScope::PerPeer => format!("dm-peer-{peer}"),
         DmScope::PerChannel => format!("dm-peer-{peer}-channel-telegram"),
-        DmScope::PerAccount => format!(
-            "dm-peer-{peer}-account-{}",
-            account_key.unwrap_or_default()
-        ),
+        DmScope::PerAccount => {
+            format!("dm-peer-{peer}-account-{}", account_key.unwrap_or_default())
+        },
     }
 }
 
@@ -1477,6 +1476,38 @@ mod tests {
             &expected,
             "group-peer-tgchat.n1001-branch-topic.7"
         ));
+    }
+
+    #[test]
+    fn reply_target_ref_round_trip_keeps_direct_delivery_fields_only() {
+        let reply_target_ref =
+            reply_target_ref_for_target("telegram:test", "-1001", Some("7"), Some("99"))
+                .expect("reply_target_ref");
+        assert!(!reply_target_ref.contains("lineageMessageId"));
+
+        let parsed = telegram_outbound_target_from_reply_target_ref(&reply_target_ref)
+            .expect("parse reply_target_ref");
+        assert_eq!(parsed.target.chan_account_key, "telegram:test");
+        assert_eq!(parsed.target.chat_id, "-1001");
+        assert_eq!(parsed.target.thread_id.as_deref(), Some("7"));
+        assert_eq!(parsed.target.message_id.as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn reply_target_ref_rejects_legacy_lineage_field() {
+        let legacy = serde_json::json!({
+            "v": 1,
+            "type": "telegram",
+            "accountKey": "telegram:test",
+            "chatId": "-1001",
+            "threadId": "7",
+            "messageId": "99",
+            "lineageMessageId": "88"
+        })
+        .to_string();
+
+        assert!(telegram_outbound_target_from_reply_target_ref(&legacy).is_none());
+        assert!(inbound_target_from_reply_target_ref(&legacy).is_none());
     }
 
     fn snapshot(account_handle: &str, username: &str) -> TelegramBusAccountSnapshot {

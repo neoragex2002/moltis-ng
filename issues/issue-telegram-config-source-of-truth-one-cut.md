@@ -1,3 +1,9 @@
+# SUPERSEDED BY `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md`
+#
+# 2026-03-25 决策更新：
+# - `bot_dispatch_cycle_budget`、hop limit、budget/fuse 这类 Telegram 渠道级隐藏协作配置已被 hard-cut 删除。
+# - Telegram 当前只保留 bot 账号配置与直接投递/运行时事实；相关过时方案以 `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md` 为准。
+
 # Issue: Telegram 配置事实源分裂导致 owner 不清（single_source_of_truth / one_cut）
 
 ## 实施现状（Status）【增量更新主入口】

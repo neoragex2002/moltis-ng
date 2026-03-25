@@ -44,11 +44,7 @@ use moltis_tools::{
 
 use {
     moltis_projects::ProjectStore,
-    moltis_sessions::{
-        SessionKey,
-        metadata::SqliteSessionMetadata,
-        store::SessionStore,
-    },
+    moltis_sessions::{SessionKey, metadata::SqliteSessionMetadata, store::SessionStore},
 };
 
 use crate::{
@@ -1922,9 +1918,6 @@ pub async fn start_gateway(
                 "failed to load telegram identity links during startup"
             ),
         }
-        tg_plugin
-            .set_group_dispatch_cycle_budget(config.channels.telegram.bot_dispatch_cycle_budget);
-
         // Start channels from config file (these take precedence).
         let mut started: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (account_handle, account_config) in configured_telegram_accounts(&config) {
@@ -6488,7 +6481,6 @@ mod tests {
     #[test]
     fn configured_telegram_accounts_uses_typed_accounts_only() {
         let mut cfg = moltis_config::MoltisConfig::default();
-        cfg.channels.telegram.bot_dispatch_cycle_budget = 7;
         cfg.channels.telegram.accounts.insert(
             "ops-bot".into(),
             moltis_config::TelegramAccountConfig {
@@ -6512,7 +6504,9 @@ mod tests {
             "job-nightly-sync"
         );
         assert_eq!(
-            cron_session_bucket_key(&moltis_cron::types::SessionTarget::Named("heartbeat".into())),
+            cron_session_bucket_key(&moltis_cron::types::SessionTarget::Named(
+                "heartbeat".into()
+            )),
             "heartbeat"
         );
     }

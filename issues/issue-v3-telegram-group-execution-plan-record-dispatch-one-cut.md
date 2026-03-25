@@ -1,3 +1,9 @@
+# NOTE (2026-03-25):
+# - 本单关于 TG planner / `record` / `dispatch` 收口的主结论仍有效。
+# - 但其中涉及保留 hop/budget/strictness 作为 Telegram 内部策略的表述，已被
+#   `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md`
+#   的最新 hard-cut 方案收回：`RootId` / hop limit / root budget fuse 不再保留。
+#
 # Issue: V3 Telegram 群聊执行计划 one-cut（record / dispatch / TG adapter）
 
 ## 实施现状（Status）【增量更新主入口】

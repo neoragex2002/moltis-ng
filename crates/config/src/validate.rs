@@ -388,7 +388,7 @@ fn build_schema_map() -> KnownKeys {
                 "telegram",
                 MapWithFields {
                     value: Box::new(telegram_account_entry()),
-                    fields: HashMap::from([("bot_dispatch_cycle_budget", Leaf)]),
+                    fields: HashMap::new(),
                 },
             )])),
         ),
@@ -1424,15 +1424,6 @@ fn check_semantic_warnings(
             message: "port is 0; a random port will be assigned at startup".into(),
         });
     }
-
-    if config.channels.telegram.bot_dispatch_cycle_budget == 0 {
-        diagnostics.push(Diagnostic {
-            severity: Severity::Error,
-            category: "breaking-change",
-            path: "channels.telegram.bot_dispatch_cycle_budget".into(),
-            message: "channels.telegram.bot_dispatch_cycle_budget must be > 0".into(),
-        });
-    }
 }
 
 /// Check that file paths referenced in TLS config exist on disk.
@@ -1549,25 +1540,6 @@ bnd = "0.0.0.0"
     }
 
     #[test]
-    fn telegram_dispatch_cycle_budget_zero_is_hard_error() {
-        let result = validate_toml_str(
-            r#"
-[channels.telegram]
-bot_dispatch_cycle_budget = 0
-"#,
-        );
-
-        assert!(
-            result.diagnostics.iter().any(|d| {
-                d.severity == Severity::Error
-                    && d.path == "channels.telegram.bot_dispatch_cycle_budget"
-            }),
-            "expected hard error for zero telegram dispatch cycle budget: {:?}",
-            result.diagnostics
-        );
-    }
-
-    #[test]
     fn legacy_sandbox_scope_chat_is_a_hard_error() {
         let toml = r#"
 [tools.exec.sandbox]
@@ -1613,13 +1585,9 @@ container_prefix = "legacy"
 "#;
         let result = validate_toml_str(toml);
         assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|d| {
-                    d.severity == Severity::Error
-                        && d.path == "tools.exec.sandbox.container_prefix"
-                }),
+            result.diagnostics.iter().any(|d| {
+                d.severity == Severity::Error && d.path == "tools.exec.sandbox.container_prefix"
+            }),
             "legacy container_prefix must hard-fail: {:?}",
             result.diagnostics
         );

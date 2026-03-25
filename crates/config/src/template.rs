@@ -563,7 +563,6 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 [channels]
 # Telegram bots
 # [channels.telegram]
-# bot_dispatch_cycle_budget = 128   # Shared bot-to-bot dispatch fuse budget for Telegram groups
 #
 # [channels.telegram.my-bot]
 # token = "..."                   # Bot token from @BotFather

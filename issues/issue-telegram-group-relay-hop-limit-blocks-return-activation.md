@@ -1,3 +1,9 @@
+# SUPERSEDED BY `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md`
+#
+# 2026-03-25 决策更新：
+# - `relay_hop_limit`、epoch budget、root budget fuse 等隐藏链路控制已不再保留。
+# - Telegram 群协作当前不再以 hop/budget 语义治理，而是 hard-cut 收敛为 `local_msg_ref + author_bindings + namespaced dedupe`。
+
 # Issue: Telegram 群聊 relay 在 hop 超限时阻断派发，导致“员工 bot 行首点名 PM bot”无法激活（relay_hop_limit / return-to-PM）
 
 ## 实施现状（Status）【增量更新主入口】

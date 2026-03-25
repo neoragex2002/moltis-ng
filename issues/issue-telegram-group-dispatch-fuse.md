@@ -1,9 +1,15 @@
+# SUPERSEDED BY `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md`
+#
+# 2026-03-25 决策更新：
+# - `root_message_id` / root budget / dispatch fuse / hop limit 整套隐藏链路语义被判定为不符合第一性原则、唯一真源原则。
+# - 新方案不再修补或保留这套机制，而是 hard-cut 删除，只保留 `local_msg_ref`、作者绑定与 namespaced dedupe。
+
 # Issue: Telegram 群聊 bot 协作链缺少根消息共享派发保险丝（root_message_id / dispatch_fuse）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: DONE
+- Status: SUPERSEDED
 - Priority: P1
-- Updated: 2026-03-24
+- Updated: 2026-03-25
 - Owners: Codex
 - Components: telegram / config / gateway
 - Affected providers/models: N/A

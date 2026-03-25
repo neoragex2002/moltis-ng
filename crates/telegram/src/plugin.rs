@@ -113,13 +113,6 @@ impl TelegramPlugin {
         crate::state::replace_telegram_identity_links(&self.accounts, links);
     }
 
-    pub fn set_group_dispatch_cycle_budget(&self, budget: u32) {
-        crate::state::shared_group_runtime(&self.accounts)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .set_bot_dispatch_cycle_budget(budget);
-    }
-
     /// Update the in-memory config for an account without restarting the
     /// polling loop.  Use for allowlist changes that don't need
     /// re-authentication or bot restart.
