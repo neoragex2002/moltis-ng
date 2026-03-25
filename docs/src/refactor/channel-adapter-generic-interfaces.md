@@ -29,7 +29,8 @@
 
 本文档与下列 Telegram 专项文档配套使用：
 
-- `issues/issue-v3-session-ids-and-channel-boundary-one-cut.md`
+- `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
+- `docs/src/refactor/session-key-bucket-key-one-cut.md`
 - `docs/src/refactor/channel-info-exposure-boundary.md`
 - `docs/src/refactor/telegram-adapter-boundary.md`
 
@@ -38,12 +39,12 @@
 - 先由 Telegram 专项边界压实真实需求
 - 再从中提炼稳定的通用接口
 
-如果两者暂时出现冲突，应先以主单 + 渠道边界专项文档为准，再回修本通用接口文档
+如果两者暂时出现冲突，应先以当前治理主单 + 设计真源 + 渠道边界专项文档为准，再回修本通用接口文档
 
 这里再明确一条当前阶段的实施原则：
 
 - 本文档不是当前阶段的直接施工蓝图
-- 当前实现应先以 `issues/issue-v3-session-ids-and-channel-boundary-one-cut.md`、`docs/src/refactor/channel-info-exposure-boundary.md`、`docs/src/refactor/telegram-adapter-boundary.md` 为准
+- 当前实现应先以 `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`、`docs/src/refactor/session-key-bucket-key-one-cut.md`、`docs/src/refactor/channel-info-exposure-boundary.md`、`docs/src/refactor/telegram-adapter-boundary.md` 为准
 - 本文档更适合作为 Telegram 落地后的回看、提炼与校验材料
 - C 阶段不应阻塞在“全渠道通用 trait 一次性全部落地”上
 - 只要 Telegram 专项边界已经把 adapter / core 分工切清，就允许先以 TG-first 方式推进
@@ -312,7 +313,7 @@ pub trait ChannelMessageIngress: Send + Sync {
 这里的重点不是方法签名本身，而是：
 
 - 聊天主链只接收归一化后的 `NormalizedMessage`
-- 这仍是 future-facing 草案；当前 C 阶段 Telegram 落地以主单和专项边界文档里的最小 envelope 为准
+- 这仍是 future-facing 草案；当前 C 阶段 Telegram 落地以当前治理主单、设计真源和专项边界文档里的最小 envelope 为准
 
 ### `NormalizedMessage`
 

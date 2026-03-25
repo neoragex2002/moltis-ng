@@ -1,5 +1,10 @@
 # Issue: V3 one-cut 实施前补齐可信性缺口（旧桥内存态 / legacy binding 过渡 / transcript 配置 / 契约文档对齐）
 
+> SUPERSEDED BY:
+> - 设计真源：`docs/src/refactor/session-key-bucket-key-one-cut.md`
+> - 治理主单：`issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
+> - 本单仅保留历史背景与实施证据，不再定义当前实现口径或规范优先级。
+
 ## 实施现状（Status）【增量更新主入口】
 - Status: DONE
 - Priority: P0
@@ -20,8 +25,8 @@
 - 无；本单是实施前补缺/收口单，不直接改运行时代码。
 
 **已知差异/后续优化（非阻塞）**
-- 本单不是新的实现主单；实现仍以 `issues/issue-v3-session-ids-and-channel-boundary-one-cut.md` 为唯一主单。
-- 本单已完成；若本单中的历史设计表述与当前实现冲突，以主单、运行时代码和最新测试为准。
+- 本单不是当前治理主单；当前实现与规范以 `docs/src/refactor/session-key-bucket-key-one-cut.md` 和 `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md` 为准。
+- 本单已完成；若本单中的历史设计表述与当前实现冲突，以新设计真源、当前治理主单、运行时代码和最新测试为准。
 
 ---
 

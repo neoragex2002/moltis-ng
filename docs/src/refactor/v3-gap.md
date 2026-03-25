@@ -1,7 +1,7 @@
 # 当前代码现状与 V3 目标差距
 
-> 补充说明（2026-03-20）：
-> 本文档尚未完成与最新 one-cut 主单的再同步。若本文与 `issues/issue-v3-session-ids-and-channel-boundary-one-cut.md`、`issues/issue-v3-one-cut-readiness-gaps.md`、`docs/src/refactor/channel-info-exposure-boundary.md`、`docs/src/refactor/telegram-adapter-boundary.md` 冲突，以后者为准。
+> 补充说明（2026-03-25）：
+> 本文档是历史差距盘点，不再定义当前 one-cut 规范。若本文与 `docs/src/refactor/session-key-bucket-key-one-cut.md`、`issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`、`docs/src/refactor/channel-info-exposure-boundary.md`、`docs/src/refactor/telegram-adapter-boundary.md` 冲突，以后者为准。
 
 ## 2026-03-20 最新结论
 

@@ -268,13 +268,13 @@
   - `crates/gateway/src/assets/js/persona-utils.js`
   - `docs/src/configuration.md`
   - `docs/src/config-reset-and-recovery.md`
-  - `issues/issue-v3-session-ids-and-channel-boundary-one-cut.md`
-  - `issues/issue-v3-one-cut-readiness-gaps.md`
+  - `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
+  - `docs/src/refactor/session-key-bucket-key-one-cut.md`
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
-  - `issues/issue-v3-session-ids-and-channel-boundary-one-cut.md`
-  - `issues/issue-v3-one-cut-readiness-gaps.md`
+  - `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
+  - `docs/src/refactor/session-key-bucket-key-one-cut.md`
 - Related commits/PRs：
   - TBD
 

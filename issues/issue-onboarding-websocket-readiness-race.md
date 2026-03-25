@@ -166,7 +166,7 @@
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
-  - `issues/issue-v3-one-cut-readiness-gaps.md`
+  - `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
   - `docs/src/config-reset-and-recovery.md`
 - Related commits/PRs：
 - External refs（可选）：

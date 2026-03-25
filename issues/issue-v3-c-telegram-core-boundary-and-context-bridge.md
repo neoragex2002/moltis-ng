@@ -9,7 +9,7 @@
 - Affected providers/models: N/A
 
 **已实现（如有，写日期）**
-- 2026-03-20：A+B 已完成，Telegram adapter 边界与 bucket/session 语义已先行落地：`issues/issue-v3-telegram-adapter-and-session-semantics.md:1`
+- 2026-03-20：A+B 已完成，Telegram adapter 边界与 bucket/session 语义已先行落地；当前收口已迁移到 `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md:1`
 - 2026-03-20：V3 设计、roadmap、上下文分层、Telegram 边界等文档，已经统一成“C 阶段先不改落盘，先收敛 Telegram / core 边界”的口径：`docs/src/refactor/v3-roadmap.md:1`
 - 2026-03-20：TG 主路径已经改走正式 `TelegramCoreBridge`，Telegram runtime 在 server/plugin/bot/state 四处都显式挂接 `core_bridge`，不再靠 handler 直接跨层调用旧入口：`crates/telegram/src/adapter.rs:103`、`crates/telegram/src/plugin.rs:68`、`crates/gateway/src/server.rs:1822`
 - 2026-03-20：Telegram handler 不再直接做 TgGstV1 最终 speaker/envelope 塑形，只负责整理 bridge hint 后 dispatch/ingest：`crates/telegram/src/handlers.rs:544`
@@ -40,7 +40,7 @@
 
 **已知差异/后续优化（非阻塞）**
 - 本单明确不改最终落盘格式，不引入 `session_event` 持久化替换。
-- `_chanChatKey`（V2 跨域桥）已退出 TG 主路径真值判断，但当前仍残留在工具上下文与部分 router/sandbox 辅助链路；彻底删除与 `session_key/session_id` 统一改名，跟踪在：`issues/issue-v3-session-ids-and-channel-boundary-one-cut.md:1`
+- `_chanChatKey`（V2 跨域桥）已退出 TG 主路径真值判断，但当前仍残留在工具上下文与部分 router/sandbox 辅助链路；彻底删除与 `session_key/session_id` 统一改名，当前跟踪以 `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md:1` 为准
 - `ChannelEventSink` 仍保留给 OTP 审批、实时 UI 事件这类旁路能力使用；但它已不再承担 TG 主消息 / callback / live location / voice 主路径跨层语义。
 - relay / mirror / mention / listen-only / addressed / topic-thread / reply continuity、voice / photo / unsupported attachment 继续沿用现有行为；本单只收职责边界，不重写规则。
 
@@ -649,7 +649,7 @@
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
-  - `issues/issue-v3-telegram-adapter-and-session-semantics.md`
+  - `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
   - `docs/src/refactor/v3-design.md`
   - `docs/src/refactor/v3-roadmap.md`
   - `docs/src/refactor/v3-gap.md`

@@ -8,7 +8,8 @@
 
 配套文档：
 
-- `issues/issue-v3-session-ids-and-channel-boundary-one-cut.md`
+- `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
+- `docs/src/refactor/session-key-bucket-key-one-cut.md`
 - `docs/src/refactor/telegram-adapter-boundary.md`
 - `docs/src/refactor/channel-adapter-generic-interfaces.md`
 - `docs/src/refactor/session-context-layering.md`

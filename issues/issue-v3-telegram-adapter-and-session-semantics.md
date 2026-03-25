@@ -1,5 +1,10 @@
 # Issue: V3 Telegram adapter 边界重构与会话语义落地（telegram / gateway）
 
+> SUPERSEDED BY:
+> - 设计真源：`docs/src/refactor/session-key-bucket-key-one-cut.md`
+> - 治理主单：`issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
+> - 本单仅保留历史背景与实施证据，不再定义当前实现口径或规范优先级。
+
 ## 实施现状（Status）【增量更新主入口】
 - Status: DONE
 - Priority: P1
@@ -29,6 +34,7 @@
 - 全量验证：`cargo test -p moltis-telegram -p moltis-gateway -p moltis-sessions`
 
 **已知差异/后续优化（非阻塞）**
+- 当前 Telegram runtime / session key / bucket key 规范，已统一迁移到 `docs/src/refactor/session-key-bucket-key-one-cut.md` 与 `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`。
 - 本单明确不处理第三版内核收口（统一事件记录 / core 上下文整理 / 最终落盘格式重构）。
 - 本单允许阶段性复用现有 `SessionStore`、`PersistedMessage`、`session_metadata` 桥接新边界。
 - `ChannelReplyTarget` / `channel_binding` / server-session-sandbox 侧旧兼容载体在 A+B 阶段继续保留；统一替换放到 C 阶段。

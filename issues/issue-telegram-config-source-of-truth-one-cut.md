@@ -330,7 +330,7 @@
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
-  - `issues/issue-v3-telegram-adapter-and-session-semantics.md`
+  - `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
   - `issues/issue-v3-telegram-speaker-link-identity-and-tg-gst-one-cut.md`
   - `docs/src/refactor/dm-scope.md`
   - `docs/src/refactor/group-scope.md`

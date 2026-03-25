@@ -1,5 +1,10 @@
 # Issue: V3 一刀切收敛会话标识与渠道边界（删 `chan_chat_key/persona*`，定 `reply_target_ref/channelTarget`，统一 `session_id/session_key` 与 sandbox 分桶）
 
+> SUPERSEDED BY:
+> - 设计真源：`docs/src/refactor/session-key-bucket-key-one-cut.md`
+> - 治理主单：`issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`
+> - 本单仅保留历史背景与实施证据，不再定义当前实现口径或规范优先级。
+
 ## 实施现状（Status）【增量更新主入口】
 - Status: DONE
 - Priority: P0
@@ -64,8 +69,8 @@
 **已知差异/后续优化（非阻塞）**
 - 本单目标是“切干净”，不接受保留 V2 尾巴；在清理 `chan_chat_key` 的同时，也确认了一组“概念/命名”层面的额外收敛项需要一并收口：
   - `persona_id` 概念目前横跨 gateway/tools/telegram 配置与 docs/UI，与 V3 的 `agent_id` 概念并存；已决策一刀切删除 persona（见 Decision log）。
-- `issues/issue-v3-one-cut-readiness-gaps.md` 中记录的实施前补缺已并回本单；该单保留为本轮复核记录，不再阻塞本单开工。
-- 当前口径已冻结：主单可以直接驱动代码实施；除“落盘暂不改”外，不再允许留下运行时/跨层旧桥接尾巴。
+- `issues/issue-v3-one-cut-readiness-gaps.md` 中记录的实施前补缺已并回本单；该单保留为当时那轮复核记录。
+- 本轮历史口径已冻结；当前实现与规范已迁移到 `docs/src/refactor/session-key-bucket-key-one-cut.md` 与 `issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md`。
 - 2026-03-21：本轮建议实施顺序（减少返工，逐步可编译/可测）：
   1) Step 1：先贯穿 `session_id/session_key` 两条主链数据流（先修 `LlmRequestContext.session_id` 与 prompt-cache/worktree 绑定口径）
   2) Step 3：tool context 一刀切：只注入/读取 `_sessionId/_sessionKey`
