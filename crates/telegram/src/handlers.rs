@@ -106,11 +106,9 @@ fn callback_sender_hint_from_target(target: &ChannelReplyTarget) -> Option<Strin
     target
         .bucket_key
         .as_deref()
-        .and_then(|bucket_key| bucket_key.rsplit_once(":sender:"))
+        .and_then(|bucket_key| bucket_key.rsplit_once("-sender-"))
         .and_then(|(_, sender)| {
-            sender
-                .chars()
-                .all(|ch| ch.is_ascii_digit() || ch == '-')
+            (sender.starts_with("person.") || sender.starts_with("tguser."))
                 .then(|| sender.to_string())
         })
 }
@@ -125,9 +123,7 @@ fn with_callback_sender_hint(base: String, target: &ChannelReplyTarget) -> Strin
 fn split_callback_sender_hint(data: &str) -> (&str, Option<&str>) {
     if let Some((base, sender_hint)) = data.rsplit_once("|s=")
         && !sender_hint.is_empty()
-        && sender_hint
-            .chars()
-            .all(|ch| ch.is_ascii_digit() || ch == '-')
+        && (sender_hint.starts_with("person.") || sender_hint.starts_with("tguser."))
     {
         return (base, Some(sender_hint));
     }
@@ -704,6 +700,7 @@ pub async fn handle_message_direct(
 
         // Handle location sharing: update stored location and resolve any pending tool request.
         let resolved = if let Some(ref bridge) = core_bridge {
+            let identity_links = crate::state::telegram_identity_links_snapshot(accounts);
             let inbound = build_tg_inbound(
                 &config,
                 account_handle,
@@ -714,7 +711,8 @@ pub async fn handle_message_direct(
                 true,
                 &msg,
                 bot_mentioned,
-                &peer_id,
+                bot_user_id.map(|user_id| user_id.0 as u64),
+                &identity_links,
             );
             let route = resolve_tg_route(&config, &inbound);
             bridge
@@ -925,7 +923,8 @@ pub async fn handle_message_direct(
             false,
             &msg,
             planned_action.addressed,
-            &peer_id,
+            bot_user_id.map(|user_id| user_id.0 as u64),
+            &identity_links,
         );
         let route = resolve_tg_route(&config, &inbound);
         let private_target = build_tg_private_target(account_handle, &msg);
@@ -1849,10 +1848,13 @@ pub async fn handle_edited_location(
 
     if let Some(ref bridge) = core_bridge {
         let (chat_type, _) = classify_chat(&msg);
-        let dm_peer_id = tg_sender_for_message(&msg).unwrap_or_default();
-        let sender = tg_sender_for_message(&msg);
-        let thread_id = message_thread_id_text(&msg);
-        let peer = tg_peer_for_message(&chat_type, &msg, &dm_peer_id);
+        let identity_links = crate::state::telegram_identity_links_snapshot(accounts);
+        let sender = tg_sender_for_message(&msg, &identity_links);
+        let branch = crate::adapter::resolve_branch_key(
+            message_thread_id_text(&msg).as_deref(),
+            reply_to_message_id_text(&msg).as_deref(),
+        );
+        let peer = tg_peer_for_message(&chat_type, &msg, &identity_links).unwrap_or_default();
         if let Some(config) = config.as_ref() {
             log_follow_up_route_degrade(
                 config,
@@ -1861,18 +1863,18 @@ pub async fn handle_edited_location(
                 Some(msg.id.0),
                 &chat_type,
                 sender.as_deref(),
-                thread_id.as_deref(),
+                branch.as_deref(),
                 "edited_location",
             );
         }
         let bucket_key = config.as_ref().map(|config| {
             tg_bucket_key_for_route(
                 config,
-                account_handle,
+                crate::adapter::account_key_from_config(config).as_deref(),
                 &chat_type,
                 &peer,
                 sender.as_deref(),
-                thread_id.as_deref(),
+                branch.as_deref(),
             )
         });
         let route = TgRoute {
@@ -1889,7 +1891,7 @@ pub async fn handle_edited_location(
                         account_handle: account_handle.to_string(),
                         chat_id: msg.chat.id.0.to_string(),
                         message_id: Some(msg.id.0.to_string()),
-                        thread_id,
+                        thread_id: message_thread_id_text(&msg),
                     },
                 },
                 lat,
@@ -3221,18 +3223,22 @@ fn message_thread_id_text(msg: &Message) -> Option<String> {
     msg.thread_id.map(|thread_id| thread_id.to_string())
 }
 
+fn reply_to_message_id_text(msg: &Message) -> Option<String> {
+    msg.reply_to_message().map(|reply| reply.id.0.to_string())
+}
+
 fn tg_bucket_key_for_route(
     config: &crate::config::TelegramAccountConfig,
-    account_handle: &str,
+    account_key: Option<&str>,
     chat_type: &ChatType,
     peer: &str,
     sender: Option<&str>,
-    thread_id: Option<&str>,
+    branch: Option<&str>,
 ) -> String {
     match chat_type {
-        ChatType::Dm => resolve_dm_bucket_key(&config.dm_scope, account_handle, peer),
+        ChatType::Dm => resolve_dm_bucket_key(&config.dm_scope, account_key, peer),
         ChatType::Group | ChatType::Channel => {
-            resolve_group_bucket_key(&config.group_scope, account_handle, peer, sender, thread_id)
+            resolve_group_bucket_key(&config.group_scope, account_key, peer, sender, branch)
         },
     }
 }
@@ -3287,40 +3293,64 @@ fn log_follow_up_route_degrade(
     }
 }
 
-fn tg_peer_for_message(chat_type: &ChatType, msg: &Message, dm_peer_id: &str) -> String {
+fn tg_peer_for_message(
+    chat_type: &ChatType,
+    msg: &Message,
+    identity_links: &[crate::config::TelegramIdentityLink],
+) -> Option<String> {
     match chat_type {
-        ChatType::Dm => dm_peer_id.to_string(),
-        ChatType::Group | ChatType::Channel => msg.chat.id.0.to_string(),
+        ChatType::Dm => crate::adapter::resolve_person_or_tguser_key(
+            identity_links,
+            msg.from.as_ref().map(|user| user.id.0 as u64),
+            msg.from.as_ref().and_then(|user| user.username.as_deref()),
+        ),
+        ChatType::Group | ChatType::Channel => crate::adapter::tgchat_key(&msg.chat.id.0.to_string()),
     }
 }
 
-fn tg_sender_for_message(msg: &Message) -> Option<String> {
-    msg.from.as_ref().map(|user| user.id.0.to_string())
+fn tg_sender_for_message(
+    msg: &Message,
+    identity_links: &[crate::config::TelegramIdentityLink],
+) -> Option<String> {
+    crate::adapter::resolve_person_or_tguser_key(
+        identity_links,
+        msg.from.as_ref().map(|user| user.id.0 as u64),
+        msg.from.as_ref().and_then(|user| user.username.as_deref()),
+    )
 }
 
 #[cfg(test)]
 fn tg_bucket_key_for_callback_query(
     config: &crate::config::TelegramAccountConfig,
-    account_handle: &str,
+    _account_handle: &str,
     query: &CallbackQuery,
 ) -> Option<String> {
     let message = query.message.as_ref()?;
     let chat = message.chat();
     let (chat_type, peer) = match &chat.kind {
-        teloxide::types::ChatKind::Private(_) => (ChatType::Dm, query.from.id.0.to_string()),
-        teloxide::types::ChatKind::Public(_) => (ChatType::Group, chat.id.0.to_string()),
+        teloxide::types::ChatKind::Private(_) => {
+            (ChatType::Dm, crate::adapter::tguser_key(query.from.id.0 as u64))
+        },
+        teloxide::types::ChatKind::Public(_) => (
+            ChatType::Group,
+            crate::adapter::tgchat_key(&chat.id.0.to_string())?,
+        ),
     };
-    let thread_id = message
-        .regular_message()
-        .and_then(|message| message.thread_id.map(|thread_id| thread_id.to_string()));
-    let sender = query.from.id.0.to_string();
+    let branch = crate::adapter::resolve_branch_key(
+        message
+            .regular_message()
+            .and_then(|message| message.thread_id.map(|thread_id| thread_id.to_string()))
+            .as_deref(),
+        None,
+    );
+    let sender = crate::adapter::tguser_key(query.from.id.0 as u64);
     Some(tg_bucket_key_for_route(
         config,
-        account_handle,
+        crate::adapter::account_key_from_config(config).as_deref(),
         &chat_type,
         &peer,
         Some(sender.as_str()),
-        thread_id.as_deref(),
+        branch.as_deref(),
     ))
 }
 
@@ -3336,8 +3366,6 @@ fn resolve_callback_bucket_key(
     let chat = message.chat();
     let chat_id = chat.id.0.to_string();
     let message_id = message.id().0;
-    let clicker_sender = query.from.id.0.to_string();
-
     if let Some(bucket_key) = lookup_callback_bucket_binding(account_handle, &chat_id, message_id) {
         return Some(bucket_key);
     }
@@ -3356,20 +3384,26 @@ fn resolve_callback_bucket_key(
         );
     }
 
-    let (chat_type, sender, thread_id) = match &chat.kind {
-        teloxide::types::ChatKind::Private(_) => {
-            (ChatType::Dm, Some(query.from.id.0.to_string()), None)
-        },
+    let (chat_type, sender, branch) = match &chat.kind {
+        teloxide::types::ChatKind::Private(_) => (
+            ChatType::Dm,
+            Some(crate::adapter::tguser_key(query.from.id.0 as u64)),
+            None,
+        ),
         teloxide::types::ChatKind::Public(_) => (
             ChatType::Group,
             Some(
                 sender_override
-                    .unwrap_or(clicker_sender.as_str())
+                    .unwrap_or(crate::adapter::tguser_key(query.from.id.0 as u64).as_str())
                     .to_string(),
             ),
-            message
-                .regular_message()
-                .and_then(|message| message.thread_id.map(|thread_id| thread_id.to_string())),
+            crate::adapter::resolve_branch_key(
+                message
+                    .regular_message()
+                    .and_then(|message| message.thread_id.map(|thread_id| thread_id.to_string()))
+                    .as_deref(),
+                None,
+            ),
         ),
     };
     log_follow_up_route_degrade(
@@ -3379,18 +3413,21 @@ fn resolve_callback_bucket_key(
         Some(message_id),
         &chat_type,
         sender.as_deref(),
-        thread_id.as_deref(),
+        branch.as_deref(),
         "callback_query",
     );
 
     let sender = sender.as_deref().unwrap_or_default();
     Some(tg_bucket_key_for_route(
         config,
-        account_handle,
+        crate::adapter::account_key_from_config(config).as_deref(),
         &chat_type,
-        &chat_id,
+        &match chat_type {
+            ChatType::Dm => crate::adapter::tguser_key(query.from.id.0 as u64),
+            ChatType::Group | ChatType::Channel => crate::adapter::tgchat_key(&chat_id)?,
+        },
         Some(sender),
-        thread_id.as_deref(),
+        branch.as_deref(),
     ))
 }
 
@@ -3404,7 +3441,8 @@ fn build_tg_inbound(
     has_location: bool,
     msg: &Message,
     addressed: bool,
-    dm_peer_id: &str,
+    bot_user_id: Option<u64>,
+    identity_links: &[crate::config::TelegramIdentityLink],
 ) -> TgInbound {
     let kind = match chat_type {
         ChatType::Dm => TgInboundKind::Dm,
@@ -3420,11 +3458,13 @@ fn build_tg_inbound(
         },
         private_source: TgPrivateSource {
             account_handle: account_handle.to_string(),
+            account_key: bot_user_id.map(crate::adapter::tguser_key),
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
             thread_id: message_thread_id_text(msg),
-            peer: tg_peer_for_message(chat_type, msg, dm_peer_id),
-            sender: tg_sender_for_message(msg),
+            reply_to_message_id: reply_to_message_id_text(msg),
+            peer: tg_peer_for_message(chat_type, msg, identity_links).unwrap_or_default(),
+            sender: tg_sender_for_message(msg, identity_links),
             addressed,
         },
     };
@@ -4694,7 +4734,7 @@ mod tests {
             );
             let ctx = ChannelInboundContext {
                 chan_type: ChannelType::Telegram,
-                session_key: bucket_key,
+                bucket_key,
                 reply_target_ref,
                 channel_binding,
             };
@@ -4740,7 +4780,7 @@ mod tests {
                 command,
                 ChannelInboundContext {
                     chan_type: ChannelType::Telegram,
-                    session_key: bucket_key,
+                    bucket_key,
                     reply_target_ref,
                     channel_binding,
                 },
@@ -4785,7 +4825,7 @@ mod tests {
                 self,
                 ChannelInboundContext {
                     chan_type: ChannelType::Telegram,
-                    session_key: bucket_key,
+                    bucket_key,
                     reply_target_ref,
                     channel_binding,
                 },
@@ -4982,7 +5022,7 @@ mod tests {
             .expect("recorded request");
         assert_eq!(
             request.route.bucket_key,
-            "group:account:telegram:test-account:peer:-100123"
+            "group-peer-tgchat.n100123"
         );
         assert_eq!(request.private_target.chat_id, "-100123");
         assert_eq!(request.private_target.thread_id.as_deref(), Some("9"));
@@ -5151,9 +5191,9 @@ mod tests {
         let account_handle = "telegram:test-account";
         let expected_bucket_key = crate::adapter::resolve_group_bucket_key(
             &crate::config::GroupScope::PerSender,
-            account_handle,
-            "-100999",
-            Some("2002"),
+            None,
+            "tgchat.n100999",
+            Some("tguser.2002"),
             None,
         );
 
@@ -5245,10 +5285,10 @@ mod tests {
         let account_handle = "telegram:test-account";
         let expected_bucket_key = crate::adapter::resolve_group_bucket_key(
             &crate::config::GroupScope::PerBranchSender,
-            account_handle,
-            "-100888",
-            Some("2002"),
-            Some("77"),
+            None,
+            "tgchat.n100888",
+            Some("tguser.2002"),
+            Some("topic.77"),
         );
 
         {
@@ -6809,7 +6849,7 @@ mod tests {
             message_id: Some("10".to_string()),
             thread_id: None,
             bucket_key: Some(
-                "group:account:telegram:test-account:peer:-100999:sender:2002".to_string(),
+                "group-peer-tgchat.n100999-sender-tguser.2002".to_string(),
             ),
         };
 
@@ -6837,9 +6877,9 @@ mod tests {
         let account_handle = "telegram:test-account";
         let expected_bucket_key = crate::adapter::resolve_group_bucket_key(
             &crate::config::GroupScope::PerSender,
-            account_handle,
-            "-100999",
-            Some("1001"),
+            None,
+            "tgchat.n100999",
+            Some("tguser.1001"),
             None,
         );
 
@@ -6901,7 +6941,7 @@ mod tests {
             .unwrap()
             .clone()
             .expect("expected update_location context");
-        assert_eq!(ctx.session_key, expected_bucket_key);
+        assert_eq!(ctx.bucket_key, expected_bucket_key);
         let decoded = crate::adapter::inbound_target_from_reply_target_ref(&ctx.reply_target_ref)
             .expect("decode reply_target_ref");
         assert_eq!(decoded.chat_id, "-100999");
@@ -7015,7 +7055,7 @@ mod tests {
 
         let payload = json!({
             "session": {
-                "key": "telegram:bot:group:123",
+                "key": "agent:zhuzhu:group-peer-tgchat.n123",
                 "messageCount": 42,
                 "provider": "openai-responses",
                 "model": "openai-responses::gpt-5.2"
@@ -7024,7 +7064,7 @@ mod tests {
                 "provider": "openai-responses",
                 "model": "openai-responses::gpt-5.2",
                 "overrides": {
-                    "prompt_cache_key": "moltis:openai-responses:gpt-5.2:telegram:bot:group:123:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "prompt_cache_key": "agent:zhuzhu:group-peer-tgchat.n123-branch-topic.42-sender-person.alice-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "generation": {
                         "max_output_tokens": { "configured": 2048, "effective": 2048, "limit": 8192, "clamped": false },
                         "reasoning_effort": "medium",
@@ -7065,7 +7105,7 @@ mod tests {
         let cfg = crate::config::TelegramAccountConfig::default();
         let html = render_context_card_v1(&payload, &cfg, ChatType::Group);
         assert!(html.contains("Session Context"));
-        assert!(html.contains("telegram:bot:group:123"));
+        assert!(html.contains("agent:zhuzhu:group-peer-tgchat.n123"));
         if html.contains("Output too long for Telegram") {
             // Fallback path should still provide a minimal, valid summary.
             assert!(html.contains("openai-responses"));
@@ -7543,9 +7583,9 @@ mod tests {
         let account_handle = "telegram:test-account";
         let expected_bucket_key = crate::adapter::resolve_group_bucket_key(
             &crate::config::GroupScope::PerSender,
-            account_handle,
-            "-100999",
-            Some("2002"),
+            None,
+            "tgchat.n100999",
+            Some("tguser.2002"),
             None,
         );
 
@@ -7630,7 +7670,7 @@ mod tests {
             .unwrap()
             .clone()
             .expect("expected callback dispatch context");
-        assert_eq!(ctx.session_key, expected_bucket_key);
+        assert_eq!(ctx.bucket_key, expected_bucket_key);
         let decoded = crate::adapter::inbound_target_from_reply_target_ref(&ctx.reply_target_ref)
             .expect("decode reply_target_ref");
         assert_eq!(decoded.chat_id, "-100999");
@@ -7683,9 +7723,9 @@ mod tests {
         let account_handle = "telegram:test-account";
         let expected_bucket_key = crate::adapter::resolve_group_bucket_key(
             &crate::config::GroupScope::PerSender,
-            account_handle,
-            "-100999",
-            Some("2002"),
+            None,
+            "tgchat.n100999",
+            Some("tguser.2002"),
             None,
         );
 
@@ -7723,7 +7763,7 @@ mod tests {
             "id": "cb-sender-hint",
             "from": { "id": 1001, "is_bot": false, "first_name": "Alice", "username": "alice" },
             "chat_instance": "ci",
-            "data": "sessions_switch:1|s=2002",
+            "data": "sessions_switch:1|s=tguser.2002",
             "message": {
                 "message_id": 11,
                 "date": 1,
@@ -7743,7 +7783,7 @@ mod tests {
             .unwrap()
             .clone()
             .expect("expected callback dispatch context");
-        assert_eq!(ctx.session_key, expected_bucket_key);
+        assert_eq!(ctx.bucket_key, expected_bucket_key);
         let decoded = crate::adapter::inbound_target_from_reply_target_ref(&ctx.reply_target_ref)
             .expect("decode reply_target_ref");
         assert_eq!(decoded.chat_id, "-100999");

@@ -43,7 +43,7 @@
 
 - **Telegram bot 账号配置**（主称呼）：某个具体 Telegram bot 实例的运行配置，例如 `token`、`agent_id`、`dm_policy`、`allowlist`、`dm_scope`、`group_scope`、`model` 等。
   - Why：这是当前分裂最严重的一类事实。
-  - Not：不是 Telegram 渠道级共享策略，也不是 people roster / identity link。
+  - Not：不是 Telegram 渠道级共享策略，也不是 people roster / identity link，更不包含可由 Telegram `getMe` 探测出的 bot 身份事实。
   - Source/Method：effective
   - Aliases（仅记录，不在正文使用）：bot runtime config / account config
 
@@ -58,6 +58,12 @@
   - Not：不是 bot token、allowlist 或 `dm_scope/group_scope` 之类的 bot runtime 配置。
   - Source/Method：effective
   - Aliases（仅记录，不在正文使用）：people link / speaker link
+
+- **系统探测 bot 身份事实**（主称呼）：可由 Telegram `getMe` 或运行时状态直接得到的 bot 身份字段，例如 `chan_user_id`、`chan_user_name`、`chan_nickname`。
+  - Why：这类字段属于“系统观察到的事实”，不是“用户想让系统如何工作”的配置意图。
+  - Not：不是用户应手填维护的 bot runtime 配置，也不是 identity link。
+  - Source/Method：authoritative
+  - Aliases（仅记录，不在正文使用）：probed bot identity / runtime bot facts
 
 - **混源启动**（主称呼）：系统在启动时同时从多条 owner 候选路径读取同类事实，并用 precedence 或补集规则拼出最终运行态。
   - Why：这正是当前 Telegram bot 账号配置的核心问题。
@@ -83,11 +89,13 @@
 - 正确性口径（必须/不得）：
   - 必须让每一类 Telegram 相关事实只有一个 owner
   - 必须把“identity link”“渠道级共享策略”“bot 账号配置”三类事实分开判断 owner
+  - 必须把“用户意图配置”与“系统探测身份事实”分开；不得把 `chan_user_id/chan_user_name/chan_nickname` 这类字段混入用户配置心智
   - 必须删除当前“配置文件先启动 + 数据库补剩余”的同类事实拼接模型
   - 必须让 `dm_scope` / `group_scope` 这类真实生效字段在 owner 路径中可见、可改、可验证
   - 不得继续保留文件与 DB 同时都能作为 Telegram bot 账号配置生效来源
   - 不得用 fallback、alias、自动双写、静默同步来掩盖 owner 分裂
   - 不得让 UI 继续编辑一部分 bot 字段，而把另一部分同层级字段隐藏在 owner 之外
+  - 不得把“DB 当前能完整存储”误判成“UI 当前已完整暴露”
 - 兼容性：
   - 本单按 hard-cut/one-cut 收口设计，不以保留旧混源行为为目标
   - 一旦最终 owner 确定，非 owner 路径上的 Telegram bot 账号事实必须报错或强告警，不做 silent precedence
@@ -103,12 +111,15 @@
 1. Telegram bot 账号配置目前既可以来自 `moltis.toml`，也可以来自 SQLite `channels` 表，启动时还会把两边拼起来。
 2. `identity link` 又来自 `PEOPLE.md`，与 bot 账号配置不在同一 owner 面上。
 3. UI 的 Telegram 账号编辑入口只暴露了 `dm_policy`、`allowlist`、group dispatch 开关等少数字段，`dm_scope` / `group_scope` 虽然真实生效，但 UI 完全看不到、也改不了。
-4. 因为 owner 不清，用户很难判断“该改配置文件、改 UI，还是改 DB”；系统也难以给出明确拒绝口径。
+4. DB/运行时实际上可以承载完整 `TelegramAccountConfig`，问题不在“DB 字段不够”，而在“UI 只暴露半套字段”，导致操作者容易误以为 DB/配置能力本身不完整。
+5. `chan_user_id` / `chan_user_name` / `chan_nickname` 这类字段看起来像配置项，但本质是系统通过 token 探测出的 bot 身份事实；当前它们与用户意图配置混放在同一结构里，进一步放大了“哪些该我配、哪些不该我配”的混乱。
+6. 因为 owner 不清，用户很难判断“该改配置文件、改 UI，还是改 DB”；系统也难以给出明确拒绝口径。
 
 ### 影响（Impact）
 - 用户体验：
   - 用户无法一眼看清 Telegram bot 的完整配置真相
   - UI 可编辑项与真实生效项不对称，容易形成“改了但不是我以为的那层”的错觉
+  - 用户容易把“系统探测身份事实”误当成必须手填的配置项
 - 可靠性：
   - 同类事实跨文件与 DB 分裂时，运行态依赖 precedence 与补集规则，容易出现隐藏状态
   - 未来继续扩字段时，会进一步扩大 UI、DB、文件三者漂移
@@ -128,6 +139,8 @@
 > 必须至少给出 1 条可定位证据：`path/to/file:line` / 测试 / 日志关键词。
 
 - 代码证据：
+  - `crates/channels/src/store.rs:5`：stored channel 的持久化载体就是整块 `config: serde_json::Value`，不是拆散后的半套列
+  - `crates/gateway/src/channel_store.rs:46`：SQLite `channels` 表只有 `config TEXT`，结构上可承载完整 Telegram bot 配置
   - `crates/gateway/src/server.rs:1854`：启动时先从配置文件启动 Telegram 账号
   - `crates/gateway/src/server.rs:1867`：随后再加载数据库 stored channels，并启动那些“不在配置文件里”的账号
   - `crates/gateway/src/people.rs:139`：Telegram `identity link` 从 `PEOPLE.md` 解析，不属于 bot 账号配置入口
@@ -137,6 +150,9 @@
   - `crates/telegram/src/plugin.rs:175`：Telegram plugin 启动账号时，直接把 JSON 反序列化为完整 `TelegramAccountConfig`
   - `crates/gateway/src/channel.rs:261`：`channels.add` 入口按完整 `TelegramAccountConfig` 校验并持久化
   - `crates/gateway/src/channel.rs:367`：`channels.update` 同样按完整 `TelegramAccountConfig` 校验并持久化
+  - `crates/gateway/src/channel.rs:267`：`channels.add` 会先用 token 调 `getMe` 探测 bot 身份，再把 `chan_user_id/chan_user_name/chan_nickname` 写回配置快照
+  - `crates/telegram/src/bot.rs:60`：`probe_bot_identity()` 明确表明这些字段属于 Telegram authoritative 身份事实
+  - `crates/telegram/src/state.rs:487`：运行时有效 bot 身份优先来自 runtime state，其次才回落到 config 中的 `chan_user_*`
   - `crates/config/src/telegram.rs:11`：`dm_scope` 是 TelegramAccountConfig 的正式字段
   - `crates/config/src/telegram.rs:26`：`group_scope` 是 TelegramAccountConfig 的正式字段
   - `crates/gateway/src/assets/js/page-channels.js:321`：新增 Telegram bot UI 草稿字段不包含 `dm_scope/group_scope`
@@ -154,7 +170,8 @@
 - A. Telegram 相关事实没有先做 owner 切分，直接沿实现便利分散到 `PEOPLE.md`、配置文件、DB 与 UI 多条路径
 - B. Telegram bot 账号配置路径历史上同时支持“文件启动”和“UI/DB 持久化启动”，但没有硬切换掉其中一条
 - C. UI 只覆盖了早期少数字段，没有随着 `TelegramAccountConfig` 扩展同步补齐同层级入口
-- D. 当前系统靠 precedence（配置先、DB 后）而不是 owner 来维持运行，导致混源状态长期存在
+- D. 当前结构没有把“用户意图配置”和“系统探测 bot 身份事实”分层，导致操作者心智与真实 owner 不一致
+- E. 当前系统靠 precedence（配置先、DB 后）而不是 owner 来维持运行，导致混源状态长期存在
 
 ## 期望行为（Desired Behavior / Spec）【尽量冻结】
 > 用“必须/不得/应当”写清楚最终口径；后续更新优先改“实现/测试/进度”，避免频繁改 Spec。
@@ -164,9 +181,11 @@
     - `identity link`
     - 渠道级共享策略
     - bot 账号配置
+    - 系统探测 bot 身份事实
   - 必须为每一类事实指定唯一 owner
   - 必须让 Telegram bot 账号配置只剩一条生效路径：**要么 DB，要么配置文件**
   - 必须让 `dm_scope` / `group_scope` 这类真实生效字段在最终 owner 路径中可见、可改、可验证
+  - 必须把 `chan_user_id/chan_user_name/chan_nickname` 明确归为系统探测事实，不再要求用户把它们当成手工配置主路径
   - 必须补齐 owner 冲突或 legacy 路径继续使用时的结构化日志
 - 不得：
   - 不得继续保留“配置先、DB 后”的 Telegram bot 账号混源启动
@@ -191,6 +210,7 @@
   - 不需要用户同时维护多个 bot 账号块
 - 风险/缺点：
   - UI 需要系统性补齐，不是只加两个下拉框就结束
+  - 除了 `dm_scope/group_scope`，还要明确哪些字段继续留作高级配置，哪些字段应改为只读的系统探测事实
   - 当前 UI 结构与 onboarding 都偏轻量，需要重构字段分组与说明
   - 若 UI 未补齐前硬切到 DB owner，会产生“owner 在 DB，但用户无完整入口”的断层
 
@@ -225,8 +245,9 @@
 #### 行为规范（Normative Rules）
 - 规则 1：同一类 Telegram 事实只能有一个 owner；owner 之外的路径不得再生效
 - 规则 2：Telegram bot 账号配置必须整体收口；不能把 `token/agent_id` 放一处、`dm_scope/group_scope` 放另一处、UI 再只暴露一半
-- 规则 3：无论最终选 DB owner 还是配置文件 owner，`identity link` 与渠道级共享策略都继续单独评估，不自动与 bot 账号配置绑成一处
-- 规则 4：一旦 owner 确定，非 owner 路径命中 Telegram bot 账号配置时必须直接拒绝或强告警，不做 silent precedence
+- 规则 3：`chan_user_id/chan_user_name/chan_nickname` 必须被视为系统探测事实；即使暂时仍落在同一结构体中，也不得再作为“用户必须手填的配置字段”对外建模
+- 规则 4：无论最终选 DB owner 还是配置文件 owner，`identity link` 与渠道级共享策略都继续单独评估，不自动与 bot 账号配置绑成一处
+- 规则 5：一旦 owner 确定，非 owner 路径命中 Telegram bot 账号配置时必须直接拒绝或强告警，不做 silent precedence
 
 #### 接口与数据结构（Contracts）
 - API/RPC：

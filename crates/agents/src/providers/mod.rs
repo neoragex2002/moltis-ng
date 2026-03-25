@@ -2751,7 +2751,9 @@ mod tests {
         });
 
         let ctx = LlmRequestContext {
+            session_key: None,
             session_id: Some("session:test".into()),
+            prompt_cache_key: None,
             run_id: None,
         };
         let _ = wrapped
@@ -2773,7 +2775,9 @@ mod tests {
         });
 
         let ctx = LlmRequestContext {
+            session_key: None,
             session_id: Some("session:test".into()),
+            prompt_cache_key: None,
             run_id: None,
         };
         let mut stream =
@@ -2797,7 +2801,9 @@ mod tests {
             inner,
         });
         let ctx = LlmRequestContext {
+            session_key: None,
             session_id: Some("session:test".into()),
+            prompt_cache_key: None,
             run_id: None,
         };
         let dbg = wrapped.debug_request_overrides(Some(&ctx));

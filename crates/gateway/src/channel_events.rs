@@ -59,7 +59,7 @@ fn channel_inbound_context_from_tg(
 
     Some(ChannelInboundContext {
         chan_type: ChannelType::Telegram,
-        session_key: route.bucket_key.clone(),
+        bucket_key: route.bucket_key.clone(),
         reply_target_ref,
         channel_binding,
     })
@@ -73,24 +73,6 @@ fn tg_private_target_from_reply_target_ref(reply_target_ref: &str) -> Option<TgP
         message_id: target.message_id,
         thread_id: target.thread_id,
     })
-}
-
-fn reject_legacy_telegram_binding(
-    ctx: &ChannelInboundContext,
-    session_id: &str,
-    expected: &moltis_telegram::adapter::TelegramChannelBindingInfo,
-) -> anyhow::Error {
-    warn!(
-        event = "telegram.session.reject_legacy_binding",
-        session_id,
-        chan_account_key = %expected.account_key,
-        chat_id = %expected.chat_id,
-        thread_id = ?expected.thread_id,
-        bucket_key = %ctx.session_key,
-        reason_code = "legacy_channel_binding_rejected",
-        "rejecting telegram session with legacy or incomplete channel_binding"
-    );
-    anyhow!("legacy telegram channel_binding rejected for session {session_id}")
 }
 
 fn channel_message_meta_from_tg(request: &TgInboundRequest) -> ChannelMessageMeta {
@@ -114,110 +96,102 @@ fn channel_attachments_from_tg(attachments: &[TgAttachment]) -> Vec<ChannelAttac
 }
 
 async fn resolve_channel_session_id(
-    ctx: &ChannelInboundContext,
+    session_key: &str,
     metadata: &SqliteSessionMetadata,
 ) -> Result<Option<String>> {
-    if ctx.session_key.trim().is_empty() {
+    if session_key.trim().is_empty() {
         return Ok(None);
     }
-    if let Some(session_id) = metadata
-        .get_bucket_session_id(ctx.chan_type.as_str(), &ctx.session_key)
-        .await
-    {
-        return Ok(Some(session_id));
-    }
-
-    if ctx.chan_type != ChannelType::Telegram {
-        return Ok(None);
-    }
-
-    let Some(binding_json) = ctx.channel_binding.as_deref() else {
-        return Ok(None);
-    };
-    let Some(expected) = moltis_telegram::adapter::telegram_channel_binding_info(binding_json)
-    else {
-        return Ok(None);
-    };
-
-    let Some(active_session_id) = metadata
-        .get_active_session_id(
-            ctx.chan_type.as_str(),
-            &expected.account_key,
-            &expected.chat_id,
-        )
-        .await
-    else {
-        return Ok(None);
-    };
-    let active_entry = metadata.get(&active_session_id).await;
-    if let Some(existing_binding) = active_entry
-        .as_ref()
-        .and_then(|entry| entry.channel_binding.as_deref())
-    {
-        let strict_binding_missing_bucket =
-            moltis_telegram::adapter::telegram_channel_binding_info(existing_binding)
-                .is_some_and(|info| info.bucket_key.is_none());
-        if moltis_telegram::adapter::telegram_binding_uses_legacy_shape(existing_binding)
-            || strict_binding_missing_bucket
-        {
-            return Err(reject_legacy_telegram_binding(
-                ctx,
-                &active_session_id,
-                &expected,
-            ));
-        }
-        if !moltis_telegram::adapter::telegram_binding_is_compatible_for_bucket(
-            existing_binding,
-            &expected,
-            &ctx.session_key,
-        ) {
-            return Ok(None);
-        }
-    }
-
-    metadata
-        .set_bucket_session_id(ctx.chan_type.as_str(), &ctx.session_key, &active_session_id)
-        .await;
-    info!(
-        event = "telegram.session_compat.backfilled_bucket_session",
-        chan_account_key = expected.account_key,
-        chat_id = expected.chat_id,
-        thread_id = ?expected.thread_id,
-        bucket_key = ctx.session_key,
-        session_id = active_session_id,
-        reason_code = "legacy_active_session_without_bucket_mapping",
-        "reused active telegram session and backfilled bucket mapping"
-    );
-    Ok(Some(active_session_id))
+    Ok(metadata.get_active_session_id(session_key).await)
 }
 
 async fn ensure_channel_session_id(
-    ctx: &ChannelInboundContext,
+    session_key: &str,
     metadata: &SqliteSessionMetadata,
 ) -> Result<String> {
-    if let Some(id) = resolve_channel_session_id(ctx, metadata).await? {
+    if let Some(id) = resolve_channel_session_id(session_key, metadata).await? {
         return Ok(id);
     }
-    let new_id = format!("session:{}", uuid::Uuid::new_v4());
-    metadata
-        .set_bucket_session_id(ctx.chan_type.as_str(), &ctx.session_key, &new_id)
-        .await;
+    let new_id = format!("sess_{}", uuid::Uuid::new_v4().simple());
+    metadata.set_active_session_id(session_key, &new_id).await;
+    Ok(new_id)
+}
 
-    if ctx.chan_type == ChannelType::Telegram
-        && let Some(binding_json) = ctx.channel_binding.as_deref()
-        && let Some(info) = moltis_telegram::adapter::telegram_channel_binding_info(binding_json)
-    {
-        metadata
-            .set_active_session_id(
-                ctx.chan_type.as_str(),
-                &info.account_key,
-                &info.chat_id,
-                &new_id,
-            )
-            .await;
+async fn resolve_channel_runtime_session_key(
+    state: &GatewayState,
+    ctx: &ChannelInboundContext,
+    bucket_key: &str,
+) -> Result<String> {
+    if ctx.chan_type != ChannelType::Telegram {
+        warn!(
+            event = "channel.session.reject_unsupported_owner",
+            chan_type = ctx.chan_type.as_str(),
+            reason_code = "unsupported_channel_owner",
+            decision = "reject",
+            "rejecting channel inbound context without canonical session owner"
+        );
+        return Err(anyhow!("unsupported channel owner for runtime session_key"));
     }
 
-    Ok(new_id)
+    let Some(binding_json) = ctx.channel_binding.as_deref() else {
+        warn!(
+            event = "channel.session.reject_missing_binding",
+            chan_type = ctx.chan_type.as_str(),
+            reason_code = "channel_binding_missing",
+            decision = "reject",
+            "rejecting telegram channel inbound context without channel_binding"
+        );
+        return Err(anyhow!("missing telegram channel_binding"));
+    };
+    let Some(binding_info) = moltis_telegram::adapter::telegram_channel_binding_info(binding_json)
+    else {
+        warn!(
+            event = "channel.session.reject_invalid_binding",
+            chan_type = ctx.chan_type.as_str(),
+            reason_code = "channel_binding_invalid",
+            decision = "reject",
+            "rejecting telegram channel inbound context with invalid channel_binding"
+        );
+        return Err(anyhow!("invalid telegram channel_binding"));
+    };
+
+    let agent_id = if let Some(agent_id) = state
+        .services
+        .channel
+        .telegram_account_agent_id(&binding_info.account_key)
+        .await
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(agent_id)
+    } else {
+        state
+            .services
+            .channel
+            .telegram_bus_accounts_snapshot()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.account_handle == binding_info.account_key)
+            .and_then(|snapshot| snapshot.agent_id)
+            .filter(|value| !value.trim().is_empty())
+    };
+
+    let Some(agent_id) = agent_id else {
+        warn!(
+            event = "channel.session.reject_missing_agent_id",
+            chan_type = ctx.chan_type.as_str(),
+            chan_account_key = %binding_info.account_key,
+            bucket_key = %bucket_key,
+            reason_code = "telegram_agent_id_missing",
+            decision = "reject",
+            "rejecting telegram channel inbound context without configured agent_id"
+        );
+        return Err(anyhow!(
+            "missing telegram agent_id for account {}",
+            binding_info.account_key
+        ));
+    };
+
+    Ok(moltis_sessions::key::SessionKey::agent(&agent_id, bucket_key).0)
 }
 
 #[derive(Debug)]
@@ -230,7 +204,7 @@ async fn resolve_channel_bridge_session(
     state: &GatewayState,
     ctx: &ChannelInboundContext,
 ) -> Result<ChannelBridgeSession> {
-    let session_key = if ctx.session_key.trim().is_empty() {
+    let bucket_key = if ctx.bucket_key.trim().is_empty() {
         warn!(
             event = "channel.session.reject_missing_session_key",
             chan_type = ctx.chan_type.as_str(),
@@ -239,12 +213,11 @@ async fn resolve_channel_bridge_session(
         );
         return Err(anyhow!("missing channel session_key"));
     } else {
-        ctx.session_key.clone()
+        ctx.bucket_key.clone()
     };
+    let session_key = resolve_channel_runtime_session_key(state, ctx, &bucket_key).await?;
     let session_id = if let Some(ref sm) = state.services.session_metadata {
-        let mut ctx_for_lookup = ctx.clone();
-        ctx_for_lookup.session_key = session_key.clone();
-        ensure_channel_session_id(&ctx_for_lookup, sm).await?
+        ensure_channel_session_id(&session_key, sm).await?
     } else {
         session_key.clone()
     };
@@ -258,6 +231,7 @@ async fn resolve_channel_bridge_session(
 async fn persist_channel_bridge_binding(
     state: &GatewayState,
     ctx: &ChannelInboundContext,
+    session_key: &str,
     session_id: &str,
 ) {
     let Some(binding_json) = ctx.channel_binding.as_deref() else {
@@ -288,24 +262,10 @@ async fn persist_channel_bridge_binding(
         } else {
             session_id.to_string()
         };
-        let _ = session_meta.upsert(session_id, Some(label)).await;
+        let _ = session_meta.upsert(session_id, session_key, Some(label)).await;
     }
 
-    session_meta
-        .set_bucket_session_id(ctx.chan_type.as_str(), &ctx.session_key, session_id)
-        .await;
-    if ctx.chan_type == ChannelType::Telegram
-        && let Some(info) = moltis_telegram::adapter::telegram_channel_binding_info(binding_json)
-    {
-        session_meta
-            .set_active_session_id(
-                ctx.chan_type.as_str(),
-                &info.account_key,
-                &info.chat_id,
-                session_id,
-            )
-            .await;
-    }
+    session_meta.set_active_session_id(session_key, session_id).await;
     session_meta
         .set_channel_binding(session_id, Some(binding_json.to_string()))
         .await;
@@ -356,13 +316,12 @@ impl ChannelEventSink for GatewayChannelEventSink {
         meta: ChannelMessageMeta,
     ) {
         if let Some(state) = self.state.get() {
-            let mut ctx = ctx;
+            let ctx = ctx;
             let Ok(bridge) = resolve_channel_bridge_session(state, &ctx).await else {
                 return;
             };
             let session_key = bridge.session_key;
             let session_id = bridge.session_id;
-            ctx.session_key = session_key.clone();
             let channel_turn_id = crate::ids::new_trigger_id();
             let inbound_text = text.to_string();
             let public_meta = meta.clone();
@@ -408,7 +367,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 .push_channel_reply(&session_id, &channel_turn_id, reply_target_ref)
                 .await;
 
-            persist_channel_bridge_binding(state, &ctx, &session_id).await;
+            persist_channel_bridge_binding(state, &ctx, &session_key, &session_id).await;
 
             let chat = state.chat().await;
             let mut params = serde_json::json!({
@@ -620,13 +579,12 @@ impl ChannelEventSink for GatewayChannelEventSink {
             return;
         };
 
-        let mut ctx = ctx;
+        let ctx = ctx;
         let Ok(bridge) = resolve_channel_bridge_session(state, &ctx).await else {
             return;
         };
         let session_key = bridge.session_key;
         let session_id = bridge.session_id;
-        ctx.session_key = session_key.clone();
         let inbound_text = text.to_string();
         let public_meta = meta.clone();
 
@@ -657,7 +615,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         .await;
 
         // Persist channel binding so the session is treated as channel-bound.
-        persist_channel_bridge_binding(state, &ctx, &session_id).await;
+        persist_channel_bridge_binding(state, &ctx, &session_key, &session_id).await;
 
         // If a channel default model is configured, persist it on first use so that
         // the next addressed message uses the expected model.
@@ -848,13 +806,13 @@ impl ChannelEventSink for GatewayChannelEventSink {
             return false;
         };
 
-        let mut ctx = ctx;
+        let ctx = ctx;
         let Ok(bridge) = resolve_channel_bridge_session(state, &ctx).await else {
             return false;
         };
+        let session_key = bridge.session_key;
         let session_id = bridge.session_id;
-        ctx.session_key = bridge.session_key;
-        persist_channel_bridge_binding(state, &ctx, &session_id).await;
+        persist_channel_bridge_binding(state, &ctx, &session_key, &session_id).await;
 
         // Update in-memory cache.
         let geo = moltis_config::GeoLocation::now(latitude, longitude, None);
@@ -898,7 +856,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         ctx: ChannelInboundContext,
         meta: ChannelMessageMeta,
     ) {
-        let mut ctx = ctx;
+        let ctx = ctx;
         let attachment_count = attachments.len();
         let has_non_image_attachment = attachments
             .iter()
@@ -949,7 +907,6 @@ impl ChannelEventSink for GatewayChannelEventSink {
         };
         let session_key = bridge.session_key;
         let session_id = bridge.session_id;
-        ctx.session_key = session_key.clone();
         let channel_turn_id = crate::ids::new_trigger_id();
         let inbound_text = text.to_string();
         let public_meta = meta.clone();
@@ -1025,7 +982,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             .push_channel_reply(&session_id, &channel_turn_id, reply_target_ref)
             .await;
 
-        persist_channel_bridge_binding(state, &ctx, &session_id).await;
+        persist_channel_bridge_binding(state, &ctx, &session_key, &session_id).await;
 
         let chat = state.chat().await;
         let mut params = serde_json::json!({
@@ -1232,11 +1189,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
             .session_metadata
             .as_ref()
             .ok_or_else(|| anyhow!("session metadata not available"))?;
-        let mut ctx = ctx;
+        let ctx = ctx;
         let bridge = resolve_channel_bridge_session(state, &ctx).await?;
         let session_key = bridge.session_key;
         let session_id = bridge.session_id;
-        ctx.session_key = session_key.clone();
         let chat = state.chat().await;
         let binding_json = ctx.channel_binding.clone();
         let binding_info = binding_json
@@ -1249,8 +1205,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
         match cmd {
             "new" => {
-                // Create a new session with a fresh UUID key.
-                let new_id = format!("session:{}", uuid::Uuid::new_v4());
+                // Create a new opaque session instance under the same canonical session_key.
                 let binding_json = binding_json
                     .clone()
                     .ok_or_else(|| anyhow!("channel binding missing"))?;
@@ -1273,14 +1228,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         &info.chat_id,
                     )
                 } else {
-                    new_id.clone()
+                    session_key.clone()
                 };
 
-                // Create the new session entry with channel binding.
-                session_metadata
-                    .upsert(&new_id, Some(label))
+                let new_entry = session_metadata
+                    .create(&session_key, Some(label))
                     .await
                     .map_err(|e| anyhow!("failed to create session: {e}"))?;
+                let new_id = new_entry.session_id;
                 session_metadata
                     .set_channel_binding(&new_id, Some(binding_json.clone()))
                     .await;
@@ -1298,20 +1253,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 }
 
                 // Update forward mapping.
-                if ctx.chan_type == ChannelType::Telegram
-                    && let Some(ref info) = binding_info
-                {
-                    session_metadata
-                        .set_active_session_id(
-                            ctx.chan_type.as_str(),
-                            &info.account_key,
-                            &info.chat_id,
-                            &new_id,
-                        )
-                        .await;
-                }
                 session_metadata
-                    .set_bucket_session_id(ctx.chan_type.as_str(), &ctx.session_key, &new_id)
+                    .set_active_session_id(&session_key, &new_id)
                     .await;
 
                 info!(
@@ -1518,8 +1461,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     // List mode.
                     let mut lines = Vec::new();
                     for (i, s) in sessions.iter().enumerate() {
-                        let label = s.label.as_deref().unwrap_or(&s.key);
-                        let marker = if s.key == session_id {
+                        let label = s.label.as_deref().unwrap_or(&s.session_key);
+                        let marker = if s.session_id == session_id {
                             " *"
                         } else {
                             ""
@@ -1546,27 +1489,15 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
                     // Update forward mapping.
                     session_metadata
-                        .set_active_session_id(
-                            ctx.chan_type.as_str(),
-                            &info.account_key,
-                            &info.chat_id,
-                            &target_session.key,
-                        )
-                        .await;
-                    session_metadata
-                        .set_bucket_session_id(
-                            ctx.chan_type.as_str(),
-                            &ctx.session_key,
-                            &target_session.key,
-                        )
+                        .set_active_session_id(&session_key, &target_session.session_id)
                         .await;
 
                     let label = target_session
                         .label
                         .as_deref()
-                        .unwrap_or(&target_session.key);
+                        .unwrap_or(&target_session.session_key);
                     info!(
-                        session = %target_session.key,
+                        session = %target_session.session_id,
                         "channel /sessions: switched session"
                     );
 
@@ -1575,7 +1506,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         "session",
                         serde_json::json!({
                             "kind": "switched",
-                            "sessionId": &target_session.key,
+                            "sessionId": &target_session.session_id,
                         }),
                         BroadcastOpts {
                             drop_if_slow: true,
@@ -1703,7 +1634,15 @@ impl ChannelEventSink for GatewayChannelEventSink {
             },
             "sandbox" => {
                 let is_enabled = if let Some(ref router) = state.sandbox_router {
-                    router.is_sandboxed(&session_id).await
+                    let session_key = if let Some(ref metadata) = state.services.session_metadata {
+                        metadata.get(&session_id).await.map(|entry| entry.session_key)
+                    } else {
+                        None
+                    };
+                    router
+                        .is_sandboxed(&session_id, session_key.as_deref())
+                        .await
+                        .unwrap_or(false)
                 } else {
                     false
                 };
@@ -1971,8 +1910,7 @@ mod tests {
         super::*,
         async_trait::async_trait,
         moltis_channels::{
-            ChannelInboundContext, ChannelMessageKind, ChannelReplyTarget, ChannelType,
-            plugin::ChannelOutbound,
+            ChannelInboundContext, ChannelMessageKind, ChannelType, plugin::ChannelOutbound,
         },
         moltis_common::types::ReplyPayload,
         moltis_telegram::config::TelegramBusAccountSnapshot,
@@ -2010,7 +1948,7 @@ mod tests {
     ) -> ChannelInboundContext {
         ChannelInboundContext {
             chan_type: ChannelType::Telegram,
-            session_key: bucket_key.unwrap_or_default().to_string(),
+            bucket_key: bucket_key.unwrap_or_default().to_string(),
             reply_target_ref: moltis_telegram::adapter::reply_target_ref_for_target(
                 chan_account_key,
                 chat_id,
@@ -2030,7 +1968,7 @@ mod tests {
     fn telegram_dm_bucket_key(chan_account_key: &str, chat_id: &str) -> String {
         moltis_telegram::adapter::resolve_dm_bucket_key(
             &moltis_telegram::config::DmScope::PerAccount,
-            chan_account_key,
+            Some(chan_account_key),
             chat_id,
         )
     }
@@ -2038,7 +1976,7 @@ mod tests {
     fn telegram_group_bucket_key(chan_account_key: &str, chat_id: &str) -> String {
         moltis_telegram::adapter::resolve_group_bucket_key(
             &moltis_telegram::config::GroupScope::Group,
-            chan_account_key,
+            Some(chan_account_key),
             chat_id,
             None,
             None,
@@ -2065,15 +2003,26 @@ mod tests {
         let chat = Arc::new(RecordingChatService {
             last_params: tokio::sync::Mutex::new(None),
         });
-        let services = crate::services::GatewayServices::noop();
-        let state = Arc::new(crate::state::GatewayState::new(
+        let mut services = crate::services::GatewayServices::noop();
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:acct".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
         state.set_chat(chat.clone()).await;
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
@@ -2084,7 +2033,7 @@ mod tests {
             "hello",
             ChannelInboundContext {
                 chan_type: ChannelType::Telegram,
-                session_key: "group:account:telegram:acct:peer:-100".into(),
+                bucket_key: "group-peer-tgchat.n100".into(),
                 reply_target_ref: moltis_telegram::adapter::reply_target_ref_for_target(
                     "telegram:acct",
                     "-100",
@@ -2096,7 +2045,7 @@ mod tests {
                     "telegram:acct",
                     "-100",
                     None,
-                    Some("group:account:telegram:acct:peer:-100"),
+                    Some("group-peer-tgchat.n100"),
                 ),
             },
             ChannelMessageMeta {
@@ -2132,17 +2081,28 @@ mod tests {
             tmp.path().to_path_buf(),
         ));
         let metadata = sqlite_metadata().await;
-        let services = crate::services::GatewayServices::noop()
+        let mut services = crate::services::GatewayServices::noop()
             .with_session_store(Arc::clone(&store))
             .with_session_metadata(Arc::clone(&metadata));
-        let state = Arc::new(crate::state::GatewayState::new(
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:acct".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
         assert!(cell.set(Arc::clone(&state)).is_ok());
@@ -2152,7 +2112,7 @@ mod tests {
             "[photo]",
             ChannelInboundContext {
                 chan_type: ChannelType::Telegram,
-                session_key: "group:account:telegram:acct:peer:-100".into(),
+                bucket_key: "group-peer-tgchat.n100".into(),
                 reply_target_ref: moltis_telegram::adapter::reply_target_ref_for_target(
                     "telegram:acct",
                     "-100",
@@ -2164,7 +2124,7 @@ mod tests {
                     "telegram:acct",
                     "-100",
                     None,
-                    Some("group:account:telegram:acct:peer:-100"),
+                    Some("group-peer-tgchat.n100"),
                 ),
             },
             ChannelMessageMeta {
@@ -2178,9 +2138,9 @@ mod tests {
         .await;
 
         let session_id = metadata
-            .get_bucket_session_id("telegram", "group:account:telegram:acct:peer:-100")
+            .get_active_session_id("agent:zhuzhu:group-peer-tgchat.n100")
             .await
-            .expect("bucket session must be created");
+            .expect("active session must be created");
         let history = store.read(&session_id).await.expect("history");
         assert_eq!(history.len(), 1);
         assert_eq!(
@@ -2219,163 +2179,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bucket_session_mapping_takes_precedence_over_active_session() {
+    async fn resolve_channel_session_id_uses_session_key_mapping() {
         let metadata = sqlite_metadata().await;
         metadata
-            .set_active_session_id("telegram", "telegram:bot1", "-100999", "session:old")
-            .await;
-        metadata
-            .set_bucket_session_id("telegram", "group:peer:-100999", "session:new")
+            .set_active_session_id("agent:zhuzhu:group-peer-tgchat.n100999", "sess_old")
             .await;
 
-        let ctx = telegram_inbound_ctx(
-            "telegram:bot1",
-            "-100999",
-            None,
-            None,
-            Some("group:peer:-100999"),
-        );
-
-        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref())
+        let session_id = resolve_channel_session_id(
+            "agent:zhuzhu:group-peer-tgchat.n100999",
+            metadata.as_ref(),
+        )
             .await
             .expect("lookup should succeed");
-        assert_eq!(session_id.as_deref(), Some("session:new"));
+        assert_eq!(session_id.as_deref(), Some("sess_old"));
     }
 
     #[tokio::test]
-    async fn resolve_channel_session_id_does_not_fall_back_to_active_session() {
+    async fn resolve_channel_session_id_returns_none_without_session_key_mapping() {
         let metadata = sqlite_metadata().await;
-        metadata
-            .set_active_session_id("telegram", "telegram:bot1", "-100999", "session:old")
-            .await;
 
-        let ctx = telegram_inbound_ctx("telegram:bot1", "-100999", None, None, None);
-
-        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref())
+        let session_id =
+            resolve_channel_session_id("agent:zhuzhu:group-peer-tgchat.n100999", metadata.as_ref())
             .await
             .expect("lookup should succeed");
         assert!(session_id.is_none());
     }
 
     #[tokio::test]
-    async fn resolve_channel_session_id_rejects_legacy_active_session_for_matching_bucket() {
+    async fn ensure_channel_session_id_creates_new_opaque_session_id() {
         let metadata = sqlite_metadata().await;
-        let legacy_binding = serde_json::to_string(&ChannelReplyTarget {
-            chan_type: ChannelType::Telegram,
-            chan_account_key: "telegram:bot1".into(),
-            chan_user_name: None,
-            chat_id: "-100999".into(),
-            message_id: None,
-            thread_id: Some("77".into()),
-            bucket_key: None,
-        })
-        .expect("serialize binding");
-        let _ = metadata.upsert("session:old", Some("legacy".into())).await;
-        metadata
-            .set_channel_binding("session:old", Some(legacy_binding))
-            .await;
-        metadata
-            .set_active_session_id("telegram", "telegram:bot1", "-100999", "session:old")
-            .await;
-
-        let ctx = telegram_inbound_ctx(
-            "telegram:bot1",
-            "-100999",
-            None,
-            Some("77"),
-            Some("group:account:telegram:bot1:peer:-100999:branch:77"),
-        );
-
-        let err = ensure_channel_session_id(&ctx, metadata.as_ref())
-            .await
-            .expect_err("incomplete binding must be rejected");
-        assert!(
-            err.to_string()
-                .contains("legacy telegram channel_binding rejected"),
-            "unexpected error: {err:#}"
-        );
+        let session_id = ensure_channel_session_id(
+            "agent:zhuzhu:group-peer-tgchat.n100999-branch-topic.77",
+            metadata.as_ref(),
+        )
+        .await
+        .expect("session id must be created");
+        assert!(session_id.starts_with("sess_"));
         assert_eq!(
             metadata
-                .get_bucket_session_id(
-                    "telegram",
-                    "group:account:telegram:bot1:peer:-100999:branch:77"
-                )
+                .get_active_session_id("agent:zhuzhu:group-peer-tgchat.n100999-branch-topic.77")
                 .await
                 .as_deref(),
-            None
+            Some(session_id.as_str())
         );
     }
 
     #[tokio::test]
-    async fn resolve_channel_session_id_rejects_active_session_with_legacy_binding_blob_shape() {
+    async fn ensure_channel_session_id_reuses_existing_session_for_same_session_key() {
         let metadata = sqlite_metadata().await;
-        let legacy_binding = r#"{"channel_type":"telegram","account_handle":"telegram:bot1","chat_id":"-100999","thread_id":"77"}"#.to_string();
-        let _ = metadata.upsert("session:old", Some("legacy".into())).await;
         metadata
-            .set_channel_binding("session:old", Some(legacy_binding))
-            .await;
-        metadata
-            .set_active_session_id("telegram", "telegram:bot1", "-100999", "session:old")
+            .set_active_session_id("agent:zhuzhu:group-peer-tgchat.n100999-branch-topic.77", "sess_old")
             .await;
 
-        let ctx = telegram_inbound_ctx(
-            "telegram:bot1",
-            "-100999",
-            None,
-            Some("77"),
-            Some("group:account:telegram:bot1:peer:-100999:branch:77"),
-        );
-
-        let err = ensure_channel_session_id(&ctx, metadata.as_ref())
+        let session_id = ensure_channel_session_id(
+            "agent:zhuzhu:group-peer-tgchat.n100999-branch-topic.77",
+            metadata.as_ref(),
+        )
             .await
-            .expect_err("legacy binding blob must be rejected");
-        assert!(
-            err.to_string()
-                .contains("legacy telegram channel_binding rejected"),
-            "unexpected error: {err:#}"
-        );
-        assert_eq!(
-            metadata
-                .get_bucket_session_id(
-                    "telegram",
-                    "group:account:telegram:bot1:peer:-100999:branch:77"
-                )
-                .await
-                .as_deref(),
-            None
-        );
+            .expect("existing session id must be reused");
+        assert_eq!(session_id, "sess_old");
     }
 
     #[tokio::test]
-    async fn resolve_channel_session_id_does_not_reuse_active_session_from_other_bucket() {
+    async fn resolve_channel_session_id_does_not_reuse_other_session_key() {
         let metadata = sqlite_metadata().await;
-        let bound_binding = serde_json::to_string(&ChannelReplyTarget {
-            chan_type: ChannelType::Telegram,
-            chan_account_key: "telegram:bot1".into(),
-            chan_user_name: None,
-            chat_id: "-100999".into(),
-            message_id: None,
-            thread_id: None,
-            bucket_key: Some("group:account:telegram:bot1:peer:-100999:sender:alice".into()),
-        })
-        .expect("serialize binding");
-        let _ = metadata.upsert("session:alice", Some("alice".into())).await;
         metadata
-            .set_channel_binding("session:alice", Some(bound_binding))
-            .await;
-        metadata
-            .set_active_session_id("telegram", "telegram:bot1", "-100999", "session:alice")
+            .set_active_session_id(
+                "agent:zhuzhu:group-peer-tgchat.n100999-sender-person.alice",
+                "sess_alice",
+            )
             .await;
 
-        let ctx = telegram_inbound_ctx(
-            "telegram:bot1",
-            "-100999",
-            None,
-            None,
-            Some("group:account:telegram:bot1:peer:-100999:sender:bob"),
-        );
-
-        let session_id = resolve_channel_session_id(&ctx, metadata.as_ref())
+        let session_id =
+            resolve_channel_session_id("agent:zhuzhu:group-peer-tgchat.n100999", metadata.as_ref())
             .await
             .expect("lookup should succeed");
         assert!(session_id.is_none());
@@ -2395,7 +2271,7 @@ mod tests {
         );
         let ctx = ChannelInboundContext {
             chan_type: ChannelType::Telegram,
-            session_key: String::new(),
+            bucket_key: String::new(),
             reply_target_ref: "reply-target".into(),
             channel_binding: None,
         };
@@ -2407,6 +2283,44 @@ mod tests {
             err.to_string().contains("missing channel session_key"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_channel_bridge_session_builds_agent_scoped_session_key() {
+        let metadata = sqlite_metadata().await;
+        let mut services = crate::services::GatewayServices::noop().with_session_metadata(metadata);
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:bot1".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        );
+        let ctx = telegram_inbound_ctx(
+            "telegram:bot1",
+            "-100999",
+            Some("1"),
+            None,
+            Some("group-peer-tgchat.n100999"),
+        );
+
+        let bridge = resolve_channel_bridge_session(&state, &ctx)
+            .await
+            .expect("bridge session should resolve");
+        assert_eq!(bridge.session_key, "agent:zhuzhu:group-peer-tgchat.n100999");
+        assert!(bridge.session_id.starts_with("sess_"));
     }
 
     #[test]
@@ -2604,15 +2518,27 @@ mod tests {
         let rec = Arc::new(RecordingOutbound::default());
         let outbound: Arc<dyn ChannelOutbound> = rec.clone();
 
-        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
-        let state = Arc::new(crate::state::GatewayState::new(
+        let mut services =
+            crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:acct".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
 
         let err_chat = Arc::new(ErrChatServiceWithLog {
             state: Arc::clone(&state),
@@ -2731,11 +2657,13 @@ mod tests {
     struct AsyncRunChatService {
         started: tokio::sync::Notify,
         finish: tokio::sync::Notify,
+        send_calls: AtomicUsize,
     }
 
     #[async_trait]
     impl crate::services::ChatService for AsyncRunChatService {
         async fn send(&self, _params: serde_json::Value) -> crate::services::ServiceResult {
+            self.send_calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             Ok(serde_json::json!({ "runId": "run-1" }))
         }
@@ -2841,15 +2769,27 @@ mod tests {
             last_params: tokio::sync::Mutex::new(None),
         });
 
-        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
-        let state = Arc::new(crate::state::GatewayState::new(
+        let mut services =
+            crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:acct".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
         state.set_chat(chat.clone()).await;
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
@@ -2899,17 +2839,30 @@ mod tests {
         let chat = Arc::new(AsyncRunChatService {
             started: tokio::sync::Notify::new(),
             finish: tokio::sync::Notify::new(),
+            send_calls: AtomicUsize::new(0),
         });
 
-        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
-        let state = Arc::new(crate::state::GatewayState::new(
+        let mut services =
+            crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:acct".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
         state.set_chat(chat.clone()).await;
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
@@ -2989,16 +2942,27 @@ mod tests {
         });
         let outbound_trait: Arc<dyn ChannelOutbound> = outbound.clone();
 
-        let services =
+        let mut services =
             crate::services::GatewayServices::noop().with_channel_outbound(outbound_trait);
-        let state = Arc::new(crate::state::GatewayState::new(
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:acct".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
 
         state.set_chat(Arc::new(ErrChatService)).await;
 
@@ -3054,6 +3018,7 @@ mod tests {
 
     struct BlockingTypingOutbound {
         send_typing_started: tokio::sync::Notify,
+        typings: AtomicUsize,
     }
 
     #[async_trait]
@@ -3079,6 +3044,7 @@ mod tests {
         }
 
         async fn send_typing(&self, _chan_account_key: &str, _to: &str) -> anyhow::Result<()> {
+            self.typings.fetch_add(1, Ordering::SeqCst);
             self.send_typing_started.notify_waiters();
             std::future::pending::<()>().await;
             Ok(())
@@ -3090,23 +3056,36 @@ mod tests {
         let bucket_key = telegram_dm_bucket_key("telegram:acct", "123");
         let outbound = Arc::new(BlockingTypingOutbound {
             send_typing_started: tokio::sync::Notify::new(),
+            typings: AtomicUsize::new(0),
         });
         let outbound_trait: Arc<dyn ChannelOutbound> = outbound.clone();
         let chat = Arc::new(AsyncRunChatService {
             started: tokio::sync::Notify::new(),
             finish: tokio::sync::Notify::new(),
+            send_calls: AtomicUsize::new(0),
         });
 
-        let services =
+        let mut services =
             crate::services::GatewayServices::noop().with_channel_outbound(outbound_trait);
-        let state = Arc::new(crate::state::GatewayState::new(
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:acct".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
         state.set_chat(chat.clone()).await;
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
@@ -3114,9 +3093,6 @@ mod tests {
             panic!("failed to set gateway state oncecell for test");
         }
         let sink = Arc::new(GatewayChannelEventSink::new(Arc::clone(&cell)));
-        let started = chat.started.notified();
-        let typing_started = outbound.send_typing_started.notified();
-
         let sink_task = {
             let sink = Arc::clone(&sink);
             tokio::spawn(async move {
@@ -3141,13 +3117,14 @@ mod tests {
             })
         };
 
-        tokio::time::timeout(std::time::Duration::from_millis(50), typing_started)
-            .await
-            .expect("typing loop must start");
-        tokio::time::timeout(std::time::Duration::from_millis(50), started)
-            .await
-            .expect("chat send must still start while typing is blocked");
-        tokio::time::timeout(std::time::Duration::from_millis(50), sink_task)
+        tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            while chat.send_calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("chat send must still start while typing is blocked");
+        tokio::time::timeout(std::time::Duration::from_millis(200), sink_task)
             .await
             .expect("dispatch_to_chat must not wait for run completion or blocked typing send")
             .unwrap();
@@ -3164,14 +3141,14 @@ mod tests {
         });
 
         let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
-        let state = Arc::new(crate::state::GatewayState::new(
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
         state.set_chat(chat.clone()).await;
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
@@ -3223,15 +3200,26 @@ mod tests {
             last_params: tokio::sync::Mutex::new(None),
         });
 
-        let services = crate::services::GatewayServices::noop();
-        let state = Arc::new(crate::state::GatewayState::new(
+        let mut services = crate::services::GatewayServices::noop();
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:acct".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
         state.set_chat(chat.clone()).await;
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
@@ -3298,15 +3286,26 @@ mod tests {
             last_params: tokio::sync::Mutex::new(None),
         });
 
-        let services = crate::services::GatewayServices::noop();
-        let state = Arc::new(crate::state::GatewayState::new(
+        let mut services = crate::services::GatewayServices::noop();
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:acct".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: Some(8344017527),
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::PerAccount,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
         state.set_chat(chat.clone()).await;
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
@@ -3395,6 +3394,13 @@ mod tests {
         async fn telegram_bus_accounts_snapshot(&self) -> Vec<TelegramBusAccountSnapshot> {
             self.snapshots.clone()
         }
+
+        async fn telegram_account_agent_id(&self, account_id: &str) -> Option<String> {
+            self.snapshots
+                .iter()
+                .find(|snapshot| snapshot.account_handle == account_id)
+                .and_then(|snapshot| snapshot.agent_id.clone())
+        }
     }
 
     #[tokio::test]
@@ -3402,11 +3408,15 @@ mod tests {
         let bucket_key = telegram_dm_bucket_key("telegram:845", "123");
         let metadata = sqlite_metadata().await;
         metadata
-            .upsert("session:test", Some("ok".into()))
+            .upsert(
+                "sess_test",
+                &moltis_sessions::SessionKey::agent("zhuzhu", &bucket_key).0,
+                Some("ok".into()),
+            )
             .await
             .expect("metadata upsert works");
         assert!(
-            metadata.get("session:test").await.is_some(),
+            metadata.get("sess_test").await.is_some(),
             "metadata get works"
         );
 
@@ -3416,7 +3426,7 @@ mod tests {
         services.channel = Arc::new(SnapshotChannelService {
             snapshots: vec![TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
-                agent_id: None,
+                agent_id: Some("zhuzhu".into()),
                 chan_user_id: None,
                 chan_user_name: Some("lovely_apple_bot".into()),
                 chan_nickname: None,
@@ -3425,14 +3435,14 @@ mod tests {
             }],
         });
 
-        let state = Arc::new(crate::state::GatewayState::new(
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
         assert!(
             state.services.session_metadata.is_some(),
             "test must have session_metadata wired"
@@ -3458,7 +3468,7 @@ mod tests {
         .await;
 
         let session_id = metadata
-            .get_active_session_id("telegram", "telegram:845", "123")
+            .get_active_session_id(&moltis_sessions::SessionKey::agent("zhuzhu", &bucket_key).0)
             .await
             .expect("active session id");
         let entry = metadata.get(&session_id).await.expect("session row");
@@ -3479,7 +3489,7 @@ mod tests {
         services.channel = Arc::new(SnapshotChannelService {
             snapshots: vec![TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
-                agent_id: None,
+                agent_id: Some("zhuzhu".into()),
                 chan_user_id: None,
                 chan_user_name: Some("lovely_apple_bot".into()),
                 chan_nickname: None,
@@ -3488,14 +3498,14 @@ mod tests {
             }],
         });
 
-        let state = Arc::new(crate::state::GatewayState::new(
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
         if cell.set(Arc::clone(&state)).is_err() {
@@ -3523,7 +3533,7 @@ mod tests {
         .await;
 
         let session_id = metadata
-            .get_active_session_id("telegram", "telegram:845", "-100")
+            .get_active_session_id(&moltis_sessions::SessionKey::agent("zhuzhu", &bucket_key).0)
             .await
             .expect("active session id");
         let entry = metadata.get(&session_id).await.expect("session row");
@@ -3545,7 +3555,7 @@ mod tests {
         services.channel = Arc::new(SnapshotChannelService {
             snapshots: vec![TelegramBusAccountSnapshot {
                 account_handle: "telegram:845".into(),
-                agent_id: None,
+                agent_id: Some("zhuzhu".into()),
                 chan_user_id: None,
                 chan_user_name: None,
                 chan_nickname: None,
@@ -3554,14 +3564,14 @@ mod tests {
             }],
         });
 
-        let state = Arc::new(crate::state::GatewayState::new(
+        let state = crate::state::GatewayState::new(
             crate::auth::ResolvedAuth {
                 mode: crate::auth::AuthMode::Token,
                 token: None,
                 password: None,
             },
             services,
-        ));
+        );
 
         let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
         if cell.set(Arc::clone(&state)).is_err() {
@@ -3583,10 +3593,81 @@ mod tests {
         .await;
 
         let session_id = metadata
-            .get_active_session_id("telegram", "telegram:845", "123")
+            .get_active_session_id(&moltis_sessions::SessionKey::agent("zhuzhu", &bucket_key).0)
             .await
             .expect("active session id");
         let entry = metadata.get(&session_id).await.expect("session row");
         assert_eq!(entry.label.as_deref(), Some("TG 845 · dm:123"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_command_new_creates_opaque_session_id_under_same_session_key() {
+        let bucket_key = telegram_dm_bucket_key("telegram:845", "123");
+        let session_key = moltis_sessions::SessionKey::agent("zhuzhu", &bucket_key).0;
+        let metadata = sqlite_metadata().await;
+        metadata
+            .upsert("sess_current", &session_key, Some("current".into()))
+            .await
+            .expect("seed current session");
+        metadata
+            .set_active_session_id(&session_key, "sess_current")
+            .await;
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_chat(Arc::new(ErrChatService))
+            .with_session_metadata(Arc::clone(&metadata));
+        services.channel = Arc::new(SnapshotChannelService {
+            snapshots: vec![TelegramBusAccountSnapshot {
+                account_handle: "telegram:845".into(),
+                agent_id: Some("zhuzhu".into()),
+                chan_user_id: None,
+                chan_user_name: Some("lovely_apple_bot".into()),
+                chan_nickname: None,
+                dm_scope: moltis_telegram::config::DmScope::Main,
+                group_scope: moltis_telegram::config::GroupScope::Group,
+            }],
+        });
+
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        );
+
+        let cell: Arc<OnceCell<Arc<crate::state::GatewayState>>> = Arc::new(OnceCell::new());
+        if cell.set(Arc::clone(&state)).is_err() {
+            panic!("failed to set gateway state oncecell for test");
+        }
+        let sink = GatewayChannelEventSink::new(Arc::clone(&cell));
+
+        let result = <GatewayChannelEventSink as ChannelEventSink>::dispatch_command(
+            &sink,
+            "new",
+            telegram_inbound_ctx("telegram:845", "123", Some("1"), None, Some(bucket_key.as_str())),
+        )
+        .await
+        .expect("channel /new should succeed");
+        assert!(result.starts_with("New session started."));
+
+        let new_session_id = metadata
+            .get_active_session_id(&session_key)
+            .await
+            .expect("active session id should exist");
+        assert_ne!(new_session_id, "sess_current");
+        assert!(
+            new_session_id.starts_with("sess_"),
+            "new session id must be opaque sess_*"
+        );
+        assert!(
+            !new_session_id.starts_with("session:"),
+            "new session id must not use legacy session:* shape"
+        );
+
+        let new_entry = metadata.get(&new_session_id).await.expect("new session row");
+        assert_eq!(new_entry.session_key, session_key);
+        assert!(new_entry.channel_binding.is_some());
     }
 }

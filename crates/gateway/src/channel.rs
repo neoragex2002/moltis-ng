@@ -212,9 +212,11 @@ impl ChannelService for LiveChannelService {
                         let sessions: Vec<_> = bound
                             .iter()
                             .map(|s| {
-                                let is_active = active_map.iter().any(|(_, sk)| sk == &s.key);
+                                let is_active = active_map.iter().any(|(active_key, active_id)| {
+                                    active_key == &s.session_key && active_id == &s.session_id
+                                });
                                 serde_json::json!({
-                                    "sessionId": s.key,
+                                    "sessionId": s.session_id,
                                     "label": s.label,
                                     "messageCount": s.message_count,
                                     "active": is_active,

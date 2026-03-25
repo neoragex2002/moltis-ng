@@ -1090,8 +1090,11 @@ registerPrefix(
 		if (sessionIdFromUrl) {
 			sessionId = sessionIdFromUrl;
 		} else {
-			sessionId = localStorage.getItem("moltis-sessionId") || "main";
-			history.replaceState(null, "", sessionPath(sessionId));
+			var storedSessionId = localStorage.getItem("moltis-sessionId") || "";
+			sessionId = sessionStore.getById(storedSessionId) ? storedSessionId : "";
+			if (sessionId) {
+				history.replaceState(null, "", sessionPath(sessionId));
+			}
 		}
 
 		if (S.connected) {

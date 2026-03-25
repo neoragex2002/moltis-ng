@@ -11,10 +11,10 @@ use {
     serde::{Deserialize, Serialize},
 };
 
-/// A single search hit within a session.
+/// A single search hit within a session instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
-    pub session_key: String,
+    pub session_id: String,
     pub snippet: String,
     pub role: String,
     pub message_index: usize,
@@ -76,24 +76,26 @@ impl SessionStore {
         Self { base_dir }
     }
 
-    /// Sanitize a session key for use as a filename.
-    pub fn key_to_filename(key: &str) -> String {
-        key.replace(':', "_")
+    /// Derive the JSONL filename for a session instance.
+    pub fn key_to_filename(session_id: &str) -> String {
+        session_id.to_string()
     }
 
-    fn path_for(&self, key: &str) -> PathBuf {
+    fn path_for(&self, session_id: &str) -> PathBuf {
         self.base_dir
-            .join(format!("{}.jsonl", Self::key_to_filename(key)))
+            .join(format!("{}.jsonl", Self::key_to_filename(session_id)))
     }
 
     /// Directory for session media files (screenshots, audio, etc.).
-    fn media_dir_for(&self, key: &str) -> PathBuf {
-        self.base_dir.join("media").join(Self::key_to_filename(key))
+    fn media_dir_for(&self, session_id: &str) -> PathBuf {
+        self.base_dir
+            .join("media")
+            .join(Self::key_to_filename(session_id))
     }
 
     /// Save a media file for a session. Returns the relative path from base_dir.
-    pub async fn save_media(&self, key: &str, filename: &str, data: &[u8]) -> Result<String> {
-        let dir = self.media_dir_for(key);
+    pub async fn save_media(&self, session_id: &str, filename: &str, data: &[u8]) -> Result<String> {
+        let dir = self.media_dir_for(session_id);
         let file_path = dir.join(filename);
         let data = data.to_vec();
 
@@ -104,13 +106,12 @@ impl SessionStore {
         })
         .await??;
 
-        let sanitized = Self::key_to_filename(key);
-        Ok(format!("media/{sanitized}/{filename}"))
+        Ok(format!("media/{session_id}/{filename}"))
     }
 
     /// Read a media file. Returns raw bytes.
-    pub async fn read_media(&self, key: &str, filename: &str) -> Result<Vec<u8>> {
-        let file_path = self.media_dir_for(key).join(filename);
+    pub async fn read_media(&self, session_id: &str, filename: &str) -> Result<Vec<u8>> {
+        let file_path = self.media_dir_for(session_id).join(filename);
 
         tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
             let data = fs::read(&file_path)?;
@@ -120,8 +121,8 @@ impl SessionStore {
     }
 
     /// Append a message (JSON value) as a single line to the session file.
-    pub async fn append(&self, key: &str, message: &serde_json::Value) -> Result<()> {
-        let path = self.path_for(key);
+    pub async fn append(&self, session_id: &str, message: &serde_json::Value) -> Result<()> {
+        let path = self.path_for(session_id);
         let line = serde_json::to_string(message)?;
 
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -142,8 +143,8 @@ impl SessionStore {
     }
 
     /// Read all messages from a session file.
-    pub async fn read(&self, key: &str) -> Result<Vec<serde_json::Value>> {
-        let path = self.path_for(key);
+    pub async fn read(&self, session_id: &str) -> Result<Vec<serde_json::Value>> {
+        let path = self.path_for(session_id);
 
         tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>> {
             if !path.exists() {
@@ -171,8 +172,8 @@ impl SessionStore {
     }
 
     /// Read the last N messages from a session file.
-    pub async fn read_last_n(&self, key: &str, n: usize) -> Result<Vec<serde_json::Value>> {
-        let path = self.path_for(key);
+    pub async fn read_last_n(&self, session_id: &str, n: usize) -> Result<Vec<serde_json::Value>> {
+        let path = self.path_for(session_id);
 
         tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>> {
             if !path.exists() {
@@ -207,12 +208,12 @@ impl SessionStore {
     /// - Malformed JSON lines are ignored (consistent with `read()` behavior).
     pub async fn tail_contains_channel_field_value(
         &self,
-        key: &str,
+        session_id: &str,
         field: &str,
         expected: &str,
         n: usize,
     ) -> Result<bool> {
-        let path = self.path_for(key);
+        let path = self.path_for(session_id);
         let field = field.to_string();
         let expected = expected.to_string();
 
@@ -259,9 +260,9 @@ impl SessionStore {
     }
 
     /// Delete the session file and its media directory.
-    pub async fn clear(&self, key: &str) -> Result<()> {
-        let path = self.path_for(key);
-        let media_dir = self.media_dir_for(key);
+    pub async fn clear(&self, session_id: &str) -> Result<()> {
+        let path = self.path_for(session_id);
+        let media_dir = self.media_dir_for(session_id);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
             if path.exists() {
@@ -277,7 +278,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// List all session keys by scanning JSONL files in the base directory.
+    /// List all session ids by scanning JSONL files in the base directory.
     pub fn list_keys(&self) -> Vec<String> {
         let Ok(entries) = fs::read_dir(&self.base_dir) else {
             return vec![];
@@ -286,7 +287,7 @@ impl SessionStore {
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
-                name.strip_suffix(".jsonl").map(|s| s.replace('_', ":"))
+                name.strip_suffix(".jsonl").map(str::to_string)
             })
             .collect()
     }
@@ -309,10 +310,9 @@ impl SessionStore {
                 let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
-                let Some(key_raw) = name.strip_suffix(".jsonl") else {
+                let Some(session_id) = name.strip_suffix(".jsonl") else {
                     continue;
                 };
-                let session_key = key_raw.replace('_', ":");
 
                 let Ok(file) = File::open(&path) else {
                     continue;
@@ -342,7 +342,7 @@ impl SessionStore {
                         let snippet = build_search_snippet(content, match_start, match_end);
 
                         results.push(SearchResult {
-                            session_key: session_key.clone(),
+                            session_id: session_id.to_string(),
                             snippet,
                             role,
                             message_index: idx,
@@ -359,8 +359,12 @@ impl SessionStore {
     }
 
     /// Replace the entire session history with the given messages.
-    pub async fn replace_history(&self, key: &str, messages: Vec<serde_json::Value>) -> Result<()> {
-        let path = self.path_for(key);
+    pub async fn replace_history(
+        &self,
+        session_id: &str,
+        messages: Vec<serde_json::Value>,
+    ) -> Result<()> {
+        let path = self.path_for(session_id);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
             if let Some(parent) = path.parent() {
@@ -387,8 +391,8 @@ impl SessionStore {
     }
 
     /// Count messages in a session file without parsing them.
-    pub async fn count(&self, key: &str) -> Result<u32> {
-        let path = self.path_for(key);
+    pub async fn count(&self, session_id: &str) -> Result<u32> {
+        let path = self.path_for(session_id);
 
         tokio::task::spawn_blocking(move || -> Result<u32> {
             if !path.exists() {
@@ -507,7 +511,7 @@ mod tests {
 
         let results = store.search("hello", 10).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].session_key, "s1");
+        assert_eq!(results[0].session_id, "s1");
         assert_eq!(results[0].role, "user");
         assert!(results[0].snippet.contains("hello"));
     }
@@ -523,7 +527,7 @@ mod tests {
 
         let results = store.search("hello world", 10).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].session_key, "s1");
+        assert_eq!(results[0].session_id, "s1");
     }
 
     #[tokio::test]
@@ -593,7 +597,7 @@ mod tests {
 
         let results = store.search("rust", 10).await.unwrap();
         assert_eq!(results.len(), 2);
-        let keys: Vec<&str> = results.iter().map(|r| r.session_key.as_str()).collect();
+        let keys: Vec<&str> = results.iter().map(|r| r.session_id.as_str()).collect();
         assert!(keys.contains(&"s1"));
         assert!(keys.contains(&"s2"));
     }
@@ -654,10 +658,10 @@ mod tests {
         let (store, _dir) = temp_store();
 
         store
-            .append("session:abc-123", &json!({"role": "user"}))
+            .append("sess:abc-123", &json!({"role": "user"}))
             .await
             .unwrap();
-        let msgs = store.read("session:abc-123").await.unwrap();
+        let msgs = store.read("sess:abc-123").await.unwrap();
         assert_eq!(msgs.len(), 1);
     }
 
@@ -677,15 +681,30 @@ mod tests {
     async fn test_save_media_with_colon_key() {
         let (store, _dir) = temp_store();
         let data = b"screenshot bytes";
+        let session_id = "sess_0195f3c5b3d27d8aa91e4439bb3c2e74";
 
         let path = store
-            .save_media("session:abc", "shot.png", data)
+            .save_media(session_id, "shot.png", data)
             .await
             .unwrap();
-        assert_eq!(path, "media/session_abc/shot.png");
+        assert_eq!(path, format!("media/{session_id}/shot.png"));
 
-        let read_back = store.read_media("session:abc", "shot.png").await.unwrap();
+        let read_back = store.read_media(session_id, "shot.png").await.unwrap();
         assert_eq!(read_back, data);
+    }
+
+    #[tokio::test]
+    async fn filename_round_trips_opaque_session_id_without_rewriting() {
+        let (store, dir) = temp_store();
+        let session_id = "sess_0195f3c5b3d27d8aa91e4439bb3c2e74";
+
+        store
+            .append(session_id, &json!({"role": "user", "content": "hello"}))
+            .await
+            .unwrap();
+
+        assert!(dir.path().join(format!("{session_id}.jsonl")).exists());
+        assert_eq!(SessionStore::key_to_filename(session_id), session_id);
     }
 
     #[tokio::test]

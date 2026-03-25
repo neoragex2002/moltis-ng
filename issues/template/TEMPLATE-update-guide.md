@@ -9,6 +9,7 @@
 2) 再更新 **状态**（TODO → IN-PROGRESS → DONE）
    - 同步更新文档顶部的 `Updated: YYYY-MM-DD`（或 Status 区块的 `Updated:` 字段）
    - 若已标 `DONE`，`Updated` 必须体现最近完成/收口日期，不能留旧日期
+   - 同步勾选正文里对应的 checklist 项；禁止出现文首“已实现 / 已覆盖测试 / DONE”，但下方 TODO 仍停留未勾的漂移状态
 3) 最后更新 **交叉引用**（Doc/Index/Related issues）
 
 ### 0.1.1 时间字段纪律（强制）
@@ -40,6 +41,7 @@
 - 在“已覆盖测试”里追加：`path/to/test:line`
 当你发现非阻塞缺口：
 - 在“已知差异/后续优化”里追加（并说明不阻塞原因）
+- 若正文保留 Requirements / Acceptance / Test Plan / Close Checklist 等 checkbox 区块，必须在同一轮更新里同步勾掉已完成项；如果某区块只是历史快照又不打算维护勾选状态，就不要用 checkbox，改成普通 bullet
 
 ### 1.2 什么时候需要改 Spec
 - 只有当“原 Spec 被证明不对/不可行”或“需求变更”才改。
@@ -50,8 +52,9 @@
 ### 1.3 关单前的最小动作
 1) 勾完 `Close Checklist`
 2) 确认 `Updated` 已改到最近完成/收口日期，且“已实现”区块不存在无日期条目
-3) 在 Evidence 里补齐关键 `file:line`
-4) 如果缺自动化：写“手工验收步骤 + 原因 + 后续补测计划”
+3) 确认正文所有“已完成/已覆盖”的 checklist 都已同步勾选，未勾选项必须真的是残留缺口或未补证据
+4) 在 Evidence 里补齐关键 `file:line`
+5) 如果缺自动化：写“手工验收步骤 + 原因 + 后续补测计划”
 
 ---
 

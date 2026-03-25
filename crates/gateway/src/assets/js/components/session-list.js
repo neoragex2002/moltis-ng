@@ -28,8 +28,6 @@ var spinnerFrames = [
 // ── Helpers ──────────────────────────────────────────────────
 
 function isTelegramSession(s) {
-	var sessionId = s.sessionId || "";
-	if (sessionId.startsWith("telegram:")) return true;
 	var channel = s.channel || null;
 	if (!channel) return false;
 	return channel.type === "telegram";
@@ -48,7 +46,7 @@ function SessionIcon({ session, isBranch }) {
 		var sessionId = session.sessionId || "";
 		var icon;
 		if (isBranch) icon = makeBranchIcon();
-		else if (sessionId.startsWith("cron:")) icon = makeCronIcon();
+		else if (session.sessionKind === "system") icon = makeCronIcon();
 		else if (isTelegramSession(session)) icon = makeTelegramIcon();
 		else icon = makeChatIcon();
 		iconRef.current.appendChild(icon);
@@ -160,7 +158,7 @@ function SessionItem({ session, activeKey, depth, keyMap }) {
 			<div class="session-info">
 				<div class="session-label">
 					<${SessionIcon} session=${session} isBranch=${isBranch} />
-					<span data-label-text>${session.label || session.sessionId}</span>
+					<span data-label-text>${session.displayName || session.label || session.sessionId}</span>
 					${
 						ts > 0 &&
 						html`

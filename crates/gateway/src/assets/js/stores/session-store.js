@@ -12,7 +12,14 @@ export class Session {
 	constructor(serverData) {
 		// Server fields (plain properties, set on construction/update)
 		this.sessionId = serverData.sessionId;
+		this.sessionKey = serverData.sessionKey || "";
 		this.label = serverData.label || "";
+		this.displayName = serverData.displayName || serverData.label || serverData.sessionId || "";
+		this.sessionKind = serverData.sessionKind || "";
+		this.canRename = !!serverData.canRename;
+		this.canDelete = !!serverData.canDelete;
+		this.canFork = !!serverData.canFork;
+		this.canClear = !!serverData.canClear;
 		this.model = serverData.model || "";
 		this.provider = serverData.provider || "";
 		this.projectId = serverData.projectId || "";
@@ -59,7 +66,14 @@ export class Session {
 		var incoming = serverData.version || 0;
 		if (incoming > 0 && this.version > 0 && incoming < this.version) return false;
 		this.version = incoming || this.version;
+		this.sessionKey = serverData.sessionKey || "";
 		this.label = serverData.label || "";
+		this.displayName = serverData.displayName || serverData.label || serverData.sessionId || "";
+		this.sessionKind = serverData.sessionKind || "";
+		this.canRename = !!serverData.canRename;
+		this.canDelete = !!serverData.canDelete;
+		this.canFork = !!serverData.canFork;
+		this.canClear = !!serverData.canClear;
 		this.model = serverData.model || "";
 		this.provider = serverData.provider || "";
 		this.projectId = serverData.projectId || "";
@@ -114,7 +128,7 @@ export class Session {
 
 // ── Store signals ────────────────────────────────────────────
 export var sessions = signal([]);
-export var activeSessionId = signal(localStorage.getItem("moltis-sessionId") || "main");
+export var activeSessionId = signal(localStorage.getItem("moltis-sessionId") || "");
 export var switchInProgress = signal(false);
 
 export var activeSession = computed(() => {
@@ -191,7 +205,17 @@ export function getById(sessionId) {
 
 export function setActive(sessionId) {
 	activeSessionId.value = sessionId;
-	localStorage.setItem("moltis-sessionId", sessionId);
+	if (sessionId) {
+		localStorage.setItem("moltis-sessionId", sessionId);
+	} else {
+		localStorage.removeItem("moltis-sessionId");
+	}
+}
+
+export function defaultSessionId(list = sessions.value) {
+	var home = list.find((session) => session.sessionKind === "agent" && session.canClear);
+	if (home?.sessionId) return home.sessionId;
+	return list[0]?.sessionId || "";
 }
 
 export var sessionStore = {
@@ -205,5 +229,6 @@ export var sessionStore = {
 	fetch,
 	getById,
 	setActive,
+	defaultSessionId,
 	notify,
 };

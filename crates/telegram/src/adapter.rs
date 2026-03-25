@@ -35,9 +35,11 @@ pub struct TgContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TgPrivateSource {
     pub account_handle: String,
+    pub account_key: Option<String>,
     pub chat_id: String,
     pub message_id: Option<String>,
     pub thread_id: Option<String>,
+    pub reply_to_message_id: Option<String>,
     pub peer: String,
     pub sender: Option<String>,
     pub addressed: bool,
@@ -1079,9 +1081,79 @@ pub fn reply_target_ref_from_binding(binding: &str) -> Option<String> {
     reply_target_ref_from_inbound_target(&target)
 }
 
-pub fn session_key_from_binding(binding: &str) -> Option<String> {
+pub fn bucket_key_from_binding(binding: &str) -> Option<String> {
     let target = telegram_reply_target_from_binding(binding)?;
     target.bucket_key
+}
+
+pub fn tguser_key(telegram_user_id: u64) -> String {
+    format!("tguser.{telegram_user_id}")
+}
+
+pub fn tgchat_key(chat_id: &str) -> Option<String> {
+    let chat_id = chat_id.parse::<i64>().ok()?;
+    let chat_atom = if chat_id < 0 {
+        format!("n{}", chat_id.unsigned_abs())
+    } else {
+        chat_id.to_string()
+    };
+    Some(format!("tgchat.{chat_atom}"))
+}
+
+pub fn topic_key(thread_id: &str) -> String {
+    format!("topic.{thread_id}")
+}
+
+pub fn reply_key(message_id: &str) -> String {
+    format!("reply.{message_id}")
+}
+
+pub fn resolve_branch_key(
+    thread_id: Option<&str>,
+    reply_to_message_id: Option<&str>,
+) -> Option<String> {
+    thread_id
+        .filter(|value| !value.is_empty())
+        .map(topic_key)
+        .or_else(|| {
+            reply_to_message_id
+                .filter(|value| !value.is_empty())
+                .map(reply_key)
+        })
+}
+
+pub fn account_key_from_snapshot(snapshot: &TelegramBusAccountSnapshot) -> Option<String> {
+    snapshot.chan_user_id.map(tguser_key)
+}
+
+pub fn account_key_from_config(config: &TelegramAccountConfig) -> Option<String> {
+    config.chan_user_id.map(tguser_key)
+}
+
+pub fn resolve_person_or_tguser_key(
+    identity_links: &[TelegramIdentityLink],
+    telegram_user_id: Option<u64>,
+    telegram_user_name: Option<&str>,
+) -> Option<String> {
+    if let Some(telegram_user_id) = telegram_user_id {
+        if let Some((link, _)) =
+            tg_gst_v1_find_identity_link(identity_links, Some(telegram_user_id), None)
+        {
+            return Some(format!("person.{}", link.agent_id));
+        }
+        return Some(tguser_key(telegram_user_id));
+    }
+
+    let username = telegram_user_name.map(tg_gst_v1_normalize_username)?;
+    identity_links.iter().find_map(|link| {
+        (link
+            .telegram_user_name
+            .as_deref()
+            .map(tg_gst_v1_normalize_username)
+            .as_deref()
+            == Some(username.as_str()))
+        .then(|| format!("person.{}", link.agent_id))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1147,16 +1219,20 @@ pub fn resolve_group_bucket_route(
     let snapshot = snapshots
         .iter()
         .find(|snapshot| snapshot.account_handle == account_handle)?;
-    let sender = sender_account_key.map(|value| value.strip_prefix("telegram:").unwrap_or(value));
     Some(TgRoute {
-        peer: chat_id.to_string(),
-        sender: sender.map(str::to_string),
+        peer: tgchat_key(chat_id)?,
+        sender: sender_account_key
+            .and_then(|value| snapshots.iter().find(|snapshot| snapshot.account_handle == value))
+            .and_then(account_key_from_snapshot),
         bucket_key: resolve_group_bucket_key(
             &snapshot.group_scope,
-            &snapshot.account_handle,
-            chat_id,
-            sender,
-            thread_id,
+            account_key_from_snapshot(snapshot).as_deref(),
+            &tgchat_key(chat_id)?,
+            sender_account_key
+                .and_then(|value| snapshots.iter().find(|snapshot| snapshot.account_handle == value))
+                .and_then(account_key_from_snapshot)
+                .as_deref(),
+            resolve_branch_key(thread_id, None).as_deref(),
         ),
         addressed: true,
     })
@@ -1165,19 +1241,27 @@ pub fn resolve_group_bucket_route(
 pub fn resolve_tg_route(config: &TelegramAccountConfig, inbound: &TgInbound) -> TgRoute {
     let peer = inbound.private_source.peer.clone();
     let sender = inbound.private_source.sender.clone();
-    let branch = inbound.private_source.thread_id.as_deref();
+    let account_key = inbound
+        .private_source
+        .account_key
+        .clone()
+        .or_else(|| account_key_from_config(config));
+    let branch = resolve_branch_key(
+        inbound.private_source.thread_id.as_deref(),
+        inbound.private_source.reply_to_message_id.as_deref(),
+    );
     let bucket_key = match inbound.kind {
         TgInboundKind::Dm => resolve_dm_bucket_key(
             &config.dm_scope,
-            &inbound.private_source.account_handle,
+            account_key.as_deref(),
             &peer,
         ),
         TgInboundKind::Group => resolve_group_bucket_key(
             &config.group_scope,
-            &inbound.private_source.account_handle,
+            account_key.as_deref(),
             &peer,
             sender.as_deref(),
-            branch,
+            branch.as_deref(),
         ),
     };
 
@@ -1189,35 +1273,38 @@ pub fn resolve_tg_route(config: &TelegramAccountConfig, inbound: &TgInbound) -> 
     }
 }
 
-pub fn resolve_dm_bucket_key(dm_scope: &DmScope, account_handle: &str, peer: &str) -> String {
+pub fn resolve_dm_bucket_key(dm_scope: &DmScope, account_key: Option<&str>, peer: &str) -> String {
     match dm_scope {
-        DmScope::Main => "dm:main".to_string(),
-        DmScope::PerPeer => format!("dm:peer:{peer}"),
-        DmScope::PerChannel => format!("dm:channel:telegram:peer:{peer}"),
-        DmScope::PerAccount => format!("dm:account:{account_handle}:peer:{peer}"),
+        DmScope::Main => "dm-main".to_string(),
+        DmScope::PerPeer => format!("dm-peer-{peer}"),
+        DmScope::PerChannel => format!("dm-peer-{peer}-channel-telegram"),
+        DmScope::PerAccount => format!(
+            "dm-peer-{peer}-account-{}",
+            account_key.unwrap_or_default()
+        ),
     }
 }
 
 pub fn resolve_group_bucket_key(
     group_scope: &GroupScope,
-    account_handle: &str,
+    _account_key: Option<&str>,
     peer: &str,
     sender: Option<&str>,
     branch: Option<&str>,
 ) -> String {
-    let prefix = format!("group:account:{account_handle}:peer:{peer}");
+    let prefix = format!("group-peer-{peer}");
     match group_scope {
         GroupScope::Group => prefix,
         GroupScope::PerSender => sender
-            .map(|sender| format!("{prefix}:sender:{sender}"))
+            .map(|sender| format!("{prefix}-sender-{sender}"))
             .unwrap_or(prefix),
         GroupScope::PerBranch => branch
-            .map(|branch| format!("{prefix}:branch:{branch}"))
+            .map(|branch| format!("{prefix}-branch-{branch}"))
             .unwrap_or(prefix),
         GroupScope::PerBranchSender => match (branch, sender) {
-            (Some(branch), Some(sender)) => format!("{prefix}:branch:{branch}:sender:{sender}"),
-            (Some(branch), None) => format!("{prefix}:branch:{branch}"),
-            (None, Some(sender)) => format!("{prefix}:sender:{sender}"),
+            (Some(branch), Some(sender)) => format!("{prefix}-branch-{branch}-sender-{sender}"),
+            (Some(branch), None) => format!("{prefix}-branch-{branch}"),
+            (None, Some(sender)) => format!("{prefix}-sender-{sender}"),
             (None, None) => prefix,
         },
     }
@@ -1240,20 +1327,20 @@ mod tests {
     #[test]
     fn dm_bucket_key_follows_scope() {
         assert_eq!(
-            resolve_dm_bucket_key(&DmScope::Main, "telegram:a", "peer-1"),
-            "dm:main"
+            resolve_dm_bucket_key(&DmScope::Main, Some("tguser.8344017527"), "peer-1"),
+            "dm-main"
         );
         assert_eq!(
-            resolve_dm_bucket_key(&DmScope::PerPeer, "telegram:a", "peer-1"),
-            "dm:peer:peer-1"
+            resolve_dm_bucket_key(&DmScope::PerPeer, Some("tguser.8344017527"), "peer-1"),
+            "dm-peer-peer-1"
         );
         assert_eq!(
-            resolve_dm_bucket_key(&DmScope::PerChannel, "telegram:a", "peer-1"),
-            "dm:channel:telegram:peer:peer-1"
+            resolve_dm_bucket_key(&DmScope::PerChannel, Some("tguser.8344017527"), "peer-1"),
+            "dm-peer-peer-1-channel-telegram"
         );
         assert_eq!(
-            resolve_dm_bucket_key(&DmScope::PerAccount, "telegram:a", "peer-1"),
-            "dm:account:telegram:a:peer:peer-1"
+            resolve_dm_bucket_key(&DmScope::PerAccount, Some("tguser.8344017527"), "peer-1"),
+            "dm-peer-peer-1-account-tguser.8344017527"
         );
     }
 
@@ -1262,42 +1349,42 @@ mod tests {
         assert_eq!(
             resolve_group_bucket_key(
                 &GroupScope::PerSender,
-                "telegram:a",
+                Some("tguser.8344017527"),
                 "peer-1",
                 None,
                 Some("7"),
             ),
-            "group:account:telegram:a:peer:peer-1"
+            "group-peer-peer-1"
         );
         assert_eq!(
             resolve_group_bucket_key(
                 &GroupScope::PerBranch,
-                "telegram:a",
+                Some("tguser.8344017527"),
                 "peer-1",
                 Some("sender-1"),
                 None,
             ),
-            "group:account:telegram:a:peer:peer-1"
+            "group-peer-peer-1"
         );
         assert_eq!(
             resolve_group_bucket_key(
                 &GroupScope::PerBranchSender,
-                "telegram:a",
+                Some("tguser.8344017527"),
                 "peer-1",
                 Some("sender-1"),
                 None,
             ),
-            "group:account:telegram:a:peer:peer-1:sender:sender-1"
+            "group-peer-peer-1-sender-sender-1"
         );
         assert_eq!(
             resolve_group_bucket_key(
                 &GroupScope::PerBranchSender,
-                "telegram:a",
+                Some("tguser.8344017527"),
                 "peer-1",
                 None,
                 Some("7"),
             ),
-            "group:account:telegram:a:peer:peer-1:branch:7"
+            "group-peer-peer-1-branch-7"
         );
     }
 
@@ -1318,20 +1405,22 @@ mod tests {
             },
             private_source: TgPrivateSource {
                 account_handle: "telegram:test".into(),
+                account_key: Some("tguser.8344017527".into()),
                 chat_id: "-1001".into(),
                 message_id: Some("99".into()),
                 thread_id: Some("7".into()),
-                peer: "-1001".into(),
-                sender: Some("u-1".into()),
+                reply_to_message_id: Some("55".into()),
+                peer: "tgchat.n1001".into(),
+                sender: Some("tguser.1001".into()),
                 addressed: true,
             },
         };
         let route = resolve_tg_route(&config, &inbound);
-        assert_eq!(route.peer, "-1001");
-        assert_eq!(route.sender.as_deref(), Some("u-1"));
+        assert_eq!(route.peer, "tgchat.n1001");
+        assert_eq!(route.sender.as_deref(), Some("tguser.1001"));
         assert_eq!(
             route.bucket_key,
-            "group:account:telegram:test:peer:-1001:branch:7:sender:u-1"
+            "group-peer-tgchat.n1001-branch-topic.7-sender-tguser.1001"
         );
         assert!(route.addressed);
     }
@@ -1346,7 +1435,7 @@ mod tests {
         assert!(telegram_channel_binding_info(&binding).is_none());
         assert!(reply_target_ref_from_binding(&binding).is_none());
         assert!(channel_target_from_binding(&binding).is_none());
-        assert!(session_key_from_binding(&binding).is_none());
+        assert!(bucket_key_from_binding(&binding).is_none());
         assert_eq!(
             tg_gst_v1_system_prompt_block_for_binding(&binding, &[]),
             None
@@ -1361,7 +1450,7 @@ mod tests {
         assert!(telegram_channel_binding_info(&binding).is_none());
         assert!(reply_target_ref_from_binding(&binding).is_none());
         assert!(channel_target_from_binding(&binding).is_none());
-        assert!(session_key_from_binding(&binding).is_none());
+        assert!(bucket_key_from_binding(&binding).is_none());
     }
 
     #[test]
@@ -1380,13 +1469,13 @@ mod tests {
             account_key: "telegram:test".into(),
             chat_id: "-1001".into(),
             thread_id: Some("7".into()),
-            bucket_key: Some("group:account:telegram:test:peer:-1001:branch:7".into()),
+            bucket_key: Some("group-peer-tgchat.n1001-branch-topic.7".into()),
         };
 
         assert!(!telegram_binding_is_compatible_for_bucket(
             &binding,
             &expected,
-            "group:account:telegram:test:peer:-1001:branch:7"
+            "group-peer-tgchat.n1001-branch-topic.7"
         ));
     }
 

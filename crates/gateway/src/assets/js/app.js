@@ -41,8 +41,11 @@ import "./session-search.js";
 import "./time-format.js";
 
 function preferredChatPath() {
-	var sessionId = localStorage.getItem("moltis-sessionId") || "main";
-	return sessionPath(sessionId);
+	var storedSessionId = localStorage.getItem("moltis-sessionId") || "";
+	var sessionId = sessionStore.getById(storedSessionId)
+		? storedSessionId
+		: sessionStore.defaultSessionId();
+	return sessionId ? sessionPath(sessionId) : routes.chats;
 }
 
 // Redirect root to the active/default chat session.
@@ -294,6 +297,13 @@ function fetchBootstrap() {
 				sessionStore.setAll(bootSessions);
 				// Dual-write to state.js for backward compat
 				S.setSessions(bootSessions);
+				if (!sessionStore.activeSessionId.value) {
+					var defaultSessionId = sessionStore.defaultSessionId(bootSessions);
+					if (defaultSessionId) {
+						sessionStore.setActive(defaultSessionId);
+						S.setActiveSessionId(defaultSessionId);
+					}
+				}
 				renderSessionList();
 			}
 			if (boot.models) applyModels(boot.models);

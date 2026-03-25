@@ -73,8 +73,8 @@ var BASE_STEP_LABELS = ["Security", "Agent", "LLM", "Channel", "Summary"];
 var VOICE_STEP_LABELS = ["Security", "Agent", "LLM", "Voice", "Channel", "Summary"];
 
 function preferredChatPath() {
-	var sessionId = localStorage.getItem("moltis-sessionId") || "main";
-	return `/chats/${sessionId.replace(/:/g, "/")}`;
+	var sessionId = localStorage.getItem("moltis-sessionId") || "";
+	return sessionId ? `/chats/${sessionId.replace(/:/g, "/")}` : "/chats";
 }
 
 function ErrorPanel({ message }) {

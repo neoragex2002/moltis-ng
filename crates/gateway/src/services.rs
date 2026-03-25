@@ -288,6 +288,8 @@ impl AgentService for NoopAgentService {
 
 #[async_trait]
 pub trait SessionService: Send + Sync {
+    async fn home(&self) -> ServiceResult;
+    async fn create(&self, params: Value) -> ServiceResult;
     async fn list(&self) -> ServiceResult;
     async fn preview(&self, params: Value) -> ServiceResult;
     async fn resolve(&self, params: Value) -> ServiceResult;
@@ -306,6 +308,14 @@ pub struct NoopSessionService;
 
 #[async_trait]
 impl SessionService for NoopSessionService {
+    async fn home(&self) -> ServiceResult {
+        Ok(serde_json::json!({}))
+    }
+
+    async fn create(&self, _p: Value) -> ServiceResult {
+        Ok(serde_json::json!({}))
+    }
+
     async fn list(&self) -> ServiceResult {
         Ok(serde_json::json!([]))
     }

@@ -479,10 +479,10 @@ impl AgentTool for SandboxPackagesTool {
         let session_id = params
             .get("_sessionId")
             .and_then(|v| v.as_str())
-            .unwrap_or("main");
+            .ok_or_else(|| anyhow::anyhow!("missing '_sessionId' context"))?;
         let session_key = params.get("_sessionKey").and_then(|v| v.as_str());
 
-        if router.is_sandboxed(session_id).await
+        if router.is_sandboxed(session_id, session_key).await?
             && let Some(sandbox_pkgs) =
                 query_sandbox_packages(router, session_id, session_key).await
         {
@@ -534,7 +534,7 @@ mod tests {
             "imagemagick".into(),
         ]);
 
-        let result = tool.execute(json!({})).await.unwrap();
+        let result = tool.execute(json!({ "_sessionId": "sess_test" })).await.unwrap();
 
         assert_eq!(result["total"], 5);
 
@@ -564,7 +564,7 @@ mod tests {
             "python3-dev".into(),
         ]);
 
-        let result = tool.execute(json!({})).await.unwrap();
+        let result = tool.execute(json!({ "_sessionId": "sess_test" })).await.unwrap();
 
         // Only curl should remain (libvips-tools is filtered by is_infrastructure_package
         // because it starts with "lib")
@@ -582,7 +582,7 @@ mod tests {
             "another-tool".into(),
         ]);
 
-        let result = tool.execute(json!({})).await.unwrap();
+        let result = tool.execute(json!({ "_sessionId": "sess_test" })).await.unwrap();
 
         assert_eq!(result["total"], 3);
         let cats = result["categories"].as_object().unwrap();
@@ -596,14 +596,28 @@ mod tests {
     #[tokio::test]
     async fn test_no_sandbox_returns_error() {
         let tool = SandboxPackagesTool::new();
-        let result = tool.execute(json!({})).await.unwrap();
+        let result = tool.execute(json!({ "_sessionId": "sess_test" })).await.unwrap();
         assert_eq!(result["error"], "Sandbox is not enabled");
+    }
+
+    #[tokio::test]
+    async fn test_requires_session_id_when_router_present() {
+        let router = Arc::new(SandboxRouter::new(SandboxConfig {
+            packages: vec!["curl".into()],
+            ..Default::default()
+        }));
+        let tool = SandboxPackagesTool::new().with_sandbox_router(router);
+        let err = tool
+            .execute(json!({}))
+            .await
+            .expect_err("missing _sessionId must hard error");
+        assert!(err.to_string().contains("missing '_sessionId' context"));
     }
 
     #[tokio::test]
     async fn test_empty_packages() {
         let tool = make_tool(vec![]);
-        let result = tool.execute(json!({})).await.unwrap();
+        let result = tool.execute(json!({ "_sessionId": "sess_test" })).await.unwrap();
 
         assert_eq!(result["total"], 0);
         let cats = result["categories"].as_object().unwrap();

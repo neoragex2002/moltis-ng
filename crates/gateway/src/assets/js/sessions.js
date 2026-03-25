@@ -105,6 +105,23 @@ export function refreshActiveSession() {
 	});
 }
 
+function homeSessionId() {
+	return sessionStore.defaultSessionId();
+}
+
+function ensureHomeSession() {
+	return sendRpc("sessions.home", {}).then((res) => {
+		if (!(res?.ok && res.payload?.sessionId)) return null;
+		sessionStore.upsert(res.payload);
+		return res.payload.sessionId;
+	});
+}
+
+function isMissingSessionSwitchError(res) {
+	var message = res?.error?.message || "";
+	return message.includes("session resolve failed:") && message.includes("not found");
+}
+
 // ── Session list ─────────────────────────────────────────────
 // The Preact SessionList component is mounted once from app.js and
 // auto-rerenders from signals.  This function handles the imperative
@@ -174,63 +191,51 @@ export function seedSessionPreviewFromUserText(sessionId, text) {
 // ── New session button ──────────────────────────────────────
 var newSessionBtn = S.$("newSessionBtn");
 newSessionBtn.addEventListener("click", () => {
-	var sessionId = `session:${crypto.randomUUID()}`;
 	var filterId = projectStore.projectFilterId.value;
-	if (currentPrefix === "/chats") {
-		switchSession(sessionId, null, filterId || undefined);
-	} else {
-		navigate(sessionPath(sessionId));
-	}
+	var params = {};
+	if (filterId) params.projectId = filterId;
+	sendRpc("sessions.create", params).then((res) => {
+		if (!(res?.ok && res.payload?.sessionId)) return;
+		var sessionId = res.payload.sessionId;
+		sessionStore.upsert(res.payload);
+		if (currentPrefix === "/chats") {
+			switchSession(sessionId, null, filterId || undefined);
+		} else {
+			navigate(sessionPath(sessionId));
+		}
+	});
 });
 
 // ── Clear all sessions button ───────────────────────────────
 var clearAllBtn = S.$("clearAllSessionsBtn");
 
-/** Show the Clear button only when there are deletable (session:*) sessions. */
+/** Show the Clear button only when there are deletable agent sessions. */
 function updateClearAllVisibility() {
 	if (!clearAllBtn) return;
 	var allSessions = sessionStore.sessions.value;
-	var hasClearable = allSessions.some(
-		(s) =>
-			s.sessionId !== "main" &&
-			!s.sessionId.startsWith("cron:") &&
-			!s.sessionId.startsWith("telegram:") &&
-			!s.channel,
-	);
+	var hasClearable = allSessions.some((s) => s.canDelete && s.sessionKind === "agent");
 	clearAllBtn.classList.toggle("hidden", !hasClearable);
 }
 
 if (clearAllBtn) {
 	clearAllBtn.addEventListener("click", () => {
 		var allSessions = sessionStore.sessions.value;
-		var count = allSessions.filter(
-			(s) =>
-				s.sessionId !== "main" &&
-				!s.sessionId.startsWith("cron:") &&
-				!s.sessionId.startsWith("telegram:") &&
-				!s.channel,
-		).length;
+		var count = allSessions.filter((s) => s.canDelete && s.sessionKind === "agent").length;
 		if (count === 0) return;
-		confirmDialog(
-			`Delete ${count} session${count !== 1 ? "s" : ""}? Main, Telegram and cron sessions will be kept.`,
-		).then((yes) => {
+		confirmDialog(`Delete ${count} session${count !== 1 ? "s" : ""}?`).then((yes) => {
 			if (!yes) return;
 			clearAllBtn.disabled = true;
 			clearAllBtn.textContent = "Clearing\u2026";
-				sendRpc("sessions.clear_all", {}).then((res) => {
+			sendRpc("sessions.clear_all", {}).then((res) => {
 				clearAllBtn.disabled = false;
 				clearAllBtn.textContent = "Clear";
 				if (res?.ok) {
-					// If the active session was deleted, switch to main.
 					var active = sessionStore.getById(sessionStore.activeSessionId.value);
-					var wasKept =
-						!active ||
-						active.sessionId === "main" ||
-						active.sessionId.startsWith("cron:") ||
-						active.sessionId.startsWith("telegram:") ||
-						active.channel;
+					var wasKept = !active || !(active.canDelete && active.sessionKind === "agent");
 					if (!wasKept) {
-						switchSession("main");
+						ensureHomeSession().then((sessionId) => {
+							if (sessionId) switchSession(sessionId);
+						});
 					}
 					fetchSessions();
 				}
@@ -387,7 +392,7 @@ function renderHistoryToolResult(msg) {
 		// Render persisted screenshot from the media API.
 		if (msg.result.screenshot && !msg.result.screenshot.startsWith("data:")) {
 			var filename = msg.result.screenshot.split("/").pop();
-			var sessionId = S.activeSessionId || "main";
+			var sessionId = S.activeSessionId || homeSessionId();
 			var mediaSrc = `/api/sessions/${encodeURIComponent(sessionId)}/media/${encodeURIComponent(filename)}`;
 			renderScreenshot(card, mediaSrc);
 		}
@@ -534,6 +539,12 @@ function ensureSessionInClientStore(sessionId, entry, projectId) {
 }
 
 export function switchSession(sessionId, searchContext, projectId) {
+	if (!sessionId) {
+		ensureHomeSession().then((homeId) => {
+			if (homeId) switchSession(homeId, searchContext, projectId);
+		});
+		return;
+	}
 	sessionStore.setActive(sessionId);
 	// Dual-write to state.js for backward compat
 	S.setActiveSessionId(sessionId);
@@ -618,6 +629,13 @@ export function switchSession(sessionId, searchContext, projectId) {
 		} else {
 			sessionStore.switchInProgress.value = false;
 			S.setSessionSwitchInProgress(false);
+			if (isMissingSessionSwitchError(res)) {
+				sessionStore.setActive("");
+				S.setActiveSessionId("");
+				ensureHomeSession().then((homeId) => {
+					if (homeId) switchSession(homeId, searchContext, projectId);
+				});
+			}
 			if (S.chatInput) S.chatInput.focus();
 		}
 	});

@@ -436,30 +436,45 @@ pub async fn run_with_targeted_typing_loop<T>(
         }
     }
 
-    let operation = operation;
-    let typing_loop = async {
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (first_attempt_tx, first_attempt_rx) = tokio::sync::oneshot::channel::<()>();
+    let outbound_for_loop = std::sync::Arc::clone(&outbound);
+    let target_for_loop = target.clone();
+    let typing_task = tokio::spawn(async move {
         let mut typing_failed = false;
-        send_typing_once(&outbound, &target, op, &mut typing_failed).await;
-
-        let mut keepalive = tokio::time::interval_at(
-            tokio::time::Instant::now() + keepalive_interval,
-            keepalive_interval,
-        );
-        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
+        let mut send_immediately = true;
+        let mut first_attempt_tx = Some(first_attempt_tx);
         loop {
-            keepalive.tick().await;
-            send_typing_once(&outbound, &target, op, &mut typing_failed).await;
+            if !send_immediately {
+                let delay = tokio::time::sleep(keepalive_interval);
+                tokio::pin!(delay);
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    _ = &mut delay => {}
+                }
+            }
+            send_immediately = false;
+
+            let send_once = async {
+                if let Some(first_attempt_tx) = first_attempt_tx.take() {
+                    let _ = first_attempt_tx.send(());
+                }
+                send_typing_once(&outbound_for_loop, &target_for_loop, op, &mut typing_failed)
+                    .await;
+            };
+            tokio::pin!(send_once);
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = &mut send_once => {}
+            }
         }
-    };
+    });
 
-    tokio::pin!(operation);
-    tokio::pin!(typing_loop);
-
-    tokio::select! {
-        result = &mut operation => result,
-        _ = &mut typing_loop => unreachable!("telegram typing loop must stay pending until the operation completes"),
-    }
+    let _ = first_attempt_rx.await;
+    let result = operation.await;
+    let _ = stop_tx.send(());
+    let _ = typing_task.await;
+    result
 }
 
 pub fn spawn_targeted_typing_loop_until(
@@ -752,7 +767,7 @@ impl TelegramOutbound {
             source_username,
             source_sender_name,
             source_sender_id,
-            source_sender_token,
+            _source_sender_token,
             participants,
         ) = {
             let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
@@ -947,11 +962,13 @@ impl TelegramOutbound {
                 },
                 private_source: TgPrivateSource {
                     account_handle: target_account_handle.clone(),
+                    account_key: crate::adapter::account_key_from_config(&target_config),
                     chat_id: chat_id.to_string(),
                     message_id: Some(sent_message_id.to_string()),
                     thread_id: thread_id.map(str::to_string),
-                    peer: chat_id.to_string(),
-                    sender: source_sender_token.clone(),
+                    reply_to_message_id: None,
+                    peer: crate::adapter::tgchat_key(chat_id).unwrap_or_else(|| chat_id.to_string()),
+                    sender: source_sender_id.map(crate::adapter::tguser_key),
                     addressed: action.addressed,
                 },
             };

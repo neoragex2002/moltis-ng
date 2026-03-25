@@ -205,7 +205,8 @@ impl AgentTool for SpawnAgentTool {
         let session_id = params
             .get("_sessionId")
             .and_then(|v| v.as_str())
-            .unwrap_or("main");
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("spawn_agent requires _sessionId in tool context"))?;
 
         let agent_label = agent_id.unwrap_or("default");
         let canonical = build_canonical_system_prompt_v1(
@@ -345,7 +346,10 @@ mod tests {
             tool_registry,
         );
 
-        let params = serde_json::json!({ "task": "do something" });
+        let params = serde_json::json!({
+            "task": "do something",
+            "_sessionId": "sess_test",
+        });
         let result = spawn_tool.execute(params).await.unwrap();
 
         assert_eq!(result["text"], "Sub-agent result");
@@ -442,7 +446,10 @@ mod tests {
         let spawn_tool =
             SpawnAgentTool::new(make_empty_provider_registry(), provider, Arc::new(registry));
         let result = spawn_tool
-            .execute(serde_json::json!({ "task": "test" }))
+            .execute(serde_json::json!({
+                "task": "test",
+                "_sessionId": "sess_test",
+            }))
             .await
             .unwrap();
         assert_eq!(result["text"], "ok");
@@ -463,6 +470,7 @@ mod tests {
         let params = serde_json::json!({
             "task": "analyze code",
             "context": "The code is in src/main.rs",
+            "_sessionId": "sess_test",
         });
         let result = spawn_tool.execute(params).await.unwrap();
         assert_eq!(result["text"], "done with context");
@@ -483,5 +491,31 @@ mod tests {
         let result = spawn_tool.execute(serde_json::json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("task"));
+    }
+
+    #[tokio::test]
+    async fn test_requires_session_id_in_tool_context() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider {
+            response: "unused".into(),
+            model_id: "mock".into(),
+        });
+        let spawn_tool = SpawnAgentTool::new(
+            make_empty_provider_registry(),
+            provider,
+            Arc::new(ToolRegistry::new()),
+        );
+
+        let result = spawn_tool
+            .execute(serde_json::json!({
+                "task": "analyze code",
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("requires _sessionId")
+        );
     }
 }

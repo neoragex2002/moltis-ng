@@ -844,7 +844,12 @@ pub async fn run_agent_loop_with_context_prefix_and_hook_context(
         }
 
         let llm_context = crate::model::LlmRequestContext {
+            session_key: session_key_for_hooks
+                .clone()
+                .filter(|value| !value.is_empty()),
             session_id: (!session_id_for_hooks.is_empty()).then_some(session_id_for_hooks.clone()),
+            prompt_cache_key: (!session_id_for_hooks.is_empty())
+                .then_some(session_id_for_hooks.clone()),
             run_id: (!run_id_for_hooks.is_empty()).then_some(run_id_for_hooks.clone()),
         };
 
@@ -1420,7 +1425,12 @@ pub async fn run_agent_loop_streaming_with_prefix_and_hook_context(
         #[cfg(feature = "metrics")]
         let iter_start = std::time::Instant::now();
         let llm_context = crate::model::LlmRequestContext {
+            session_key: session_key_for_hooks
+                .clone()
+                .filter(|value| !value.is_empty()),
             session_id: (!session_id_for_hooks.is_empty()).then_some(session_id_for_hooks.clone()),
+            prompt_cache_key: (!session_id_for_hooks.is_empty())
+                .then_some(session_id_for_hooks.clone()),
             run_id: (!run_id_for_hooks.is_empty()).then_some(run_id_for_hooks.clone()),
         };
         let mut stream = provider.stream_with_tools_with_context(

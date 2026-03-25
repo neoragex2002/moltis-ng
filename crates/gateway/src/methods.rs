@@ -120,6 +120,7 @@ const READ_METHODS: &[&str] = &[
     "skills.security.scan",
     "voicewake.get",
     "sessions.list",
+    "sessions.home",
     "sessions.preview",
     "sessions.search",
     "sessions.branches",
@@ -204,6 +205,7 @@ const WRITE_METHODS: &[&str] = &[
     "channels.senders.approve",
     "channels.senders.deny",
     "sessions.switch",
+    "sessions.create",
     "sessions.fork",
     "sessions.clear_all",
     "projects.upsert",
@@ -1417,6 +1419,32 @@ impl MethodRegistry {
 
         // Sessions
         self.register(
+            "sessions.home",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    ctx.state
+                        .services
+                        .session
+                        .home()
+                        .await
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
+                })
+            }),
+        );
+        self.register(
+            "sessions.create",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    ctx.state
+                        .services
+                        .session
+                        .create(ctx.params.clone())
+                        .await
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
+                })
+            }),
+        );
+        self.register(
             "sessions.list",
             Box::new(|ctx| {
                 Box::pin(async move {
@@ -2303,29 +2331,14 @@ impl MethodRegistry {
                         .ok_or_else(|| {
                             ErrorShape::new(error_codes::INVALID_REQUEST, "missing sessionId")
                         })?;
+                    let project_id = ctx
+                        .params
+                        .get("projectId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
 
-                    // Store the active session (and project if provided) for this connection.
-                    {
-                        let mut inner = ctx.state.inner.write().await;
-                        inner
-                            .active_sessions
-                            .insert(ctx.client_conn_id.clone(), session_id.to_string());
-
-                        if let Some(project_id) =
-                            ctx.params.get("projectId").and_then(|v| v.as_str())
-                        {
-                            if project_id.is_empty() {
-                                inner.active_projects.remove(&ctx.client_conn_id);
-                            } else {
-                                inner
-                                    .active_projects
-                                    .insert(ctx.client_conn_id.clone(), project_id.to_string());
-                            }
-                        }
-                    }
-
-                    // Resolve first (auto-creates session if needed), then
-                    // persist project_id so the entry exists when we patch.
+                    // Resolve first so a failed switch cannot poison the
+                    // connection's active session/project state.
                     let result = ctx
                         .state
                         .services
@@ -2340,10 +2353,27 @@ impl MethodRegistry {
                             )
                         })?;
 
+                    {
+                        let mut inner = ctx.state.inner.write().await;
+                        inner
+                            .active_sessions
+                            .insert(ctx.client_conn_id.clone(), session_id.to_string());
+
+                        if let Some(project_id) = project_id.as_deref() {
+                            if project_id.is_empty() {
+                                inner.active_projects.remove(&ctx.client_conn_id);
+                            } else {
+                                inner
+                                    .active_projects
+                                    .insert(ctx.client_conn_id.clone(), project_id.to_string());
+                            }
+                        }
+                    }
+
                     // Mark the session as seen so unread state clears.
                     ctx.state.services.session.mark_seen(session_id).await;
 
-                    if let Some(pid) = ctx.params.get("projectId").and_then(|v| v.as_str()) {
+                    if let Some(pid) = project_id.as_deref() {
                         let _ = ctx
                             .state
                             .services
@@ -2550,7 +2580,9 @@ impl MethodRegistry {
                                     )),
                                 ];
                                 let llm_context = moltis_agents::model::LlmRequestContext {
-                                    session_id: Some(format!("tts.generate_phrase:{context}")),
+                                    session_key: None,
+                                    session_id: None,
+                                    prompt_cache_key: None,
                                     run_id: None,
                                 };
                                 let result = tokio::time::timeout(
@@ -5687,6 +5719,95 @@ mod tests {
 
     fn scopes(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    async fn sqlite_metadata() -> Arc<moltis_sessions::metadata::SqliteSessionMetadata> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+            .await
+            .unwrap();
+        Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(pool))
+    }
+
+    #[tokio::test]
+    async fn sessions_switch_does_not_poison_active_session_when_resolve_fails() {
+        let metadata = sqlite_metadata().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(moltis_sessions::store::SessionStore::new(
+            tmp.path().to_path_buf(),
+        ));
+
+        let mut services = crate::services::GatewayServices::noop()
+            .with_session_metadata(Arc::clone(&metadata))
+            .with_session_store(Arc::clone(&store));
+        services.session = Arc::new(crate::session::LiveSessionService::new(
+            Arc::clone(&store),
+            Arc::clone(&metadata),
+        ));
+
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            services,
+        );
+
+        {
+            let mut inner = state.inner.write().await;
+            inner
+                .active_sessions
+                .insert("conn-test".to_string(), "sess_old".to_string());
+            inner
+                .active_projects
+                .insert("conn-test".to_string(), "proj_old".to_string());
+        }
+
+        let registry = MethodRegistry::new();
+        let response = registry
+            .dispatch(MethodContext {
+                request_id: "req-1".to_string(),
+                method: "sessions.switch".to_string(),
+                params: serde_json::json!({
+                    "sessionId": "sess_missing",
+                    "projectId": "proj_new",
+                }),
+                client_conn_id: "conn-test".to_string(),
+                client_role: "operator".to_string(),
+                client_scopes: scopes(&["operator.write"]),
+                state: Arc::clone(&state),
+            })
+            .await;
+
+        assert!(!response.ok);
+        assert!(
+            response
+                .error
+                .as_ref()
+                .map(|err| err.message.contains("session resolve failed"))
+                .unwrap_or(false),
+            "expected resolve failure error, got: {:?}",
+            response.error
+        );
+
+        let inner = state.inner.read().await;
+        assert_eq!(
+            inner.active_sessions.get("conn-test").map(String::as_str),
+            Some("sess_old")
+        );
+        assert_eq!(
+            inner.active_projects.get("conn-test").map(String::as_str),
+            Some("proj_old")
+        );
     }
 
     #[test]

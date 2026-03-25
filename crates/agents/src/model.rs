@@ -314,7 +314,9 @@ pub enum StreamEvent {
 
 #[derive(Debug, Clone, Default)]
 pub struct LlmRequestContext {
+    pub session_key: Option<String>,
     pub session_id: Option<String>,
+    pub prompt_cache_key: Option<String>,
     pub run_id: Option<String>,
 }
 

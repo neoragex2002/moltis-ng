@@ -243,7 +243,6 @@ backend = "auto"                  # Container backend:
                                   #   "docker"          - Use Docker
 no_network = true                 # Disable network access in sandbox (recommended)
 # image = "custom-image:tag"      # Custom Docker image (default: auto-built)
-# container_prefix = "moltis"     # Prefix for container names
 
 # Additional host directory mounts (deny-by-default; Docker backend only for v1).
 # External mounts require an allowlist of permitted host roots.

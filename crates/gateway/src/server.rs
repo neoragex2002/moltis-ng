@@ -45,7 +45,8 @@ use moltis_tools::{
 use {
     moltis_projects::ProjectStore,
     moltis_sessions::{
-        metadata::{SessionMetadata, SqliteSessionMetadata},
+        SessionKey,
+        metadata::SqliteSessionMetadata,
         store::SessionStore,
     },
 };
@@ -272,7 +273,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
             .await?;
 
         // Create a pending invoke keyed by session.
-        let pending_key = format!("channel_location:{}", entry.key);
+        let pending_key = format!("channel_location:{}", entry.session_id);
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
             let mut inner = self.state.inner.write().await;
@@ -407,8 +408,90 @@ fn extract_yaml_frontmatter(content: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-fn sandbox_container_prefix(instance_slug: &str) -> String {
-    format!("moltis-{instance_slug}-sandbox")
+fn cron_session_bucket_key(target: &moltis_cron::types::SessionTarget) -> String {
+    match target {
+        moltis_cron::types::SessionTarget::Named(name) if name.trim() == "heartbeat" => {
+            "heartbeat".to_string()
+        },
+        moltis_cron::types::SessionTarget::Named(name) => {
+            let mut normalized = String::new();
+            let mut last_dash = false;
+            for ch in name.trim().chars() {
+                let mapped = if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '-'
+                };
+                if mapped == '-' {
+                    if !last_dash {
+                        normalized.push(mapped);
+                    }
+                    last_dash = true;
+                } else {
+                    normalized.push(mapped);
+                    last_dash = false;
+                }
+            }
+            let normalized = normalized.trim_matches('-');
+            if normalized.is_empty() {
+                "job".to_string()
+            } else {
+                format!("job-{normalized}")
+            }
+        },
+        _ => panic!("cron_session_bucket_key only supports named cron sessions"),
+    }
+}
+
+async fn resolve_home_session_id(state: &Arc<GatewayState>) -> anyhow::Result<String> {
+    let home = state
+        .services
+        .session
+        .home()
+        .await
+        .map_err(anyhow::Error::msg)?;
+    home.get("sessionId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("sessions.home returned no sessionId"))
+}
+
+async fn resolve_cron_runtime_session_id(
+    state: &Arc<GatewayState>,
+    target: &moltis_cron::types::SessionTarget,
+) -> anyhow::Result<String> {
+    match target {
+        moltis_cron::types::SessionTarget::Main => resolve_home_session_id(state).await,
+        moltis_cron::types::SessionTarget::Named(_) => {
+            let metadata = state
+                .services
+                .session_metadata
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("session metadata unavailable"))?;
+            let session_key = SessionKey::system("cron", &cron_session_bucket_key(target)).0;
+            if let Some(session_id) = metadata.get_active_session_id(&session_key).await
+                && metadata.get(&session_id).await.is_some()
+            {
+                return Ok(session_id);
+            }
+            let entry = metadata.create(&session_key, None).await?;
+            metadata
+                .set_active_session_id(&session_key, &entry.session_id)
+                .await;
+            Ok(entry.session_id)
+        },
+        moltis_cron::types::SessionTarget::Isolated => {
+            let metadata = state
+                .services
+                .session_metadata
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("session metadata unavailable"))?;
+            let opaque = uuid::Uuid::new_v4().simple().to_string();
+            let session_key = SessionKey::system("cron", &format!("job-{opaque}")).0;
+            let entry = metadata.create(&session_key, None).await?;
+            Ok(entry.session_id)
+        },
+    }
 }
 
 fn browser_container_prefix(instance_slug: &str) -> String {
@@ -933,7 +1016,6 @@ pub async fn start_gateway(
 
     let instance_slug_value = instance_slug(&config);
     let browser_container_prefix = browser_container_prefix(&instance_slug_value);
-    let sandbox_container_prefix = sandbox_container_prefix(&instance_slug_value);
 
     // CLI --no-tls / MOLTIS_NO_TLS overrides config file TLS setting.
     if no_tls {
@@ -1311,30 +1393,21 @@ pub async fn start_gateway(
         std::fs::rename(&projects_toml_path, &bak).ok();
     }
 
-    // Migrate from metadata.json if it exists.
     let sessions_dir = data_dir.join("sessions");
     let metadata_json_path = sessions_dir.join("metadata.json");
     if metadata_json_path.exists() {
-        info!("migrating metadata.json to SQLite");
-        if let Ok(old_meta) = SessionMetadata::load(metadata_json_path.clone()) {
-            let sqlite_meta = SqliteSessionMetadata::new(db_pool.clone());
-            for entry in old_meta.list() {
-                if let Err(e) = sqlite_meta.upsert(&entry.key, entry.label.clone()).await {
-                    tracing::warn!("failed to migrate session {}: {e}", entry.key);
-                }
-                if entry.model.is_some() {
-                    sqlite_meta.set_model(&entry.key, entry.model.clone()).await;
-                }
-                sqlite_meta.touch(&entry.key, entry.message_count).await;
-                if entry.project_id.is_some() {
-                    sqlite_meta
-                        .set_project_id(&entry.key, entry.project_id.clone())
-                        .await;
-                }
-            }
-        }
-        let bak = metadata_json_path.with_extension("json.bak");
-        std::fs::rename(&metadata_json_path, &bak).ok();
+        tracing::error!(
+            event = "sessions.metadata.reject_legacy_file",
+            path = %metadata_json_path.display(),
+            reason_code = "legacy_metadata_json_rejected",
+            decision = "reject",
+            remediation = "remove data/sessions/metadata.json and recreate sessions under the canonical sqlite contract",
+            "legacy metadata.json is no longer supported"
+        );
+        anyhow::bail!(
+            "legacy metadata.json is no longer supported: {}; remove it and recreate sessions under the canonical sqlite contract",
+            metadata_json_path.display()
+        );
     }
 
     // Wire stores.
@@ -1374,7 +1447,14 @@ pub async fn start_gateway(
         tokio::spawn(async move {
             if let Some(state) = st.get() {
                 let chat = state.chat().await;
-                let params = serde_json::json!({ "text": text });
+                let session_id = match resolve_home_session_id(state).await {
+                    Ok(session_id) => session_id,
+                    Err(e) => {
+                        tracing::error!("cron system event failed to resolve home session: {e}");
+                        return;
+                    },
+                };
+                let params = serde_json::json!({ "text": text, "_sessionId": session_id });
                 if let Err(e) = chat.send(params).await {
                     tracing::error!("cron system event failed: {e}");
                 }
@@ -1421,12 +1501,7 @@ pub async fn start_gateway(
             }
 
             let chat = state.chat().await;
-            let session_id = match &req.session_target {
-                moltis_cron::types::SessionTarget::Named(name) => {
-                    format!("cron:{name}")
-                },
-                _ => format!("cron:{}", uuid::Uuid::new_v4()),
-            };
+            let session_id = resolve_cron_runtime_session_id(state, &req.session_target).await?;
 
             // Clear session history for named cron sessions before execution
             // so the run starts fresh but the history remains readable for debugging.
@@ -1533,7 +1608,6 @@ pub async fn start_gateway(
     // Build sandbox router from config (shared across sessions).
     let mut sandbox_config =
         moltis_tools::sandbox::SandboxConfig::try_from(&config.tools.exec.sandbox)?;
-    sandbox_config.container_prefix = Some(sandbox_container_prefix);
     sandbox_config.timezone = moltis_config::load_user()
         .and_then(|u| u.timezone)
         .map(|tz| tz.name().to_string());
@@ -6427,5 +6501,19 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].0, "ops-bot");
         assert_eq!(accounts[0].1.token.expose_secret(), "123:ABC");
+    }
+
+    #[test]
+    fn cron_named_session_bucket_uses_canonical_system_job_prefix() {
+        assert_eq!(
+            cron_session_bucket_key(&moltis_cron::types::SessionTarget::Named(
+                "nightly-sync".into()
+            )),
+            "job-nightly-sync"
+        );
+        assert_eq!(
+            cron_session_bucket_key(&moltis_cron::types::SessionTarget::Named("heartbeat".into())),
+            "heartbeat"
+        );
     }
 }

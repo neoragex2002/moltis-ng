@@ -572,43 +572,40 @@ impl OpenAiResponsesProvider {
             return None;
         }
 
-        let session_id = ctx
-            .and_then(|c| c.session_id.as_deref())
+        let prompt_cache_key = ctx
+            .and_then(|c| c.prompt_cache_key.as_deref())
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        if let Some(session_id) = session_id {
-            return Some(self.prompt_cache_bucket_id(session_id));
+        if let Some(prompt_cache_key) = prompt_cache_key {
+            return Some(self.prompt_cache_bucket_id(prompt_cache_key));
         }
 
-        // Fallback: still send a deterministic key so Responses gateways that
-        // require `prompt_cache_key` don't reject context-less calls (e.g.
-        // model probes, or callers using `complete()` without context).
-        //
-        // This does not leak user/session identifiers and is stable across runs.
-        let fallback = format!("moltis:{}:{}:no-session", self.provider_name, self.model);
         debug!(
+            event = "provider.prompt_cache_key.omitted",
             provider = %self.provider_name,
             model = %self.model,
-            "prompt_cache enabled but no sessionId in request context; using fallback prompt_cache_key"
+            reason_code = "prompt_cache_key_missing",
+            decision = "omit",
+            "prompt_cache enabled but caller omitted prompt_cache_key; omitting southbound prompt cache"
         );
-        Some(self.prompt_cache_bucket_id(&fallback))
+        None
     }
 
-    fn prompt_cache_bucket_id(&self, session_key: &str) -> String {
+    fn prompt_cache_bucket_id(&self, bucket_key: &str) -> String {
         let Some(ref cfg) = self.prompt_cache else {
-            return session_key.to_string();
+            return bucket_key.to_string();
         };
 
         let should_hash = match cfg.bucket_hash {
             PromptCacheBucketHashConfig::Bool(force) => force,
-            PromptCacheBucketHashConfig::Mode(_) => session_key.as_bytes().len() > 64,
+            PromptCacheBucketHashConfig::Mode(_) => bucket_key.as_bytes().len() > 64,
         };
 
         if should_hash {
-            blake3::hash(session_key.as_bytes()).to_hex().to_string()
+            blake3::hash(bucket_key.as_bytes()).to_hex().to_string()
         } else {
-            session_key.to_string()
+            bucket_key.to_string()
         }
     }
 
@@ -1254,22 +1251,31 @@ impl LlmProvider for OpenAiResponsesProvider {
         let mut root = serde_json::Map::new();
 
         if self.is_prompt_cache_enabled() {
+            let session_key = ctx
+                .and_then(|c| c.session_key.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
             let session_id = ctx
                 .and_then(|c| c.session_id.as_deref())
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
-            let source = if session_id.is_some() {
-                "sessionId"
+            let prompt_cache_key = ctx
+                .and_then(|c| c.prompt_cache_key.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let source = if prompt_cache_key.is_some() && prompt_cache_key == session_id {
+                "session_id"
+            } else if prompt_cache_key.is_some() && prompt_cache_key == session_key {
+                "session_key"
+            } else if prompt_cache_key.is_some() {
+                "explicit"
             } else {
-                "fallback"
+                "omitted"
             };
-            let bucket_input = session_id.map_or_else(
-                || format!("moltis:{}:{}:no-session", self.provider_name, self.model),
-                ToString::to_string,
-            );
             let hashed = match self.prompt_cache.as_ref().map(|c| c.bucket_hash) {
                 Some(PromptCacheBucketHashConfig::Bool(force)) => force,
-                Some(PromptCacheBucketHashConfig::Mode(_)) => bucket_input.as_bytes().len() > 64,
+                Some(PromptCacheBucketHashConfig::Mode(_)) => prompt_cache_key
+                    .is_some_and(|value| value.as_bytes().len() > 64),
                 None => false,
             };
             root.insert(
@@ -1511,7 +1517,9 @@ mod tests {
 
         let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
         let ctx = LlmRequestContext {
+            session_key: Some("agent:zhuzhu:main".to_string()),
             session_id: Some("main".to_string()),
+            prompt_cache_key: Some("main".to_string()),
             run_id: None,
         };
 
@@ -1532,11 +1540,15 @@ mod tests {
 
         let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
         let ctx_a = LlmRequestContext {
+            session_key: Some("agent:zhuzhu:session-a".to_string()),
             session_id: Some("session:a".to_string()),
+            prompt_cache_key: Some("session:a".to_string()),
             run_id: None,
         };
         let ctx_b = LlmRequestContext {
+            session_key: Some("agent:zhuzhu:session-b".to_string()),
             session_id: Some("session:b".to_string()),
+            prompt_cache_key: Some("session:b".to_string()),
             run_id: None,
         };
 
@@ -1569,7 +1581,9 @@ mod tests {
         let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
         let session_key = "a".repeat(65);
         let ctx = LlmRequestContext {
+            session_key: Some("agent:zhuzhu:main".to_string()),
             session_id: Some(session_key.clone()),
+            prompt_cache_key: Some(session_key.clone()),
             run_id: None,
         };
 
@@ -1586,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn build_responses_body_uses_fallback_prompt_cache_key_when_context_missing() {
+    fn build_responses_body_omits_prompt_cache_key_when_context_missing() {
         let mut cfg = OpenAiResponsesPromptCacheConfig::default();
         cfg.enabled = true;
         cfg.bucket_hash = PromptCacheBucketHashConfig::Bool(false);
@@ -1599,9 +1613,9 @@ mod tests {
             false,
         );
 
-        assert_eq!(
-            body["prompt_cache_key"].as_str(),
-            Some("moltis:openai-responses:gpt-4o:no-session")
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "prompt_cache_key must be omitted when caller did not provide a canonical cache bucket"
         );
     }
 
@@ -1679,14 +1693,34 @@ mod tests {
 
         let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
         let ctx = LlmRequestContext {
+            session_key: Some("agent:zhuzhu:telegram".to_string()),
             session_id: Some("telegram:bot:123".to_string()),
+            prompt_cache_key: Some("telegram:bot:123".to_string()),
             run_id: None,
         };
         let dbg = provider.debug_request_overrides(Some(&ctx));
         assert_eq!(dbg["prompt_cache"]["enabled"].as_bool(), Some(true));
-        assert_eq!(dbg["prompt_cache"]["source"].as_str(), Some("sessionId"));
+        assert_eq!(dbg["prompt_cache"]["source"].as_str(), Some("session_id"));
         assert_eq!(dbg["prompt_cache"]["hashed"].as_bool(), Some(false));
         assert_eq!(dbg["prompt_cache_key"].as_str(), Some("telegram:bot:123"));
+    }
+
+    #[test]
+    fn debug_request_overrides_reports_prompt_cache_omission_when_context_missing() {
+        let mut cfg = OpenAiResponsesPromptCacheConfig::default();
+        cfg.enabled = true;
+        cfg.bucket_hash = PromptCacheBucketHashConfig::Bool(false);
+
+        let provider = test_provider_with_prompt_cache("https://api.example.com/v1", cfg);
+        let dbg = provider.debug_request_overrides(None);
+
+        assert_eq!(dbg["prompt_cache"]["enabled"].as_bool(), Some(true));
+        assert_eq!(dbg["prompt_cache"]["source"].as_str(), Some("omitted"));
+        assert_eq!(dbg["prompt_cache"]["hashed"].as_bool(), Some(false));
+        assert!(
+            dbg.get("prompt_cache_key").is_none(),
+            "debug payload must not invent fallback prompt_cache_key"
+        );
     }
 
     #[test]

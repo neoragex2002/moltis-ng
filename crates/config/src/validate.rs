@@ -182,7 +182,6 @@ fn build_schema_map() -> KnownKeys {
             ),
             ("mount_allowlist", Array(Box::new(Leaf))),
             ("image", Leaf),
-            ("container_prefix", Leaf),
             ("no_network", Leaf),
             ("backend", Leaf),
             ("resource_limits", resource_limits()),
@@ -1601,6 +1600,27 @@ scope_key = "session_id"
                 .iter()
                 .any(|d| { d.severity == Severity::Error && d.path == "tools.exec.sandbox.scope" }),
             "expected conflict error, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn legacy_sandbox_container_prefix_is_a_hard_error() {
+        let toml = r#"
+[tools.exec.sandbox]
+mode = "off"
+container_prefix = "legacy"
+"#;
+        let result = validate_toml_str(toml);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| {
+                    d.severity == Severity::Error
+                        && d.path == "tools.exec.sandbox.container_prefix"
+                }),
+            "legacy container_prefix must hard-fail: {:?}",
             result.diagnostics
         );
     }

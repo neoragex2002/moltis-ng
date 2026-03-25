@@ -20,6 +20,39 @@ test.describe("Session management", () => {
 		await expect(items).not.toHaveCount(0);
 	});
 
+	test("stale browser session id falls back to service-owned home session", async ({ page }) => {
+		const staleSessionId = "sess_stale_missing";
+		await page.addInitScript((sessionId) => {
+			localStorage.setItem("moltis-sessionId", sessionId);
+		}, staleSessionId);
+
+		const pageErrors = await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		await expect
+			.poll(
+				() =>
+					page.evaluate((oldId) => {
+						const store = window.__moltis_stores?.sessionStore;
+						if (!store) return false;
+						const activeSessionId = store.activeSessionId?.value || "";
+						const activeSession = store.getById?.(activeSessionId);
+						return (
+							activeSessionId.length > 0 &&
+							activeSessionId !== oldId &&
+							(localStorage.getItem("moltis-sessionId") || "") === activeSessionId &&
+							window.location.pathname === `/chats/${activeSessionId}` &&
+							activeSession?.displayName === "Main" &&
+							activeSession?.sessionKind === "agent"
+						);
+					}, staleSessionId),
+				{ timeout: 10_000 },
+			)
+			.toBe(true);
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("sessions sidebar uses search and add button row", async ({ page }) => {
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);

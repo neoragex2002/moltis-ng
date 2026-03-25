@@ -4,6 +4,7 @@
 - Status: [TODO|IN-PROGRESS|DONE|SURVEY]
 - Priority: [P0|P1|P2|P3]
 - Updated: <YYYY-MM-DD>（必填；每次增量更新都要改。若 `Status: DONE`，这里必须是本单最近完成/收口日期）
+- Checklist discipline: 每次增量更新除补“已实现 / 已覆盖测试”外，必须同步勾选正文里对应的 checklist；禁止出现文首已完成、正文 TODO 未更新的漂移
 - Owners: <人/组，可选>
 - Components: <gateway/agents/sessions/ui/telegram/...>
 - Affected providers/models: <如 openai-responses::gpt-5.2，可选>
@@ -125,11 +126,13 @@
 - 禁止打印字段清单：
 
 ## 验收标准（Acceptance Criteria）【不可省略】
+> 已完成项必须同步勾选；若本区块只想保留历史快照而不维护勾选状态，请改成普通 bullet，不要保留假 TODO。
 - [ ] <验收点1>
 - [ ] <验收点2>
 - [ ] <回归点>
 
 ## 测试计划（Test Plan）【不可省略】
+> 已完成且有证据的测试项必须同步勾选；未勾选项表示当前仍未补到自动化证据或手工验收说明。
 ### Unit
 - [ ] <test 名>：`path/to/file:line`
 

@@ -1,6 +1,6 @@
 //! Per-session key-value state store.
 //!
-//! Provides a SQLite-backed KV store scoped to `(session_key, namespace, key)`
+//! Provides a SQLite-backed KV store scoped to `(session_id, namespace, key)`
 //! so that skills and extensions can persist context across messages.
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -52,17 +52,17 @@ impl SessionStateStore {
         Self { pool }
     }
 
-    /// Get a value by session key, namespace, and key.
+    /// Get a value by session id, namespace, and key.
     pub async fn get(
         &self,
-        session_key: &str,
+        session_id: &str,
         namespace: &str,
         key: &str,
     ) -> Result<Option<String>> {
         let row = sqlx::query_scalar::<_, String>(
-            "SELECT value FROM session_state WHERE session_key = ? AND namespace = ? AND key = ?",
+            "SELECT value FROM session_state WHERE session_id = ? AND namespace = ? AND key = ?",
         )
-        .bind(session_key)
+        .bind(session_id)
         .bind(namespace)
         .bind(key)
         .fetch_optional(&self.pool)
@@ -73,20 +73,20 @@ impl SessionStateStore {
     /// Set a value. Inserts or updates the entry.
     pub async fn set(
         &self,
-        session_key: &str,
+        session_id: &str,
         namespace: &str,
         key: &str,
         value: &str,
     ) -> Result<()> {
         let now = now_ms();
         sqlx::query(
-            r#"INSERT INTO session_state (session_key, namespace, key, value, updated_at)
+            r#"INSERT INTO session_state (session_id, namespace, key, value, updated_at)
                VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(session_key, namespace, key) DO UPDATE SET
+               ON CONFLICT(session_id, namespace, key) DO UPDATE SET
                  value = excluded.value,
                  updated_at = excluded.updated_at"#,
         )
-        .bind(session_key)
+        .bind(session_id)
         .bind(namespace)
         .bind(key)
         .bind(value)
@@ -97,11 +97,11 @@ impl SessionStateStore {
     }
 
     /// Delete a single key.
-    pub async fn delete(&self, session_key: &str, namespace: &str, key: &str) -> Result<bool> {
+    pub async fn delete(&self, session_id: &str, namespace: &str, key: &str) -> Result<bool> {
         let result = sqlx::query(
-            "DELETE FROM session_state WHERE session_key = ? AND namespace = ? AND key = ?",
+            "DELETE FROM session_state WHERE session_id = ? AND namespace = ? AND key = ?",
         )
-        .bind(session_key)
+        .bind(session_id)
         .bind(namespace)
         .bind(key)
         .execute(&self.pool)
@@ -110,12 +110,12 @@ impl SessionStateStore {
     }
 
     /// List all entries in a namespace for a session.
-    pub async fn list(&self, session_key: &str, namespace: &str) -> Result<Vec<StateEntry>> {
+    pub async fn list(&self, session_id: &str, namespace: &str) -> Result<Vec<StateEntry>> {
         let rows = sqlx::query_as::<_, StateRow>(
             "SELECT namespace, key, value, updated_at FROM session_state \
-             WHERE session_key = ? AND namespace = ? ORDER BY key",
+             WHERE session_id = ? AND namespace = ? ORDER BY key",
         )
-        .bind(session_key)
+        .bind(session_id)
         .bind(namespace)
         .fetch_all(&self.pool)
         .await?;
@@ -123,10 +123,10 @@ impl SessionStateStore {
     }
 
     /// Delete all entries in a namespace for a session.
-    pub async fn delete_all(&self, session_key: &str, namespace: &str) -> Result<u64> {
+    pub async fn delete_all(&self, session_id: &str, namespace: &str) -> Result<u64> {
         let result =
-            sqlx::query("DELETE FROM session_state WHERE session_key = ? AND namespace = ?")
-                .bind(session_key)
+            sqlx::query("DELETE FROM session_state WHERE session_id = ? AND namespace = ?")
+                .bind(session_id)
                 .bind(namespace)
                 .execute(&self.pool)
                 .await?;
@@ -134,9 +134,9 @@ impl SessionStateStore {
     }
 
     /// Delete all state for a session (cascade on session delete).
-    pub async fn delete_session(&self, session_key: &str) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM session_state WHERE session_key = ?")
-            .bind(session_key)
+    pub async fn delete_session(&self, session_id: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM session_state WHERE session_id = ?")
+            .bind(session_id)
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected())
@@ -152,12 +152,12 @@ mod tests {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS session_state (
-                session_key TEXT NOT NULL,
+                session_id  TEXT NOT NULL,
                 namespace   TEXT NOT NULL,
                 key         TEXT NOT NULL,
                 value       TEXT NOT NULL,
                 updated_at  INTEGER NOT NULL,
-                PRIMARY KEY (session_key, namespace, key)
+                PRIMARY KEY (session_id, namespace, key)
             )"#,
         )
         .execute(&pool)
@@ -172,10 +172,10 @@ mod tests {
         let store = SessionStateStore::new(pool);
 
         store
-            .set("session:1", "my-skill", "count", "42")
+            .set("sess_1", "my-skill", "count", "42")
             .await
             .unwrap();
-        let val = store.get("session:1", "my-skill", "count").await.unwrap();
+        let val = store.get("sess_1", "my-skill", "count").await.unwrap();
         assert_eq!(val.as_deref(), Some("42"));
     }
 
@@ -184,7 +184,7 @@ mod tests {
         let pool = test_pool().await;
         let store = SessionStateStore::new(pool);
 
-        let val = store.get("session:1", "ns", "missing").await.unwrap();
+        let val = store.get("sess_1", "ns", "missing").await.unwrap();
         assert!(val.is_none());
     }
 
@@ -280,5 +280,17 @@ mod tests {
             store.get("s1", "ns-b", "key").await.unwrap().as_deref(),
             Some("val-b")
         );
+    }
+
+    #[tokio::test]
+    async fn table_schema_uses_session_id_not_session_key() {
+        let pool = test_pool().await;
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('session_state')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(columns.iter().any(|c| c == "session_id"));
+        assert!(!columns.iter().any(|c| c == "session_key"));
     }
 }

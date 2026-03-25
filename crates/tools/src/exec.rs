@@ -270,11 +270,11 @@ impl AgentTool for ExecTool {
         let session_id = params
             .get("_sessionId")
             .and_then(|v| v.as_str())
-            .unwrap_or("main");
+            .ok_or_else(|| anyhow::anyhow!("missing '_sessionId' context"))?;
         let session_key = params.get("_sessionKey").and_then(|v| v.as_str());
 
         let is_sandboxed = if let Some(ref router) = self.sandbox_router {
-            router.is_sandboxed(session_id).await
+            router.is_sandboxed(session_id, session_key).await?
         } else {
             self.sandbox_id.is_some()
         };
@@ -620,7 +620,10 @@ mod tests {
             ..Default::default()
         };
         let result = tool
-            .execute(serde_json::json!({ "command": "echo hello" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "echo hello"
+            }))
             .await
             .unwrap();
         assert_eq!(result["stdout"].as_str().unwrap().trim(), "hello");
@@ -635,7 +638,11 @@ mod tests {
             ..Default::default()
         };
         let result = tool
-            .execute(serde_json::json!({ "command": "pwd", "working_dir": "" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "pwd",
+                "working_dir": ""
+            }))
             .await
             .unwrap();
         assert_eq!(result["exit_code"], 0);
@@ -651,7 +658,10 @@ mod tests {
         let mut tool = ExecTool::default().with_approval(Arc::clone(&mgr), bc_dyn);
         tool.working_dir = Some(temp_dir.path().to_path_buf());
         let result = tool
-            .execute(serde_json::json!({ "command": "echo safe" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "echo safe"
+            }))
             .await
             .unwrap();
         assert_eq!(result["stdout"].as_str().unwrap().trim(), "safe");
@@ -681,7 +691,10 @@ mod tests {
         });
 
         let result = tool
-            .execute(serde_json::json!({ "command": "curl http://example.com" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "curl http://example.com"
+            }))
             .await;
         handle.await.unwrap();
         assert!(bc.called.load(Ordering::SeqCst));
@@ -706,7 +719,10 @@ mod tests {
         });
 
         let result = tool
-            .execute(serde_json::json!({ "command": "rm -rf /" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "rm -rf /"
+            }))
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("denied"));
@@ -725,7 +741,10 @@ mod tests {
         let mut tool = ExecTool::default().with_sandbox(sandbox, id);
         tool.working_dir = Some(temp_dir.path().to_path_buf());
         let result = tool
-            .execute(serde_json::json!({ "command": "echo sandboxed" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "echo sandboxed"
+            }))
             .await
             .unwrap();
         assert_eq!(result["stdout"].as_str().unwrap().trim(), "sandboxed");
@@ -770,7 +789,10 @@ mod tests {
         let mut tool = ExecTool::default().with_env_provider(provider);
         tool.working_dir = Some(temp_dir.path().to_path_buf());
         let result = tool
-            .execute(serde_json::json!({ "command": "echo $TEST_INJECTED" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "echo $TEST_INJECTED"
+            }))
             .await
             .unwrap();
         // The value is redacted in output.
@@ -784,7 +806,10 @@ mod tests {
         let mut tool = ExecTool::default().with_env_provider(provider);
         tool.working_dir = Some(temp_dir.path().to_path_buf());
         let result = tool
-            .execute(serde_json::json!({ "command": "echo $TEST_INJECTED | base64" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "echo $TEST_INJECTED | base64"
+            }))
             .await
             .unwrap();
         let stdout = result["stdout"].as_str().unwrap().trim();
@@ -801,7 +826,10 @@ mod tests {
         let mut tool = ExecTool::default().with_env_provider(provider);
         tool.working_dir = Some(temp_dir.path().to_path_buf());
         let result = tool
-            .execute(serde_json::json!({ "command": "printf '%s' \"$TEST_INJECTED\" | xxd -p" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "printf '%s' \"$TEST_INJECTED\" | xxd -p"
+            }))
             .await
             .unwrap();
         let stdout = result["stdout"].as_str().unwrap().trim();
@@ -819,6 +847,7 @@ mod tests {
         tool.working_dir = Some(temp_dir.path().to_path_buf());
         let result = tool
             .execute(serde_json::json!({
+                "_sessionId": "sess_test",
                 "command": "f=$(mktemp); echo $TEST_INJECTED > $f; cat $f; rm $f"
             }))
             .await
@@ -862,12 +891,30 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut tool = ExecTool::default().with_sandbox_router(router);
         tool.working_dir = Some(temp_dir.path().to_path_buf());
-        // No session key → defaults to "main", mode=Off → direct exec.
         let result = tool
-            .execute(serde_json::json!({ "command": "echo direct" }))
+            .execute(serde_json::json!({
+                "command": "echo direct",
+                "_sessionId": "sess_direct"
+            }))
             .await
             .unwrap();
         assert_eq!(result["stdout"].as_str().unwrap().trim(), "direct");
+    }
+
+    #[tokio::test]
+    async fn test_exec_tool_requires_session_id_context() {
+        use crate::sandbox::{NoSandbox, SandboxConfig, SandboxRouter};
+
+        let router = Arc::new(SandboxRouter::with_backend(
+            SandboxConfig::default(),
+            Arc::new(NoSandbox),
+        ));
+        let tool = ExecTool::default().with_sandbox_router(router);
+        let err = tool
+            .execute(serde_json::json!({ "command": "echo direct" }))
+            .await
+            .expect_err("missing _sessionId must hard error");
+        assert!(err.to_string().contains("missing '_sessionId' context"));
     }
 
     #[tokio::test]
@@ -930,7 +977,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             result["stdout"].as_str().unwrap().trim(),
-            "sandboxed:session-abc"
+            "sandboxed:msb-session-abc-a29d803b"
         );
     }
 
@@ -994,7 +1041,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             result["stdout"].as_str().unwrap().trim(),
-            "sandboxed:bucket-xyz"
+            "sandboxed:msb-bucket-xyz-d661be39"
         );
     }
 
@@ -1015,7 +1062,10 @@ mod tests {
         // No explicit working_dir — the tool must NOT default to /home/sandbox.
         let tool = ExecTool::default().with_sandbox_router(router);
         let result = tool
-            .execute(serde_json::json!({ "command": "echo works" }))
+            .execute(serde_json::json!({
+                "_sessionId": "sess_test",
+                "command": "echo works"
+            }))
             .await
             .unwrap();
         assert_eq!(result["stdout"].as_str().unwrap().trim(), "works");

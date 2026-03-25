@@ -131,7 +131,7 @@ impl ProcessTool {
         };
 
         if let Some(ref router) = self.sandbox_router {
-            let is_sandboxed = router.is_sandboxed(session_id).await;
+            let is_sandboxed = router.is_sandboxed(session_id, session_key).await?;
             if is_sandboxed {
                 let _lease = router.acquire_lease(session_id, session_key)?;
                 router.touch(session_id, session_key)?;
@@ -423,7 +423,7 @@ impl AgentTool for ProcessTool {
         let session_id = params
             .get("_sessionId")
             .and_then(|v| v.as_str())
-            .unwrap_or("main");
+            .ok_or_else(|| anyhow::anyhow!("missing '_sessionId' context"))?;
         let session_key = params.get("_sessionKey").and_then(|v| v.as_str());
 
         let action: ProcessAction = match serde_json::from_value(params.clone()) {
@@ -759,7 +759,7 @@ mod tests {
     async fn test_process_tool_invalid_params() {
         let tool = ProcessTool::new();
         let result = tool
-            .execute(serde_json::json!({ "action": "bogus" }))
+            .execute(serde_json::json!({ "_sessionId": "sess_test", "action": "bogus" }))
             .await
             .unwrap();
         assert!(!result["success"].as_bool().unwrap());
@@ -776,6 +776,7 @@ mod tests {
         let tool = ProcessTool::new();
         let result = tool
             .execute(serde_json::json!({
+                "_sessionId": "sess_test",
                 "action": "poll",
                 "session_name": "bad;name"
             }))
@@ -795,6 +796,7 @@ mod tests {
         let tool = ProcessTool::new();
         let result = tool
             .execute(serde_json::json!({
+                "_sessionId": "sess_test",
                 "action": "send_keys",
                 "session_name": "has space",
                 "keys": "Enter"
@@ -815,6 +817,7 @@ mod tests {
         let tool = ProcessTool::new();
         let result = tool
             .execute(serde_json::json!({
+                "_sessionId": "sess_test",
                 "action": "paste",
                 "session_name": "a|b",
                 "text": "hello"
@@ -835,6 +838,7 @@ mod tests {
         let tool = ProcessTool::new();
         let result = tool
             .execute(serde_json::json!({
+                "_sessionId": "sess_test",
                 "action": "kill",
                 "session_name": "$(whoami)"
             }))
@@ -856,7 +860,7 @@ mod tests {
         // the result is valid JSON with success or error.
         let tool = ProcessTool::new();
         let result = tool
-            .execute(serde_json::json!({ "action": "list" }))
+            .execute(serde_json::json!({ "_sessionId": "sess_test", "action": "list" }))
             .await
             .unwrap();
         // Should always return valid JSON with a success field.
@@ -867,7 +871,7 @@ mod tests {
     async fn test_process_tool_start_without_command() {
         let tool = ProcessTool::new();
         let result = tool
-            .execute(serde_json::json!({ "action": "start" }))
+            .execute(serde_json::json!({ "_sessionId": "sess_test", "action": "start" }))
             .await
             .unwrap();
         assert!(!result["success"].as_bool().unwrap());
@@ -877,5 +881,18 @@ mod tests {
                 .unwrap()
                 .contains("invalid parameters")
         );
+    }
+
+    #[tokio::test]
+    async fn test_process_tool_requires_session_id_context() {
+        let tool = ProcessTool::new();
+        let err = tool
+            .execute(serde_json::json!({
+                "_sessionId": serde_json::Value::Null,
+                "action": "list"
+            }))
+            .await
+            .expect_err("missing _sessionId must hard error");
+        assert!(err.to_string().contains("missing '_sessionId' context"));
     }
 }

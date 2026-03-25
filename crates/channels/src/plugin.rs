@@ -88,8 +88,8 @@ pub enum ChannelEvent {
 #[derive(Debug, Clone)]
 pub struct ChannelInboundContext {
     pub chan_type: ChannelType,
-    /// V3 cross-domain bridge key ("bucket key"). This is *not* a session id.
-    pub session_key: String,
+    /// Adapter-local route bucket. This is *not* a system-layer `session_key`.
+    pub bucket_key: String,
     /// Adapter-private opaque reference describing where to send replies.
     pub reply_target_ref: String,
     /// Adapter-private session-level binding blob (for session metadata persistence).
@@ -755,7 +755,7 @@ mod tests {
         let sink = DummySink;
         let ctx = ChannelInboundContext {
             chan_type: ChannelType::Telegram,
-            session_key: "test".into(),
+            bucket_key: "test".into(),
             reply_target_ref: "{}".into(),
             channel_binding: None,
         };

@@ -59,6 +59,7 @@
 - [Telegram Adapter Boundary](refactor/telegram-adapter-boundary.md)
 - [V3 Channel Info Exposure Boundary](refactor/channel-info-exposure-boundary.md)
 - [Session Scope Overview](refactor/session-scope-overview.md)
+- [Session Key / Bucket Key One-Cut](refactor/session-key-bucket-key-one-cut.md)
 - [Session Context Layering](refactor/session-context-layering.md)
 - [Session Event Canonical](refactor/session-event-canonical.md)
 - [DM Scope](refactor/dm-scope.md)

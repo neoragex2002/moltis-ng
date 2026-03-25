@@ -4,6 +4,7 @@ use {
     anyhow::{Context, Result},
     async_trait::async_trait,
     serde::{Deserialize, Serialize},
+    sha2::{Digest, Sha256},
     tokio::sync::RwLock,
     tracing::{debug, info, warn},
     walkdir::WalkDir,
@@ -600,6 +601,11 @@ impl TryFrom<&moltis_config::schema::SandboxConfig> for SandboxConfig {
                 "tools.exec.sandbox.scope is no longer supported; remove \"{scope}\" and use tools.exec.sandbox.scope_key"
             );
         }
+        if let Some(prefix) = cfg.container_prefix.as_deref() {
+            anyhow::bail!(
+                "tools.exec.sandbox.container_prefix is no longer supported; remove \"{prefix}\""
+            );
+        }
         Ok(Self {
             mode: match cfg.mode.as_str() {
                 "all" => SandboxMode::All,
@@ -643,7 +649,7 @@ impl TryFrom<&moltis_config::schema::SandboxConfig> for SandboxConfig {
                 .map(std::path::PathBuf::from)
                 .collect(),
             image: cfg.image.clone(),
-            container_prefix: cfg.container_prefix.clone(),
+            container_prefix: None,
             no_network: cfg.no_network,
             backend: cfg.backend.clone(),
             resource_limits: ResourceLimits {
@@ -949,14 +955,11 @@ impl DockerSandbox {
     }
 
     fn container_prefix(&self) -> &str {
-        self.config
-            .container_prefix
-            .as_deref()
-            .unwrap_or("moltis-sandbox")
+        "msb"
     }
 
     fn container_name(&self, id: &SandboxId) -> String {
-        format!("{}-{}", self.container_prefix(), id.key)
+        id.key.clone()
     }
 
     fn image_repo(&self) -> &str {
@@ -1573,12 +1576,7 @@ impl CgroupSandbox {
     }
 
     fn scope_name(&self, id: &SandboxId) -> String {
-        let prefix = self
-            .config
-            .container_prefix
-            .as_deref()
-            .unwrap_or("moltis-sandbox");
-        format!("{}-{}", prefix, id.key)
+        id.key.clone()
     }
 
     fn property_args(&self) -> Vec<String> {
@@ -1697,14 +1695,11 @@ impl AppleContainerSandbox {
     }
 
     fn container_prefix(&self) -> &str {
-        self.config
-            .container_prefix
-            .as_deref()
-            .unwrap_or("moltis-sandbox")
+        "msb"
     }
 
     fn base_container_name(&self, id: &SandboxId) -> String {
-        format!("{}-{}", self.container_prefix(), id.key)
+        id.key.clone()
     }
 
     async fn container_name(&self, id: &SandboxId) -> String {
@@ -2277,16 +2272,75 @@ pub enum SandboxEvent {
     ProvisionFailed { container: String, error: String },
 }
 
-fn sanitize_sandbox_key(key: &str) -> String {
-    key.chars()
+fn sanitize_readable_fragment(raw: &str) -> String {
+    let sanitized = raw
+        .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
             } else {
                 '-'
             }
         })
-        .collect()
+        .collect::<String>();
+    let compact = sanitized
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if compact.is_empty() {
+        "session".to_string()
+    } else {
+        compact
+    }
+}
+
+fn sandbox_readable_slice(effective_key: &str) -> String {
+    match moltis_sessions::SessionKey::parse(effective_key) {
+        Ok(moltis_sessions::key::ParsedSessionKey::Agent { agent_id, bucket_key }) => {
+            if bucket_key == "main" {
+                return sanitize_readable_fragment(&format!("agent-{agent_id}-main"));
+            }
+            if bucket_key.starts_with("chat-") {
+                return sanitize_readable_fragment(&format!("agent-{agent_id}-chat"));
+            }
+            if bucket_key.starts_with("dm-") {
+                return sanitize_readable_fragment(&format!("agent-{agent_id}-dm"));
+            }
+            if let Some(chat_suffix) = bucket_key.strip_prefix("group-peer-tgchat.n") {
+                let chat_id = chat_suffix
+                    .split('-')
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("group");
+                return sanitize_readable_fragment(&format!("agent-{agent_id}-group-{chat_id}"));
+            }
+            sanitize_readable_fragment(&format!("agent-{agent_id}-{bucket_key}"))
+        },
+        Ok(moltis_sessions::key::ParsedSessionKey::System {
+            service_id,
+            bucket_key,
+        }) => {
+            if service_id == "cron" && bucket_key == "heartbeat" {
+                return "system-cron-heartbeat".to_string();
+            }
+            if service_id == "cron" && bucket_key.starts_with("job-") {
+                return "system-cron-job".to_string();
+            }
+            sanitize_readable_fragment(&format!("system-{service_id}-{bucket_key}"))
+        },
+        Err(_) => sanitize_readable_fragment(effective_key),
+    }
+}
+
+fn sandbox_runtime_name(effective_key: &str) -> String {
+    let readable = sandbox_readable_slice(effective_key);
+    let hash = Sha256::digest(effective_key.as_bytes());
+    let short_hash = hash[..4]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("msb-{readable}-{short_hash}")
 }
 
 /// In-process lease guard for a sandbox key.
@@ -2378,15 +2432,31 @@ impl SandboxRouter {
 
     /// Check whether a session should run sandboxed.
     /// Per-session override takes priority, then falls back to global mode.
-    pub async fn is_sandboxed(&self, session_id: &str) -> bool {
+    pub async fn is_sandboxed(
+        &self,
+        session_id: &str,
+        session_key: Option<&str>,
+    ) -> Result<bool> {
         if let Some(&override_val) = self.overrides.read().await.get(session_id) {
-            return override_val;
+            return Ok(override_val);
         }
-        match self.config.mode {
+        Ok(match self.config.mode {
             SandboxMode::Off => false,
             SandboxMode::All => true,
-            SandboxMode::NonMain => session_id != "main",
-        }
+            SandboxMode::NonMain => {
+                let canonical_session_key = session_key
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("missing session_key for sandbox mode non-main")
+                    })?;
+                !matches!(
+                    moltis_sessions::SessionKey::parse(canonical_session_key),
+                    Ok(moltis_sessions::key::ParsedSessionKey::Agent { bucket_key, .. })
+                        if bucket_key == "main"
+                )
+            },
+        })
     }
 
     /// Set a per-session sandbox override.
@@ -2406,10 +2476,9 @@ impl SandboxRouter {
     /// The key is sanitized for use as a container name (only alphanumeric, dash, underscore, dot).
     pub fn sandbox_id_for(&self, session_id: &str, session_key: Option<&str>) -> Result<SandboxId> {
         let effective_key = self.effective_sandbox_key(session_id, session_key)?;
-        let sanitized = sanitize_sandbox_key(&effective_key);
         Ok(SandboxId {
             scope_key: self.config.scope_key.clone(),
-            key: sanitized,
+            key: sandbox_runtime_name(&effective_key),
         })
     }
 
@@ -2537,7 +2606,7 @@ impl SandboxRouter {
     pub async fn cleanup_effective_key(&self, effective_key: &str) -> Result<()> {
         let id = SandboxId {
             scope_key: self.config.scope_key.clone(),
-            key: sanitize_sandbox_key(effective_key),
+            key: sandbox_runtime_name(effective_key),
         };
         self.backend.cleanup(&id).await?;
         {
@@ -3306,24 +3375,23 @@ mod tests {
 
     #[test]
     fn test_docker_container_name() {
-        let config = SandboxConfig {
-            container_prefix: Some("my-prefix".into()),
-            ..Default::default()
-        };
-        let docker = DockerSandbox::new(config);
+        let docker = DockerSandbox::new(SandboxConfig::default());
         let id = SandboxId {
             scope_key: SandboxScopeKey::SessionId,
-            key: "abc123".into(),
+            key: "msb-agent-zhuzhu-main-deadbeef".into(),
         };
-        assert_eq!(docker.container_name(&id), "my-prefix-abc123");
+        assert_eq!(
+            docker.container_name(&id),
+            "msb-agent-zhuzhu-main-deadbeef"
+        );
     }
 
     #[tokio::test]
     async fn test_sandbox_router_default_all() {
         let config = SandboxConfig::default(); // mode = All
         let router = SandboxRouter::new(config);
-        assert!(router.is_sandboxed("main").await);
-        assert!(router.is_sandboxed("session:abc").await);
+        assert!(router.is_sandboxed("main", None).await.unwrap());
+        assert!(router.is_sandboxed("session:abc", None).await.unwrap());
     }
 
     #[tokio::test]
@@ -3333,8 +3401,8 @@ mod tests {
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
-        assert!(!router.is_sandboxed("main").await);
-        assert!(!router.is_sandboxed("session:abc").await);
+        assert!(!router.is_sandboxed("main", None).await.unwrap());
+        assert!(!router.is_sandboxed("session:abc", None).await.unwrap());
     }
 
     #[tokio::test]
@@ -3344,8 +3412,8 @@ mod tests {
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
-        assert!(router.is_sandboxed("main").await);
-        assert!(router.is_sandboxed("session:abc").await);
+        assert!(router.is_sandboxed("main", None).await.unwrap());
+        assert!(router.is_sandboxed("session:abc", None).await.unwrap());
     }
 
     #[tokio::test]
@@ -3355,8 +3423,42 @@ mod tests {
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
-        assert!(!router.is_sandboxed("main").await);
-        assert!(router.is_sandboxed("session:abc").await);
+        assert!(
+            !router
+                .is_sandboxed("sess_main", Some("agent:zhuzhu:main"))
+                .await
+                .expect("main bucket should not be sandboxed")
+        );
+        assert!(
+            router
+                .is_sandboxed("sess_branch", Some("agent:zhuzhu:chat-123"))
+                .await
+                .expect("chat bucket should be sandboxed")
+        );
+        assert!(
+            router
+                .is_sandboxed("sess_cron", Some("system:cron:heartbeat"))
+                .await
+                .expect("system bucket should be sandboxed")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_router_mode_non_main_requires_session_key() {
+        let config = SandboxConfig {
+            mode: SandboxMode::NonMain,
+            ..Default::default()
+        };
+        let router = SandboxRouter::new(config);
+        let err = router
+            .is_sandboxed("sess_missing", None)
+            .await
+            .expect_err("non-main mode must reject missing canonical session_key");
+        assert!(
+            err.to_string()
+                .contains("missing session_key for sandbox mode non-main"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[tokio::test]
@@ -3366,16 +3468,36 @@ mod tests {
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
-        assert!(!router.is_sandboxed("session:abc").await);
+        assert!(
+            !router
+                .is_sandboxed("session:abc", Some("agent:zhuzhu:chat-abc"))
+                .await
+                .unwrap()
+        );
 
         router.set_override("session:abc", true).await;
-        assert!(router.is_sandboxed("session:abc").await);
+        assert!(
+            router
+                .is_sandboxed("session:abc", Some("agent:zhuzhu:chat-abc"))
+                .await
+                .unwrap()
+        );
 
         router.set_override("session:abc", false).await;
-        assert!(!router.is_sandboxed("session:abc").await);
+        assert!(
+            !router
+                .is_sandboxed("session:abc", Some("agent:zhuzhu:chat-abc"))
+                .await
+                .unwrap()
+        );
 
         router.remove_override("session:abc").await;
-        assert!(!router.is_sandboxed("session:abc").await);
+        assert!(
+            !router
+                .is_sandboxed("session:abc", Some("agent:zhuzhu:chat-abc"))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -3385,11 +3507,21 @@ mod tests {
             ..Default::default()
         };
         let router = SandboxRouter::new(config);
-        assert!(router.is_sandboxed("main").await);
+        assert!(
+            router
+                .is_sandboxed("sess_main", Some("agent:zhuzhu:main"))
+                .await
+                .unwrap()
+        );
 
         // Override to disable sandbox for main
-        router.set_override("main", false).await;
-        assert!(!router.is_sandboxed("main").await);
+        router.set_override("sess_main", false).await;
+        assert!(
+            !router
+                .is_sandboxed("sess_main", Some("agent:zhuzhu:main"))
+                .await
+                .unwrap()
+        );
     }
 
     #[test]
@@ -3442,16 +3574,21 @@ mod tests {
 
     #[test]
     fn test_sandbox_router_sandbox_id_for() {
-        let config = SandboxConfig {
+        let session_id_router = SandboxRouter::new(SandboxConfig {
             scope_key: SandboxScopeKey::SessionId,
             ..Default::default()
-        };
-        let router = SandboxRouter::new(config);
-        let id = router.sandbox_id_for("session:abc", None).unwrap();
-        assert_eq!(id.key, "session-abc");
-        // Plain alphanumeric keys pass through unchanged.
-        let id2 = router.sandbox_id_for("main", None).unwrap();
-        assert_eq!(id2.key, "main");
+        });
+        let id = session_id_router.sandbox_id_for("session:abc", None).unwrap();
+        assert!(id.key.starts_with("msb-session-abc-"));
+
+        let session_key_router = SandboxRouter::new(SandboxConfig {
+            scope_key: SandboxScopeKey::SessionKey,
+            ..Default::default()
+        });
+        let id2 = session_key_router
+            .sandbox_id_for("sess_main", Some("agent:zhuzhu:main"))
+            .unwrap();
+        assert!(id2.key.starts_with("msb-agent-zhuzhu-main-"));
     }
 
     struct ConcurrencyDetectSandbox {
@@ -3585,6 +3722,21 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("tools.exec.sandbox.scope is no longer supported"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_runtime_config_rejects_legacy_container_prefix_field() {
+        let schema_cfg = moltis_config::schema::SandboxConfig {
+            container_prefix: Some("legacy".into()),
+            ..Default::default()
+        };
+        let err = SandboxConfig::try_from(&schema_cfg)
+            .expect_err("legacy container_prefix field must be rejected");
+        assert!(
+            err.to_string()
+                .contains("tools.exec.sandbox.container_prefix is no longer supported"),
             "unexpected error: {err:#}"
         );
     }
@@ -3910,7 +4062,7 @@ mod tests {
                 scope_key: SandboxScopeKey::SessionId,
                 key: "sess1".into(),
             };
-            assert_eq!(cgroup.scope_name(&id), "moltis-sandbox-sess1");
+            assert_eq!(cgroup.scope_name(&id), "sess1");
         }
 
         #[test]

@@ -17,7 +17,7 @@ function nextSessionKey(currentKey) {
 	var idx = allSessions.findIndex((x) => x.sessionId === currentKey);
 	if (idx >= 0 && idx + 1 < allSessions.length) return allSessions[idx + 1].sessionId;
 	if (idx > 0) return allSessions[idx - 1].sessionId;
-	return "main";
+	return sessionStore.defaultSessionId(allSessions);
 }
 
 export function SessionHeader() {
@@ -28,13 +28,13 @@ export function SessionHeader() {
 	var [clearing, setClearing] = useState(false);
 	var inputRef = useRef(null);
 
-	var fullName = session ? session.label || session.sessionId : currentKey;
+	var fullName = session ? session.displayName || session.label || session.sessionId : currentKey;
 	var displayName = fullName.length > 20 ? `${fullName.slice(0, 20)}\u2026` : fullName;
 
-	var isMain = currentKey === "main";
-	var isChannel = session?.channel || currentKey.startsWith("telegram:");
-	var isCron = currentKey.startsWith("cron:");
-	var canRename = !(isMain || isChannel || isCron);
+	var canRename = !!session?.canRename;
+	var canDelete = !!session?.canDelete;
+	var canFork = !!session?.canFork;
+	var canClear = !!session?.canClear;
 
 	var startRename = useCallback(() => {
 		if (!canRename) return;
@@ -135,7 +135,7 @@ export function SessionHeader() {
 					>${displayName}</span>`
 			}
 			${
-				!isCron &&
+				canFork &&
 				html`
 				<button class="chat-session-btn" onClick=${onFork} title="Fork session">
 					Fork
@@ -143,7 +143,7 @@ export function SessionHeader() {
 			`
 			}
 			${
-				isMain &&
+				canClear &&
 				html`
 				<button class="chat-session-btn" onClick=${onClear} title="Clear session" disabled=${clearing}>
 					${clearing ? "Clearing\u2026" : "Clear"}
@@ -151,7 +151,7 @@ export function SessionHeader() {
 			`
 			}
 			${
-				!(isMain || isCron) &&
+				canDelete &&
 				html`
 				<button class="chat-session-btn chat-session-btn-danger" onClick=${onDelete} title="Delete session">
 					Delete
