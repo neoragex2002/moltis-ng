@@ -1,0 +1,3017 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Session Key / Bucket Key One-Cut - Moltis Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/admonish.css">
+        <link rel="stylesheet" href="../theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Moltis Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/refactor/session-key-bucket-key-one-cut.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="session-key--bucket-key-one-cut-canonical-design"><a class="header" href="#session-key--bucket-key-one-cut-canonical-design">Session Key / Bucket Key One-Cut Canonical Design</a></h1>
+<p>更新时间：2026-03-25</p>
+<h2 id="1-目标与结论"><a class="header" href="#1-目标与结论">1. 目标与结论</a></h2>
+<p>本文只做一件事：</p>
+<ul>
+<li>一刀切冻结 <code>bucket_key</code>、<code>session_key</code>、<code>session_id</code>、<code>run_id</code> 的定义、分层、命名语法和示例</li>
+</ul>
+<p>本文是本轮 Session Key 专项治理的设计真源。<br />
+后续 issue、实现、测试、review，均以本文为唯一设计事实来源。</p>
+<p>若本文与旧 refactor 文档、旧 V3 issue、旧实现注释冲突：</p>
+<ul>
+<li>一律以本文为准</li>
+<li>旧文档与旧 issue 只作为历史背景和证据，不再与本文并列定义规则</li>
+<li>当前治理主单为：
+<ul>
+<li><code>issues/issue-session-key-bucket-key-runtime-and-telegram-one-cut.md</code></li>
+</ul>
+</li>
+</ul>
+<p>本文采用以下强约束：</p>
+<ul>
+<li>第一性原则：每个 key 只负责一个职责</li>
+<li>不后向兼容：旧格式直接淘汰，不保留 alias / fallback / silent degrade</li>
+<li>唯一事实来源：同一语义只允许一个权威 key</li>
+<li>收敛优先：不为未来预留多余命名空间，不把复杂度外溢到系统层</li>
+</ul>
+<p><strong>最终结论：</strong></p>
+<ol>
+<li>系统里只保留 4 个核心标识：
+<ul>
+<li><code>bucket_key</code></li>
+<li><code>session_key</code></li>
+<li><code>session_id</code></li>
+<li><code>run_id</code></li>
+</ul>
+</li>
+<li><code>session_key</code> 只分两大命名空间：
+<ul>
+<li><code>agent:&lt;agent_id&gt;:&lt;bucket_key&gt;</code></li>
+<li><code>system:&lt;service_id&gt;:&lt;bucket_key&gt;</code></li>
+</ul>
+</li>
+<li><code>session_id</code> 必须是 opaque 实例 id，不得再承载语义</li>
+<li><code>run_id</code> 必须是 opaque 执行 id，不得再冒充 session</li>
+<li>没有持久上下文复用需求的执行，不得再发明“execution-only session id”；这类执行只有 <code>run_id</code></li>
+<li>Telegram 适配层 <code>bucket_key</code> 必须 typed，且必须自描述；因为 Telegram 内部已经会单独存取它</li>
+<li><code>prompt_cache_key</code> 不是第 5 个 core runtime key；它只是 provider 南向缓存桶，由调用方显式决定，provider 不得自造 fallback</li>
+</ol>
+<h3 id="11-当前落地冻结2026-03-25"><a class="header" href="#11-当前落地冻结2026-03-25">1.1 当前落地冻结（2026-03-25）</a></h3>
+<p>本轮实现已经按本文冻结以下关键路径：</p>
+<ul>
+<li>Web 默认主会话只允许走服务端 owner path：
+<ul>
+<li><code>sessions.home</code></li>
+<li>例子：首屏无本地态时，服务端返回 <code>session_id = sess_0195f3c5b3d27d8aa91e4439bb3c2e74</code></li>
+</ul>
+</li>
+<li>Web 新建会话只允许走服务端 create path：
+<ul>
+<li><code>sessions.create</code></li>
+<li>例子：前端点击“New Chat”后，服务端返回 <code>session_id = sess_0195f3c5b3d27d8aa91e4439bb3c2e75</code></li>
+</ul>
+</li>
+<li>session-scoped consumer 缺失上下文时必须直接拒绝：
+<ul>
+<li>例子：<code>chat.send</code> / <code>chat.sendSync</code> / <code>exec</code> / <code>process</code> / <code>sandbox_packages</code> / <code>spawn_agent</code> 缺 <code>_sessionId</code> 时直接报错</li>
+</ul>
+</li>
+<li>channel <code>/new</code> 必须在原 canonical <code>session_key</code> 下创建新的 opaque session instance：
+<ul>
+<li>例子：旧实例 <code>sess_current</code></li>
+<li>例子：逻辑桶 <code>agent:zhuzhu:dm-peer-tguser.123-account-tguser.845</code></li>
+<li>例子：执行 <code>/new</code> 后新实例 <code>sess_0195f3c5b3d27d8aa91e4439bb3c2e88</code></li>
+</ul>
+</li>
+<li>sandbox runtime naming 固定为 canonical 派生名：
+<ul>
+<li>例子：<code>session_key = agent:zhuzhu:main</code></li>
+<li>例子：<code>effective_sandbox_key = agent:zhuzhu:main</code></li>
+<li>例子：<code>container_name = msb-agent-zhuzhu-main-7ab31c2d</code></li>
+</ul>
+</li>
+<li>Web/UI 会话展示名只允许由服务端计算：
+<ul>
+<li>例子：<code>displayName = Main</code></li>
+<li>例子：<code>displayName = TG @lovely_apple_bot · dm:123</code></li>
+<li>例子：<code>displayName = Heartbeat</code></li>
+</ul>
+</li>
+<li>用户配置层不再接受 <code>tools.exec.sandbox.container_prefix</code>
+<ul>
+<li>例子：模板里不再出现该字段；配置校验与运行时也不再把它当可配置项</li>
+</ul>
+</li>
+</ul>
+<hr />
+<h2 id="2-为什么必须重做"><a class="header" href="#2-为什么必须重做">2. 为什么必须重做</a></h2>
+<p>当前代码库已经出现三类混层：</p>
+<h3 id="21-session_id-被当成语义-key-使用"><a class="header" href="#21-session_id-被当成语义-key-使用">2.1 <code>session_id</code> 被当成语义 key 使用</a></h3>
+<p>代码现状里，下面这些都被当成 <code>session_id</code> 使用：</p>
+<ul>
+<li><code>main</code>：<code>crates/gateway/src/chat.rs:1930</code></li>
+<li><code>cron:&lt;name&gt;</code>：<code>crates/gateway/src/server.rs:1424</code></li>
+<li><code>probe:&lt;provider&gt;:&lt;model&gt;</code>：<code>crates/gateway/src/chat.rs:640</code></li>
+<li><code>models.test:&lt;model&gt;</code>：<code>crates/gateway/src/chat.rs:1697</code></li>
+<li><code>provider_setup:&lt;provider&gt;:&lt;model&gt;</code>：<code>crates/gateway/src/provider_setup.rs:1760</code></li>
+<li><code>tts.generate_phrase:&lt;context&gt;</code>：<code>crates/gateway/src/methods.rs:2553</code></li>
+</ul>
+<p>这不对。<br />
+<code>session_id</code> 的职责应该只是“当前会话实例是谁”，不应该携带“它属于哪个逻辑桶、哪个系统服务、哪个用途”。</p>
+<h3 id="22-telegram-bucket_key-被跨层当成-session_key"><a class="header" href="#22-telegram-bucket_key-被跨层当成-session_key">2.2 Telegram <code>bucket_key</code> 被跨层当成 <code>session_key</code></a></h3>
+<p>代码现状里：</p>
+<ul>
+<li>Telegram adapter 生成 <code>bucket_key</code>：<code>crates/telegram/src/adapter.rs:1192</code></li>
+<li>gateway 直接把它塞进 <code>session_key</code>：<code>crates/gateway/src/channel_events.rs:60</code></li>
+<li><code>ChannelInboundContext.session_key</code> 注释实际已承认这东西更接近 “bucket key”：<code>crates/channels/src/plugin.rs:91</code></li>
+</ul>
+<p>这意味着：</p>
+<ul>
+<li>adapter 层 <code>bucket_key</code></li>
+<li>系统层 <code>session_key</code></li>
+<li>会话实例层 <code>session_id</code></li>
+</ul>
+<p>三者已经塌成一团。</p>
+<h3 id="23-telegram-内部也会单独复用裸-bucket_key"><a class="header" href="#23-telegram-内部也会单独复用裸-bucket_key">2.3 Telegram 内部也会单独复用裸 <code>bucket_key</code></a></h3>
+<p>这也是为什么 Telegram <code>bucket_key</code> 不能是“只靠外围上下文才解释得通”的半成品。</p>
+<p>当前代码现状：</p>
+<ul>
+<li>callback 绑定表直接存裸 <code>bucket_key</code>：<code>crates/telegram/src/handlers.rs:67</code></li>
+<li>callback 回来直接取回裸 <code>bucket_key</code>：<code>crates/telegram/src/handlers.rs:3341</code></li>
+<li>adapter helper 直接比较 <code>bucket_key</code> 是否相等：<code>crates/telegram/src/adapter.rs:1106</code></li>
+<li>还有代码从 <code>bucket_key</code> 反解析 <code>sender</code>：<code>crates/telegram/src/handlers.rs:105</code></li>
+</ul>
+<p>所以，Telegram <code>bucket_key</code> 必须自描述，不能依赖系统层再帮它补 type。</p>
+<hr />
+<h2 id="3-核心分层"><a class="header" href="#3-核心分层">3. 核心分层</a></h2>
+<h3 id="31-bucket_key"><a class="header" href="#31-bucket_key">3.1 <code>bucket_key</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>某个“桶语义拥有者”产出的本地逻辑分桶键</li>
+</ul>
+<p><strong>职责：</strong></p>
+<ul>
+<li>回答“这条输入属于哪个逻辑桶”</li>
+</ul>
+<p><strong>不负责：</strong></p>
+<ul>
+<li>不负责表达会话实例</li>
+<li>不负责表达执行实例</li>
+<li>不负责跨全系统命名空间</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li>Agent 主会话 bucket：<code>main</code></li>
+<li>Agent 手工侧聊 bucket：<code>chat-01jv5n5x9x4m</code></li>
+<li>Telegram DM bucket：<code>dm-peer-person.neoragex2002</code></li>
+<li>Telegram Group bucket：<code>group-peer-tgchat.n1001234567890-branch-topic.42</code></li>
+<li>Cron heartbeat bucket：<code>heartbeat</code></li>
+<li>Cron job bucket：<code>job-01jv62d6h1k7</code></li>
+</ul>
+<h3 id="32-session_key"><a class="header" href="#32-session_key">3.2 <code>session_key</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>全系统唯一的“逻辑会话桶名”</li>
+</ul>
+<p><strong>职责：</strong></p>
+<ul>
+<li>回答“这个逻辑桶在系统里叫什么”</li>
+<li>作为 session-scoped sandbox / bucket-scoped policy / active-session 命中的权威名字</li>
+</ul>
+<p><strong>不负责：</strong></p>
+<ul>
+<li>不代表当前具体会话实例</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:main</code></li>
+<li><code>agent:zhuzhu:chat-01jv5n5x9x4m</code></li>
+<li><code>agent:zhuzhu:dm-peer-person.neoragex2002</code></li>
+<li><code>agent:zhuzhu:group-peer-tgchat.n1001234567890-sender-person.neoragex2002</code></li>
+<li><code>system:cron:heartbeat</code></li>
+<li><code>system:cron:job-01jv62d6h1k7</code></li>
+</ul>
+<h3 id="33-session_id"><a class="header" href="#33-session_id">3.3 <code>session_id</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>某个逻辑桶当前或历史上的具体会话实例 id</li>
+</ul>
+<p><strong>职责：</strong></p>
+<ul>
+<li>只回答“这次具体会话实例是谁”</li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li>必须 opaque</li>
+<li>不得携带业务语义</li>
+<li>不得再出现 <code>main</code> / <code>cron:*</code> / <code>session:*</code> / <code>provider_setup:*</code> 这类语义字符串</li>
+</ul>
+<p><strong>建议形态：</strong></p>
+<ul>
+<li><code>sess_&lt;opaque&gt;</code></li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e74</code></li>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e75</code></li>
+</ul>
+<h3 id="34-run_id"><a class="header" href="#34-run_id">3.4 <code>run_id</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>一次执行的实例 id</li>
+</ul>
+<p><strong>职责：</strong></p>
+<ul>
+<li>只回答“这一轮 run 是谁”</li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li>必须 opaque</li>
+<li>不得冒充 session</li>
+<li>不得携带 provider / tool / cron / tts 这类业务语义</li>
+</ul>
+<p><strong>建议形态：</strong></p>
+<ul>
+<li><code>run_&lt;opaque&gt;</code></li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>run_0195f3c5b3d27d8aa91e4439bb3c2e90</code></li>
+<li><code>run_0195f3c5b3d27d8aa91e4439bb3c2e91</code></li>
+</ul>
+<hr />
+<h2 id="4-权威映射关系"><a class="header" href="#4-权威映射关系">4. 权威映射关系</a></h2>
+<p>系统里只允许以下权威关系：</p>
+<h3 id="41-session_key---active-session_id"><a class="header" href="#41-session_key---active-session_id">4.1 <code>session_key -&gt; active session_id</code></a></h3>
+<p>含义：</p>
+<ul>
+<li>某个逻辑桶当前激活的会话实例是谁</li>
+</ul>
+<p>例子：</p>
+<ul>
+<li><code>agent:zhuzhu:main -&gt; sess_0195f3c5b3d27d8aa91e4439bb3c2e74</code></li>
+<li><code>agent:zhuzhu:group-peer-tgchat.n1001234567890 -&gt; sess_0195f3c5b3d27d8aa91e4439bb3c2e81</code></li>
+<li><code>system:cron:heartbeat -&gt; sess_0195f3c5b3d27d8aa91e4439bb3c2ea2</code></li>
+</ul>
+<h3 id="42-session_id---session-metadata"><a class="header" href="#42-session_id---session-metadata">4.2 <code>session_id -&gt; session metadata</code></a></h3>
+<p>含义：</p>
+<ul>
+<li>某个具体会话实例的元数据、历史、绑定、分支、工作区、sandbox image 等</li>
+</ul>
+<p>例子：</p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e74 -&gt; { label, model, project, worktree, ... }</code></li>
+</ul>
+<h3 id="43-run_id---ephemeral-run-state"><a class="header" href="#43-run_id---ephemeral-run-state">4.3 <code>run_id -&gt; ephemeral run state</code></a></h3>
+<p>含义：</p>
+<ul>
+<li>某一轮执行过程中的临时状态</li>
+</ul>
+<p>例子：</p>
+<ul>
+<li><code>run_0195f3c5b3d27d8aa91e4439bb3c2e90 -&gt; tool status / stream state / metrics</code></li>
+</ul>
+<h3 id="44-明确禁止的权威关系"><a class="header" href="#44-明确禁止的权威关系">4.4 明确禁止的权威关系</a></h3>
+<p>以下都不得再作为系统真值：</p>
+<ul>
+<li><code>channel_type + account_handle + chat_id -&gt; session_id</code></li>
+<li><code>channel_type + bucket_key -&gt; session_id</code></li>
+<li>“把语义型 <code>session_id</code> 当成 <code>session_key</code>”</li>
+<li>“把 <code>run_id</code> 当成 <code>session_id</code>”</li>
+</ul>
+<p>这些都属于当前 legacy 技术债，必须在专项治理中切掉。</p>
+<h3 id="45-持久化与运行时合同冻结目标"><a class="header" href="#45-持久化与运行时合同冻结目标">4.5 持久化与运行时合同（冻结目标）</a></h3>
+<p>仅有“逻辑关系正确”还不够。<br />
+本专项还必须把持久化与运行时 API 的目标形状一起钉死，否则后续实现会继续在
+<code>session_key</code> / <code>session_id</code> 之间反复返工。</p>
+<h4 id="451-active_sessions"><a class="header" href="#451-active_sessions">4.5.1 <code>active_sessions</code></a></h4>
+<p>用途：</p>
+<ul>
+<li>承载全系统唯一真值：<code>session_key -&gt; active session_id</code></li>
+</ul>
+<p>推荐形状：</p>
+<ul>
+<li><code>active_sessions(session_key PRIMARY KEY, session_id, updated_at)</code></li>
+</ul>
+<p>例子：</p>
+<ul>
+<li><code>agent:zhuzhu:main -&gt; sess_0195f3c5b3d27d8aa91e4439bb3c2e74</code></li>
+<li><code>agent:zhuzhu:dm-peer-person.neoragex2002 -&gt; sess_0195f3c5b3d27d8aa91e4439bb3c2e81</code></li>
+<li><code>system:cron:heartbeat -&gt; sess_0195f3c5b3d27d8aa91e4439bb3c2ea2</code></li>
+</ul>
+<p>强约束：</p>
+<ul>
+<li>所有 active-session 读写都只能经过这条映射</li>
+<li><code>channel_sessions</code></li>
+<li><code>session_buckets</code></li>
+</ul>
+<p>以上 legacy 表/映射不得再参与主路径判定</p>
+<h4 id="452-sessions"><a class="header" href="#452-sessions">4.5.2 <code>sessions</code></a></h4>
+<p>用途：</p>
+<ul>
+<li>承载 <code>session_id -&gt; session metadata</code></li>
+</ul>
+<p>推荐形状：</p>
+<ul>
+<li><code>sessions(session_id PRIMARY KEY, session_key, label, model, project_id, ..., parent_session_id, channel_binding, updated_at, ...)</code></li>
+</ul>
+<p>例子：</p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e74 -&gt; { session_key: "agent:zhuzhu:main", label: "Main", model: "gpt-5.2", project_id: "proj_alpha" }</code></li>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e81 -&gt; { session_key: "agent:zhuzhu:group-peer-tgchat.n1001234567890", channel_binding: "{...}", parent_session_id: "sess_0195f3c5b3d27d8aa91e4439bb3c2e74" }</code></li>
+</ul>
+<p>强约束：</p>
+<ul>
+<li><code>session_id</code> 是这张表唯一实例标识</li>
+<li><code>session_key</code> 必须作为该实例所属逻辑桶显式持久化</li>
+<li>hooks、session management、sandbox <code>scope_key=session_key</code>、channel observability 需要从这里读取实例归属的 <code>session_key</code></li>
+<li>不允许继续保留 <code>key</code> / <code>id</code> 双 id 语义</li>
+<li>不允许 <code>SessionEntry.key = session_id</code>、<code>SessionEntry.id = 冗余副本</code> 这种双写模型</li>
+<li><code>parent_session_key</code> 必须硬切成 <code>parent_session_id</code></li>
+</ul>
+<h4 id="453-session_state"><a class="header" href="#453-session_state">4.5.3 <code>session_state</code></a></h4>
+<p>用途：</p>
+<ul>
+<li>承载“会话实例级状态”</li>
+</ul>
+<p>推荐形状：</p>
+<ul>
+<li><code>session_state(session_id, namespace, key, value, updated_at)</code></li>
+</ul>
+<p>例子：</p>
+<ul>
+<li><code>(sess_0195f3c5b3d27d8aa91e4439bb3c2e74, "calendar", "last_city") -&gt; "Shanghai"</code></li>
+</ul>
+<p>强约束：</p>
+<ul>
+<li>这是实例级状态，不是逻辑桶共享状态</li>
+<li>因此它必须按 <code>session_id</code> 建模</li>
+<li><code>session_state.session_key</code> 属于必须切掉的旧形状</li>
+</ul>
+<h4 id="454-session_store--media-store"><a class="header" href="#454-session_store--media-store">4.5.4 <code>session_store</code> / media store</a></h4>
+<p>用途：</p>
+<ul>
+<li>承载会话实例历史</li>
+<li>承载会话实例媒体目录</li>
+<li>承载 session search 命中结果</li>
+</ul>
+<p>推荐形状：</p>
+<ul>
+<li><code>SessionStore(session_id)</code></li>
+<li><code>media/&lt;session_id&gt;/&lt;filename&gt;</code></li>
+<li><code>SearchResult { session_id, snippet, role, message_index }</code></li>
+</ul>
+<p>例子：</p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e74.jsonl</code></li>
+<li><code>media/sess_0195f3c5b3d27d8aa91e4439bb3c2e74/run_0195f3c5b3d27d8aa91e4439bb3c2e90.ogg</code></li>
+</ul>
+<p>强约束：</p>
+<ul>
+<li><code>SessionStore</code> 只允许按 <code>session_id</code> 读写</li>
+<li>文件名与媒体目录必须直接使用原始 <code>session_id</code></li>
+<li>不得再使用 <code>:</code> ↔ <code>_</code> 这类基于分隔符猜测的可逆伪编码</li>
+<li><code>search()</code> / <code>list_keys()</code> / media path 返回的都必须是原始 <code>session_id</code></li>
+</ul>
+<p>原因：</p>
+<ul>
+<li><code>session_id</code> 已经是 opaque 且文件系统安全的实例标识</li>
+<li>当前 <code>:</code> ↔ <code>_</code> 方案会把 <code>sess_&lt;opaque&gt;</code> 误反解成 <code>sess:&lt;opaque&gt;</code>，直接破坏实例 id</li>
+</ul>
+<h4 id="455-运行时-api-目标"><a class="header" href="#455-运行时-api-目标">4.5.5 运行时 API 目标</a></h4>
+<p>运行时 owner API 也必须跟着同构收口：</p>
+<ul>
+<li><code>get_session(session_id)</code>：按实例读取 metadata</li>
+<li><code>create_session(session_key, ...) -&gt; session_id</code>：由服务端创建实例并返回实例 id</li>
+<li><code>update_session(session_id, ...)</code>：按实例更新 metadata</li>
+<li><code>get_active_session_id(session_key)</code>：按逻辑桶读取当前实例</li>
+<li><code>set_active_session_id(session_key, session_id)</code>：按逻辑桶写当前实例</li>
+</ul>
+<p>例子：</p>
+<ul>
+<li>
+<p>Telegram inbound 已经算出：</p>
+<ul>
+<li><code>bucket_key = group-peer-tgchat.n1001234567890</code></li>
+<li><code>session_key = agent:zhuzhu:group-peer-tgchat.n1001234567890</code></li>
+</ul>
+</li>
+<li>
+<p>此时系统主路径只允许：</p>
+<ul>
+<li>先查 <code>get_active_session_id(session_key)</code></li>
+<li>命中则得到 <code>sess_...</code></li>
+<li>未命中则新建 <code>sess_...</code>，随后 <code>set_active_session_id(session_key, sess_...)</code></li>
+</ul>
+</li>
+<li>
+<p>Web UI 用户点击“新会话”：</p>
+<ul>
+<li>客户端不得本地生成 <code>session:uuid</code></li>
+<li>客户端必须请求服务端 owner create path（例如 <code>sessions.create</code>）</li>
+<li>服务端内部决定：
+<ul>
+<li><code>session_key = agent:zhuzhu:chat-01jv5n5x9x4m</code></li>
+</ul>
+</li>
+<li>服务端返回：
+<ul>
+<li><code>session_id = sess_0195f3c5b3d27d8aa91e4439bb3c2e74</code></li>
+<li><code>session_key = agent:zhuzhu:chat-01jv5n5x9x4m</code></li>
+</ul>
+</li>
+<li>此后 UI/Session RPC 一律只携带 <code>session_id</code></li>
+</ul>
+</li>
+</ul>
+<p>不允许再走：</p>
+<ul>
+<li><code>get_active_session_id(channel_type, account_handle, chat_id)</code></li>
+<li><code>get_bucket_session_id(channel_type, bucket_key)</code></li>
+</ul>
+<h4 id="456-web--session-管理合同"><a class="header" href="#456-web--session-管理合同">4.5.6 Web / Session 管理合同</a></h4>
+<p>Web/session management 是实例视角，不是逻辑桶视角。</p>
+<p>因此：</p>
+<ul>
+<li><code>sessions.list</code></li>
+<li><code>sessions.resolve</code></li>
+<li><code>sessions.preview</code></li>
+<li><code>sessions.patch</code></li>
+<li><code>sessions.reset</code></li>
+<li><code>sessions.delete</code></li>
+<li><code>sessions.fork</code></li>
+<li><code>sessions.branches</code></li>
+<li><code>sessions.search</code></li>
+</ul>
+<p>以上合同都必须以 <code>session_id</code> 为主标识。</p>
+<p>强约束：</p>
+<ul>
+<li>客户端不得再本地生成 <code>session_id</code></li>
+<li>客户端不得再把 <code>main</code>、<code>session:&lt;uuid&gt;</code>、<code>telegram:*</code>、<code>cron:*</code> 当作 UI 主标识规则</li>
+<li><code>sessions.resolve</code> 只负责“按 <code>session_id</code> 读取实例”</li>
+<li>Web 新建会话必须走服务端 owner create path（例如 <code>sessions.create</code>）</li>
+<li>新实例创建必须走服务端 owner create path，不得复用 <code>resolve</code> 做双语义兼容</li>
+</ul>
+<h4 id="4561-web-默认主会话--启动合同"><a class="header" href="#4561-web-默认主会话--启动合同">4.5.6.1 Web 默认主会话 / 启动合同</a></h4>
+<p>Web UI 仍然需要“默认打开哪个会话”这个能力。</p>
+<p>但这里的默认值不能再靠客户端伪造 <code>"main"</code>。</p>
+<p>必须改成：</p>
+<ul>
+<li>由服务端 owner path 返回当前 agent 主桶对应的实例 <code>session_id</code></li>
+<li>该 path 只负责：
+<ul>
+<li>定位 <code>agent:&lt;current_agent_id&gt;:main</code></li>
+<li>查当前 active <code>session_id</code></li>
+<li>若不存在，则创建一个新实例并返回</li>
+</ul>
+</li>
+</ul>
+<p>可以采用的 RPC 例子：</p>
+<ul>
+<li><code>sessions.home</code></li>
+</ul>
+<p>必须使用该 path 的场景：</p>
+<ul>
+<li>Web 首次启动、本地没有 <code>session_id</code></li>
+<li>当前激活实例被删除后需要回落</li>
+<li><code>clear_all</code> 后需要回到默认主会话</li>
+<li>onboarding / app root redirect 需要跳默认聊天页</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li>当前 agent：<code>zhuzhu</code></li>
+<li>逻辑主桶：<code>agent:zhuzhu:main</code></li>
+<li><code>sessions.home</code> 返回：
+<ul>
+<li><code>session_id = sess_0195f3c5b3d27d8aa91e4439bb3c2e74</code></li>
+<li><code>session_key = agent:zhuzhu:main</code></li>
+</ul>
+</li>
+</ul>
+<p>客户端随后只记住：</p>
+<ul>
+<li><code>session_id = sess_0195f3c5b3d27d8aa91e4439bb3c2e74</code></li>
+</ul>
+<p>不得再记住：</p>
+<ul>
+<li><code>"main"</code></li>
+</ul>
+<h4 id="4562-web-会话展示合同"><a class="header" href="#4562-web-会话展示合同">4.5.6.2 Web 会话展示合同</a></h4>
+<p>UI 还需要知道“怎么显示这个会话”“允许哪些操作”。</p>
+<p>这些都不能再靠 <code>session_id</code> 的字面去猜。</p>
+<p>因此 session management 返回给 Web 的实例数据，必须显式携带：</p>
+<ul>
+<li><code>displayName</code>
+<ul>
+<li>UI-ready 展示名</li>
+<li>header / sidebar / search 结果统一显示它</li>
+</ul>
+</li>
+<li><code>sessionKind</code>
+<ul>
+<li>用于 icon / 文案 / 交互分类</li>
+<li>当前冻结集合：
+<ul>
+<li><code>agent</code></li>
+<li><code>channel</code></li>
+<li><code>system</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><code>canRename</code></li>
+<li><code>canDelete</code></li>
+<li><code>canFork</code></li>
+<li><code>canClear</code></li>
+</ul>
+<p>其中：</p>
+<ul>
+<li><code>label</code> 仍是实例 metadata 里的“用户标签/显式命名”</li>
+<li><code>displayName</code> 是服务端计算后的 UI 展示字符串</li>
+<li>UI 不得再 fallback 到 <code>sessionId</code></li>
+<li>UI 不得再靠 <code>main</code>、<code>telegram:*</code>、<code>cron:*</code> 前缀推断 kind 或 capability</li>
+</ul>
+<p><strong>例子 1：Agent 主会话</strong></p>
+<ul>
+<li><code>session_id = sess_0195f3c5...</code></li>
+<li><code>session_key = agent:zhuzhu:main</code></li>
+<li><code>label = None</code></li>
+<li><code>displayName = Main</code></li>
+<li><code>sessionKind = agent</code></li>
+<li><code>canRename = false</code></li>
+<li><code>canDelete = false</code></li>
+<li><code>canFork = true</code></li>
+<li><code>canClear = true</code></li>
+</ul>
+<p><strong>例子 2：Telegram 群会话</strong></p>
+<ul>
+<li><code>session_id = sess_0195f3c5...</code></li>
+<li><code>session_key = agent:zhuzhu:group-peer-tgchat.n1001234567890</code></li>
+<li><code>label = TG @lovely_apple_bot · grp:-1001234567890</code></li>
+<li><code>displayName = TG @lovely_apple_bot · grp:-1001234567890</code></li>
+<li><code>sessionKind = channel</code></li>
+<li><code>canRename = false</code></li>
+<li><code>canDelete = true</code></li>
+<li><code>canFork = true</code></li>
+<li><code>canClear = false</code></li>
+</ul>
+<p><strong>例子 3：Heartbeat</strong></p>
+<ul>
+<li><code>session_id = sess_0195f3c5...</code></li>
+<li><code>session_key = system:cron:heartbeat</code></li>
+<li><code>displayName = Heartbeat</code></li>
+<li><code>sessionKind = system</code></li>
+<li><code>canRename = false</code></li>
+<li><code>canDelete = false</code></li>
+<li><code>canFork = false</code></li>
+<li><code>canClear = false</code></li>
+</ul>
+<h4 id="457-json--内存-helper-也必须同构"><a class="header" href="#457-json--内存-helper-也必须同构">4.5.7 JSON / 内存 helper 也必须同构</a></h4>
+<p>即便是测试用 JSON metadata helper、内存态索引，也必须服从同一模型：</p>
+<ul>
+<li>会话实例索引：<code>session_id -&gt; SessionEntry</code></li>
+<li>active-session 索引：<code>session_key -&gt; session_id</code></li>
+</ul>
+<p>不允许因为“只是测试 helper / 文件态 helper”就继续保留另一套 <code>key/id</code> 语义。</p>
+<h4 id="458-硬切口径"><a class="header" href="#458-硬切口径">4.5.8 硬切口径</a></h4>
+<ul>
+<li>不做自动迁移</li>
+<li>不保留 alias</li>
+<li>不保留兼容双写</li>
+<li>命中旧持久化形状时，必须直接失败并给出明确 remediation</li>
+</ul>
+<p>例子：</p>
+<ul>
+<li>若数据库里还是 <code>session_state.session_key</code>，启动直接失败</li>
+<li>若 metadata 里还是 <code>parent_session_key</code>，加载直接失败</li>
+<li>若运行时仍调用 <code>get_bucket_session_id(channel_type, bucket_key)</code> 作为主路径真值，视为未完成治理</li>
+<li>若启动时发现旧 <code>metadata.json</code>，不得自动导入；必须直接拒绝并要求人工处理</li>
+</ul>
+<hr />
+<h2 id="5-分隔符与字符规则"><a class="header" href="#5-分隔符与字符规则">5. 分隔符与字符规则</a></h2>
+<p>为了避免层次混淆，分隔符强制分层使用：</p>
+<h3 id="51--只用于系统层-namespace"><a class="header" href="#51--只用于系统层-namespace">5.1 <code>:</code> 只用于系统层 namespace</a></h3>
+<p>只出现在 <code>session_key</code> 里。</p>
+<p><strong>正确例子：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:main</code></li>
+<li><code>system:cron:heartbeat</code></li>
+</ul>
+<p><strong>错误例子：</strong></p>
+<ul>
+<li><code>dm:peer:person:neoragex2002</code></li>
+<li><code>group:account:telegram:845:peer:-100</code></li>
+</ul>
+<h3 id="52---只用于-bucket-grammar"><a class="header" href="#52---只用于-bucket-grammar">5.2 <code>-</code> 只用于 bucket grammar</a></h3>
+<p>只出现在 bucket 语法段之间。</p>
+<p><strong>正确例子：</strong></p>
+<ul>
+<li><code>dm-peer-person.neoragex2002</code></li>
+<li><code>group-peer-tgchat.n1001234567890-branch-topic.42</code></li>
+</ul>
+<h3 id="53--只用于-atom-内部-typed-value"><a class="header" href="#53--只用于-atom-内部-typed-value">5.3 <code>.</code> 只用于 atom 内部 typed value</a></h3>
+<p><strong>正确例子：</strong></p>
+<ul>
+<li><code>person.neoragex2002</code></li>
+<li><code>tgchat.n1001234567890</code></li>
+<li><code>tguser.8344017527</code></li>
+<li><code>topic.42</code></li>
+</ul>
+<h3 id="54-原则"><a class="header" href="#54-原则">5.4 原则</a></h3>
+<ul>
+<li>所有 key 一律 lower-case ASCII</li>
+<li>不允许空 segment</li>
+<li>不允许在同一层混用 <code>:</code> 和 <code>-</code></li>
+<li>用户可见 display 字段（username / nickname / title）不得直接进 key</li>
+</ul>
+<hr />
+<h2 id="6-原子-keyatom定义"><a class="header" href="#6-原子-keyatom定义">6. 原子 key（atom）定义</a></h2>
+<p>本节定义所有会进入 <code>bucket_key</code> 的原子值。</p>
+<p><strong>Telegram 侧最小对象集：</strong></p>
+<ul>
+<li>人：
+<ul>
+<li><code>person.&lt;person_id&gt;</code></li>
+</ul>
+</li>
+<li>Telegram 用户 / bot 账号：
+<ul>
+<li><code>tguser.&lt;telegram_user_id&gt;</code></li>
+</ul>
+</li>
+<li>Telegram chat 对象：
+<ul>
+<li><code>tgchat.&lt;chat_atom&gt;</code></li>
+</ul>
+</li>
+<li>Telegram 子线：
+<ul>
+<li><code>topic.&lt;topic_id&gt;</code></li>
+<li><code>reply.&lt;message_id&gt;</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>第一性约束：</strong></p>
+<ul>
+<li><code>peer_key</code> / <code>sender_key</code> / <code>account_key</code> 是槽位，不是新的对象族</li>
+<li><code>telegram</code> 只是 <code>per_channel</code> grammar 里的固定字面量，不是新的 typed atom</li>
+<li>除上述最小对象集外，不再新增 Telegram 专属 canonical 前缀</li>
+</ul>
+<h3 id="61-agent_id"><a class="header" href="#61-agent_id">6.1 <code>agent_id</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>配置中的 agent 标识</li>
+</ul>
+<p><strong>来源：</strong></p>
+<ul>
+<li>配置真值</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>zhuzhu</code></li>
+<li><code>duoduo</code></li>
+<li><code>alma</code></li>
+</ul>
+<h3 id="62-service_id"><a class="header" href="#62-service_id">6.2 <code>service_id</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>系统服务的稳定标识</li>
+</ul>
+<p><strong>当前冻结值：</strong></p>
+<ul>
+<li><code>cron</code></li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>cron</code></li>
+</ul>
+<p><strong>约束：</strong></p>
+<ul>
+<li>当前设计不为未来服务预铺命名空间</li>
+<li>新增 <code>service_id</code> 必须单独走 issue / design / review</li>
+</ul>
+<h3 id="63-固定渠道字面量-telegram"><a class="header" href="#63-固定渠道字面量-telegram">6.3 固定渠道字面量 <code>telegram</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>只在 <code>dm_scope = per_channel</code> 这种 bucket grammar 里出现的固定渠道字面量</li>
+</ul>
+<p><strong>第一性约束：</strong></p>
+<ul>
+<li>它不是一个新的对象族</li>
+<li>当前设计不引入 <code>channel.*</code> typed atom</li>
+<li>Telegram 口径下只冻结一个字面量：
+<ul>
+<li><code>telegram</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>dm-peer-person.neoragex2002-channel-telegram</code></li>
+</ul>
+<h3 id="64-conversation_key"><a class="header" href="#64-conversation_key">6.4 <code>conversation_key</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>agent 侧手工持久侧聊的逻辑桶 id</li>
+</ul>
+<p><strong>性质：</strong></p>
+<ul>
+<li>内部 opaque</li>
+<li>不要求用户可读</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>01jv5n5x9x4m</code></li>
+<li><code>01jv5p4r8h7k</code></li>
+</ul>
+<p><strong>对应 bucket 例子：</strong></p>
+<ul>
+<li><code>chat-01jv5n5x9x4m</code></li>
+</ul>
+<h3 id="65-job_key"><a class="header" href="#65-job_key">6.5 <code>job_key</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>cron 持久 job 的逻辑桶 id</li>
+</ul>
+<p><strong>性质：</strong></p>
+<ul>
+<li>使用 job 自身稳定 id，不使用 display name</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>01jv62d6h1k7</code></li>
+</ul>
+<p><strong>对应 bucket 例子：</strong></p>
+<ul>
+<li><code>job-01jv62d6h1k7</code></li>
+</ul>
+<h3 id="66-account_key"><a class="header" href="#66-account_key">6.6 <code>account_key</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>某个 Telegram bot 实例在 <code>per_account</code> bucket 里的账号槽位值</li>
+</ul>
+<p><strong>规则：</strong></p>
+<ul>
+<li>必须来自系统探测/接入事实</li>
+<li>不使用 bot username / nickname 作为真值</li>
+<li><code>account_key</code> 是槽位，不是新的对象族</li>
+<li>它直接复用 canonical Telegram user atom：
+<ul>
+<li><code>tguser.&lt;telegram_user_id&gt;</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>推荐语法：</strong></p>
+<ul>
+<li><code>tguser.&lt;bot_user_id&gt;</code></li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>tguser.8344017527</code></li>
+<li><code>tguser.8576199590</code></li>
+<li><code>tguser.8704214186</code></li>
+</ul>
+<h3 id="67-person_id"><a class="header" href="#67-person_id">6.7 <code>person_id</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>系统级 identity 主键</li>
+</ul>
+<p><strong>唯一事实来源：</strong></p>
+<ul>
+<li><code>PEOPLE.md</code> frontmatter <code>people[].name</code></li>
+</ul>
+<p><strong>规则：</strong></p>
+<ul>
+<li>它是跨渠道 identity，不是 Telegram 原生字段</li>
+<li>只有 Telegram 来件命中权威 identity link 时，才允许落成 <code>person.&lt;person_id&gt;</code></li>
+<li><code>display_name</code> / <code>telegram_user_name</code> / <code>telegram_display_name</code> 都不得反向冒充 <code>person_id</code></li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>zhuzhu</code></li>
+<li><code>duoduo</code></li>
+<li><code>neoragex2002</code></li>
+</ul>
+<p><strong>组合例子：</strong></p>
+<ul>
+<li><code>person.zhuzhu</code></li>
+<li><code>person.neoragex2002</code></li>
+</ul>
+<h3 id="68-telegram_user_id"><a class="header" href="#68-telegram_user_id">6.8 <code>telegram_user_id</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>Telegram 用户或 bot 的原生稳定数字主键</li>
+</ul>
+<p><strong>来源：</strong></p>
+<ul>
+<li>inbound sender 的 <code>from.id</code></li>
+<li>managed bot 自身的 <code>getMe.id</code></li>
+<li><code>PEOPLE.md</code> identity link 中的 <code>telegram_user_id</code></li>
+</ul>
+<p><strong>规则：</strong></p>
+<ul>
+<li>这是 Telegram 渠道内最稳定的账号事实</li>
+<li>identity link 匹配时，<code>telegram_user_id</code> 是高于 <code>telegram_user_name</code> 的主匹配键</li>
+<li>未命中 identity link 时，canonical key 应退回 <code>tguser.&lt;telegram_user_id&gt;</code></li>
+<li>bot account 维度也直接复用 <code>tguser.&lt;telegram_user_id&gt;</code>，而不是另发明第二套账号前缀</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>8344017527</code></li>
+<li><code>8576199590</code></li>
+<li><code>2002</code></li>
+</ul>
+<p><strong>组合例子：</strong></p>
+<ul>
+<li><code>tguser.2002</code></li>
+<li><code>tguser.8344017527</code></li>
+</ul>
+<h3 id="69-telegram_user_name"><a class="header" href="#69-telegram_user_name">6.9 <code>telegram_user_name</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>Telegram 用户名</li>
+</ul>
+<p><strong>规范化规则：</strong></p>
+<ul>
+<li>比较前必须：
+<ul>
+<li><code>trim()</code></li>
+<li>去掉前导 <code>@</code></li>
+<li>转成 lower-case ASCII</li>
+</ul>
+</li>
+</ul>
+<p><strong>用途：</strong></p>
+<ul>
+<li>identity link 的 fallback 匹配</li>
+<li><code>@mention</code> 渲染</li>
+<li>诊断和辅助展示</li>
+</ul>
+<p><strong>禁止：</strong></p>
+<ul>
+<li>不得直接进入任何 canonical key</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li>原始值：<code>@Lovely_Apple_Bot</code></li>
+<li>规范化后：<code>lovely_apple_bot</code></li>
+</ul>
+<h3 id="610-telegram_display_name"><a class="header" href="#610-telegram_display_name">6.10 <code>telegram_display_name</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>Telegram UI 展示名</li>
+</ul>
+<p><strong>用途：</strong></p>
+<ul>
+<li>transcript 展示</li>
+<li>UI 展示</li>
+<li>辅助诊断</li>
+</ul>
+<p><strong>禁止：</strong></p>
+<ul>
+<li>不得直接进入任何 canonical key</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>猪猪</code></li>
+<li><code>朵朵</code></li>
+<li><code>Neo Rage</code></li>
+</ul>
+<h3 id="611-chat_atom"><a class="header" href="#611-chat_atom">6.11 <code>chat_atom</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>Telegram chat 对象的 canonical 原子值</li>
+</ul>
+<p><strong>来源：</strong></p>
+<ul>
+<li>Telegram <code>chat.id</code></li>
+</ul>
+<p><strong>规则：</strong></p>
+<ul>
+<li><code>chat_id &gt;= 0</code>：直接用十进制</li>
+<li><code>chat_id &lt; 0</code>：编码成 <code>n&lt;abs(chat_id)&gt;</code></li>
+<li><code>chat_atom</code> 代表“chat 对象”，不代表“人”</li>
+<li>private DM 里即使 <code>chat.id</code> 与 <code>from.id</code> 数字相同，也不能把 <code>chat_atom</code> 拿来冒充 DM <code>peer_key</code></li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li>private chat <code>2002</code>
+<ul>
+<li><code>chat_atom = 2002</code></li>
+<li><code>tgchat.2002</code></li>
+</ul>
+</li>
+<li>supergroup / channel chat <code>-1001234567890</code>
+<ul>
+<li><code>chat_atom = n1001234567890</code></li>
+<li><code>tgchat.n1001234567890</code></li>
+</ul>
+</li>
+</ul>
+<h3 id="612-telegram-身份--聊天形态与使用口径"><a class="header" href="#612-telegram-身份--聊天形态与使用口径">6.12 Telegram 身份 / 聊天形态与使用口径</a></h3>
+<h4 id="6121-一个-telegram-账号常见的-4-种形态"><a class="header" href="#6121-一个-telegram-账号常见的-4-种形态">6.12.1 一个 Telegram 账号常见的 4 种形态</a></h4>
+<ul>
+<li>identity：
+<ul>
+<li>形式：<code>person.&lt;person_id&gt;</code></li>
+<li>何时使用：只有 <code>PEOPLE.md</code> 权威 link 命中时，才用于 canonical <code>peer_key</code> / <code>sender_key</code></li>
+</ul>
+</li>
+<li>数字账号：
+<ul>
+<li>形式：<code>telegram_user_id</code></li>
+<li>何时使用：作为 Telegram 原生稳定主键，用于 link 匹配、<code>tguser.*</code></li>
+</ul>
+</li>
+<li>用户名：
+<ul>
+<li>形式：<code>telegram_user_name</code></li>
+<li>何时使用：fallback 匹配、<code>@mention</code>、诊断</li>
+</ul>
+</li>
+<li>显示名：
+<ul>
+<li>形式：<code>telegram_display_name</code></li>
+<li>何时使用：仅展示</li>
+</ul>
+</li>
+</ul>
+<p><strong>例子 1：系统内 bot <code>zhuzhu</code></strong></p>
+<ul>
+<li><code>person_id = zhuzhu</code></li>
+<li><code>telegram_user_id = 8344017527</code></li>
+<li><code>telegram_user_name = @lovely_apple_bot</code></li>
+<li><code>telegram_display_name = 猪猪</code></li>
+<li>canonical account key：
+<ul>
+<li><code>tguser.8344017527</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>例子 2：外部用户 <code>Neoragex2002</code></strong></p>
+<ul>
+<li>若 <code>PEOPLE.md</code> 已绑定：
+<ul>
+<li>canonical person：
+<ul>
+<li><code>person.neoragex2002</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>若未绑定，但 <code>from.id = 2002</code>：
+<ul>
+<li>canonical telegram user：
+<ul>
+<li><code>tguser.2002</code></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<h4 id="6122-一个-telegram-chat-常见的-2-种形态"><a class="header" href="#6122-一个-telegram-chat-常见的-2-种形态">6.12.2 一个 Telegram chat 常见的 2 种形态</a></h4>
+<ul>
+<li>private chat：
+<ul>
+<li>原始形态：<code>chat.id &gt; 0</code></li>
+<li>例子：<code>chat.id = 2002</code></li>
+</ul>
+</li>
+<li>shared group / channel chat：
+<ul>
+<li>原始形态：<code>chat.id &lt; 0</code></li>
+<li>例子：<code>chat.id = -1001234567890</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>使用规则：</strong></p>
+<ul>
+<li>DM：
+<ul>
+<li>canonical <code>peer_key</code> 看“对端人/用户”，不用 <code>tgchat.&lt;chat_atom&gt;</code></li>
+</ul>
+</li>
+<li>Group / Channel：
+<ul>
+<li>canonical <code>peer_key</code> 看“共享 chat 对象”，必须用 <code>tgchat.&lt;chat_atom&gt;</code></li>
+</ul>
+</li>
+<li>Group / Channel sender：
+<ul>
+<li>canonical <code>sender_key</code> 看“发言人”，因此用 <code>person.&lt;person_id&gt;</code> 或 <code>tguser.&lt;telegram_user_id&gt;</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>最容易混淆的例子：</strong></p>
+<ul>
+<li>Telegram DM 中：
+<ul>
+<li><code>from.id = 2002</code></li>
+<li><code>chat.id = 2002</code></li>
+</ul>
+</li>
+<li>虽然数字一样，但语义不同：
+<ul>
+<li><code>from.id = 2002</code> 表示“这个人/账号是谁”</li>
+<li><code>chat.id = 2002</code> 表示“这个 private chat 对象是谁”</li>
+</ul>
+</li>
+<li>因此 canonical DM <code>peer_key</code> 必须是：
+<ul>
+<li><code>person.neoragex2002</code></li>
+<li>或 <code>tguser.2002</code></li>
+</ul>
+</li>
+<li>绝不能写成：
+<ul>
+<li><code>tgchat.2002</code></li>
+</ul>
+</li>
+</ul>
+<h4 id="6123-identity-link-判定合同硬规则"><a class="header" href="#6123-identity-link-判定合同硬规则">6.12.3 Identity link 判定合同（硬规则）</a></h4>
+<p><code>PEOPLE.md</code> 是 Telegram identity link 的唯一事实来源。</p>
+<p><strong>索引构建规则：</strong></p>
+<ul>
+<li><code>telegram_user_id</code> 索引：
+<ul>
+<li>只接受唯一值</li>
+<li>同一个 <code>telegram_user_id</code> 若出现在 2 个及以上 <code>person_id</code> 上，配置直接判为无效</li>
+<li><code>moltis config check</code> 必须失败</li>
+<li>Telegram identity link 启动必须失败</li>
+</ul>
+</li>
+<li><code>telegram_user_name</code> 索引：
+<ul>
+<li>先做规范化：
+<ul>
+<li><code>trim()</code></li>
+<li>去掉前导 <code>@</code></li>
+<li>lower-case ASCII</li>
+</ul>
+</li>
+<li>只接受唯一值</li>
+<li>同一个规范化 username 若出现在 2 个及以上 <code>person_id</code> 上，配置直接判为无效</li>
+<li><code>moltis config check</code> 必须失败</li>
+<li>Telegram identity link 启动必须失败</li>
+</ul>
+</li>
+</ul>
+<p><strong>入站判定顺序：</strong></p>
+<ol>
+<li>若事件携带 <code>telegram_user_id</code>
+<ul>
+<li>只按 <code>telegram_user_id</code> 判定 canonical identity</li>
+<li>命中：
+<ul>
+<li><code>person.&lt;person_id&gt;</code></li>
+</ul>
+</li>
+<li>未命中：
+<ul>
+<li><code>tguser.&lt;telegram_user_id&gt;</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>只有在事件<strong>缺失</strong> <code>telegram_user_id</code> 时，才允许退回 <code>telegram_user_name</code> 做唯一匹配
+<ul>
+<li>命中：
+<ul>
+<li><code>person.&lt;person_id&gt;</code></li>
+</ul>
+</li>
+<li>未命中：
+<ul>
+<li>不得凭 username 伪造 <code>tguser.*</code></li>
+<li>canonical actor 视为缺失</li>
+</ul>
+</li>
+</ul>
+</li>
+</ol>
+<p><strong>canonical actor 缺失时的硬处理：</strong></p>
+<ul>
+<li>DM：
+<ul>
+<li><code>peer_key</code> 无法生成</li>
+<li>该入站不得继续走需要 canonical peer 的主路径</li>
+<li>不得伪造 <code>tguser.&lt;normalized_username&gt;</code></li>
+</ul>
+</li>
+<li>Group / Channel：
+<ul>
+<li><code>sender_key</code> 视为缺失</li>
+<li>只允许按既定 group scope 降级规则继续</li>
+<li>不得伪造 <code>sender_key</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>冲突规则：</strong></p>
+<ul>
+<li>若事件同时携带 <code>telegram_user_id</code> 和 <code>telegram_user_name</code></li>
+<li>且 <code>telegram_user_id</code> 命中了 A，username 规范化后却命中了 B</li>
+<li>则：
+<ul>
+<li>canonical 结果必须仍然选择 <code>telegram_user_id -&gt; A</code></li>
+<li>不得因为 username 把 canonical actor 改写到 B</li>
+<li>必须打结构化冲突日志</li>
+</ul>
+</li>
+</ul>
+<p><strong>例子 1：稳定 id 命中</strong></p>
+<ul>
+<li>入站：
+<ul>
+<li><code>telegram_user_id = 2002</code></li>
+<li><code>telegram_user_name = @neo_rage</code></li>
+</ul>
+</li>
+<li><code>PEOPLE.md</code>：
+<ul>
+<li><code>neoragex2002.telegram_user_id = 2002</code></li>
+</ul>
+</li>
+<li>结果：
+<ul>
+<li><code>person.neoragex2002</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>例子 2：id 未命中，不得拿 username 顶替</strong></p>
+<ul>
+<li>入站：
+<ul>
+<li><code>telegram_user_id = 2002</code></li>
+<li><code>telegram_user_name = @neo_rage</code></li>
+</ul>
+</li>
+<li><code>PEOPLE.md</code>：
+<ul>
+<li>只有 <code>telegram_user_name = @neo_rage</code></li>
+<li>但没有 <code>telegram_user_id = 2002</code></li>
+</ul>
+</li>
+<li>结果：
+<ul>
+<li><code>tguser.2002</code></li>
+</ul>
+</li>
+<li>说明：
+<ul>
+<li>因为稳定 id 已经出现，就只能按稳定 id 判</li>
+</ul>
+</li>
+</ul>
+<p><strong>例子 3：只有 username 时才允许 fallback</strong></p>
+<ul>
+<li>入站：
+<ul>
+<li><code>telegram_user_id = None</code></li>
+<li><code>telegram_user_name = @neo_rage</code></li>
+</ul>
+</li>
+<li><code>PEOPLE.md</code>：
+<ul>
+<li><code>neoragex2002.telegram_user_name = @neo_rage</code></li>
+</ul>
+</li>
+<li>结果：
+<ul>
+<li><code>person.neoragex2002</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>例子 4：配置重复，直接判无效</strong></p>
+<ul>
+<li><code>PEOPLE.md</code>：
+<ul>
+<li><code>person.a.telegram_user_id = 2002</code></li>
+<li><code>person.b.telegram_user_id = 2002</code></li>
+</ul>
+</li>
+<li>结果：
+<ul>
+<li>identity link 配置无效</li>
+<li>不得 silent pick first</li>
+</ul>
+</li>
+</ul>
+<h3 id="613-peer_key"><a class="header" href="#613-peer_key">6.13 <code>peer_key</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>当前消息所面对的逻辑对端</li>
+</ul>
+<p><strong>规则：</strong></p>
+<ul>
+<li>Telegram DM：
+<ul>
+<li>有权威 identity link：
+<ul>
+<li><code>person.&lt;person_id&gt;</code></li>
+</ul>
+</li>
+<li>无 identity link：
+<ul>
+<li><code>tguser.&lt;telegram_user_id&gt;</code></li>
+</ul>
+</li>
+<li>禁止：
+<ul>
+<li><code>tgchat.&lt;chat_atom&gt;</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>Telegram Group / Channel：
+<ul>
+<li>一律使用共享 chat：
+<ul>
+<li><code>tgchat.&lt;chat_atom&gt;</code></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>person.neoragex2002</code></li>
+<li><code>tguser.2002</code></li>
+<li><code>tgchat.n1001234567890</code></li>
+</ul>
+<p><strong>语义例子：</strong></p>
+<ul>
+<li>DM 给 <code>Neoragex2002</code>，有 identity link：
+<ul>
+<li><code>peer_key = person.neoragex2002</code></li>
+</ul>
+</li>
+<li>DM 给 Telegram 用户 <code>2002</code>，无 identity link：
+<ul>
+<li><code>peer_key = tguser.2002</code></li>
+</ul>
+</li>
+<li>Group <code>-1001234567890</code>：
+<ul>
+<li><code>peer_key = tgchat.n1001234567890</code></li>
+</ul>
+</li>
+</ul>
+<h3 id="614-sender_key"><a class="header" href="#614-sender_key">6.14 <code>sender_key</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>群消息发言人的逻辑标识</li>
+</ul>
+<p><strong>规则：</strong></p>
+<ul>
+<li>有 identity link：
+<ul>
+<li><code>person.&lt;person_id&gt;</code></li>
+</ul>
+</li>
+<li>无 identity link：
+<ul>
+<li><code>tguser.&lt;telegram_user_id&gt;</code></li>
+</ul>
+</li>
+<li>不得使用：
+<ul>
+<li><code>tgchat.&lt;chat_atom&gt;</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>person.neoragex2002</code></li>
+<li><code>tguser.1001</code></li>
+</ul>
+<h3 id="615-branch_key"><a class="header" href="#615-branch_key">6.15 <code>branch_key</code></a></h3>
+<p><strong>定义：</strong></p>
+<ul>
+<li>Telegram 群内子线判别结果</li>
+</ul>
+<p><strong>当前冻结类型：</strong></p>
+<ul>
+<li>forum topic</li>
+<li>reply-root branch</li>
+</ul>
+<p><strong>推荐语法：</strong></p>
+<ul>
+<li>topic：<code>topic.&lt;topic_id&gt;</code></li>
+<li>reply-root：<code>reply.&lt;message_id&gt;</code></li>
+</ul>
+<p><strong>生成优先级（硬规则）：</strong></p>
+<ol>
+<li>若当前事件存在 Telegram forum <code>thread_id</code>
+<ul>
+<li><code>branch_key = topic.&lt;thread_id&gt;</code></li>
+</ul>
+</li>
+<li>否则，若当前事件存在 <code>reply_to_message_id</code>
+<ul>
+<li><code>branch_key = reply.&lt;reply_to_message_id&gt;</code></li>
+</ul>
+</li>
+<li>否则
+<ul>
+<li><code>branch_key = None</code></li>
+</ul>
+</li>
+</ol>
+<p><strong>强约束：</strong></p>
+<ul>
+<li><code>topic</code> 优先级永远高于 <code>reply</code></li>
+<li>不做 reply 链递归追根</li>
+<li>不从历史消息、binding、缓存里反推一个“真正 root”</li>
+<li>只使用当前 Telegram 事件已经携带的 branch 事实</li>
+<li>当 <code>branch_key = None</code> 且 scope 需要 branch 时，只允许按既定降级规则退化，不得伪造 branch</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>topic.42</code></li>
+<li><code>reply.98765</code></li>
+</ul>
+<p><strong>例子 1：topic 与 reply 同时存在</strong></p>
+<ul>
+<li>入站：
+<ul>
+<li><code>thread_id = 42</code></li>
+<li><code>reply_to_message_id = 98765</code></li>
+</ul>
+</li>
+<li>结果：
+<ul>
+<li><code>branch_key = topic.42</code></li>
+</ul>
+</li>
+<li>说明：
+<ul>
+<li>forum topic 是更强的结构事实，reply anchor 被忽略</li>
+</ul>
+</li>
+</ul>
+<p><strong>例子 2：只有 reply</strong></p>
+<ul>
+<li>入站：
+<ul>
+<li><code>thread_id = None</code></li>
+<li><code>reply_to_message_id = 98765</code></li>
+</ul>
+</li>
+<li>结果：
+<ul>
+<li><code>branch_key = reply.98765</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>例子 3：两者都没有</strong></p>
+<ul>
+<li>入站：
+<ul>
+<li><code>thread_id = None</code></li>
+<li><code>reply_to_message_id = None</code></li>
+</ul>
+</li>
+<li>结果：
+<ul>
+<li><code>branch_key = None</code></li>
+</ul>
+</li>
+</ul>
+<h3 id="616-带符号整数的编码规则"><a class="header" href="#616-带符号整数的编码规则">6.16 带符号整数的编码规则</a></h3>
+<p>为了保证 <code>-</code> 只保留给 bucket grammar，原子值内部不得直接带负号。</p>
+<p><strong>规则：</strong></p>
+<ul>
+<li>非负整数：直接写十进制</li>
+<li>负整数：前缀 <code>n</code>，再写绝对值</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li>Telegram chat id <code>-1001234567890</code>
+<ul>
+<li>原子值：<code>n1001234567890</code></li>
+<li>组合后：<code>tgchat.n1001234567890</code></li>
+</ul>
+</li>
+<li>Telegram private chat id <code>2002</code>
+<ul>
+<li>原子值：<code>2002</code></li>
+<li>组合后：<code>tgchat.2002</code></li>
+</ul>
+</li>
+<li>Telegram user id <code>2002</code>
+<ul>
+<li>原子值：<code>2002</code></li>
+<li>组合后：<code>tguser.2002</code></li>
+</ul>
+</li>
+</ul>
+<hr />
+<h2 id="7-session_key-规范"><a class="header" href="#7-session_key-规范">7. <code>session_key</code> 规范</a></h2>
+<h3 id="71-总语法"><a class="header" href="#71-总语法">7.1 总语法</a></h3>
+<pre><code class="language-text">session_key = agent_session_key | system_session_key
+
+agent_session_key  = "agent:"  agent_id   ":" agent_bucket_key
+system_session_key = "system:" service_id ":" system_bucket_key
+</code></pre>
+<h3 id="72-agent-命名空间"><a class="header" href="#72-agent-命名空间">7.2 <code>agent</code> 命名空间</a></h3>
+<p><code>agent</code> 命名空间承载“某个 agent 的长期会话桶”。</p>
+<h4 id="721-主会话"><a class="header" href="#721-主会话">7.2.1 主会话</a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>main</code></li>
+</ul>
+<p><strong>session_key 例子：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:main</code></li>
+</ul>
+<h4 id="722-手工持久侧聊"><a class="header" href="#722-手工持久侧聊">7.2.2 手工持久侧聊</a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>chat-&lt;conversation_key&gt;</code></li>
+</ul>
+<p><strong>session_key 例子：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:chat-01jv5n5x9x4m</code></li>
+</ul>
+<h4 id="723-telegram-adapter-产出的-bucket"><a class="header" href="#723-telegram-adapter-产出的-bucket">7.2.3 Telegram adapter 产出的 bucket</a></h4>
+<p><strong>session_key 例子：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:dm-main</code></li>
+<li><code>agent:zhuzhu:dm-peer-person.neoragex2002</code></li>
+<li><code>agent:zhuzhu:dm-peer-person.neoragex2002-channel-telegram</code></li>
+<li><code>agent:zhuzhu:dm-peer-person.neoragex2002-account-tguser.8344017527</code></li>
+<li><code>agent:zhuzhu:group-peer-tgchat.n1001234567890</code></li>
+<li><code>agent:zhuzhu:group-peer-tgchat.n1001234567890-sender-person.neoragex2002</code></li>
+<li><code>agent:zhuzhu:group-peer-tgchat.n1001234567890-branch-topic.42</code></li>
+<li><code>agent:zhuzhu:group-peer-tgchat.n1001234567890-branch-topic.42-sender-person.neoragex2002</code></li>
+</ul>
+<h3 id="73-system-命名空间"><a class="header" href="#73-system-命名空间">7.3 <code>system</code> 命名空间</a></h3>
+<p><code>system</code> 命名空间承载“系统服务自身需要长期复用上下文的会话桶”。</p>
+<h4 id="731-当前冻结的-service_id"><a class="header" href="#731-当前冻结的-service_id">7.3.1 当前冻结的 <code>service_id</code></a></h4>
+<p>当前只冻结：</p>
+<ul>
+<li><code>cron</code></li>
+</ul>
+<h4 id="732-cron-heartbeat"><a class="header" href="#732-cron-heartbeat">7.3.2 Cron heartbeat</a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>heartbeat</code></li>
+</ul>
+<p><strong>session_key 例子：</strong></p>
+<ul>
+<li><code>system:cron:heartbeat</code></li>
+</ul>
+<h4 id="733-cron-持久-job"><a class="header" href="#733-cron-持久-job">7.3.3 Cron 持久 job</a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>job-&lt;job_key&gt;</code></li>
+</ul>
+<p><strong>session_key 例子：</strong></p>
+<ul>
+<li><code>system:cron:job-01jv62d6h1k7</code></li>
+</ul>
+<h3 id="74-为什么-session_key-不再额外写-channel-前缀"><a class="header" href="#74-为什么-session_key-不再额外写-channel-前缀">7.4 为什么 <code>session_key</code> 不再额外写 channel 前缀</a></h3>
+<p>因为 channel 是否参与同桶判定，应该由 <code>bucket_key</code> 决定，而不是由系统层先写死。</p>
+<p><strong>例子：</strong></p>
+<ul>
+<li>同一个人跨 Telegram / Feishu，如果 <code>dm_scope = per_peer</code>，应共桶</li>
+<li>如果系统层强行写成 <code>agent:zhuzhu:telegram:...</code>，那这个能力会被系统层提前砍死</li>
+</ul>
+<p>所以正确做法是：</p>
+<ul>
+<li><code>per_peer</code>：<code>agent:zhuzhu:dm-peer-person.neoragex2002</code></li>
+<li><code>per_channel</code>：<code>agent:zhuzhu:dm-peer-person.neoragex2002-channel-telegram</code></li>
+</ul>
+<p>channel 只在 scope 需要它的时候才进入 key。</p>
+<hr />
+<h2 id="8-telegram-bucket_key-规范"><a class="header" href="#8-telegram-bucket_key-规范">8. Telegram <code>bucket_key</code> 规范</a></h2>
+<h3 id="81-总语法"><a class="header" href="#81-总语法">8.1 总语法</a></h3>
+<pre><code class="language-text">tg_bucket_key = dm_bucket_key | group_bucket_key
+</code></pre>
+<h3 id="82-dm-全部形式"><a class="header" href="#82-dm-全部形式">8.2 DM 全部形式</a></h3>
+<p><strong>DM 总口径：</strong></p>
+<ul>
+<li>DM bucket 的 <code>peer_key</code> 看“对端人/用户”，不看 private chat 对象</li>
+<li>即使 Telegram 原始事件里 <code>from.id = chat.id = 2002</code>，canonical DM peer 仍然只能是：
+<ul>
+<li><code>person.&lt;person_id&gt;</code></li>
+<li>或 <code>tguser.&lt;telegram_user_id&gt;</code></li>
+</ul>
+</li>
+<li>绝不能写成：
+<ul>
+<li><code>tgchat.2002</code></li>
+</ul>
+</li>
+</ul>
+<h4 id="821-dm_scope--main"><a class="header" href="#821-dm_scope--main">8.2.1 <code>dm_scope = main</code></a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>dm-main</code></li>
+</ul>
+<p><strong>含义：</strong></p>
+<ul>
+<li>同一 agent 下所有 DM 共桶</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>dm-main</code></li>
+<li>对 <code>Neoragex2002</code> 的 DM：<code>dm-main</code></li>
+<li>对另一个陌生用户 <code>tguser.3003</code> 的 DM：仍然是 <code>dm-main</code></li>
+</ul>
+<h4 id="822-dm_scope--per_peer"><a class="header" href="#822-dm_scope--per_peer">8.2.2 <code>dm_scope = per_peer</code></a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>dm-peer-&lt;peer_key&gt;</code></li>
+</ul>
+<p><strong>含义：</strong></p>
+<ul>
+<li>同一逻辑对端共桶</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li>linked person：
+<ul>
+<li><code>dm-peer-person.neoragex2002</code></li>
+</ul>
+</li>
+<li>unresolved tg user：
+<ul>
+<li><code>dm-peer-tguser.2002</code></li>
+</ul>
+</li>
+</ul>
+<h4 id="823-dm_scope--per_channel"><a class="header" href="#823-dm_scope--per_channel">8.2.3 <code>dm_scope = per_channel</code></a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>dm-peer-&lt;peer_key&gt;-channel-telegram</code></li>
+</ul>
+<p><strong>含义：</strong></p>
+<ul>
+<li>同一逻辑对端在不同渠道不共桶</li>
+</ul>
+<p><strong>Telegram 例子：</strong></p>
+<ul>
+<li><code>dm-peer-person.neoragex2002-channel-telegram</code></li>
+</ul>
+<h4 id="824-dm_scope--per_account"><a class="header" href="#824-dm_scope--per_account">8.2.4 <code>dm_scope = per_account</code></a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>dm-peer-&lt;peer_key&gt;-account-&lt;account_key&gt;</code></li>
+</ul>
+<p><strong>含义：</strong></p>
+<ul>
+<li>同一逻辑对端在不同接入账号不共桶</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>dm-peer-person.neoragex2002-account-tguser.8344017527</code></li>
+<li><code>dm-peer-person.neoragex2002-account-tguser.8576199590</code></li>
+</ul>
+<p><strong>说明：</strong></p>
+<ul>
+<li><code>account_key</code> 天然已经带渠道边界</li>
+<li>因此 <code>per_account</code> 不再重复写 <code>channel-telegram</code></li>
+</ul>
+<h3 id="83-group-全部形式"><a class="header" href="#83-group-全部形式">8.3 Group 全部形式</a></h3>
+<h4 id="831-group_scope--group"><a class="header" href="#831-group_scope--group">8.3.1 <code>group_scope = group</code></a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>group-peer-&lt;peer_key&gt;</code></li>
+</ul>
+<p><strong>含义：</strong></p>
+<ul>
+<li>同一共享群对象共桶</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>group-peer-tgchat.n1001234567890</code></li>
+</ul>
+<h4 id="832-group_scope--per_sender"><a class="header" href="#832-group_scope--per_sender">8.3.2 <code>group_scope = per_sender</code></a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>group-peer-&lt;peer_key&gt;-sender-&lt;sender_key&gt;</code></li>
+</ul>
+<p><strong>含义：</strong></p>
+<ul>
+<li>同群按发言人拆桶</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-sender-person.neoragex2002</code></li>
+<li><code>group-peer-tgchat.n1001234567890-sender-tguser.1001</code></li>
+</ul>
+<p><strong>降级：</strong></p>
+<ul>
+<li><code>sender</code> 缺失时，降级为：
+<ul>
+<li><code>group-peer-&lt;peer_key&gt;</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>降级例子：</strong></p>
+<ul>
+<li>原计划：
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-sender-tguser.1001</code></li>
+</ul>
+</li>
+<li>但 sender 缺失：
+<ul>
+<li><code>group-peer-tgchat.n1001234567890</code></li>
+</ul>
+</li>
+</ul>
+<h4 id="833-group_scope--per_branch"><a class="header" href="#833-group_scope--per_branch">8.3.3 <code>group_scope = per_branch</code></a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>group-peer-&lt;peer_key&gt;-branch-&lt;branch_key&gt;</code></li>
+</ul>
+<p><strong>含义：</strong></p>
+<ul>
+<li>同群按子线拆桶</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-branch-topic.42</code></li>
+<li><code>group-peer-tgchat.n1001234567890-branch-reply.98765</code></li>
+</ul>
+<p><strong>降级：</strong></p>
+<ul>
+<li><code>branch</code> 缺失时，降级为：
+<ul>
+<li><code>group-peer-&lt;peer_key&gt;</code></li>
+</ul>
+</li>
+</ul>
+<h4 id="834-group_scope--per_branch_sender"><a class="header" href="#834-group_scope--per_branch_sender">8.3.4 <code>group_scope = per_branch_sender</code></a></h4>
+<p><strong>bucket：</strong></p>
+<ul>
+<li><code>group-peer-&lt;peer_key&gt;-branch-&lt;branch_key&gt;-sender-&lt;sender_key&gt;</code></li>
+</ul>
+<p><strong>含义：</strong></p>
+<ul>
+<li>同群按“子线 + 发言人”共同拆桶</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-branch-topic.42-sender-person.neoragex2002</code></li>
+<li><code>group-peer-tgchat.n1001234567890-branch-reply.98765-sender-tguser.1001</code></li>
+</ul>
+<p><strong>降级规则：</strong></p>
+<ul>
+<li>缺 <code>branch</code>、有 <code>sender</code>
+<ul>
+<li><code>group-peer-&lt;peer_key&gt;-sender-&lt;sender_key&gt;</code></li>
+</ul>
+</li>
+<li>有 <code>branch</code>、缺 <code>sender</code>
+<ul>
+<li><code>group-peer-&lt;peer_key&gt;-branch-&lt;branch_key&gt;</code></li>
+</ul>
+</li>
+<li>两者都缺
+<ul>
+<li><code>group-peer-&lt;peer_key&gt;</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>降级例子 1：</strong></p>
+<ul>
+<li>目标：
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-branch-topic.42-sender-person.neoragex2002</code></li>
+</ul>
+</li>
+<li>但 <code>branch</code> 缺失：
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-sender-person.neoragex2002</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>降级例子 2：</strong></p>
+<ul>
+<li>目标：
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-branch-topic.42-sender-person.neoragex2002</code></li>
+</ul>
+</li>
+<li>但 <code>sender</code> 缺失：
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-branch-topic.42</code></li>
+</ul>
+</li>
+</ul>
+<h3 id="84-为什么-group-默认不带-account"><a class="header" href="#84-为什么-group-默认不带-account">8.4 为什么 Group 默认不带 <code>account</code></a></h3>
+<p>这是本轮最关键的第一性修正之一。</p>
+<p><code>group_scope = group</code> 的同桶判定语义是：</p>
+<ul>
+<li>同一 agent</li>
+<li>同一共享群对象 <code>peer</code></li>
+</ul>
+<p>而不是：</p>
+<ul>
+<li>同一 agent</li>
+<li>同一 bot account</li>
+<li>同一群</li>
+</ul>
+<p><strong>正确例子：</strong></p>
+<ul>
+<li><code>group-peer-tgchat.n1001234567890</code></li>
+</ul>
+<p><strong>必须淘汰的旧思路：</strong></p>
+<ul>
+<li><code>group:account:telegram:8344017527:peer:-1001234567890</code></li>
+</ul>
+<p>因为它把不属于 <code>group</code> 语义轴的 <code>account</code> 硬烤进了默认 bucket。</p>
+<h3 id="85-为什么-telegram-bucket_key-必须保留-type"><a class="header" href="#85-为什么-telegram-bucket_key-必须保留-type">8.5 为什么 Telegram <code>bucket_key</code> 必须保留 type</a></h3>
+<p>因为 Telegram 内部已经会单独存取和复用裸 <code>bucket_key</code>。</p>
+<p><strong>现状例子：</strong></p>
+<ul>
+<li>callback 键盘消息发出时保存 <code>bucket_key</code></li>
+<li>callback 点击回来时直接用这个 <code>bucket_key</code> 恢复原桶</li>
+</ul>
+<p>如果此时 <code>bucket_key</code> 没有 <code>dm-</code> / <code>group-</code> 前缀，就会出现：</p>
+<ul>
+<li>Telegram 内部只能靠外围上下文猜它属于 DM 还是 Group</li>
+</ul>
+<p>这是不合格的。</p>
+<p>所以 Telegram <code>bucket_key</code> 必须 typed。</p>
+<hr />
+<h2 id="9-agent--system--transient-三类场景示例"><a class="header" href="#9-agent--system--transient-三类场景示例">9. Agent / System / Transient 三类场景示例</a></h2>
+<h3 id="91-agent-主会话"><a class="header" href="#91-agent-主会话">9.1 Agent 主会话</a></h3>
+<p>用户在 Web UI 打开 <code>zhuzhu</code> 的主会话。</p>
+<p><strong>bucket_key：</strong></p>
+<ul>
+<li><code>main</code></li>
+</ul>
+<p><strong>session_key：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:main</code></li>
+</ul>
+<p><strong>session_id：</strong></p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e74</code></li>
+</ul>
+<p><strong>run_id：</strong></p>
+<ul>
+<li><code>run_0195f3c5b3d27d8aa91e4439bb3c2e90</code></li>
+</ul>
+<h3 id="92-agent-telegram-dmper_peer"><a class="header" href="#92-agent-telegram-dmper_peer">9.2 Agent Telegram DM：<code>per_peer</code></a></h3>
+<p><code>zhuzhu</code> 在 Telegram 上收到 <code>Neoragex2002</code> 的私信，且 identity link 已命中。</p>
+<p><strong>原始 Telegram 事实：</strong></p>
+<ul>
+<li><code>from.id = 2002</code></li>
+<li><code>chat.id = 2002</code></li>
+<li><code>chat.kind = private</code></li>
+</ul>
+<p><strong>解释：</strong></p>
+<ul>
+<li>这里 <code>from.id</code> 和 <code>chat.id</code> 虽然数值相同，但语义不同</li>
+<li>canonical DM <code>peer_key</code> 仍然按“人/用户”建模，不按 <code>tgchat.2002</code> 建模</li>
+</ul>
+<p><strong>peer_key：</strong></p>
+<ul>
+<li><code>person.neoragex2002</code></li>
+</ul>
+<p><strong>bucket_key：</strong></p>
+<ul>
+<li><code>dm-peer-person.neoragex2002</code></li>
+</ul>
+<p><strong>session_key：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:dm-peer-person.neoragex2002</code></li>
+</ul>
+<p><strong>session_id：</strong></p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e81</code></li>
+</ul>
+<h3 id="93-agent-telegram-groupper_branch_sender"><a class="header" href="#93-agent-telegram-groupper_branch_sender">9.3 Agent Telegram Group：<code>per_branch_sender</code></a></h3>
+<p><code>zhuzhu</code> 在群 <code>-1001234567890</code> 的 topic <code>42</code> 里收到 <code>Neoragex2002</code> 的发言。</p>
+<p><strong>原始 Telegram 事实：</strong></p>
+<ul>
+<li><code>chat.id = -1001234567890</code></li>
+<li><code>thread_id = 42</code></li>
+<li><code>from.id = 2002</code></li>
+</ul>
+<p><strong>peer_key：</strong></p>
+<ul>
+<li><code>tgchat.n1001234567890</code></li>
+</ul>
+<p><strong>branch_key：</strong></p>
+<ul>
+<li><code>topic.42</code></li>
+</ul>
+<p><strong>sender_key：</strong></p>
+<ul>
+<li><code>person.neoragex2002</code></li>
+</ul>
+<p><strong>bucket_key：</strong></p>
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-branch-topic.42-sender-person.neoragex2002</code></li>
+</ul>
+<p><strong>session_key：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:group-peer-tgchat.n1001234567890-branch-topic.42-sender-person.neoragex2002</code></li>
+</ul>
+<p><strong>session_id：</strong></p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e95</code></li>
+</ul>
+<h3 id="94-system-cron-heartbeat"><a class="header" href="#94-system-cron-heartbeat">9.4 System Cron Heartbeat</a></h3>
+<p>系统 heartbeat 任务需要长期复用自己的上下文。</p>
+<p><strong>bucket_key：</strong></p>
+<ul>
+<li><code>heartbeat</code></li>
+</ul>
+<p><strong>session_key：</strong></p>
+<ul>
+<li><code>system:cron:heartbeat</code></li>
+</ul>
+<p><strong>session_id：</strong></p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2ea2</code></li>
+</ul>
+<h3 id="95-system-cron-普通持久-job"><a class="header" href="#95-system-cron-普通持久-job">9.5 System Cron 普通持久 Job</a></h3>
+<p>job id 为 <code>01jv62d6h1k7</code> 的 cron 任务需要长期保留上下文。</p>
+<p><strong>bucket_key：</strong></p>
+<ul>
+<li><code>job-01jv62d6h1k7</code></li>
+</ul>
+<p><strong>session_key：</strong></p>
+<ul>
+<li><code>system:cron:job-01jv62d6h1k7</code></li>
+</ul>
+<p><strong>session_id：</strong></p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2eb0</code></li>
+</ul>
+<h3 id="96-transient-执行provider-setup-probe"><a class="header" href="#96-transient-执行provider-setup-probe">9.6 Transient 执行：Provider Setup Probe</a></h3>
+<p>provider setup 探针只是一轮探测，不需要长期上下文。</p>
+<p><strong>正确做法：</strong></p>
+<ul>
+<li><code>session_key = None</code></li>
+<li><code>session_id = None</code></li>
+<li><code>run_id = run_0195f3c5b3d27d8aa91e4439bb3c2ef1</code></li>
+</ul>
+<p><strong>错误做法：</strong></p>
+<ul>
+<li><code>session_id = provider_setup:openai:gpt-5.2</code></li>
+</ul>
+<h3 id="97-transient-执行model-capability-probe--stream-test"><a class="header" href="#97-transient-执行model-capability-probe--stream-test">9.7 Transient 执行：Model Capability Probe / Stream Test</a></h3>
+<p>模型可用性探针、模型连通性测试也都只是一轮探测，不需要长期上下文。</p>
+<p><strong>正确做法：</strong></p>
+<ul>
+<li><code>session_key = None</code></li>
+<li><code>session_id = None</code></li>
+<li><code>run_id = run_0195f3c5b3d27d8aa91e4439bb3c2ef2</code></li>
+</ul>
+<p><strong>错误做法：</strong></p>
+<ul>
+<li><code>session_id = probe:openai:gpt-5.2</code></li>
+<li><code>session_id = models.test:gpt-5.2</code></li>
+</ul>
+<h3 id="98-transient-执行tts-phrase-probe"><a class="header" href="#98-transient-执行tts-phrase-probe">9.8 Transient 执行：TTS Phrase Probe</a></h3>
+<p>TTS phrase 生成探针只是一轮探测，不需要长期上下文。</p>
+<p><strong>正确做法：</strong></p>
+<ul>
+<li><code>session_key = None</code></li>
+<li><code>session_id = None</code></li>
+<li><code>run_id = run_0195f3c5b3d27d8aa91e4439bb3c2ef2</code></li>
+</ul>
+<p><strong>错误做法：</strong></p>
+<ul>
+<li><code>session_id = tts.generate_phrase:voice</code></li>
+</ul>
+<hr />
+<h2 id="10-为什么删除-execution-only-session-id"><a class="header" href="#10-为什么删除-execution-only-session-id">10. 为什么删除 “execution-only session id”</a></h2>
+<p>本轮设计明确删除这个概念。</p>
+<p>原因很简单：</p>
+<ol>
+<li>它会把“执行实例”伪装成“会话实例”</li>
+<li>它会重新把业务语义塞进 <code>session_id</code></li>
+<li>它会制造第三套伪命名空间，进一步加剧混乱</li>
+</ol>
+<p>正确分工是：</p>
+<ul>
+<li>需要长期上下文复用：给 <code>session_key</code></li>
+<li>需要会话实例：给 <code>session_id</code></li>
+<li>只是一次执行：给 <code>run_id</code></li>
+</ul>
+<p><strong>例子对比：</strong></p>
+<h3 id="错误"><a class="header" href="#错误">错误</a></h3>
+<ul>
+<li><code>session_id = provider_setup:openai:gpt-5.2</code></li>
+<li><code>session_id = probe:openai:gpt-5.2</code></li>
+<li><code>session_id = models.test:gpt-5.2</code></li>
+<li><code>session_id = cron:heartbeat</code></li>
+<li><code>session_id = main</code></li>
+</ul>
+<h3 id="正确"><a class="header" href="#正确">正确</a></h3>
+<ul>
+<li><code>session_key = system:cron:heartbeat</code></li>
+<li><code>session_id = sess_0195f3c5...</code></li>
+<li><code>run_id = run_0195f3c5...</code></li>
+</ul>
+<p>或者对于 transient probe：</p>
+<ul>
+<li><code>session_key = None</code></li>
+<li><code>session_id = None</code></li>
+<li><code>run_id = run_0195f3c5...</code></li>
+</ul>
+<hr />
+<h2 id="11-sandbox--prompt-cache--binding-口径"><a class="header" href="#11-sandbox--prompt-cache--binding-口径">11. Sandbox / Prompt Cache / Binding 口径</a></h2>
+<h3 id="111-scope_keysession_key"><a class="header" href="#111-scope_keysession_key">11.1 <code>scope_key=session_key</code></a></h3>
+<p>适用于要按逻辑桶复用环境的场景。</p>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:dm-peer-person.neoragex2002</code></li>
+<li><code>system:cron:heartbeat</code></li>
+</ul>
+<p>这意味着：</p>
+<ul>
+<li>同一个逻辑桶，即使滚动出多个 <code>session_id</code>，也可继续复用同一个 sandbox</li>
+</ul>
+<h3 id="112-scope_keysession_id"><a class="header" href="#112-scope_keysession_id">11.2 <code>scope_key=session_id</code></a></h3>
+<p>适用于要按具体会话实例隔离环境的场景。</p>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e81</code></li>
+</ul>
+<p>这意味着：</p>
+<ul>
+<li>同一逻辑桶如果切出新的会话实例，sandbox 也会切开</li>
+</ul>
+<h4 id="1121-sandbox-runtime-artifact-naming"><a class="header" href="#1121-sandbox-runtime-artifact-naming">11.2.1 sandbox runtime artifact naming</a></h4>
+<p>sandbox 运行时还会派生出：</p>
+<ul>
+<li>container name</li>
+<li><code>.sandbox_views/&lt;...&gt;</code> 目录名</li>
+<li>其他 backend-specific runtime artifact name</li>
+</ul>
+<p>这里要明确：</p>
+<ul>
+<li>sandbox 的事实源不是这些 artifact name</li>
+<li>sandbox 的事实源只有 <code>effective_sandbox_key</code></li>
+</ul>
+<p>其中：</p>
+<ul>
+<li>当 <code>scope_key=session_key</code> 时：
+<ul>
+<li><code>effective_sandbox_key = session_key</code></li>
+</ul>
+</li>
+<li>当 <code>scope_key=session_id</code> 时：
+<ul>
+<li><code>effective_sandbox_key = session_id</code></li>
+</ul>
+</li>
+</ul>
+<p>runtime artifact name 必须满足：</p>
+<ul>
+<li>由完整 <code>effective_sandbox_key</code> 稳定派生</li>
+<li>collision-safe</li>
+<li>backend / filesystem safe</li>
+<li>不得使用简单 <code>sanitize</code> / 字符替换作为真名</li>
+</ul>
+<p>因为：</p>
+<ul>
+<li><code>agent:zhuzhu:dm-peer-person.a/b</code></li>
+<li><code>agent:zhuzhu:dm-peer-person.a:b</code></li>
+</ul>
+<p>这类不同 key，简单 sanitize 后可能会撞成同一个 runtime name。</p>
+<p><strong>推荐形态：</strong></p>
+<ul>
+<li><code>sandbox_runtime_name = msb-&lt;readable-slice&gt;-&lt;short-hash&gt;</code></li>
+</ul>
+<p>其中：</p>
+<ul>
+<li><code>msb</code>
+<ul>
+<li>固定前缀</li>
+<li>含义：<code>moltis sandbox</code></li>
+</ul>
+</li>
+<li><code>readable-slice</code>
+<ul>
+<li>给人看的短语义片段</li>
+<li>只用于辅助识别，不承担真值职责</li>
+</ul>
+</li>
+<li><code>short-hash</code>
+<ul>
+<li>基于完整 <code>effective_sandbox_key</code> 的稳定短哈希</li>
+<li>用于防撞</li>
+</ul>
+</li>
+</ul>
+<p><code>readable-slice</code> 的推荐裁剪规则：</p>
+<ul>
+<li><code>agent:&lt;agent_id&gt;:main</code>
+<ul>
+<li><code>agent-&lt;agent_id&gt;-main</code></li>
+</ul>
+</li>
+<li><code>agent:&lt;agent_id&gt;:chat-&lt;id&gt;</code>
+<ul>
+<li><code>agent-&lt;agent_id&gt;-chat</code></li>
+</ul>
+</li>
+<li><code>agent:&lt;agent_id&gt;:dm-*</code>
+<ul>
+<li><code>agent-&lt;agent_id&gt;-dm</code></li>
+</ul>
+</li>
+<li><code>agent:&lt;agent_id&gt;:group-peer-tgchat.n&lt;chat_id&gt;...</code>
+<ul>
+<li><code>agent-&lt;agent_id&gt;-group-&lt;chat_id&gt;</code></li>
+</ul>
+</li>
+<li><code>system:cron:heartbeat</code>
+<ul>
+<li><code>system-cron-heartbeat</code></li>
+</ul>
+</li>
+<li><code>system:cron:job-&lt;job_id&gt;</code>
+<ul>
+<li><code>system-cron-job</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li>
+<p><code>effective_sandbox_key = agent:zhuzhu:dm-peer-person.neoragex2002</code></p>
+</li>
+<li>
+<p><code>sandbox_runtime_name = msb-agent-zhuzhu-dm-4f2a91c0</code></p>
+</li>
+<li>
+<p><code>container_name = msb-agent-zhuzhu-dm-4f2a91c0</code></p>
+</li>
+<li>
+<p><code>public_data_view = .sandbox_views/msb-agent-zhuzhu-dm-4f2a91c0</code></p>
+</li>
+<li>
+<p><code>effective_sandbox_key = agent:zhuzhu:main</code></p>
+</li>
+<li>
+<p><code>sandbox_runtime_name = msb-agent-zhuzhu-main-7ab31c2d</code></p>
+</li>
+<li>
+<p><code>container_name = msb-agent-zhuzhu-main-7ab31c2d</code></p>
+</li>
+<li>
+<p><code>effective_sandbox_key = agent:zhuzhu:group-peer-tgchat.n1001234567890</code></p>
+</li>
+<li>
+<p><code>sandbox_runtime_name = msb-agent-zhuzhu-group-1001234567890-a83c1d92</code></p>
+</li>
+<li>
+<p><code>container_name = msb-agent-zhuzhu-group-1001234567890-a83c1d92</code></p>
+</li>
+<li>
+<p><code>effective_sandbox_key = system:cron:heartbeat</code></p>
+</li>
+<li>
+<p><code>sandbox_runtime_name = msb-system-cron-heartbeat-d91a7c44</code></p>
+</li>
+<li>
+<p><code>container_name = msb-system-cron-heartbeat-d91a7c44</code></p>
+</li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li><code>msb</code> 是固定字面量，不是用户可配置项</li>
+<li>旧配置 <code>tools.exec.sandbox.container_prefix</code> 必须直接 reject</li>
+<li>debug / observability / UI 若展示 sandbox 信息，必须同时能看到：
+<ul>
+<li><code>effectiveSandboxKey</code></li>
+<li><code>containerName</code></li>
+</ul>
+</li>
+<li><code>containerName</code> 只是运行时派生名，不得回流为 session truth</li>
+<li><code>containerName</code> 可以直观，但其可读片段只做辅助识别；真正复用、命中、判等一律只看完整 <code>effective_sandbox_key</code></li>
+</ul>
+<h4 id="1122-non-main-的判定口径"><a class="header" href="#1122-non-main-的判定口径">11.2.2 <code>non-main</code> 的判定口径</a></h4>
+<p><code>non-main</code> 是逻辑桶语义，不是实例 id 语义。</p>
+<p>因此：</p>
+<ul>
+<li>不得再用 <code>session_id == "main"</code> 判定</li>
+</ul>
+<p>必须改成：</p>
+<ul>
+<li>Agent 主桶：
+<ul>
+<li><code>session_key = agent:&lt;agent_id&gt;:main</code></li>
+<li>这是 <code>main</code></li>
+</ul>
+</li>
+<li>其他 agent 桶：
+<ul>
+<li>都是 <code>non-main</code></li>
+</ul>
+</li>
+<li><code>system:*</code>
+<ul>
+<li>都是 <code>non-main</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li><code>session_key = agent:zhuzhu:main</code>
+<ul>
+<li><code>non-main = false</code></li>
+</ul>
+</li>
+<li><code>session_key = agent:zhuzhu:chat-01jv5n5x9x4m</code>
+<ul>
+<li><code>non-main = true</code></li>
+</ul>
+</li>
+<li><code>session_key = agent:zhuzhu:group-peer-tgchat.n1001234567890</code>
+<ul>
+<li><code>non-main = true</code></li>
+</ul>
+</li>
+<li><code>session_key = system:cron:heartbeat</code>
+<ul>
+<li><code>non-main = true</code></li>
+</ul>
+</li>
+</ul>
+<p>若某条路径启用了 <code>non-main</code> 策略，却拿不到判定所需的 canonical <code>session_key</code>：</p>
+<ul>
+<li>必须直接 reject 或显式报错</li>
+<li>不得退回去猜 <code>session_id</code></li>
+</ul>
+<h3 id="113-prompt_cache_key"><a class="header" href="#113-prompt_cache_key">11.3 <code>prompt_cache_key</code></a></h3>
+<p><code>prompt_cache_key</code> 是 provider 南向 prompt cache 的桶名。</p>
+<p>它不是：</p>
+<ul>
+<li>不是 <code>session_key</code></li>
+<li>不是 <code>session_id</code></li>
+<li>不是 <code>run_id</code></li>
+<li>不是 active-session truth</li>
+</ul>
+<p>它只回答一件事：</p>
+<ul>
+<li>这次南向 LLM 请求，应当与哪一类请求共用 provider prompt cache</li>
+</ul>
+<p><strong>生成 owner：</strong></p>
+<ul>
+<li>必须由调用方决定并传入</li>
+<li>provider 只能消费，不得自行猜测或补默认值</li>
+</ul>
+<p><strong>默认规则：</strong></p>
+<ol>
+<li>Agent 会话请求
+<ul>
+<li>默认取 <code>session_id</code></li>
+</ul>
+</li>
+<li>稳定 system lane 请求
+<ul>
+<li>默认取稳定 <code>session_key</code></li>
+</ul>
+</li>
+<li>非 Agent 且没有 canonical session、但业务上仍想吃 prompt cache
+<ul>
+<li>必须由调用方显式提供稳定 <code>prompt_cache_key</code></li>
+</ul>
+</li>
+<li>若调用方既没有 canonical 默认值，也不想显式提供
+<ul>
+<li>直接省略 <code>prompt_cache_key</code></li>
+</ul>
+</li>
+</ol>
+<p><strong>例子 1：Agent 会话</strong></p>
+<ul>
+<li><code>session_id = sess_0195f3c5b3d27d8aa91e4439bb3c2e81</code></li>
+<li><code>prompt_cache_key = sess_0195f3c5b3d27d8aa91e4439bb3c2e81</code></li>
+</ul>
+<p><strong>例子 2：System heartbeat</strong></p>
+<ul>
+<li><code>session_key = system:cron:heartbeat</code></li>
+<li><code>prompt_cache_key = system:cron:heartbeat</code></li>
+</ul>
+<p><strong>例子 3：System 持久 cron job</strong></p>
+<ul>
+<li><code>session_key = system:cron:job-01jv62d6h1k7</code></li>
+<li><code>prompt_cache_key = system:cron:job-01jv62d6h1k7</code></li>
+</ul>
+<p><strong>例子 4：非 Agent transient，但调用方显式给缓存桶</strong></p>
+<ul>
+<li><code>run_id = run_0195f3c5b3d27d8aa91e4439bb3c2ef1</code></li>
+<li><code>prompt_cache_key = provider_setup:openai:gpt-5.2</code></li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li>provider 不得生成 <code>moltis:*:no-session</code></li>
+<li><code>prompt_cache_key</code> 不得回流为 <code>session_key</code> / <code>session_id</code></li>
+<li><code>prompt_cache_key</code> 不参与 active-session、sandbox、routing、history truth</li>
+</ul>
+<h3 id="114-transient-run"><a class="header" href="#114-transient-run">11.4 Transient run</a></h3>
+<p>transient run 没有 <code>session_key</code> / <code>session_id</code>。</p>
+<p>因此：</p>
+<ul>
+<li>不得靠伪造 <code>session_id</code> 来骗过 sandbox</li>
+<li>provider 不得伪造 <code>prompt_cache_key</code></li>
+<li>若 transient 调用确实需要 southbound prompt cache，必须由调用方显式提供稳定 <code>prompt_cache_key</code></li>
+<li>若某个 transient 工作真的需要长期复用环境，它就不再是 transient，必须被提升为真实 <code>system</code> 会话</li>
+</ul>
+<p><strong>例子：</strong></p>
+<ul>
+<li>provider setup probe：不应拥有 <code>system:provider_setup:*</code></li>
+<li>若未来某个“系统级长期 provider audit”真的需要复用上下文，必须单独定义新的 <code>service_id</code>，而不是偷用 probe run</li>
+</ul>
+<h3 id="115-telegram-adapter-内部局部缓存"><a class="header" href="#115-telegram-adapter-内部局部缓存">11.5 Telegram adapter 内部局部缓存</a></h3>
+<p>Telegram callback/message binding 这类局部 helper，可以继续存储 Telegram 自己的 <code>bucket_key</code>。</p>
+<p>但要注意：</p>
+<ul>
+<li>这只是 adapter 内部局部辅助真值</li>
+<li>不是全系统 session 真值</li>
+</ul>
+<p>全系统真值仍然是：</p>
+<ul>
+<li><code>session_key</code></li>
+<li><code>session_key -&gt; active session_id</code></li>
+</ul>
+<h3 id="116-key-消费矩阵硬规则"><a class="header" href="#116-key-消费矩阵硬规则">11.6 Key 消费矩阵（硬规则）</a></h3>
+<p>以下矩阵用于冻结“谁该看哪个 key”。</p>
+<h4 id="1161-只能消费-bucket_key-的位置"><a class="header" href="#1161-只能消费-bucket_key-的位置">11.6.1 只能消费 <code>bucket_key</code> 的位置</a></h4>
+<ul>
+<li>Telegram adapter 内部 callback / binding / route helper</li>
+<li>Telegram adapter 内部 bucket 相等性比较</li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li><code>bucket_key</code> 只允许留在适配层局部语义里</li>
+<li>不得把 <code>bucket_key</code> 直接冒充系统层 <code>session_key</code></li>
+</ul>
+<h4 id="1162-只能消费-session_key-的位置"><a class="header" href="#1162-只能消费-session_key-的位置">11.6.2 只能消费 <code>session_key</code> 的位置</a></h4>
+<ul>
+<li><code>session_key -&gt; active session_id</code> 的权威映射</li>
+<li>逻辑桶级 sandbox（仅当 <code>scope_key=session_key</code>）</li>
+<li>bucket-scoped policy / routing 命中</li>
+<li>其他“明确声明为逻辑桶共享状态”的组件</li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li>若某个组件消费的是“逻辑桶共享状态”，它必须显式使用 <code>session_key</code></li>
+<li>当前仓库内的 <code>SessionStateStore</code> 不属于这里；它的语义已经冻结为“会话实例级状态”，必须走 <code>session_id</code></li>
+<li>不得把 <code>channel_type + bucket_key</code> 当 <code>session_key</code> 的替代真值</li>
+</ul>
+<h4 id="1163-只能消费-prompt_cache_key-的位置"><a class="header" href="#1163-只能消费-prompt_cache_key-的位置">11.6.3 只能消费 <code>prompt_cache_key</code> 的位置</a></h4>
+<ul>
+<li>provider 南向 prompt cache</li>
+<li>provider prompt cache debug / observability</li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li><code>prompt_cache_key</code> 不是 core runtime key</li>
+<li>Agent 会话默认取 <code>session_id</code></li>
+<li>稳定 system lane 默认取 <code>session_key</code></li>
+<li>非 Agent 无 canonical session 时，若想吃 cache，必须由调用方显式提供稳定 bucket</li>
+<li>若调用方未提供，也没有默认 derivation，则直接省略</li>
+<li>provider 不得生成 <code>moltis:*:no-session</code> 或其他 fallback bucket</li>
+</ul>
+<h4 id="1164-只能消费-session_id-的位置"><a class="header" href="#1164-只能消费-session_id-的位置">11.6.4 只能消费 <code>session_id</code> 的位置</a></h4>
+<ul>
+<li><code>LlmRequestContext.session_id</code></li>
+<li>会话实例历史 / metadata / label / model / project</li>
+<li>worktree 绑定</li>
+<li>branching parent / child 关系</li>
+<li><code>session_state</code> 工具与其持久化存储（语义是“当前会话实例状态”）</li>
+<li>silent memory flush / compaction helper 注入给工具的 <code>_sessionId</code></li>
+<li>实例级 sandbox（仅当 <code>scope_key=session_id</code>）</li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li>这些位置消费的是“具体会话实例”</li>
+<li>不得改用 <code>session_key</code></li>
+<li>若现有字段、变量、列名写成 <code>session_key</code>，但实际承载的是实例语义，必须硬切修正</li>
+<li>对应旧持久化形状（如 <code>parent_session_key</code>、<code>session_state.session_key</code>）必须直接 reject</li>
+<li>不得为旧字段名保留 serde alias、SQL fallback、silent ignore</li>
+<li>若调用方没有 <code>session_id</code>，这些消费者必须显式 reject 或保持缺失</li>
+<li>不得把缺失的 <code>session_id</code> 默认补成 <code>main</code></li>
+</ul>
+<h4 id="1165-只能消费-run_id-的位置"><a class="header" href="#1165-只能消费-run_id-的位置">11.6.5 只能消费 <code>run_id</code> 的位置</a></h4>
+<ul>
+<li>transient probe</li>
+<li>stream state</li>
+<li>run-scoped metrics / tracing</li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li>transient probe 不得再伪造 <code>session_id</code></li>
+<li>不得发明 <code>system:provider_setup:*</code>、<code>system:tts:*</code> 这种伪长期会话</li>
+</ul>
+<hr />
+<h2 id="12-硬切-legacy-拒绝口径"><a class="header" href="#12-硬切-legacy-拒绝口径">12. 硬切 legacy 拒绝口径</a></h2>
+<p>以下格式在专项治理后必须直接拒绝：</p>
+<h3 id="121-旧-session_key"><a class="header" href="#121-旧-session_key">12.1 旧 <code>session_key</code></a></h3>
+<p><strong>拒绝例子：</strong></p>
+<ul>
+<li><code>main</code></li>
+<li><code>cron:heartbeat</code></li>
+<li><code>session:abc</code></li>
+<li><code>telegram:845:group:-1001234567890</code></li>
+<li>直接把 Telegram raw bucket 当 <code>session_key</code></li>
+</ul>
+<p><strong>正确例子：</strong></p>
+<ul>
+<li><code>agent:zhuzhu:main</code></li>
+<li><code>system:cron:heartbeat</code></li>
+<li><code>agent:zhuzhu:group-peer-tgchat.n1001234567890</code></li>
+</ul>
+<h3 id="122-旧-session_id"><a class="header" href="#122-旧-session_id">12.2 旧 <code>session_id</code></a></h3>
+<p><strong>拒绝例子：</strong></p>
+<ul>
+<li><code>main</code></li>
+<li><code>cron:heartbeat</code></li>
+<li><code>probe:openai:gpt-5.2</code></li>
+<li><code>models.test:gpt-5.2</code></li>
+<li><code>provider_setup:openai:gpt-5.2</code></li>
+<li><code>tts.generate_phrase:voice</code></li>
+<li><code>session:550e8400-e29b-41d4-a716-446655440000</code></li>
+</ul>
+<p><strong>正确例子：</strong></p>
+<ul>
+<li><code>sess_0195f3c5b3d27d8aa91e4439bb3c2e74</code></li>
+</ul>
+<h3 id="123-旧-telegram-bucket"><a class="header" href="#123-旧-telegram-bucket">12.3 旧 Telegram bucket</a></h3>
+<p><strong>拒绝例子：</strong></p>
+<ul>
+<li><code>dm:main</code></li>
+<li><code>dm:account:telegram:8344017527:peer:foo</code></li>
+<li><code>group:account:telegram:8344017527:peer:-1001234567890</code></li>
+<li><code>group:account:telegram:8344017527:peer:-1001234567890:branch:42:sender:1001</code></li>
+</ul>
+<p><strong>正确例子：</strong></p>
+<ul>
+<li><code>dm-main</code></li>
+<li><code>dm-peer-person.neoragex2002-account-tguser.8344017527</code></li>
+<li><code>group-peer-tgchat.n1001234567890</code></li>
+<li><code>group-peer-tgchat.n1001234567890-branch-topic.42-sender-person.neoragex2002</code></li>
+</ul>
+<h3 id="124-结构化拒绝--冲突日志合同硬规则"><a class="header" href="#124-结构化拒绝--冲突日志合同硬规则">12.4 结构化拒绝 / 冲突日志合同（硬规则）</a></h3>
+<p>命中 strict one-cut 拒绝或 identity 冲突时，必须留下结构化日志。</p>
+<p><strong>必带字段：</strong></p>
+<ul>
+<li><code>event</code></li>
+<li><code>reason_code</code></li>
+<li><code>decision</code></li>
+<li><code>policy</code></li>
+</ul>
+<p><strong>上下文字段：</strong></p>
+<ul>
+<li>视场景补充：
+<ul>
+<li><code>agent_id</code></li>
+<li><code>session_key</code></li>
+<li><code>bucket_key</code></li>
+<li><code>telegram_user_id</code></li>
+<li><code>telegram_user_name</code></li>
+<li><code>chat_id</code></li>
+<li><code>chat_type</code></li>
+<li><code>group_scope</code></li>
+</ul>
+</li>
+<li>禁止打印完整消息正文、token、secret</li>
+</ul>
+<p><strong>固定 policy：</strong></p>
+<ul>
+<li>Session / bucket one-cut：
+<ul>
+<li><code>session_key_bucket_key_one_cut_v1</code></li>
+</ul>
+</li>
+<li>Telegram identity link：
+<ul>
+<li><code>telegram_identity_link_one_cut_v1</code></li>
+</ul>
+</li>
+<li>Telegram group route degrade：
+<ul>
+<li><code>telegram_group_scope_one_cut_v1</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>固定日志事件与 reason_code：</strong></p>
+<ul>
+<li>旧 <code>session_key</code> 被拒绝：
+<ul>
+<li><code>event = "canonical_key.reject"</code></li>
+<li><code>reason_code = "legacy_session_key_shape"</code></li>
+<li><code>decision = "reject"</code></li>
+</ul>
+</li>
+<li>旧 <code>session_id</code> 被拒绝：
+<ul>
+<li><code>event = "canonical_key.reject"</code></li>
+<li><code>reason_code = "legacy_session_id_shape"</code></li>
+<li><code>decision = "reject"</code></li>
+</ul>
+</li>
+<li>旧 Telegram bucket 被拒绝：
+<ul>
+<li><code>event = "canonical_key.reject"</code></li>
+<li><code>reason_code = "legacy_tg_bucket_shape"</code></li>
+<li><code>decision = "reject"</code></li>
+</ul>
+</li>
+<li><code>PEOPLE.md</code> 中 <code>telegram_user_id</code> 重复：
+<ul>
+<li><code>event = "telegram.identity_link.reject"</code></li>
+<li><code>reason_code = "identity_link_duplicate_user_id"</code></li>
+<li><code>decision = "reject"</code></li>
+</ul>
+</li>
+<li><code>PEOPLE.md</code> 中规范化 username 重复：
+<ul>
+<li><code>event = "telegram.identity_link.reject"</code></li>
+<li><code>reason_code = "identity_link_duplicate_user_name"</code></li>
+<li><code>decision = "reject"</code></li>
+</ul>
+</li>
+<li>同一入站事件里 user_id 与 username 指向不同 <code>person_id</code>：
+<ul>
+<li><code>event = "telegram.identity_link.conflict"</code></li>
+<li><code>reason_code = "identity_link_username_conflicts_with_user_id"</code></li>
+<li><code>decision = "prefer_user_id"</code></li>
+</ul>
+</li>
+<li>group scope 需要 sender 但 sender 缺失：
+<ul>
+<li><code>event = "telegram.route.degrade"</code></li>
+<li><code>reason_code = "sender_missing"</code></li>
+<li><code>decision = "degrade"</code></li>
+</ul>
+</li>
+<li>group scope 需要 branch 但 branch 缺失：
+<ul>
+<li><code>event = "telegram.route.degrade"</code></li>
+<li><code>reason_code = "branch_missing"</code></li>
+<li><code>decision = "degrade"</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>强约束：</strong></p>
+<ul>
+<li>不得 silent reject</li>
+<li>不得一会儿写 <code>legacy_bucket</code>，一会儿写 <code>bucket_legacy</code></li>
+<li>上述 <code>reason_code</code> 在本专项内冻结，实施不得自由发挥别名</li>
+</ul>
+<hr />
+<h2 id="13-最小测试面设计冻结后的验收"><a class="header" href="#13-最小测试面设计冻结后的验收">13. 最小测试面（设计冻结后的验收）</a></h2>
+<p>本设计落地后，至少要覆盖下面这组关键测试。</p>
+<h3 id="131-key-语法测试"><a class="header" href="#131-key-语法测试">13.1 Key 语法测试</a></h3>
+<ul>
+<li>允许：
+<ul>
+<li><code>agent:zhuzhu:main</code></li>
+<li><code>agent:zhuzhu:dm-peer-person.neoragex2002</code></li>
+<li><code>system:cron:heartbeat</code></li>
+</ul>
+</li>
+<li>拒绝：
+<ul>
+<li><code>main</code></li>
+<li><code>cron:heartbeat</code></li>
+<li><code>dm:main</code></li>
+</ul>
+</li>
+</ul>
+<h3 id="132-telegram-bucket-生成测试"><a class="header" href="#132-telegram-bucket-生成测试">13.2 Telegram bucket 生成测试</a></h3>
+<ul>
+<li><code>dm_scope = main</code>
+<ul>
+<li>输入：任意 peer</li>
+<li>输出：<code>dm-main</code></li>
+</ul>
+</li>
+<li>DM private chat 不得冒充 peer
+<ul>
+<li>输入：
+<ul>
+<li><code>from.id = 2002</code></li>
+<li><code>chat.id = 2002</code></li>
+<li>identity link 命中 <code>person.neoragex2002</code></li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>dm-peer-person.neoragex2002</code></li>
+</ul>
+</li>
+<li>禁止输出：
+<ul>
+<li><code>dm-peer-tgchat.2002</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>DM unresolved user
+<ul>
+<li>输入：
+<ul>
+<li><code>from.id = 2002</code></li>
+<li><code>chat.id = 2002</code></li>
+<li>无 identity link</li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>dm-peer-tguser.2002</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><code>dm_scope = per_peer</code>
+<ul>
+<li>输入：<code>peer_key = person.neoragex2002</code></li>
+<li>输出：<code>dm-peer-person.neoragex2002</code></li>
+</ul>
+</li>
+<li><code>group_scope = per_branch_sender</code>
+<ul>
+<li>输入：
+<ul>
+<li><code>peer_key = tgchat.n1001234567890</code></li>
+<li><code>branch_key = topic.42</code></li>
+<li><code>sender_key = person.neoragex2002</code></li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>group-peer-tgchat.n1001234567890-branch-topic.42-sender-person.neoragex2002</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>Group shared chat 编码
+<ul>
+<li>输入：
+<ul>
+<li><code>chat.id = -1001234567890</code></li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>peer_key = tgchat.n1001234567890</code></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<h3 id="133-identity-link-判定测试"><a class="header" href="#133-identity-link-判定测试">13.3 Identity link 判定测试</a></h3>
+<ul>
+<li><code>telegram_user_id</code> 唯一命中
+<ul>
+<li>输入：
+<ul>
+<li><code>telegram_user_id = 2002</code></li>
+<li><code>telegram_user_name = @neo_rage</code></li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>person.neoragex2002</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><code>telegram_user_id</code> 未命中时不得退回 username 顶替
+<ul>
+<li>输入：
+<ul>
+<li><code>telegram_user_id = 2002</code></li>
+<li><code>telegram_user_name = @neo_rage</code></li>
+<li><code>PEOPLE.md</code> 只配置 username link</li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>tguser.2002</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><code>telegram_user_id</code> 缺失时才允许 username fallback
+<ul>
+<li>输入：
+<ul>
+<li><code>telegram_user_id = None</code></li>
+<li><code>telegram_user_name = @neo_rage</code></li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>person.neoragex2002</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><code>PEOPLE.md</code> 重复 <code>telegram_user_id</code>
+<ul>
+<li>结果：
+<ul>
+<li>配置检查失败</li>
+<li>启动失败</li>
+<li><code>reason_code = identity_link_duplicate_user_id</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><code>PEOPLE.md</code> 重复规范化 username
+<ul>
+<li>结果：
+<ul>
+<li>配置检查失败</li>
+<li>启动失败</li>
+<li><code>reason_code = identity_link_duplicate_user_name</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>无 <code>telegram_user_id</code> 且 username 也未命中
+<ul>
+<li>DM：
+<ul>
+<li><code>peer_key</code> 生成失败</li>
+<li>不得伪造 <code>tguser.&lt;username&gt;</code></li>
+</ul>
+</li>
+<li>Group：
+<ul>
+<li><code>sender_key</code> 视为缺失</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>同一事件里 user_id 与 username 指向不同 person
+<ul>
+<li>结果：
+<ul>
+<li>canonical actor 仍按 user_id</li>
+<li><code>decision = prefer_user_id</code></li>
+<li><code>reason_code = identity_link_username_conflicts_with_user_id</code></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<h3 id="134-branch-判定测试"><a class="header" href="#134-branch-判定测试">13.4 Branch 判定测试</a></h3>
+<ul>
+<li>topic 与 reply 同时存在
+<ul>
+<li>输入：
+<ul>
+<li><code>thread_id = 42</code></li>
+<li><code>reply_to_message_id = 98765</code></li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>branch_key = topic.42</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>只有 reply
+<ul>
+<li>输入：
+<ul>
+<li><code>thread_id = None</code></li>
+<li><code>reply_to_message_id = 98765</code></li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>branch_key = reply.98765</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>两者都缺失
+<ul>
+<li>输入：
+<ul>
+<li><code>thread_id = None</code></li>
+<li><code>reply_to_message_id = None</code></li>
+</ul>
+</li>
+<li>输出：
+<ul>
+<li><code>branch_key = None</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><code>group_scope = per_branch_sender</code> 且 branch 缺失
+<ul>
+<li>输出：
+<ul>
+<li>按既定 bucket 降级</li>
+<li><code>reason_code = branch_missing</code></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<h3 id="135-transient-run-测试"><a class="header" href="#135-transient-run-测试">13.5 Transient run 测试</a></h3>
+<ul>
+<li>provider setup probe
+<ul>
+<li>必须：
+<ul>
+<li>有 <code>run_id</code></li>
+<li>无 <code>session_key</code></li>
+<li>无 <code>session_id</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>tts phrase probe
+<ul>
+<li>必须：
+<ul>
+<li>有 <code>run_id</code></li>
+<li>无 <code>session_key</code></li>
+<li>无 <code>session_id</code></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<h3 id="136-session-truth-与拒绝日志测试"><a class="header" href="#136-session-truth-与拒绝日志测试">13.6 Session truth 与拒绝日志测试</a></h3>
+<ul>
+<li>全系统 active-session 命中必须基于完整 <code>session_key</code></li>
+<li>不得再基于 <code>channel_type + bucket_key</code></li>
+<li>不得再基于语义型 <code>session_id</code></li>
+<li>legacy <code>session_key</code> 被拒绝时：
+<ul>
+<li><code>event = canonical_key.reject</code></li>
+<li><code>reason_code = legacy_session_key_shape</code></li>
+</ul>
+</li>
+<li>legacy <code>session_id</code> 被拒绝时：
+<ul>
+<li><code>event = canonical_key.reject</code></li>
+<li><code>reason_code = legacy_session_id_shape</code></li>
+</ul>
+</li>
+<li>legacy Telegram bucket 被拒绝时：
+<ul>
+<li><code>event = canonical_key.reject</code></li>
+<li><code>reason_code = legacy_tg_bucket_shape</code></li>
+</ul>
+</li>
+</ul>
+<hr />
+<h2 id="14-最终冻结摘要"><a class="header" href="#14-最终冻结摘要">14. 最终冻结摘要</a></h2>
+<p>如果只记 6 条，记下面这 6 条：</p>
+<ol>
+<li><code>bucket_key</code> 是本地分桶键；<code>session_key</code> 是全局逻辑桶名；<code>session_id</code> 是会话实例 id；<code>run_id</code> 是执行实例 id</li>
+<li><code>session_key</code> 只允许两大命名空间：
+<ul>
+<li><code>agent:&lt;agent_id&gt;:&lt;bucket_key&gt;</code></li>
+<li><code>system:&lt;service_id&gt;:&lt;bucket_key&gt;</code></li>
+</ul>
+</li>
+<li><code>session_id</code> 与 <code>run_id</code> 必须 opaque，不得再带业务语义</li>
+<li>transient 执行没有 “execution-only session id”；只有 <code>run_id</code></li>
+<li>Telegram <code>bucket_key</code> 必须 typed，且必须 self-describing</li>
+<li>旧 <code>main</code> / <code>cron:*</code> / <code>session:*</code> / <code>provider_setup:*</code> / <code>tts.generate_phrase:*</code> / <code>dm:...</code> / <code>group:...</code> 形态全部一刀切淘汰</li>
+</ol>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../refactor/session-scope-overview.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../refactor/session-context-layering.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../refactor/session-scope-overview.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../refactor/session-context-layering.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
