@@ -183,44 +183,91 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="sandbox-backends"><a class="header" href="#sandbox-backends">Sandbox Backends</a></h1>
-<p>Moltis runs LLM-generated commands inside containers to protect your host
-system. The sandbox backend controls which container technology is used.</p>
-<h2 id="backend-selection"><a class="header" href="#backend-selection">Backend Selection</a></h2>
-<p>Configure in <code>moltis.toml</code>:</p>
+                        <h1 id="exec-sandbox-docker-only"><a class="header" href="#exec-sandbox-docker-only">Exec Sandbox (Docker-only)</a></h1>
+<p>Moltis runs LLM-generated <code>exec</code> / <code>process</code> commands inside Docker containers
+to isolate untrusted workloads from your host system.</p>
+<p>This page documents the <strong>exec sandbox</strong> (<code>[tools.exec.sandbox]</code>), not the
+browser tool’s container settings.</p>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<p><code>moltis.toml</code>:</p>
 <pre><code class="language-toml">[tools.exec.sandbox]
-backend = "auto"          # default — picks the best available
-# backend = "docker"      # force Docker
-# backend = "apple-container"  # not supported (will fail-fast)
+# When to apply sandboxing:
+# - "off": no container isolation (runs on host)
+# - "non-main": sandbox only for non-main sessions
+# - "all": sandbox for all sessions
+mode = "off"
+
+# Sandbox runtime image. Must already exist in your local Docker image store.
+# Moltis does NOT build or pull images.
+# image = "moltis-sandbox:2026-03-26"
+
+# Startup policy for managed sandbox containers:
+# - "reset": delete managed containers at startup
+# - "reuse": keep only containers matching the current contract
+startup_container_policy = "reset"
+
+# Container reuse boundary:
+# - "session_id": per session instance
+# - "session_key": per logical session bucket
+scope_key = "session_id"
+
+# Idle TTL for sandbox containers (seconds). 0 disables TTL.
+idle_ttl_secs = 0
+
+# Data directory mount contract (required when mode != "off")
+data_mount = "ro"           # "ro" | "rw"
+data_mount_type = "bind"    # "bind" | "volume"
+data_mount_source = "/srv/moltis-data"
 </code></pre>
-<p>With <code>"auto"</code> (the default), Moltis uses Docker when available:</p>
-<div class="table-wrapper"><table><thead><tr><th>Priority</th><th>Backend</th><th>Platform</th><th>Isolation</th></tr></thead><tbody>
-<tr><td>1</td><td>Docker</td><td>any</td><td>Linux namespaces / cgroups</td></tr>
-<tr><td>2</td><td>none (host)</td><td>any</td><td>no isolation</td></tr>
-</tbody></table>
-</div>
+<h2 id="one-cut-rules-no-backward-compatibility"><a class="header" href="#one-cut-rules-no-backward-compatibility">One-cut rules (no backward compatibility)</a></h2>
+<ul>
+<li>Docker-only: when <code>mode != "off"</code>, Docker must be available or the gateway
+fails fast (no host fallback).</li>
+<li>Single runtime image: <code>tools.exec.sandbox.image</code> is the <strong>only</strong> runtime image
+source. There are no per-session overrides.</li>
+<li>No build/pull/provision: Moltis does not <code>docker build</code>, does not pull, and
+does not apt-get install packages at runtime.</li>
+</ul>
+<h2 id="container-paths-runtime-contract"><a class="header" href="#container-paths-runtime-contract">Container paths (runtime contract)</a></h2>
+<p>Sandbox containers use two fixed guest paths:</p>
+<ul>
+<li><code>/moltis/data</code>: Moltis instance data directory (mounted read-only or read-write)</li>
+<li><code>/moltis/workdir</code>: the only default writable working directory</li>
+</ul>
+<p>Moltis also enforces:</p>
+<ul>
+<li><code>-w /moltis/workdir</code></li>
+<li><code>HOME=/moltis/workdir</code></li>
+<li><code>TMPDIR=/moltis/workdir/tmp</code></li>
+</ul>
 <h2 id="data-directory-mount-moltisdata"><a class="header" href="#data-directory-mount-moltisdata">Data directory mount (<code>/moltis/data</code>)</a></h2>
 <p>Sandbox containers use a fixed, stable path for the Moltis instance data
 directory: <code>/moltis/data</code>.</p>
 <p>On Docker, this requires configuring the mount backing explicitly:</p>
 <pre><code class="language-toml">[tools.exec.sandbox]
-data_mount = "ro"                 # "ro" | "rw" (must not be "none" when sandboxing)
-data_mount_type = "bind"          # "bind" | "volume"
+data_mount = "ro"                  # "ro" | "rw"
+data_mount_type = "bind"           # "bind" | "volume"
 data_mount_source = "/srv/moltis-data" # bind: absolute host path | volume: volume name
 </code></pre>
 <p>Moltis injects <code>MOLTIS_DATA_DIR=/moltis/data</code> into sandbox containers so any code
 running inside the sandbox resolves the data directory consistently.</p>
-<h2 id="docker"><a class="header" href="#docker">Docker</a></h2>
-<p>Docker is supported on macOS, Linux, and Windows. On macOS it runs inside a
-Linux VM managed by Docker Desktop.</p>
-<p>Install from https://docs.docker.com/get-docker/</p>
-<h2 id="no-sandbox"><a class="header" href="#no-sandbox">No sandbox</a></h2>
-<p>If neither runtime is found, commands execute directly on the host. The
-startup banner will show a warning. This is <strong>not recommended</strong> for untrusted
-workloads.</p>
-<h2 id="per-session-overrides"><a class="header" href="#per-session-overrides">Per-session overrides</a></h2>
-<p>The web UI allows toggling sandboxing per session and selecting a custom
-container image. These overrides persist across gateway restarts.</p>
+<h2 id="external-mounts-deny-by-default"><a class="header" href="#external-mounts-deny-by-default">External mounts (deny-by-default)</a></h2>
+<p>Additional host mounts can be configured with <code>mounts[]</code>, but are deny-by-default.
+If <code>mount_allowlist</code> is empty, all external mounts are rejected.</p>
+<pre><code class="language-toml">[tools.exec.sandbox]
+mount_allowlist = ["/srv"]
+mounts = [
+  { host_dir = "/srv/shared", guest_dir = "/mnt/shared", mode = "ro" },
+]
+</code></pre>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<ul>
+<li><code>SANDBOX_BACKEND_UNAVAILABLE</code>: Docker daemon not reachable.</li>
+<li><code>SANDBOX_IMAGE_MISSING</code>: the configured image is not in the local image store.
+Verify with <code>docker image inspect &lt;image&gt;</code>.</li>
+<li><code>SANDBOX_IMAGE_CONTRACT_INVALID</code>: the image exists but fails the runtime contract
+checks (workdir/env/exec).</li>
+</ul>
 <h2 id="resource-limits"><a class="header" href="#resource-limits">Resource limits</a></h2>
 <pre><code class="language-toml">[tools.exec.sandbox.resource_limits]
 memory_limit = "512M"

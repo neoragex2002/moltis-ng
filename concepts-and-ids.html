@@ -530,35 +530,24 @@ UI 展示友好的信息。</p>
 <li>备注：上游 provider 的字段名/实现可能仍写作 <code>session_key</code>（历史遗留），但其语义必须
 等价于本文档定义的 <code>sessionId</code>。</li>
 </ul>
-<h3 id="sandbox-scope"><a class="header" href="#sandbox-scope">Sandbox Scope</a></h3>
-<p><strong>结论：sandbox scope 默认 = <code>chat</code>（按 chat 复用；由 <code>chanChatKey</code> 派生）。</strong></p>
+<h3 id="sandbox-container-reuse-key"><a class="header" href="#sandbox-container-reuse-key">Sandbox Container Reuse Key</a></h3>
+<p><strong>结论：sandbox 容器复用边界由配置 <code>tools.exec.sandbox.scope_key</code> 冻结，默认 = <code>session_id</code>。</strong></p>
 <ul>
-<li>意义：同一 chat/thread 内的多条指令可以复用同一套 sandbox 环境，提高连续操作效率。</li>
-<li>注意：如果你需要更强隔离（例如高风险命令、或不希望同一 chat 内共享环境），可以将 scope
-设置为 <code>session</code>（channel-bound 场景按 <code>chanChatKey</code>；非 channel 场景按 <code>sessionId</code>）。</li>
+<li><code>session_id</code>：每个 <code>sessionId</code> 独立容器（最强隔离，默认）。</li>
+<li><code>session_key</code>：同一逻辑会话桶共享容器（更强复用，但隔离更弱）。</li>
+<li>严格 one-cut：<code>tools.exec.sandbox.scope</code> 属于 legacy 字段，已删除；命中必须配置校验失败（不做兼容）。</li>
 </ul>
-<div id="admonition-当前实现差异" class="admonition admonish-note" role="note" aria-labelledby="admonition-当前实现差异-title">
-<div class="admonition-title">
-<div id="admonition-当前实现差异-title">
-<p>当前实现差异</p>
-</div>
-<a class="admonition-anchor-link" href="#admonition-当前实现差异"></a>
-</div>
-<div>
-<p>当前实现已对齐：<code>SandboxScope</code> 默认值为 <code>chat</code>。</p>
-</div>
-</div>
 <h2 id="过载词汇overloaded-words必须避免"><a class="header" href="#过载词汇overloaded-words必须避免">过载词汇（Overloaded Words）【必须避免】</a></h2>
 <p>以下词汇在代码库里被多个子系统复用，极易造成“同词不同义”的沟通与实现事故。</p>
 <h3 id="scope"><a class="header" href="#scope"><code>scope</code></a></h3>
 <p><strong>规则：文档与协议中禁止裸写 <code>scope</code>，必须写全称。</strong></p>
 <ul>
-<li><code>sandboxScope</code>：容器复用边界（session/chat/bot/global）。</li>
+<li><code>sandboxScopeKey</code>：容器复用边界（<code>session_id</code>/<code>session_key</code>；由 <code>tools.exec.sandbox.scope_key</code> 冻结）。</li>
 <li><code>authScope</code>：权限范围（例如 <code>operator.read</code>/<code>operator.write</code>）。</li>
 <li><code>throttleScope</code>：限流范围（login/api/ws/…）。</li>
 </ul>
-<p>配置文件中如果出现 <code>scope</code>，必须由所属对象限定语义（例如 <code>[tools.exec.sandbox] scope = "chat"</code>），
-并在文档中写作 “sandbox scope”。</p>
+<p>配置文件中不得出现 legacy <code>tools.exec.sandbox.scope</code>；sandbox 容器复用边界必须通过
+<code>tools.exec.sandbox.scope_key</code> 明确表达（例如 <code>[tools.exec.sandbox] scope_key = "session_id"</code>）。</p>
 <h3 id="channel"><a class="header" href="#channel"><code>channel</code></a></h3>
 <p><strong>规则：对外禁止使用泛化字段名 <code>channel</code>。</strong></p>
 <p>必须拆成以下之一：</p>

@@ -585,29 +585,18 @@ model = "qwen2.5-coder-7b-q4_k_m"
 <p>Commands run inside isolated containers for security:</p>
 <pre><code class="language-toml">[tools.exec.sandbox]
 mode = "all"                    # "off" | "non-main" | "all"
-scope_key = "session_key"       # "session_id" | "session_key"
-backend = "auto"                # "auto" | "docker" (apple-container is not supported)
-no_network = true
+scope_key = "session_id"        # "session_id" | "session_key"
+startup_container_policy = "reset" # "reset" | "reuse"
+no_network = true               # Disable network in the sandbox (recommended)
 
 # Fixed container path for instance data is `/moltis/data`.
-# Docker backend requires these when sandboxing is enabled:
-data_mount = "ro"               # "none" | "ro" | "rw"
+# Docker requires these when sandboxing is enabled:
+data_mount = "ro"               # "ro" | "rw"
 data_mount_type = "bind"        # "bind" | "volume"
 data_mount_source = "/srv/moltis-data" # bind: absolute host path | volume: volume name
 
-# Optional: override base image for sandbox containers (default: ubuntu:25.10)
-# image = "ubuntu:25.10"
-
-# Packages installed in the sandbox image
-packages = [
-    "curl",
-    "git",
-    "jq",
-    "python3",
-    "python3-pip",
-    "nodejs",
-    "npm",
-]
+# Sandbox runtime image (must exist locally; Moltis does not build or pull images)
+image = "moltis-sandbox:2026-03-26"
 </code></pre>
 <div id="admonition-info" class="admonition admonish-info" role="note" aria-labelledby="admonition-info-title">
 <div class="admonition-title">
@@ -617,7 +606,7 @@ packages = [
 <a class="admonition-anchor-link" href="configuration.html#admonition-info"></a>
 </div>
 <div>
-<p>When you modify the packages list and restart, Moltis automatically rebuilds the sandbox image with a new tag.</p>
+<p>Moltis does not build or pull sandbox images. Manage images with Docker CLI or your own CI pipeline.</p>
 </div>
 </div>
 <h2 id="memory-system"><a class="header" href="#memory-system">Memory System</a></h2>
@@ -735,13 +724,13 @@ default = "openai-codex"
 
 [tools.exec.sandbox]
 mode = "all"
-scope_key = "session_key"
-backend = "docker"
+scope_key = "session_id"
+startup_container_policy = "reset"
 no_network = true
 data_mount = "ro"
 data_mount_type = "bind"
 data_mount_source = "/srv/moltis-data"
-packages = ["curl", "git", "jq", "python3", "nodejs"]
+image = "moltis-sandbox:2026-03-26"
 
 [memory]
 enabled = true
@@ -860,7 +849,7 @@ timeout = 5
 </ul>
 <p>如果你原来表达的是旧的 <code>chat</code> 语义，当前 V3 下通常应改成：</p>
 <pre><code class="language-toml">[tools.exec.sandbox]
-scope_key = "session_key"
+scope_key = "session_id"
 </code></pre>
 <p>此外，当前校验还会提示两条安全告警：</p>
 <ul>
@@ -2019,44 +2008,91 @@ possible.</p>
 <pre><code class="language-bash">cargo build --release --features local-llm
 </code></pre>
 <p>This is enabled by default in release builds.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="sandbox-backends"><a class="header" href="#sandbox-backends">Sandbox Backends</a></h1>
-<p>Moltis runs LLM-generated commands inside containers to protect your host
-system. The sandbox backend controls which container technology is used.</p>
-<h2 id="backend-selection"><a class="header" href="#backend-selection">Backend Selection</a></h2>
-<p>Configure in <code>moltis.toml</code>:</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="exec-sandbox-docker-only"><a class="header" href="#exec-sandbox-docker-only">Exec Sandbox (Docker-only)</a></h1>
+<p>Moltis runs LLM-generated <code>exec</code> / <code>process</code> commands inside Docker containers
+to isolate untrusted workloads from your host system.</p>
+<p>This page documents the <strong>exec sandbox</strong> (<code>[tools.exec.sandbox]</code>), not the
+browser tool’s container settings.</p>
+<h2 id="configuration-4"><a class="header" href="#configuration-4">Configuration</a></h2>
+<p><code>moltis.toml</code>:</p>
 <pre><code class="language-toml">[tools.exec.sandbox]
-backend = "auto"          # default — picks the best available
-# backend = "docker"      # force Docker
-# backend = "apple-container"  # not supported (will fail-fast)
+# When to apply sandboxing:
+# - "off": no container isolation (runs on host)
+# - "non-main": sandbox only for non-main sessions
+# - "all": sandbox for all sessions
+mode = "off"
+
+# Sandbox runtime image. Must already exist in your local Docker image store.
+# Moltis does NOT build or pull images.
+# image = "moltis-sandbox:2026-03-26"
+
+# Startup policy for managed sandbox containers:
+# - "reset": delete managed containers at startup
+# - "reuse": keep only containers matching the current contract
+startup_container_policy = "reset"
+
+# Container reuse boundary:
+# - "session_id": per session instance
+# - "session_key": per logical session bucket
+scope_key = "session_id"
+
+# Idle TTL for sandbox containers (seconds). 0 disables TTL.
+idle_ttl_secs = 0
+
+# Data directory mount contract (required when mode != "off")
+data_mount = "ro"           # "ro" | "rw"
+data_mount_type = "bind"    # "bind" | "volume"
+data_mount_source = "/srv/moltis-data"
 </code></pre>
-<p>With <code>"auto"</code> (the default), Moltis uses Docker when available:</p>
-<div class="table-wrapper"><table><thead><tr><th>Priority</th><th>Backend</th><th>Platform</th><th>Isolation</th></tr></thead><tbody>
-<tr><td>1</td><td>Docker</td><td>any</td><td>Linux namespaces / cgroups</td></tr>
-<tr><td>2</td><td>none (host)</td><td>any</td><td>no isolation</td></tr>
-</tbody></table>
-</div>
+<h2 id="one-cut-rules-no-backward-compatibility"><a class="header" href="#one-cut-rules-no-backward-compatibility">One-cut rules (no backward compatibility)</a></h2>
+<ul>
+<li>Docker-only: when <code>mode != "off"</code>, Docker must be available or the gateway
+fails fast (no host fallback).</li>
+<li>Single runtime image: <code>tools.exec.sandbox.image</code> is the <strong>only</strong> runtime image
+source. There are no per-session overrides.</li>
+<li>No build/pull/provision: Moltis does not <code>docker build</code>, does not pull, and
+does not apt-get install packages at runtime.</li>
+</ul>
+<h2 id="container-paths-runtime-contract"><a class="header" href="#container-paths-runtime-contract">Container paths (runtime contract)</a></h2>
+<p>Sandbox containers use two fixed guest paths:</p>
+<ul>
+<li><code>/moltis/data</code>: Moltis instance data directory (mounted read-only or read-write)</li>
+<li><code>/moltis/workdir</code>: the only default writable working directory</li>
+</ul>
+<p>Moltis also enforces:</p>
+<ul>
+<li><code>-w /moltis/workdir</code></li>
+<li><code>HOME=/moltis/workdir</code></li>
+<li><code>TMPDIR=/moltis/workdir/tmp</code></li>
+</ul>
 <h2 id="data-directory-mount-moltisdata"><a class="header" href="#data-directory-mount-moltisdata">Data directory mount (<code>/moltis/data</code>)</a></h2>
 <p>Sandbox containers use a fixed, stable path for the Moltis instance data
 directory: <code>/moltis/data</code>.</p>
 <p>On Docker, this requires configuring the mount backing explicitly:</p>
 <pre><code class="language-toml">[tools.exec.sandbox]
-data_mount = "ro"                 # "ro" | "rw" (must not be "none" when sandboxing)
-data_mount_type = "bind"          # "bind" | "volume"
+data_mount = "ro"                  # "ro" | "rw"
+data_mount_type = "bind"           # "bind" | "volume"
 data_mount_source = "/srv/moltis-data" # bind: absolute host path | volume: volume name
 </code></pre>
 <p>Moltis injects <code>MOLTIS_DATA_DIR=/moltis/data</code> into sandbox containers so any code
 running inside the sandbox resolves the data directory consistently.</p>
-<h2 id="docker-1"><a class="header" href="#docker-1">Docker</a></h2>
-<p>Docker is supported on macOS, Linux, and Windows. On macOS it runs inside a
-Linux VM managed by Docker Desktop.</p>
-<p>Install from https://docs.docker.com/get-docker/</p>
-<h2 id="no-sandbox"><a class="header" href="#no-sandbox">No sandbox</a></h2>
-<p>If neither runtime is found, commands execute directly on the host. The
-startup banner will show a warning. This is <strong>not recommended</strong> for untrusted
-workloads.</p>
-<h2 id="per-session-overrides"><a class="header" href="#per-session-overrides">Per-session overrides</a></h2>
-<p>The web UI allows toggling sandboxing per session and selecting a custom
-container image. These overrides persist across gateway restarts.</p>
+<h2 id="external-mounts-deny-by-default"><a class="header" href="#external-mounts-deny-by-default">External mounts (deny-by-default)</a></h2>
+<p>Additional host mounts can be configured with <code>mounts[]</code>, but are deny-by-default.
+If <code>mount_allowlist</code> is empty, all external mounts are rejected.</p>
+<pre><code class="language-toml">[tools.exec.sandbox]
+mount_allowlist = ["/srv"]
+mounts = [
+  { host_dir = "/srv/shared", guest_dir = "/mnt/shared", mode = "ro" },
+]
+</code></pre>
+<h2 id="troubleshooting-4"><a class="header" href="#troubleshooting-4">Troubleshooting</a></h2>
+<ul>
+<li><code>SANDBOX_BACKEND_UNAVAILABLE</code>: Docker daemon not reachable.</li>
+<li><code>SANDBOX_IMAGE_MISSING</code>: the configured image is not in the local image store.
+Verify with <code>docker image inspect &lt;image&gt;</code>.</li>
+<li><code>SANDBOX_IMAGE_CONTRACT_INVALID</code>: the image exists but fails the runtime contract
+checks (workdir/env/exec).</li>
+</ul>
 <h2 id="resource-limits"><a class="header" href="#resource-limits">Resource limits</a></h2>
 <pre><code class="language-toml">[tools.exec.sandbox.resource_limits]
 memory_limit = "512M"
@@ -2126,7 +2162,7 @@ voice = ["dep:moltis-voice"]
 </tbody></table>
 </div>
 <p><em>More voice providers are coming soon.</em></p>
-<h3 id="configuration-4"><a class="header" href="#configuration-4">Configuration</a></h3>
+<h3 id="configuration-5"><a class="header" href="#configuration-5">Configuration</a></h3>
 <p>Set API keys via environment variables:</p>
 <pre><code class="language-bash">export ELEVENLABS_API_KEY=your-key-here
 export OPENAI_API_KEY=your-key-here
@@ -2310,7 +2346,7 @@ endpoint = "http://localhost:5002"
 </tbody></table>
 </div>
 <p><em>More voice providers are coming soon.</em></p>
-<h3 id="configuration-5"><a class="header" href="#configuration-5">Configuration</a></h3>
+<h3 id="configuration-6"><a class="header" href="#configuration-6">Configuration</a></h3>
 <pre><code class="language-toml">[voice.stt]
 enabled = true
 provider = "whisper"  # set to any configured STT provider id
@@ -2636,7 +2672,7 @@ faster and more lightweight.</p>
 <li><strong>BrowserPool</strong> (<code>crates/browser/src/pool.rs</code>) - Chrome instance management</li>
 <li><strong>Snapshot</strong> (<code>crates/browser/src/snapshot.rs</code>) - DOM element extraction</li>
 </ul>
-<h2 id="configuration-6"><a class="header" href="#configuration-6">Configuration</a></h2>
+<h2 id="configuration-7"><a class="header" href="#configuration-7">Configuration</a></h2>
 <p>Browser automation is <strong>enabled by default</strong>. To customize, add to your <code>moltis.toml</code>:</p>
 <pre><code class="language-toml">[tools.browser]
 enabled = true              # Enable browser support
@@ -2961,7 +2997,7 @@ tool calls with missing required fields. Moltis handles this gracefully:</p>
 <li><strong>Muted error display</strong>: Validation errors show as muted/informational cards
 in the UI (60% opacity, gray text) to indicate they’re expected, not alarming</li>
 </ul>
-<h2 id="troubleshooting-4"><a class="header" href="#troubleshooting-4">Troubleshooting</a></h2>
+<h2 id="troubleshooting-5"><a class="header" href="#troubleshooting-5">Troubleshooting</a></h2>
 <h3 id="browser-not-launching"><a class="header" href="#browser-not-launching">Browser not launching</a></h3>
 <ul>
 <li>Ensure Chrome/Chromium is installed</li>
@@ -3302,7 +3338,7 @@ before deleting a skill.</p>
 }
 </code></pre>
 <p>Clicking a notification will open or focus the app and navigate to the relevant chat.</p>
-<h2 id="configuration-7"><a class="header" href="#configuration-7">Configuration</a></h2>
+<h2 id="configuration-8"><a class="header" href="#configuration-8">Configuration</a></h2>
 <h3 id="feature-flag-2"><a class="header" href="#feature-flag-2">Feature Flag</a></h3>
 <p>Push notifications are controlled by the <code>push-notifications</code> feature flag, which is enabled by default. To disable:</p>
 <pre><code class="language-toml"># In your Cargo.toml or when building
@@ -3341,7 +3377,7 @@ moltis-gateway = { default-features = false, features = ["web-ui", "tls"] }
 </tbody></table>
 </div>
 <p>Note: iOS push notifications require iOS 16.4 or later and the app must be installed as a PWA.</p>
-<h2 id="troubleshooting-5"><a class="header" href="#troubleshooting-5">Troubleshooting</a></h2>
+<h2 id="troubleshooting-6"><a class="header" href="#troubleshooting-6">Troubleshooting</a></h2>
 <h3 id="notifications-not-working"><a class="header" href="#notifications-not-working">Notifications Not Working</a></h3>
 <ol>
 <li><strong>Check permissions</strong>: Ensure notifications are allowed in browser/OS settings</li>
@@ -3918,7 +3954,13 @@ disabled = false  # keep this false in production
 <p>Always run with sandbox enabled in production:</p>
 <pre><code class="language-toml">[tools.exec.sandbox]
 mode = "all"
-backend = "auto"  # uses docker when available
+# Docker-only: Moltis does not build/pull images, so the runtime image must
+# already exist in the local Docker image store.
+image = "moltis-sandbox:2026-03-26"
+startup_container_policy = "reset"
+data_mount = "ro"
+data_mount_type = "bind"
+data_mount_source = "/srv/moltis-data"
 </code></pre>
 <h3 id="3-limit-rate-limits"><a class="header" href="#3-limit-rate-limits">3. Limit Rate Limits</a></h3>
 <p>Tighten rate limits for untrusted environments:</p>
@@ -4169,7 +4211,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t moltis:local .
 <p>OrbStack on macOS works identically to Docker — use the same socket path
 (<code>/var/run/docker.sock</code>). OrbStack’s lightweight Linux VM provides good
 isolation with lower resource usage than Docker Desktop.</p>
-<h2 id="troubleshooting-6"><a class="header" href="#troubleshooting-6">Troubleshooting</a></h2>
+<h2 id="troubleshooting-7"><a class="header" href="#troubleshooting-7">Troubleshooting</a></h2>
 <h3 id="cannot-connect-to-docker-daemon"><a class="header" href="#cannot-connect-to-docker-daemon">“Cannot connect to Docker daemon”</a></h3>
 <p>The Docker socket is not mounted or the Moltis user doesn’t have permission
 to access it. Verify:</p>
@@ -4900,35 +4942,24 @@ UI 展示友好的信息。</p>
 <li>备注：上游 provider 的字段名/实现可能仍写作 <code>session_key</code>（历史遗留），但其语义必须
 等价于本文档定义的 <code>sessionId</code>。</li>
 </ul>
-<h3 id="sandbox-scope"><a class="header" href="#sandbox-scope">Sandbox Scope</a></h3>
-<p><strong>结论：sandbox scope 默认 = <code>chat</code>（按 chat 复用；由 <code>chanChatKey</code> 派生）。</strong></p>
+<h3 id="sandbox-container-reuse-key"><a class="header" href="#sandbox-container-reuse-key">Sandbox Container Reuse Key</a></h3>
+<p><strong>结论：sandbox 容器复用边界由配置 <code>tools.exec.sandbox.scope_key</code> 冻结，默认 = <code>session_id</code>。</strong></p>
 <ul>
-<li>意义：同一 chat/thread 内的多条指令可以复用同一套 sandbox 环境，提高连续操作效率。</li>
-<li>注意：如果你需要更强隔离（例如高风险命令、或不希望同一 chat 内共享环境），可以将 scope
-设置为 <code>session</code>（channel-bound 场景按 <code>chanChatKey</code>；非 channel 场景按 <code>sessionId</code>）。</li>
+<li><code>session_id</code>：每个 <code>sessionId</code> 独立容器（最强隔离，默认）。</li>
+<li><code>session_key</code>：同一逻辑会话桶共享容器（更强复用，但隔离更弱）。</li>
+<li>严格 one-cut：<code>tools.exec.sandbox.scope</code> 属于 legacy 字段，已删除；命中必须配置校验失败（不做兼容）。</li>
 </ul>
-<div id="admonition-当前实现差异" class="admonition admonish-note" role="note" aria-labelledby="admonition-当前实现差异-title">
-<div class="admonition-title">
-<div id="admonition-当前实现差异-title">
-<p>当前实现差异</p>
-</div>
-<a class="admonition-anchor-link" href="concepts-and-ids.html#admonition-当前实现差异"></a>
-</div>
-<div>
-<p>当前实现已对齐：<code>SandboxScope</code> 默认值为 <code>chat</code>。</p>
-</div>
-</div>
 <h2 id="过载词汇overloaded-words必须避免"><a class="header" href="#过载词汇overloaded-words必须避免">过载词汇（Overloaded Words）【必须避免】</a></h2>
 <p>以下词汇在代码库里被多个子系统复用，极易造成“同词不同义”的沟通与实现事故。</p>
 <h3 id="scope"><a class="header" href="#scope"><code>scope</code></a></h3>
 <p><strong>规则：文档与协议中禁止裸写 <code>scope</code>，必须写全称。</strong></p>
 <ul>
-<li><code>sandboxScope</code>：容器复用边界（session/chat/bot/global）。</li>
+<li><code>sandboxScopeKey</code>：容器复用边界（<code>session_id</code>/<code>session_key</code>；由 <code>tools.exec.sandbox.scope_key</code> 冻结）。</li>
 <li><code>authScope</code>：权限范围（例如 <code>operator.read</code>/<code>operator.write</code>）。</li>
 <li><code>throttleScope</code>：限流范围（login/api/ws/…）。</li>
 </ul>
-<p>配置文件中如果出现 <code>scope</code>，必须由所属对象限定语义（例如 <code>[tools.exec.sandbox] scope = "chat"</code>），
-并在文档中写作 “sandbox scope”。</p>
+<p>配置文件中不得出现 legacy <code>tools.exec.sandbox.scope</code>；sandbox 容器复用边界必须通过
+<code>tools.exec.sandbox.scope_key</code> 明确表达（例如 <code>[tools.exec.sandbox] scope_key = "session_id"</code>）。</p>
 <h3 id="channel"><a class="header" href="#channel"><code>channel</code></a></h3>
 <p><strong>规则：对外禁止使用泛化字段名 <code>channel</code>。</strong></p>
 <p>必须拆成以下之一：</p>
@@ -13175,7 +13206,7 @@ async fn test_session_operations() {
 <span class="boring">}</span></code></pre></pre>
 <p>The <code>init()</code> methods are retained (marked <code>#[doc(hidden)]</code>) specifically for tests.
 In production, migrations handle schema creation.</p>
-<h2 id="troubleshooting-7"><a class="header" href="#troubleshooting-7">Troubleshooting</a></h2>
+<h2 id="troubleshooting-8"><a class="header" href="#troubleshooting-8">Troubleshooting</a></h2>
 <h3 id="failed-to-run-migrations"><a class="header" href="#failed-to-run-migrations">“failed to run migrations”</a></h3>
 <ol>
 <li>Check file permissions on <code>~/.moltis/data/</code></li>
@@ -13559,7 +13590,7 @@ pub mod my_feature {
 
 counter!(my_feature::OPERATIONS_TOTAL).increment(1);
 <span class="boring">}</span></code></pre></pre>
-<h2 id="configuration-8"><a class="header" href="#configuration-8">Configuration</a></h2>
+<h2 id="configuration-9"><a class="header" href="#configuration-9">Configuration</a></h2>
 <p>Metrics configuration in <code>moltis.toml</code>:</p>
 <pre><code class="language-toml">[metrics]
 enabled = true              # Enable metrics collection (default: true)
@@ -13578,7 +13609,7 @@ labels = { env = "prod" }   # Add custom labels to all metrics
 <li><strong>Feature-gate everything</strong>: Use <code>#[cfg(feature = "metrics")]</code> to ensure zero overhead when disabled</li>
 <li><strong>Use predefined buckets</strong>: The <code>buckets</code> module has standard histogram buckets for common metric types</li>
 </ol>
-<h2 id="troubleshooting-8"><a class="header" href="#troubleshooting-8">Troubleshooting</a></h2>
+<h2 id="troubleshooting-9"><a class="header" href="#troubleshooting-9">Troubleshooting</a></h2>
 <h3 id="metrics-not-appearing"><a class="header" href="#metrics-not-appearing">Metrics not appearing</a></h3>
 <ol>
 <li>Verify the <code>metrics</code> feature is enabled at compile time</li>
