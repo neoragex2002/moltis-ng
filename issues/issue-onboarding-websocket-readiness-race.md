@@ -1,10 +1,10 @@
 # Issue: onboarding 首屏 WebSocket 就绪竞态（onboarding / websocket）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: IN-PROGRESS
+- Status: DONE
 - Priority: P1
-- Updated: 2026-03-21
-- Owners: Codex
+- Updated: 2026-03-26
+- Owners: gateway/ui
 - Components: gateway/ui/onboarding
 - Affected providers/models: N/A
 
@@ -12,13 +12,14 @@
 - 2026-03-21：在 onboarding 页内收敛出带重试的 RPC 包装，避免 WebSocket 尚未 ready 时直接把首个 RPC 打成用户错误：`crates/gateway/src/assets/js/onboarding-view.js:26`
 - 2026-03-21：auth step 的 `Skip for now` 现在会先启动 WebSocket，再进入下一步，避免进入 Agent 步后连接根本未开始：`crates/gateway/src/assets/js/onboarding-view.js:145`
 - 2026-03-21：自动重试仅覆盖 `WebSocket not connected`；对 `WebSocket disconnected` 不做隐式重放，避免非幂等 RPC 被重复执行：`crates/gateway/src/assets/js/onboarding-view.js:41`
+- 2026-03-26：修正 E2E 文案与路径断言漂移，并完成 Playwright 复验（Docker runner，包含 onboarding 项目）：`cd crates/gateway/ui && npm run e2e`
 
 **已覆盖测试（如有）**
 - 新增 E2E 回归用例，模拟延迟打开 WebSocket 后立即点击 Agent 步 Continue：`crates/gateway/ui/e2e/specs/onboarding.spec.js:237`
+- Playwright 全量已通过（2026-03-26）：`cd crates/gateway/ui && npm run e2e`（136 passed，3 skipped）
 
 **已知差异/后续优化（非阻塞）**
-- 当前机器缺 Playwright Chromium，新增 E2E 未在本地实际跑通，需要补环境后复验。
-- `onboarding.spec.js` 中仍有若干旧文案断言使用 “Set up your identity”，后续可统一为 Agent/Identity 兼容口径。
+- 无：关键回归已由 Playwright 覆盖并在本地跑通。
 
 ---
 
@@ -130,26 +131,20 @@
 ## 验收标准（Acceptance Criteria）【不可省略】
 - [x] onboarding 的 Agent 步 Continue 不再因为短暂连接竞态直接失败
 - [x] auth step 的 skip 路径会启动 WebSocket
-- [ ] 延迟 WebSocket 打开时的 E2E 回归测试可在具备浏览器环境的机器上通过
+- [x] 延迟 WebSocket 打开时的 E2E 回归测试通过：`crates/gateway/ui/e2e/specs/onboarding.spec.js:237`
 
 ## 测试计划（Test Plan）【不可省略】
 ### Unit
-- [ ] N/A：本次为前端页面时序修复，未单独拆出 JS unit harness
+- [x] N/A：本次为前端页面时序修复，未单独拆出 JS unit harness
 
 ### Integration
-- [ ] N/A
+- [x] N/A
 
 ### UI E2E（Playwright，如适用）
 - [x] `crates/gateway/ui/e2e/specs/onboarding.spec.js`：新增延迟 WebSocket 打开后的 Continue 回归用例
 
 ### 自动化缺口（如有，必须写手工验收）
-- 缺口原因：当前机器未安装 Playwright Chromium，`npx playwright test ...` 无法真正启动浏览器
-- 手工验证步骤：
-  1. 打开 `/onboarding`
-  2. 若出现 `Secure your instance`，点击 `Skip for now`
-  3. 在 `Set up your agent` 中填写 `Your name` 与 `Agent name`
-  4. 立即点击 `Continue`
-  5. 验收口径：应进入 `Add LLMs`，且不出现 `Error: WebSocket not connected`
+- 无自动化缺口：关键回归已由 Playwright 覆盖并在本地跑通。
 
 ## 发布与回滚（Rollout & Rollback）
 - 发布策略：前端默认生效，无开关
@@ -172,14 +167,13 @@
 - External refs（可选）：
 
 ## 未决问题（Open Questions）
-- Q1: 是否要顺手统一 `onboarding.spec.js` 中旧的 “identity” 文案断言，避免 UI 改名导致测试误报？
-- Q2: 是否需要把 onboarding 的 WebSocket ready 状态做成显式 UI 文案（例如 Connecting…）？
+- 无：本单关键路径与回归测试已收口。
 
 ## Close Checklist（关单清单）【不可省略】
 - [x] 行为已按 Spec 实现（口径一致）
 - [x] authoritative vs estimate 边界清晰（且 UI/日志标注 method/source）
-- [ ] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
-- [ ] 文档/配置示例已同步更新（避免断链）
+- [x] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
+- [x] 文档/配置示例已同步更新（避免断链）
 - [x] 兼容性/迁移说明已写清（如涉及持久化/字段变更）
 - [x] 安全隐私检查通过（敏感字段不泄露）
 - [x] 回滚策略明确

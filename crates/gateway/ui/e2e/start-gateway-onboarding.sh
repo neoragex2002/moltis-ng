@@ -22,6 +22,7 @@ cd "${REPO_ROOT}"
 export MOLTIS_CONFIG_DIR="${CONFIG_DIR}"
 export MOLTIS_DATA_DIR="${DATA_DIR}"
 export MOLTIS_SERVER__PORT="${PORT}"
+export MOLTIS_ASSETS_DIR="${REPO_ROOT}/crates/gateway/src/assets"
 
 # Prefer a pre-built binary to avoid recompiling every test run.
 BINARY="${MOLTIS_BINARY:-}"

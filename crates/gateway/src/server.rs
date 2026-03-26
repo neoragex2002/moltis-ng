@@ -26,7 +26,7 @@ use {
         set_header::SetResponseHeaderLayer,
         trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer},
     },
-    tracing::{Level, debug, info, warn},
+    tracing::{Level, info, warn},
 };
 
 #[cfg(feature = "web-ui")]
@@ -334,13 +334,6 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
     }
 }
 
-fn should_prebuild_sandbox_image(
-    mode: &moltis_tools::sandbox::SandboxMode,
-    packages: &[String],
-) -> bool {
-    !matches!(mode, moltis_tools::sandbox::SandboxMode::Off) && !packages.is_empty()
-}
-
 fn instance_slug(_config: &moltis_config::MoltisConfig) -> String {
     let base = load_default_display_name()
         .unwrap_or_else(|| "moltis".to_string())
@@ -623,18 +616,6 @@ fn build_api_routes() -> Router<AppState> {
         .route(
             "/api/images/cached/{tag}",
             axum::routing::delete(api_delete_cached_image_handler),
-        )
-        .route(
-            "/api/images/build",
-            axum::routing::post(api_build_image_handler),
-        )
-        .route(
-            "/api/images/check-packages",
-            axum::routing::post(api_check_packages_handler),
-        )
-        .route(
-            "/api/images/default",
-            get(api_get_default_image_handler).put(api_set_default_image_handler),
         )
         .route(
             "/api/env",
@@ -1510,13 +1491,7 @@ pub async fn start_gateway(
                     .await;
             }
 
-            // Apply sandbox overrides for this cron session.
-            if let Some(ref router) = state.sandbox_router {
-                router.set_override(&session_id, req.sandbox.enabled).await;
-                if let Some(ref image) = req.sandbox.image {
-                    router.set_image_override(&session_id, image.clone()).await;
-                }
-            }
+            // One-cut: sandbox behavior is controlled only by `[tools.exec.sandbox]` config.
 
             let mut params = serde_json::json!({
                 "text": req.message,
@@ -1527,10 +1502,7 @@ pub async fn start_gateway(
             }
             let result = chat.send_sync(params).await.map_err(|e| anyhow::anyhow!(e));
 
-            // Clean up sandbox overrides.
-            if let Some(ref router) = state.sandbox_router {
-                router.remove_override(&session_id).await;
-            }
+            // One-cut: no sandbox overrides to clean up.
 
             let val = result?;
             let input_tokens = val.get("inputTokens").and_then(|v| v.as_u64());
@@ -1625,167 +1597,11 @@ pub async fn start_gateway(
         }
     }
 
-    // Spawn background image pre-build. This bakes configured packages into a
-    // container image so container creation is instant. Backends that don't
-    // support image building return Ok(None) and the spawn is harmless.
-    {
-        let router = Arc::clone(&sandbox_router);
-        let backend = Arc::clone(router.backend());
-        let packages = router.config().packages.clone();
-        let base_image = router
-            .config()
-            .image
-            .clone()
-            .unwrap_or_else(|| moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string());
-
-        if should_prebuild_sandbox_image(router.mode(), &packages) {
-            let deferred_for_build = Arc::clone(&deferred_state);
-            tokio::spawn(async move {
-                // Broadcast build start event.
-                if let Some(state) = deferred_for_build.get() {
-                    crate::broadcast::broadcast(
-                        state,
-                        "sandbox.image.build",
-                        serde_json::json!({ "phase": "start", "packages": packages }),
-                        crate::broadcast::BroadcastOpts {
-                            drop_if_slow: true,
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                }
-
-                match backend.build_image(&base_image, &packages).await {
-                    Ok(Some(result)) => {
-                        info!(
-                            tag = %result.tag,
-                            built = result.built,
-                            "sandbox image pre-build complete"
-                        );
-                        router.set_global_image(Some(result.tag.clone())).await;
-
-                        if let Some(state) = deferred_for_build.get() {
-                            crate::broadcast::broadcast(
-                                state,
-                                "sandbox.image.build",
-                                serde_json::json!({
-                                    "phase": "done",
-                                    "tag": result.tag,
-                                    "built": result.built,
-                                }),
-                                crate::broadcast::BroadcastOpts {
-                                    drop_if_slow: true,
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        }
-                    },
-                    Ok(None) => {
-                        debug!(
-                            "sandbox image pre-build: no-op (no packages or unsupported backend)"
-                        );
-                    },
-                    Err(e) => {
-                        tracing::warn!("sandbox image pre-build failed: {e}");
-                        if let Some(state) = deferred_for_build.get() {
-                            crate::broadcast::broadcast(
-                                state,
-                                "sandbox.image.build",
-                                serde_json::json!({
-                                    "phase": "error",
-                                    "error": e.to_string(),
-                                }),
-                                crate::broadcast::BroadcastOpts {
-                                    drop_if_slow: true,
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        }
-                    },
-                }
-            });
-        }
-    }
-
-    // When no container runtime is available and the host is Debian/Ubuntu,
-    // install the configured sandbox packages directly on the host in the background.
-    {
-        let packages = sandbox_router.config().packages.clone();
-        if sandbox_router.backend_name() == "none"
-            && !packages.is_empty()
-            && moltis_tools::sandbox::is_debian_host()
-        {
-            let deferred_for_host = Arc::clone(&deferred_state);
-            let pkg_count = packages.len();
-            tokio::spawn(async move {
-                if let Some(state) = deferred_for_host.get() {
-                    broadcast(
-                        state,
-                        "sandbox.host.provision",
-                        serde_json::json!({
-                            "phase": "start",
-                            "count": pkg_count,
-                        }),
-                        BroadcastOpts {
-                            drop_if_slow: true,
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                }
-
-                match moltis_tools::sandbox::provision_host_packages(&packages).await {
-                    Ok(Some(result)) => {
-                        info!(
-                            installed = result.installed.len(),
-                            skipped = result.skipped.len(),
-                            sudo = result.used_sudo,
-                            "host package provisioning complete"
-                        );
-                        if let Some(state) = deferred_for_host.get() {
-                            broadcast(
-                                state,
-                                "sandbox.host.provision",
-                                serde_json::json!({
-                                    "phase": "done",
-                                    "installed": result.installed.len(),
-                                    "skipped": result.skipped.len(),
-                                }),
-                                BroadcastOpts {
-                                    drop_if_slow: true,
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        }
-                    },
-                    Ok(None) => {
-                        debug!("host package provisioning: no-op (not debian or empty packages)");
-                    },
-                    Err(e) => {
-                        warn!("host package provisioning failed: {e}");
-                        if let Some(state) = deferred_for_host.get() {
-                            broadcast(
-                                state,
-                                "sandbox.host.provision",
-                                serde_json::json!({
-                                    "phase": "error",
-                                    "error": e.to_string(),
-                                }),
-                                BroadcastOpts {
-                                    drop_if_slow: true,
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-                        }
-                    },
-                }
-            });
-        }
-    }
+    // One-cut: sandbox startup is synchronous and strict.
+    // - validate docker availability
+    // - validate local runtime image exists and satisfies contract
+    // - apply startup_container_policy to managed containers
+    sandbox_router.startup_ensure_ready().await?;
 
     // Pre-pull browser container image if browser is enabled and sandbox mode is available.
     // Browser sandbox mode follows session sandbox mode, so we pre-pull if sandboxing is available.
@@ -1857,37 +1673,6 @@ pub async fn start_gateway(
                 },
             }
         });
-    }
-
-    // Load any persisted sandbox overrides from session metadata.
-    {
-        use std::collections::HashMap;
-
-        // For channel sessions, multiple persistent sessions can map to the same
-        // deterministic router key. Prefer the most recently updated entry so
-        // archived/old sessions don't override active settings on startup.
-        let mut best_by_router_key: HashMap<String, moltis_sessions::metadata::SessionEntry> =
-            HashMap::new();
-        for entry in session_metadata.list().await {
-            let router_key = crate::session::sandbox_router_key_for_entry(&entry);
-            match best_by_router_key.get(&router_key) {
-                Some(existing) if existing.updated_at >= entry.updated_at => {},
-                _ => {
-                    best_by_router_key.insert(router_key, entry);
-                },
-            }
-        }
-
-        for (router_key, entry) in best_by_router_key {
-            if let Some(enabled) = entry.sandbox_enabled {
-                sandbox_router.set_override(&router_key, enabled).await;
-            }
-            if let Some(ref image) = entry.sandbox_image {
-                sandbox_router
-                    .set_image_override(&router_key, image.clone())
-                    .await;
-            }
-        }
     }
 
     // Session service is wired after hook registry is built (below).
@@ -2468,12 +2253,8 @@ pub async fn start_gateway(
         let process_tool = moltis_tools::process::ProcessTool::new()
             .with_sandbox_router(Arc::clone(&sandbox_router));
 
-        let sandbox_packages_tool = moltis_tools::sandbox_packages::SandboxPackagesTool::new()
-            .with_sandbox_router(Arc::clone(&sandbox_router));
-
         tool_registry.register(Box::new(exec_tool));
         tool_registry.register(Box::new(process_tool));
-        tool_registry.register(Box::new(sandbox_packages_tool));
         tool_registry.register(Box::new(cron_tool));
         if let Some(t) =
             moltis_tools::web_search::WebSearchTool::from_config(&config.tools.web.search)
@@ -2837,23 +2618,6 @@ pub async fn start_gateway(
         ),
         format!("data: {}", data_dir.display()),
     ];
-    // Hint about Apple Container on macOS when using Docker.
-    #[cfg(target_os = "macos")]
-    if sandbox_router.backend_name() == "docker" {
-        lines.push(
-            "hint: install Apple Container for VM-isolated sandboxing (see docs/sandbox.md)".into(),
-        );
-    }
-    // Warn when no sandbox backend is available.
-    if sandbox_router.backend_name() == "none" {
-        if moltis_tools::sandbox::is_debian_host() && !sandbox_router.config().packages.is_empty() {
-            lines.push(
-                "⚠ no container runtime found; installing packages on host in background".into(),
-            );
-        } else {
-            lines.push("⚠ no container runtime found; commands run on host".into());
-        }
-    }
     // Display setup code if one was generated.
     if let Some(ref code) = setup_code_display {
         lines.push(format!(
@@ -3234,62 +2998,7 @@ pub async fn start_gateway(
         }
     }
 
-    // Spawn sandbox event broadcast task: forwards provision events to WS clients.
-    {
-        let event_state = Arc::clone(&state);
-        let mut event_rx = sandbox_router.subscribe_events();
-        tokio::spawn(async move {
-            loop {
-                match event_rx.recv().await {
-                    Ok(event) => {
-                        let (event_name, payload) = match event {
-                            moltis_tools::sandbox::SandboxEvent::Provisioning {
-                                container,
-                                packages,
-                            } => (
-                                "sandbox.image.provision",
-                                serde_json::json!({
-                                    "phase": "start",
-                                    "container": container,
-                                    "packages": packages,
-                                }),
-                            ),
-                            moltis_tools::sandbox::SandboxEvent::Provisioned { container } => (
-                                "sandbox.image.provision",
-                                serde_json::json!({
-                                    "phase": "done",
-                                    "container": container,
-                                }),
-                            ),
-                            moltis_tools::sandbox::SandboxEvent::ProvisionFailed {
-                                container,
-                                error,
-                            } => (
-                                "sandbox.image.provision",
-                                serde_json::json!({
-                                    "phase": "error",
-                                    "container": container,
-                                    "error": error,
-                                }),
-                            ),
-                        };
-                        crate::broadcast::broadcast(
-                            &event_state,
-                            event_name,
-                            payload,
-                            crate::broadcast::BroadcastOpts {
-                                drop_if_slow: true,
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                    },
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
-                }
-            }
-        });
-    }
+    // One-cut: sandbox image build/provision event stream removed.
 
     // Spawn log broadcast task: forwards captured tracing events to WS clients.
     if let Some(buf) = log_buffer {
@@ -3382,8 +3091,14 @@ pub async fn start_gateway(
                     }),
                     enabled: Some(true),
                     sandbox: Some(moltis_cron::types::CronSandboxConfig {
-                        enabled: hb.sandbox_enabled,
-                        image: hb.sandbox_image.clone(),
+                        enabled: !config
+                            .tools
+                            .exec
+                            .sandbox
+                            .mode
+                            .trim()
+                            .eq_ignore_ascii_case("off"),
+                        image: None,
                     }),
                     ..Default::default()
                 };
@@ -3413,8 +3128,14 @@ pub async fn start_gateway(
                     enabled: true,
                     system: true,
                     sandbox: moltis_cron::types::CronSandboxConfig {
-                        enabled: hb.sandbox_enabled,
-                        image: hb.sandbox_image.clone(),
+                        enabled: !config
+                            .tools
+                            .exec
+                            .sandbox
+                            .mode
+                            .trim()
+                            .eq_ignore_ascii_case("off"),
+                        image: None,
                     },
                 };
                 match cron_service.add(create).await {
@@ -3842,7 +3563,8 @@ struct SandboxGonInfo {
     os: &'static str,
     scope: String,
     idle_ttl_secs: u64,
-    default_image: String,
+    image: Option<String>,
+    startup_container_policy: Option<String>,
 }
 
 /// Memory snapshot included in gon data and tick broadcasts.
@@ -3965,7 +3687,11 @@ async fn build_gon_data(gw: &GatewayState) -> GonData {
             os: std::env::consts::OS,
             scope: router.config().scope_key.to_string(),
             idle_ttl_secs: router.config().idle_ttl_secs,
-            default_image: router.default_image().await,
+            image: router.config().image.clone(),
+            startup_container_policy: Some(match router.config().startup_container_policy {
+                moltis_tools::sandbox::StartupContainerPolicy::Reset => "reset".to_string(),
+                moltis_tools::sandbox::StartupContainerPolicy::Reuse => "reuse".to_string(),
+            }),
         }
     } else {
         SandboxGonInfo {
@@ -3973,7 +3699,8 @@ async fn build_gon_data(gw: &GatewayState) -> GonData {
             os: std::env::consts::OS,
             scope: "off".to_owned(),
             idle_ttl_secs: 0,
-            default_image: moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_owned(),
+            image: None,
+            startup_container_policy: None,
         }
     };
 
@@ -4502,17 +4229,21 @@ async fn api_bootstrap_handler(State(state): State<AppState>) -> impl IntoRespon
     );
     let identity = gw.services.agent.identity_get().await.ok();
     let sandbox = if let Some(ref router) = state.gateway.sandbox_router {
-        let default_image = router.default_image().await;
         serde_json::json!({
             "backend": router.backend_name(),
             "os": std::env::consts::OS,
-            "default_image": default_image,
+            "image": router.config().image,
+            "startupContainerPolicy": match router.config().startup_container_policy {
+                moltis_tools::sandbox::StartupContainerPolicy::Reset => "reset",
+                moltis_tools::sandbox::StartupContainerPolicy::Reuse => "reuse",
+            },
         })
     } else {
         serde_json::json!({
             "backend": "none",
             "os": std::env::consts::OS,
-            "default_image": moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE,
+            "image": null,
+            "startupContainerPolicy": null,
         })
     };
     let counts = build_nav_counts(gw).await;
@@ -4775,195 +4506,7 @@ async fn api_prune_cached_images_handler() -> impl IntoResponse {
     }
 }
 
-/// Check which packages already exist in a base image.
-///
-/// Runs `dpkg -s <pkg>` and `which <pkg>` inside the base image to detect
-/// packages that are already installed. Returns a map of package name to
-/// boolean (true = already present).
-#[cfg(feature = "web-ui")]
-async fn api_check_packages_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
-    let base = body
-        .get("base")
-        .and_then(|v| v.as_str())
-        .unwrap_or("ubuntu:25.10")
-        .trim()
-        .to_string();
-    let packages: Vec<String> = body
-        .get("packages")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if packages.is_empty() {
-        return Json(serde_json::json!({ "found": {} })).into_response();
-    }
-
-    // Build a shell command that checks each package via dpkg -s or which.
-    let checks: Vec<String> = packages
-        .iter()
-        .map(|pkg| {
-            format!(
-                r#"if dpkg -s '{pkg}' >/dev/null 2>&1 || command -v '{pkg}' >/dev/null 2>&1; then echo "FOUND:{pkg}"; fi"#
-            )
-        })
-        .collect();
-    let script = checks.join("\n");
-
-    let output = tokio::process::Command::new("docker")
-        .args(["run", "--rm", "--entrypoint", "sh", &base, "-c", &script])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await;
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let mut found = serde_json::Map::new();
-            for pkg in &packages {
-                let present = stdout.lines().any(|l| l.trim() == format!("FOUND:{pkg}"));
-                found.insert(pkg.clone(), serde_json::Value::Bool(present));
-            }
-            Json(serde_json::json!({ "found": found })).into_response()
-        },
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// Get the current default sandbox image.
-#[cfg(feature = "web-ui")]
-async fn api_get_default_image_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let image = if let Some(ref router) = state.gateway.sandbox_router {
-        router.default_image().await
-    } else {
-        moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string()
-    };
-    Json(serde_json::json!({ "image": image }))
-}
-
-/// Set the default sandbox image.
-#[cfg(feature = "web-ui")]
-async fn api_set_default_image_handler(
-    State(state): State<AppState>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let image = body.get("image").and_then(|v| v.as_str()).map(|s| s.trim());
-
-    if let Some(ref router) = state.gateway.sandbox_router {
-        let value = image.filter(|s| !s.is_empty()).map(String::from);
-        router.set_global_image(value.clone()).await;
-        let effective = router.default_image().await;
-        Json(serde_json::json!({ "image": effective })).into_response()
-    } else {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "no sandbox backend available" })),
-        )
-            .into_response()
-    }
-}
-
-/// Build a custom image from a base + apt packages.
-#[cfg(feature = "web-ui")]
-async fn api_build_image_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
-    let name = body
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let base = body
-        .get("base")
-        .and_then(|v| v.as_str())
-        .unwrap_or("ubuntu:25.10")
-        .trim();
-    let packages: Vec<&str> = body
-        .get("packages")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if name.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "name is required" })),
-        )
-            .into_response();
-    }
-    if packages.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "packages list is empty" })),
-        )
-            .into_response();
-    }
-
-    // Validate name: only allow alphanumeric, dash, underscore
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "name must be alphanumeric, dash, or underscore" })),
-        )
-            .into_response();
-    }
-
-    let pkg_list = packages.join(" ");
-    let dockerfile_contents = format!(
-        "FROM {base}\n\
-RUN apt-get update && apt-get install -y {pkg_list}\n\
-RUN mkdir -p /home/sandbox\n\
-ENV HOME=/home/sandbox\n\
-WORKDIR /home/sandbox\n"
-    );
-
-    let tmp_dir = std::env::temp_dir().join(format!("moltis-build-{}", uuid::Uuid::new_v4()));
-    if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response();
-    }
-
-    let dockerfile_path = tmp_dir.join("Dockerfile");
-    if let Err(e) = std::fs::write(&dockerfile_path, &dockerfile_contents) {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response();
-    }
-
-    let builder = moltis_tools::image_cache::DockerImageBuilder::new();
-    let result = builder.ensure_image(name, &dockerfile_path, &tmp_dir).await;
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-    match result {
-        Ok(tag) => Json(serde_json::json!({ "tag": tag })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
+// One-cut: Moltis no longer provides sandbox runtime image management APIs.
 
 #[cfg(feature = "web-ui")]
 static ASSETS: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/src/assets");
@@ -6086,27 +5629,6 @@ mod tests {
         assert!(is_same_origin(
             "https://app.moltis.localhost:8080",
             "localhost:8080"
-        ));
-    }
-
-    #[test]
-    fn prebuild_runs_only_when_mode_enabled_and_packages_present() {
-        let packages = vec!["curl".to_string()];
-        assert!(should_prebuild_sandbox_image(
-            &moltis_tools::sandbox::SandboxMode::All,
-            &packages
-        ));
-        assert!(should_prebuild_sandbox_image(
-            &moltis_tools::sandbox::SandboxMode::NonMain,
-            &packages
-        ));
-        assert!(!should_prebuild_sandbox_image(
-            &moltis_tools::sandbox::SandboxMode::Off,
-            &packages
-        ));
-        assert!(!should_prebuild_sandbox_image(
-            &moltis_tools::sandbox::SandboxMode::All,
-            &[]
         ));
     }
 

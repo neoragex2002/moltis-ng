@@ -685,11 +685,6 @@ pub struct HeartbeatConfig {
     pub ack_max_chars: usize,
     /// Active hours window — heartbeats only run during this window.
     pub active_hours: ActiveHoursConfig,
-    /// Whether heartbeat runs inside a sandbox. Defaults to true.
-    #[serde(default = "default_true")]
-    pub sandbox_enabled: bool,
-    /// Override sandbox image for heartbeat. If `None`, uses the default image.
-    pub sandbox_image: Option<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -701,8 +696,6 @@ impl Default for HeartbeatConfig {
             prompt: None,
             ack_max_chars: 300,
             active_hours: ActiveHoursConfig::default(),
-            sandbox_enabled: true,
-            sandbox_image: None,
         }
     }
 }
@@ -1297,18 +1290,22 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub mount_allowlist: Vec<String>,
     pub image: Option<String>,
-    pub container_prefix: Option<String>,
     pub no_network: bool,
-    /// Backend: "auto" (default) or "docker".
-    /// "auto" uses Docker when available, falls back to direct execution.
+    /// How to handle managed sandbox containers at process startup.
     ///
-    /// Note: "apple-container" is intentionally not supported (will fail-fast).
-    pub backend: String,
+    /// - "reset" (default): delete all managed containers for this instance.
+    /// - "reuse": keep only containers that fully match the current runtime contract.
+    pub startup_container_policy: String,
     pub resource_limits: ResourceLimitsConfig,
-    /// Packages to install via `apt-get` in the sandbox image.
-    /// Set to an empty list to skip provisioning.
-    #[serde(default = "default_sandbox_packages")]
-    pub packages: Vec<String>,
+    /// Legacy field retained only so validation can reject it explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_prefix: Option<String>,
+    /// Legacy field retained only so validation can reject it explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Legacy field retained only so validation can reject it explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packages: Option<Vec<String>>,
 }
 
 /// External mount configuration entry for sandbox containers.
@@ -1333,162 +1330,6 @@ impl Default for SandboxMountConfig {
     }
 }
 
-/// Default packages installed in sandbox containers.
-/// Inspired by GitHub Actions runner images — covers commonly needed
-/// CLI tools, language runtimes, and utilities for LLM-driven tasks.
-fn default_sandbox_packages() -> Vec<String> {
-    [
-        // Networking & HTTP
-        "curl",
-        "wget",
-        "ca-certificates",
-        "dnsutils",
-        "netcat-openbsd",
-        "openssh-client",
-        "iproute2",
-        "net-tools",
-        // Language runtimes
-        "python3",
-        "python3-dev",
-        "python3-pip",
-        "python3-venv",
-        "python-is-python3",
-        "nodejs",
-        "npm",
-        "ruby",
-        "ruby-dev",
-        // Build toolchain & native deps
-        "build-essential",
-        "clang",
-        "libclang-dev",
-        "llvm-dev",
-        "pkg-config",
-        "libssl-dev",
-        "libsqlite3-dev",
-        "libyaml-dev",
-        "liblzma-dev",
-        "autoconf",
-        "automake",
-        "libtool",
-        "bison",
-        "flex",
-        "dpkg-dev",
-        "fakeroot",
-        // Compression & archiving
-        "zip",
-        "unzip",
-        "bzip2",
-        "xz-utils",
-        "p7zip-full",
-        "tar",
-        "zstd",
-        "lz4",
-        "pigz",
-        // Common CLI utilities (mirrors GitHub runner image)
-        "git",
-        "gnupg2",
-        "jq",
-        "rsync",
-        "file",
-        "tree",
-        "sqlite3",
-        "sudo",
-        "locales",
-        "tzdata",
-        "shellcheck",
-        "patchelf",
-        // Text processing & search
-        "ripgrep",
-        "fd-find",
-        "yq",
-        // Terminal multiplexer (useful for capturing ncurses apps)
-        "tmux",
-        // Browser automation (for browser tool)
-        "chromium",
-        "libxss1",
-        "libnss3",
-        "libnspr4",
-        "libasound2t64",
-        "libatk1.0-0t64",
-        "libatk-bridge2.0-0t64",
-        "libcups2t64",
-        "libdrm2",
-        "libgbm1",
-        "libgtk-3-0t64",
-        "libxcomposite1",
-        "libxdamage1",
-        "libxfixes3",
-        "libxrandr2",
-        "libxkbcommon0",
-        "fonts-liberation",
-        // Image processing (headless)
-        "imagemagick",
-        "graphicsmagick",
-        "libvips-tools",
-        "pngquant",
-        "optipng",
-        "jpegoptim",
-        "webp",
-        "libimage-exiftool-perl",
-        "libheif-dev",
-        // Audio / video / media
-        "ffmpeg",
-        "sox",
-        "lame",
-        "flac",
-        "vorbis-tools",
-        "opus-tools",
-        "mediainfo",
-        // Document & office conversion
-        "pandoc",
-        "poppler-utils",
-        "ghostscript",
-        "texlive-latex-base",
-        "texlive-latex-extra",
-        "texlive-fonts-recommended",
-        "antiword",
-        "catdoc",
-        "unrtf",
-        "libreoffice-core",
-        "libreoffice-writer",
-        // Data processing & conversion
-        "csvtool",
-        "xmlstarlet",
-        "html2text",
-        "dos2unix",
-        "miller",
-        "datamash",
-        // GIS / OpenStreetMap / map generation
-        "gdal-bin",
-        "mapnik-utils",
-        "osm2pgsql",
-        "osmium-tool",
-        "osmctools",
-        "python3-mapnik",
-        "libgdal-dev",
-        // CalDAV / CardDAV
-        "vdirsyncer",
-        "khal",
-        "python3-caldav",
-        // Email (IMAP sync, indexing, CLI clients)
-        "isync",
-        "offlineimap3",
-        "notmuch",
-        "notmuch-mutt",
-        "aerc",
-        "mutt",
-        "neomutt",
-        // Newsgroups (NNTP)
-        "tin",
-        "slrn",
-        // Messaging APIs
-        "python3-discord",
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect()
-}
-
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
@@ -1504,9 +1345,10 @@ impl Default for SandboxConfig {
             image: None,
             container_prefix: None,
             no_network: true,
-            backend: "auto".into(),
+            startup_container_policy: "reset".into(),
             resource_limits: ResourceLimitsConfig::default(),
-            packages: default_sandbox_packages(),
+            backend: None,
+            packages: None,
         }
     }
 }

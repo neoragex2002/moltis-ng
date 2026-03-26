@@ -21,7 +21,6 @@ import {
 } from "./helpers.js";
 import { updateSessionProjectSelect } from "./project-combo.js";
 import { currentPrefix, navigate, sessionPath } from "./router.js";
-import { updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
 import * as S from "./state.js";
 import { modelStore } from "./stores/model-store.js";
 import { projectStore } from "./stores/project-store.js";
@@ -240,8 +239,6 @@ function restoreSessionState(entry, projectId) {
 		var found = modelStore.getById(entry.model);
 		if (S.modelComboLabel) S.modelComboLabel.textContent = found ? found.displayName || found.id : entry.model;
 	}
-	updateSandboxUI(entry.sandboxEnabled !== false);
-	updateSandboxImageUI(entry.sandboxImage || null);
 	restoreMcpToggle(!entry.mcpDisabled);
 }
 
@@ -505,7 +502,10 @@ function ensureSessionInClientStore(sessionId, entry, projectId) {
 
 export function switchSession(sessionId, searchContext, projectId, options = {}) {
 	if (!sessionId) {
+		var requestedId = sessionStore.activeSessionId.value || "";
 		ensureHomeSession().then((homeId) => {
+			// Do not let an async home-session fallback override a user-initiated switch.
+			if ((sessionStore.activeSessionId.value || "") !== requestedId) return;
 			if (homeId) switchSession(homeId, searchContext, projectId, options);
 		});
 		return;

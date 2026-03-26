@@ -110,12 +110,6 @@ fn extract_preview(history: &[Value]) -> Option<String> {
     Some(truncate_preview(&combined, MAX))
 }
 
-pub(crate) fn sandbox_router_key_for_entry(
-    entry: &moltis_sessions::metadata::SessionEntry,
-) -> String {
-    entry.session_key.clone()
-}
-
 fn is_main_session_key(session_key: &str) -> bool {
     matches!(
         SessionKey::parse(session_key),
@@ -236,8 +230,6 @@ fn session_row(entry: &moltis_sessions::metadata::SessionEntry, active_channel: 
         "lastSeenMessageCount": entry.last_seen_message_count,
         "projectId": entry.project_id,
         "archived": entry.archived,
-        "sandboxEnabled": entry.sandbox_enabled,
-        "sandboxImage": entry.sandbox_image,
         "worktreeBranch": entry.worktree_branch,
         "channel": channel,
         "activeChannel": active_channel,
@@ -497,32 +489,12 @@ impl SessionService for LiveSessionService {
                 .await;
         }
 
-        // Update sandbox_image if provided.
+        // One-cut: session-level sandbox image override removed.
         if params.get("sandboxImage").is_some() {
-            if let Some(ref router) = self.sandbox_router {
-                if router.config().scope_key != moltis_tools::sandbox::SandboxScopeKey::SessionId {
-                    return Err(
-                        "sandbox_image override is not supported when tools.exec.sandbox.scope_key != \"session_id\""
-                            .to_string(),
-                    );
-                }
-            }
-            let sandbox_image = params
-                .get("sandboxImage")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from);
-            self.metadata
-                .set_sandbox_image(session_id, sandbox_image.clone())
-                .await;
-            // Push image override to sandbox router.
-            if let Some(ref router) = self.sandbox_router {
-                if let Some(ref img) = sandbox_image {
-                    router.set_image_override(session_id, img.clone()).await;
-                } else {
-                    router.remove_image_override(session_id).await;
-                }
-            }
+            return Err(
+                "SANDBOX_LEGACY_SESSION_IMAGE_OVERRIDE_REMOVED: sandboxImage is no longer supported; remove it"
+                    .to_string(),
+            );
         }
 
         // Update mcp_disabled if provided.
@@ -533,20 +505,12 @@ impl SessionService for LiveSessionService {
                 .await;
         }
 
-        // Update sandbox_enabled if provided.
+        // One-cut: session-level sandbox enable/disable override removed.
         if params.get("sandboxEnabled").is_some() {
-            let sandbox_enabled = params.get("sandboxEnabled").and_then(|v| v.as_bool());
-            self.metadata
-                .set_sandbox_enabled(session_id, sandbox_enabled)
-                .await;
-            // Push override to sandbox router.
-            if let Some(ref router) = self.sandbox_router {
-                if let Some(enabled) = sandbox_enabled {
-                    router.set_override(session_id, enabled).await;
-                } else {
-                    router.remove_override(session_id).await;
-                }
-            }
+            return Err(
+                "SANDBOX_LEGACY_SESSION_SANDBOX_OVERRIDE_REMOVED: sandboxEnabled is no longer supported; remove it"
+                    .to_string(),
+            );
         }
 
         let entry = self
@@ -654,9 +618,6 @@ impl SessionService for LiveSessionService {
                 {
                     tracing::warn!("sandbox cleanup for session {session_id}: {e}");
                 }
-            } else {
-                // Shared scope_key: only clean up per-session override state here.
-                router.cleanup_session_state(session_id).await;
             }
         }
 

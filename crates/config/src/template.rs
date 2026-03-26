@@ -220,7 +220,7 @@ allowlist = []                    # Command patterns to allow (when security_lev
 # Commands run inside isolated containers for security.
 
 [tools.exec.sandbox]
-mode = "all"                      # Which commands to sandbox:
+mode = "off"                      # Which commands to sandbox:
                                   #   "off"      - No sandboxing (commands run on host)
                                   #   "non-main" - Sandbox all except main session
                                   #   "all"      - Sandbox everything (recommended)
@@ -233,16 +233,13 @@ idle_ttl_secs = 0                 # Idle container TTL (seconds):
 data_mount = "ro"                 # How to mount Moltis data_dir into sandbox (guest: /moltis/data):
                                   #   "ro"   - Read-only (safe; recommended)
                                   #   "rw"   - Read-write (can modify data_dir; use with care)
-                                  #   "none" - No mount (Docker backend will fail-fast when sandboxing is required)
 #
-# Docker backend requires both of these when `data_mount != "none"`:
+# Docker requires both of these:
 # data_mount_type = "bind"        # "bind" (host path) or "volume" (named volume)
 # data_mount_source = "/srv/moltis-data"  # bind: absolute host path and must resolve to effective data_dir | volume: volume name
-backend = "auto"                  # Container backend:
-                                  #   "auto"            - Auto-detect (uses Docker when available)
-                                  #   "docker"          - Use Docker
 no_network = true                 # Disable network access in sandbox (recommended)
-# image = "custom-image:tag"      # Custom Docker image (default: auto-built)
+startup_container_policy = "reset" # "reset" (default) or "reuse"
+# image = "moltis-sandbox:20260326" # Required when mode != "off"; must exist locally (Moltis does not build or pull images)
 
 # Additional host directory mounts (deny-by-default; Docker backend only for v1).
 # External mounts require an allowlist of permitted host roots.
@@ -251,90 +248,6 @@ no_network = true                 # Disable network access in sandbox (recommend
 #   {{ host_dir = "/mnt/c/dev/myproj", guest_dir = "/mnt/host/myproj", mode = "ro" }},
 #   # {{ host_dir = "/mnt/c/dev/tmp",   guest_dir = "/mnt/host/tmp",   mode = "rw" }}, # Use with care
 # ]
-
-# Packages installed in sandbox containers via apt-get.
-# This list is used to build the sandbox image. Customize as needed.
-packages = [
-    # Networking & HTTP
-    "curl",
-    "wget",
-    "ca-certificates",
-    "dnsutils",
-    "netcat-openbsd",
-    "openssh-client",
-    "iproute2",
-    "net-tools",
-    # Language runtimes
-    "python3",
-    "python3-dev",
-    "python3-pip",
-    "python3-venv",
-    "python-is-python3",
-    "nodejs",
-    "npm",
-    "ruby",
-    "ruby-dev",
-    # Build toolchain & native deps
-    "build-essential",
-    "clang",
-    "libclang-dev",
-    "llvm-dev",
-    "pkg-config",
-    "libssl-dev",
-    "libsqlite3-dev",
-    "libyaml-dev",
-    "liblzma-dev",
-    "autoconf",
-    "automake",
-    "libtool",
-    "bison",
-    "flex",
-    "dpkg-dev",
-    "fakeroot",
-    # Compression & archiving
-    "zip",
-    "unzip",
-    "bzip2",
-    "xz-utils",
-    "p7zip-full",
-    "tar",
-    "zstd",
-    "lz4",
-    "pigz",
-    # Common CLI utilities
-    "git",
-    "gnupg2",
-    "jq",
-    "rsync",
-    "file",
-    "tree",
-    "sqlite3",
-    "sudo",
-    "locales",
-    "tzdata",
-    "shellcheck",
-    "patchelf",
-    # Text processing & search
-    "ripgrep",
-    # Browser automation dependencies
-    "chromium",
-    "libxss1",
-    "libnss3",
-    "libnspr4",
-    "libasound2t64",
-    "libatk1.0-0t64",
-    "libatk-bridge2.0-0t64",
-    "libcups2t64",
-    "libdrm2",
-    "libgbm1",
-    "libgtk-3-0t64",
-    "libxcomposite1",
-    "libxdamage1",
-    "libxfixes3",
-    "libxrandr2",
-    "libxkbcommon0",
-    "fonts-liberation",
-]
 
 # Resource limits for sandboxed execution (optional)
 [tools.exec.sandbox.resource_limits]
@@ -476,8 +389,7 @@ every = "30m"                     # Interval between heartbeats (e.g., "30m", "1
 # model = "anthropic/claude-sonnet-4-20250514"  # Override model for heartbeats
 # prompt = "..."                  # Custom heartbeat prompt (default: built-in)
 ack_max_chars = 300               # Max characters for acknowledgment reply
-sandbox_enabled = true            # Run heartbeat commands in sandbox
-# sandbox_image = "..."           # Override sandbox image for heartbeats
+# Sandbox behavior follows `[tools.exec.sandbox]` (no per-heartbeat override).
 
 # Active hours window - heartbeats only run during this time
 [heartbeat.active_hours]

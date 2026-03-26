@@ -78,19 +78,6 @@ function PathInput(props) {
   </div>`;
 }
 
-var cachedImages = signal([]);
-
-function fetchCachedImages() {
-	fetch("/api/images/cached")
-		.then((r) => (r.ok ? r.json() : { images: [] }))
-		.then((data) => {
-			cachedImages.value = data.images || [];
-		})
-		.catch(() => {
-			cachedImages.value = [];
-		});
-}
-
 function ProjectEditForm(props) {
 	var p = props.project;
 	var labelRef = useRef(null);
@@ -100,11 +87,6 @@ function ProjectEditForm(props) {
 	var teardownRef = useRef(null);
 	var prefixRef = useRef(null);
 	var wtRef = useRef(null);
-	var imageRef = useRef(null);
-
-	useEffect(() => {
-		fetchCachedImages();
-	}, []);
 
 	function onSave() {
 		var updated = JSON.parse(JSON.stringify(p));
@@ -115,7 +97,6 @@ function ProjectEditForm(props) {
 		updated.teardown_command = teardownRef.current?.value.trim() || null;
 		updated.branch_prefix = prefixRef.current?.value.trim() || null;
 		updated.auto_worktree = wtRef.current?.checked;
-		updated.sandbox_image = imageRef.current?.value.trim() || null;
 		updated.updated_at = Date.now();
 		sendRpc("projects.upsert", updated).then(() => {
 			editingProject.value = null;
@@ -144,15 +125,6 @@ function ProjectEditForm(props) {
     ${field("Setup command", setupRef, p.setup_command, "e.g. pnpm install", true)}
     ${field("Teardown command", teardownRef, p.teardown_command, "e.g. docker compose down", true)}
     ${field("Branch prefix", prefixRef, p.branch_prefix, "default: moltis", true)}
-    <div class="project-edit-group">
-      <div class="text-xs text-[var(--muted)] project-edit-label">Sandbox image</div>
-      <input ref=${imageRef} type="text" class="provider-key-input" list="project-image-list"
-        value=${p.sandbox_image || ""} placeholder="Default (ubuntu:25.10)"
-        style="width:100%;font-family:var(--font-mono);font-size:.8rem;" />
-      <datalist id="project-image-list">
-        ${cachedImages.value.map((img) => html`<option key=${img.tag} value=${img.tag} />`)}
-      </datalist>
-    </div>
     <div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;">
       <input ref=${wtRef} type="checkbox" checked=${p.auto_worktree} />
       <span class="text-xs text-[var(--text)]">Auto-create git worktree per session</span>
@@ -182,7 +154,6 @@ function ProjectCard(props) {
         ${p.setup_command && html`<span class="provider-item-badge api-key">setup</span>`}
         ${p.teardown_command && html`<span class="provider-item-badge api-key">teardown</span>`}
         ${p.branch_prefix && html`<span class="provider-item-badge oauth">${p.branch_prefix}/*</span>`}
-        ${p.sandbox_image && html`<span class="provider-item-badge api-key" title=${p.sandbox_image}>image</span>`}
       </div>
       <div style="font-size:.72rem;color:var(--muted);font-family:var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;">
         ${p.directory}

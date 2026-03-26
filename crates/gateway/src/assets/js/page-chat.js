@@ -15,7 +15,6 @@ import {
 	import { bindModelComboEvents, setSessionModel } from "./models.js";
 	import { registerPrefix, sessionPath } from "./router.js";
 	import { routes } from "./routes.js";
-	import { bindSandboxImageEvents, bindSandboxToggleEvents, updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
 	import { preferredStartupChatPath } from "./startup-session.js";
 	import {
 		bumpSessionCount,
@@ -999,17 +998,6 @@ var chatPageHTML =
 	'<div id="modelDropdownList" class="model-dropdown-list"></div>' +
 	"</div>" +
 	"</div>" +
-	'<button id="sandboxToggle" class="sandbox-toggle text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)]" style="display:inline-flex;align-items:center;gap:4px;" title="Toggle sandbox mode">' +
-	'<span class="icon icon-md icon-lock" style="flex-shrink:0;"></span>' +
-	'<span id="sandboxLabel">sandboxed</span>' +
-	"</button>" +
-	'<div style="position:relative;display:inline-block">' +
-	'<button id="sandboxImageBtn" class="text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)]" style="display:inline-flex;align-items:center;gap:4px;color:var(--muted);" title="Sandbox image">' +
-	'<span class="icon icon-md icon-cube" style="flex-shrink:0;"></span>' +
-	'<span id="sandboxImageLabel" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">ubuntu:25.10</span>' +
-	"</button>" +
-	'<div id="sandboxImageDropdown" class="hidden" style="position:absolute;top:100%;left:0;z-index:50;margin-top:4px;min-width:200px;max-height:300px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);"></div>' +
-	"</div>" +
 	'<button id="mcpToggleBtn" class="text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)]" style="display:inline-flex;align-items:center;gap:4px;" title="Toggle MCP tools for this session">' +
 	'<span class="icon icon-md icon-link" style="flex-shrink:0;"></span>' +
 	'<span id="mcpToggleLabel">MCP</span>' +
@@ -1086,17 +1074,6 @@ registerPrefix(
 		S.setModelSearchInput(S.$("modelSearchInput"));
 		S.setModelDropdownList(S.$("modelDropdownList"));
 		bindModelComboEvents();
-
-		S.setSandboxToggleBtn(S.$("sandboxToggle"));
-		S.setSandboxLabel(S.$("sandboxLabel"));
-		bindSandboxToggleEvents();
-		updateSandboxUI(true);
-
-		S.setSandboxImageBtn(S.$("sandboxImageBtn"));
-		S.setSandboxImageLabel(S.$("sandboxImageLabel"));
-		S.setSandboxImageDropdown(S.$("sandboxImageDropdown"));
-		bindSandboxImageEvents();
-		updateSandboxImageUI(null);
 		// Mount reactive SessionHeader component
 		var headerMount = S.$("sessionHeaderMount");
 		if (headerMount) render(html`<${SessionHeader} />`, headerMount);
@@ -1190,7 +1167,5 @@ registerPrefix(
 		S.setModelDropdown(null);
 		S.setModelSearchInput(null);
 		S.setModelDropdownList(null);
-		S.setSandboxToggleBtn(null);
-		S.setSandboxLabel(null);
 	},
 );

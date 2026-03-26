@@ -908,10 +908,10 @@ async fn build_prompt_runtime_context(
                 mode: Some(config.mode.to_string()),
                 backend: Some(router.backend_name().to_string()),
                 scope: Some(config.scope_key.to_string()),
-                image: Some(router.resolve_image(session_id, None).await),
+                image: config.image.clone(),
                 data_mount: Some(config.data_mount.to_string()),
                 no_network: Some(config.no_network),
-                session_override: session_entry.and_then(|entry| entry.sandbox_enabled),
+                session_override: None,
             })
         } else {
             Some(PromptSandboxRuntimeContext {
@@ -3855,7 +3855,10 @@ impl ChatService for LiveChatService {
                 .is_sandboxed(&session_key, router_session_key.as_deref())
                 .await
                 .unwrap_or(false);
-            let effective_image = router.resolve_image(&session_key, None).await;
+            let effective_image = config
+                .image
+                .clone()
+                .unwrap_or_else(|| "<missing>".to_string());
             let container_name = {
                 match router.sandbox_id_for(&session_key, router_session_key.as_deref()) {
                     Ok(id) => Some(id.key),

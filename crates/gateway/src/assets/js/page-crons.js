@@ -11,7 +11,7 @@ import { updateNavCount } from "./nav-counts.js";
 import { navigate, registerPrefix } from "./router.js";
 import { routes } from "./routes.js";
 import { models as modelsSig } from "./stores/model-store.js";
-import { ComboSelect, ConfirmDialog, Modal, ModelSelect, requestConfirm } from "./ui.js";
+import { ConfirmDialog, Modal, ModelSelect, requestConfirm } from "./ui.js";
 
 var initialCrons = gon.get("crons") || [];
 var cronJobs = signal(initialCrons);
@@ -33,20 +33,7 @@ var heartbeatRuns = signal(gon.get("heartbeat_runs") || []);
 var heartbeatSaving = signal(false);
 var heartbeatRunning = signal(false);
 var heartbeatConfig = signal(gon.get("heartbeat_config") || {});
-var sandboxImages = signal([]);
 var heartbeatModel = signal(gon.get("heartbeat_config")?.model || "");
-var heartbeatSandboxImage = signal(gon.get("heartbeat_config")?.sandbox_image || "");
-
-function loadSandboxImages() {
-	fetch("/api/images/cached")
-		.then((r) => r.json())
-		.then((data) => {
-			sandboxImages.value = data?.images || [];
-		})
-		.catch(() => {
-			// Ignore fetch errors — images list is optional.
-		});
-}
 
 function loadHeartbeatStatus() {
 	sendRpc("heartbeat.status", {}).then((res) => {
@@ -233,8 +220,6 @@ function collectHeartbeatForm(form) {
 			end: form.querySelector("[data-hb=ahEnd]").value.trim() || "24:00",
 			timezone: form.querySelector("[data-hb=ahTz]").value.trim() || "local",
 		},
-		sandbox_enabled: form.querySelector("[data-hb=sandboxEnabled]").checked,
-		sandbox_image: heartbeatSandboxImage.value || null,
 	};
 }
 
@@ -256,7 +241,6 @@ function HeartbeatSection() {
 			if (res?.ok) {
 				heartbeatConfig.value = updated;
 				heartbeatModel.value = updated.model || "";
-				heartbeatSandboxImage.value = updated.sandbox_image || "";
 				refreshGon();
 				loadHeartbeatStatus();
 				loadJobs();
@@ -395,31 +379,6 @@ function HeartbeatSection() {
           <option value="Asia/Singapore" selected=${cfg.active_hours?.timezone === "Asia/Singapore"}>Asia/Singapore (SGT)</option>
           <option value="Australia/Sydney" selected=${cfg.active_hours?.timezone === "Australia/Sydney"}>Australia/Sydney (AEST/AEDT)</option>
         </select>
-      </div>
-    </div>
-
-    <!-- Sandbox -->
-    <div style="margin-top:24px;border-top:1px solid var(--border);padding-top:16px;">
-      <h3 class="text-sm font-medium text-[var(--text-strong)] mb-3">Sandbox</h3>
-      <p class="text-xs text-[var(--muted)] mb-3">Run heartbeat commands in an isolated container.</p>
-      <div class="flex items-center gap-3 mb-3">
-        <label class="cron-toggle">
-          <input data-hb="sandboxEnabled" type="checkbox" checked=${cfg.sandbox_enabled !== false} />
-          <span class="cron-slider"></span>
-        </label>
-        <span class="text-sm text-[var(--text)]">Enable sandbox</span>
-      </div>
-      <div>
-        <label class="block text-xs text-[var(--muted)] mb-1">Sandbox Image</label>
-        <${ComboSelect}
-          options=${sandboxImages.value.map((img) => ({ value: img.tag, label: img.tag }))}
-          value=${heartbeatSandboxImage.value}
-          onChange=${(v) => {
-						heartbeatSandboxImage.value = v;
-					}}
-          placeholder="Default image"
-          searchPlaceholder="Search images\u2026"
-        />
       </div>
     </div>
 
@@ -825,7 +784,6 @@ function CronModal() {
 function HeartbeatPanel() {
 	useEffect(() => {
 		loadHeartbeatStatus();
-		loadSandboxImages();
 		loadHeartbeatRuns();
 	}, []);
 
@@ -887,9 +845,7 @@ export function initCrons(container, param, options) {
 	editingJob.value = null;
 	heartbeatStatus.value = null;
 	heartbeatRuns.value = gon.get("heartbeat_runs") || [];
-	sandboxImages.value = [];
 	heartbeatModel.value = gon.get("heartbeat_config")?.model || "";
-	heartbeatSandboxImage.value = gon.get("heartbeat_config")?.sandbox_image || "";
 
 	var section = param && sectionIds.includes(param) ? param : "jobs";
 	if (syncCronsRoute && param && !sectionIds.includes(param)) {

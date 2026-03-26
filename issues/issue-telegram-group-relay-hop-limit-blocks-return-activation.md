@@ -7,10 +7,10 @@
 # Issue: Telegram 群聊 relay 在 hop 超限时阻断派发，导致“员工 bot 行首点名 PM bot”无法激活（relay_hop_limit / return-to-PM）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: IN-PROGRESS
+- Status: SUPERSEDED（不再实施；以新主单为唯一准绳）
 - Priority: P1
-- Updated: 2026-03-08
-- Owners: 
+- Updated: 2026-03-26
+- Owners: gateway/telegram
 - Components: gateway / telegram
 - Affected providers/models: openai-responses::gpt-5.2（与根因无关，仅为现场日志上下文）
 
@@ -26,8 +26,7 @@
 - `epoch_relay_budget`：预算阻断/不消耗缺失 target/dispatch 失败退款：`crates/gateway/src/chat.rs`
 
 **已知差异/后续优化（非阻塞）**
-- `epoch_relay_budget` 的 UI 配置入口暂未提供（当前仅后端默认 128 + 可通过配置更新）；是否要在 Web UI 增加可视化配置见 Open Questions。
-- 中期三原则（return-to-root 等语义）尚未实现，短期仍依赖用户把 `relay_hop_limit` 配置到足够大来覆盖常见 PM 串行点名工作流。
+- N/A：本单已被 supersede；不要继续实现 hop/budget 语义。唯一准绳见：`issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md`。
 
 ---
 
@@ -114,9 +113,9 @@
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [ ] 当员工 bot 在群里以“行首点名 PM bot”的方式提交交付时，PM bot 必须能被激活（即 PM session 里应出现 `channel.relay=true` 的注入消息 / 或等价的触发信号）。
+- [x] N/A（已 superseded）：本单不再推进 hop_limit 语义；以 `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md` 为唯一准绳。
 - [x] **短期**：当“回执到 PM/root”的 relay 因 hop_limit 等策略被拦截时，必须有明确可观测性（reason code 日志），避免用户感知为“行首点名不稳定/偶现失效”。
-- [ ] **中期**：落地三原则语义后，“return-to-root”不应再被 hop_limit 这类计数口径误伤（除非触发 `epoch_relay_budget` 熔断）。
+- [x] N/A（已 superseded）：三原则/return-to-root 语义不在本单继续推进；以新主单为准。
 
 ### 非功能目标（Non-functional）
 - 正确性口径（必须/不得）：
@@ -302,8 +301,8 @@
 - [x] Telegram DM（1:1）/非群聊 channel 的行为不受影响：不应因为本单新增预算/日志而改变 DM 的推理触发或产生刷屏日志。
 
 ### 中期
-- [ ] 三条原则落地：`R A B C A D B R` 这类路径允许回到 R，并且“回到 R 清零”后下一轮从 R 再派活不被历史长度惩罚。
-- [ ] return-to-root 在 non-root 超限情况下仍能送达（除非触发 `epoch_relay_budget` 熔断）。
+- [x] N/A（已 superseded）：以新主单的去重/归因契约取代 hop/return-to-root 语义。
+- [x] N/A（已 superseded）：以新主单的去重/归因契约取代 hop/return-to-root 语义。
 
 ## 测试计划（Test Plan）【不可省略】
 ### Unit
@@ -311,7 +310,7 @@
 - [x] 短期：hop_limit 拦截时会产生 `relay_skip_reason=hop_limit_exceeded`，并且 hop_limit 超限时不会调用 loose labeling / 不会派发。
 
 ### Integration
-- [ ] 本地三 bot 群：在 `relay_hop_limit>=4` 的配置下，PM→A→PM→B→PM 的回执链路不需要 Neo 手工 `@PM 继续`。
+- [x] N/A（已 superseded）：本单不再要求按 hop_limit 验证；以新主单的端到端验收为准。
 
 ### 自动化缺口（如有，必须写手工验收）
 - 缺口原因：Telegram 真实环境下的 update/出站回执、reply_to 等字段需要集成验证。
@@ -345,10 +344,10 @@
   - 引入当前 hop/relay 扫描骨架的提交：`7e8e212dd`（2026-02-22, luy）`feat(telegram): relay bot-to-bot @mentions in group chats`
 
 ## 未决问题（Open Questions）
-- Q1: **预算的配置入口**：`epoch_relay_budget` 已默认 128（并已落到后端配置），是否需要在 Web UI 中增加可视化配置入口（以及展示当前 effective 值）？
+- 无：本单已被 supersede；相关问题转入新主单。
 
 ## Close Checklist（关单清单）【不可省略】
-- [ ] 行为已按 Spec 实现（口径一致）
+- [x] 行为已按 Spec 实现（口径一致；以 superseded 方式关闭：不再推进本单 spec，改以新主单 spec 为准）
 - [x] authoritative vs estimate 边界清晰（且 UI/日志标注 method/source）
 - [x] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
 - [x] 文档/配置示例已同步更新（避免断链）

@@ -5,7 +5,6 @@ mod db_commands;
 mod doctor_commands;
 mod hooks_commands;
 mod memory_commands;
-mod sandbox_commands;
 #[cfg(feature = "tailscale")]
 mod tailscale_commands;
 
@@ -111,11 +110,6 @@ enum Commands {
     Hooks {
         #[command(subcommand)]
         action: hooks_commands::HookAction,
-    },
-    /// Sandbox image management.
-    Sandbox {
-        #[command(subcommand)]
-        action: sandbox_commands::SandboxAction,
     },
     /// Browser configuration management.
     Browser {
@@ -386,7 +380,6 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Commands::Onboard) => moltis_onboarding::wizard::run_onboarding().await,
         Some(Commands::Auth { action }) => auth_commands::handle_auth(action).await,
-        Some(Commands::Sandbox { action }) => sandbox_commands::handle_sandbox(action).await,
         Some(Commands::Browser { action }) => browser_commands::handle_browser(action),
         Some(Commands::Db { action }) => db_commands::handle_db(action).await,
         Some(Commands::Memory { action }) => memory_commands::handle_memory(action).await,

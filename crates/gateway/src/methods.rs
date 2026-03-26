@@ -1960,6 +1960,21 @@ impl MethodRegistry {
             "heartbeat.update",
             Box::new(|ctx| {
                 Box::pin(async move {
+                    if ctx.params.get("sandbox_enabled").is_some()
+                        || ctx.params.get("sandboxEnabled").is_some()
+                    {
+                        return Err(ErrorShape::new(
+                            error_codes::INVALID_REQUEST,
+                            "SANDBOX_LEGACY_HEARTBEAT_SANDBOX_ENABLED_REMOVED: heartbeat sandbox_enabled is no longer supported; sandbox behavior is controlled only by [tools.exec.sandbox]",
+                        ));
+                    }
+                    if ctx.params.get("sandbox_image").is_some() || ctx.params.get("sandboxImage").is_some()
+                    {
+                        return Err(ErrorShape::new(
+                            error_codes::INVALID_REQUEST,
+                            "SANDBOX_LEGACY_HEARTBEAT_SANDBOX_IMAGE_REMOVED: heartbeat sandbox_image is no longer supported; sandbox behavior is controlled only by [tools.exec.sandbox.image]",
+                        ));
+                    }
                     let patch: moltis_config::schema::HeartbeatConfig =
                         serde_json::from_value(ctx.params.clone()).map_err(|e| {
                             ErrorShape::new(
@@ -2028,10 +2043,6 @@ impl MethodRegistry {
                                 to: None,
                             }),
                             enabled: Some(effective_enabled),
-                            sandbox: Some(moltis_cron::types::CronSandboxConfig {
-                                enabled: patch.sandbox_enabled,
-                                image: patch.sandbox_image.clone(),
-                            }),
                             ..Default::default()
                         };
                         ctx.state

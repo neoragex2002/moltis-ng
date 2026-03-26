@@ -3,7 +3,6 @@ use std::sync::Arc;
 use {
     anyhow::{Result, anyhow},
     async_trait::async_trait,
-    moltis_tools::image_cache::ImageBuilder,
     tracing::{debug, error, info, warn},
 };
 
@@ -1633,169 +1632,38 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 }
             },
             "sandbox" => {
-                let is_enabled = if let Some(ref router) = state.sandbox_router {
-                    let session_key = if let Some(ref metadata) = state.services.session_metadata {
-                        metadata.get(&session_id).await.map(|entry| entry.session_key)
-                    } else {
-                        None
-                    };
-                    router
-                        .is_sandboxed(&session_id, session_key.as_deref())
-                        .await
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-
-                if args.is_empty() {
-                    // Show current status and image list.
-                    let default_img = if let Some(ref router) = state.sandbox_router {
-                        router.default_image().await
-                    } else {
-                        moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string()
-                    };
-                    let current_image = if let Some(ref router) = state.sandbox_router {
-                        router.resolve_image(&session_id, None).await
-                    } else {
-                        default_img.clone()
-                    };
-
-                    let status = if is_enabled {
-                        "on"
-                    } else {
-                        "off"
-                    };
-
-                    // List available images.
-                    let builder = moltis_tools::image_cache::DockerImageBuilder::new();
-                    let cached = builder.list_cached().await.unwrap_or_default();
-
-                    let mut images: Vec<(String, Option<String>)> =
-                        vec![(default_img.clone(), None)];
-                    for img in &cached {
-                        if img.tag == default_img {
-                            continue;
-                        }
-                        images.push((
-                            img.tag.clone(),
-                            Some(format!("{} ({})", img.skill_name, img.size)),
-                        ));
-                    }
-
-                    let mut lines = vec![format!("status:{status}")];
-                    for (i, (tag, subtitle)) in images.iter().enumerate() {
-                        let marker = if *tag == current_image {
-                            " *"
+                let (is_enabled, configured_image, startup_policy) =
+                    if let Some(ref router) = state.sandbox_router {
+                        let session_key = if let Some(ref metadata) = state.services.session_metadata
+                        {
+                            metadata.get(&session_id).await.map(|entry| entry.session_key)
                         } else {
-                            ""
+                            None
                         };
-                        let label = if let Some(sub) = subtitle {
-                            format!("{}. {} — {}{}", i + 1, tag, sub, marker)
-                        } else {
-                            format!("{}. {}{}", i + 1, tag, marker)
+                        let enabled = router
+                            .is_sandboxed(&session_id, session_key.as_deref())
+                            .await
+                            .unwrap_or(false);
+                        let image = router.config().image.clone();
+                        let policy = match router.config().startup_container_policy {
+                            moltis_tools::sandbox::StartupContainerPolicy::Reset => "reset",
+                            moltis_tools::sandbox::StartupContainerPolicy::Reuse => "reuse",
                         };
-                        lines.push(label);
-                    }
-                    Ok(lines.join("\n"))
-                } else if args == "on" || args == "off" {
-                    let new_val = args == "on";
-                    let patch_res = state
-                        .services
-                        .session
-                        .patch(serde_json::json!({
-                            "sessionId": &session_id,
-                            "sandboxEnabled": new_val,
-                        }))
-                        .await
-                        .map_err(|e| anyhow!("{e}"))?;
-                    let version = patch_res
-                        .get("version")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    broadcast(
-                        state,
-                        "session",
-                        serde_json::json!({
-                            "kind": "patched",
-                            "sessionId": &session_id,
-                            "version": version,
-                        }),
-                        BroadcastOpts {
-                            drop_if_slow: true,
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                    let label = if new_val {
-                        "enabled"
+                        (enabled, image, Some(policy))
                     } else {
-                        "disabled"
+                        (false, None, None)
                     };
-                    Ok(format!("Sandbox {label}."))
-                } else if let Some(rest) = args.strip_prefix("image ") {
-                    let n: usize = rest
-                        .parse()
-                        .map_err(|_| anyhow!("usage: /sandbox image [number]"))?;
 
-                    let default_img = if let Some(ref router) = state.sandbox_router {
-                        router.default_image().await
-                    } else {
-                        moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string()
-                    };
-                    let builder = moltis_tools::image_cache::DockerImageBuilder::new();
-                    let cached = builder.list_cached().await.unwrap_or_default();
-                    let mut images: Vec<String> = vec![default_img];
-                    for img in &cached {
-                        if img.tag == images[0] {
-                            continue;
-                        }
-                        images.push(img.tag.clone());
-                    }
-
-                    if n == 0 || n > images.len() {
-                        return Err(anyhow!("invalid image number. Use 1–{}.", images.len()));
-                    }
-                    let chosen = &images[n - 1];
-
-                    // If choosing the default image, clear the session override.
-                    let patch_value = if n == 1 {
-                        ""
-                    } else {
-                        chosen.as_str()
-                    };
-                    let patch_res = state
-                        .services
-                        .session
-                        .patch(serde_json::json!({
-                            "sessionId": &session_id,
-                            "sandboxImage": patch_value,
-                        }))
-                        .await
-                        .map_err(|e| anyhow!("{e}"))?;
-                    let version = patch_res
-                        .get("version")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-
-                    broadcast(
-                        state,
-                        "session",
-                        serde_json::json!({
-                            "kind": "patched",
-                            "sessionId": &session_id,
-                            "version": version,
-                        }),
-                        BroadcastOpts {
-                            drop_if_slow: true,
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-
-                    Ok(format!("Image set to: {chosen}"))
-                } else {
-                    Err(anyhow!("usage: /sandbox [on|off|image N]"))
+                if !args.is_empty() {
+                    return Err(anyhow!(
+                        "SANDBOX_COMMAND_ONE_CUT: /sandbox no longer supports on/off/image. Configure `[tools.exec.sandbox]` in config."
+                    ));
                 }
+
+                let status = if is_enabled { "on" } else { "off" };
+                let image = configured_image.unwrap_or_else(|| "<missing>".to_string());
+                let policy = startup_policy.unwrap_or("<n/a>");
+                Ok(format!("status:{status}\nimage:{image}\nstartup_policy:{policy}"))
             },
             _ => Err(anyhow!("unknown command: /{cmd}")),
         }

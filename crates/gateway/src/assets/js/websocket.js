@@ -619,53 +619,6 @@ function handleLogEntry(payload) {
 	}
 }
 
-function handleSandboxImageBuild(payload) {
-	var isChatPage = currentPrefix === "/chats";
-	if (!isChatPage) return;
-	if (payload.phase === "start") {
-		chatAddMsg("system", "Building sandbox image (installing packages)\u2026");
-	} else if (payload.phase === "done") {
-		if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
-		var msg = payload.built ? `Sandbox image ready: ${payload.tag}` : `Sandbox image already cached: ${payload.tag}`;
-		chatAddMsg("system", msg);
-	} else if (payload.phase === "error") {
-		if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
-		chatAddMsg("error", `Sandbox image build failed: ${payload.error || "unknown"}`);
-	}
-}
-
-function handleSandboxImageProvision(payload) {
-	var isChatPage = currentPrefix === "/chats";
-	if (!isChatPage) return;
-	if (payload.phase === "start") {
-		chatAddMsg("system", "Provisioning sandbox packages\u2026");
-	} else if (payload.phase === "done") {
-		if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
-		chatAddMsg("system", "Sandbox packages provisioned");
-	} else if (payload.phase === "error") {
-		if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
-		chatAddMsg("error", `Sandbox provisioning failed: ${payload.error || "unknown"}`);
-	}
-}
-
-function handleSandboxHostProvision(payload) {
-	var isChatPage = currentPrefix === "/chats";
-	if (!isChatPage) return;
-	if (payload.phase === "start") {
-		var msg = `Installing ${payload.count || ""} package${payload.count === 1 ? "" : "s"} on host\u2026`;
-		chatAddMsg("system", msg);
-	} else if (payload.phase === "done") {
-		if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
-		var parts = [];
-		if (payload.installed > 0) parts.push(`${payload.installed} installed`);
-		if (payload.skipped > 0) parts.push(`${payload.skipped} already present`);
-		chatAddMsg("system", `Host packages ready (${parts.join(", ") || "done"})`);
-	} else if (payload.phase === "error") {
-		if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
-		chatAddMsg("error", `Host package install failed: ${payload.error || "unknown"}`);
-	}
-}
-
 function handleBrowserImagePull(payload) {
 	var isChatPage = currentPrefix === "/chats";
 	if (!isChatPage) return;
@@ -838,9 +791,6 @@ var eventHandlers = {
 	"auth.credentials_changed": handleAuthCredentialsChanged,
 	"exec.approval.requested": handleApprovalEvent,
 	"logs.entry": handleLogEntry,
-	"sandbox.image.build": handleSandboxImageBuild,
-	"sandbox.image.provision": handleSandboxImageProvision,
-	"sandbox.host.provision": handleSandboxHostProvision,
 	"browser.image.pull": handleBrowserImagePull,
 	"local-llm.download": handleLocalLlmDownload,
 	"models.updated": handleModelsUpdated,

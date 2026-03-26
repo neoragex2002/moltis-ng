@@ -13,9 +13,8 @@ import { renderSessionProjectSelect } from "./project-combo.js";
 import { renderProjectSelect } from "./projects.js";
 	import { initPWA } from "./pwa.js";
 	import { initInstallBanner } from "./pwa-install.js";
-	import { mount, navigate, registerPage } from "./router.js";
+	import { mount, navigate, registerPage, sessionPath } from "./router.js";
 	import { routes } from "./routes.js";
-	import { updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
 	import { fetchSessions, refreshActiveSession, refreshWelcomeCardIfNeeded, renderSessionList } from "./sessions.js";
 	import { preferredStartupChatPath } from "./startup-session.js";
 	import * as S from "./state.js";
@@ -297,6 +296,13 @@ function fetchBootstrap() {
 					var defaultSessionId = sessionStore.defaultSessionId(bootSessions);
 					if (defaultSessionId) {
 						sessionStore.setActive(defaultSessionId);
+						// If we landed on the bare /chats entrypoint, canonicalize to /chats/<id>
+						// without waiting for WebSocket readiness.
+						if (window.location.pathname === routes.chats) {
+							var nextPath = sessionPath(defaultSessionId);
+							history.replaceState(null, "", nextPath);
+							mount(nextPath);
+						}
 					}
 				}
 				renderSessionList();
@@ -312,10 +318,6 @@ function fetchBootstrap() {
 				renderSessionProjectSelect();
 			}
 			S.setSandboxInfo(boot.sandbox || null);
-			// Re-apply sandbox UI now that we know the backend status.
-			// This fixes the race where the chat page renders before bootstrap completes.
-			updateSandboxUI(S.sessionSandboxEnabled);
-			updateSandboxImageUI(S.sessionSandboxImage);
 			if (boot.counts) updateNavCounts(boot.counts);
 		})
 		.catch(() => {

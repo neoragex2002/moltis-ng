@@ -58,7 +58,7 @@ async fn spawn_agent_uses_single_system_message_for_openai_responses_provider() 
     let tool_registry = Arc::new(ToolRegistry::new());
     let tool = SpawnAgentTool::new(provider_registry, provider, tool_registry);
 
-    let params = serde_json::json!({ "task": "do something" });
+    let params = serde_json::json!({ "task": "do something", "_sessionId": "test" });
     let _ = tool.execute(params).await.unwrap();
 
     let msgs = captured.lock().await;

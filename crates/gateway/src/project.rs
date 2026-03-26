@@ -38,6 +38,9 @@ impl ProjectService for LiveProjectService {
     }
 
     async fn upsert(&self, params: Value) -> ServiceResult {
+        if params.get("sandbox_image").is_some() || params.get("sandboxImage").is_some() {
+            return Err("SANDBOX_LEGACY_PROJECT_SANDBOX_IMAGE_REMOVED: projects.sandbox_image is no longer supported; sandbox image is controlled only by [tools.exec.sandbox.image]".to_string());
+        }
         let project: moltis_projects::Project =
             serde_json::from_value(params).map_err(|e| e.to_string())?;
         self.store

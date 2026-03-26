@@ -43,8 +43,6 @@
 		this.updatedAt = serverData.updatedAt || 0;
 		this.createdAt = serverData.createdAt || 0;
 		this.worktreeBranch = serverData.worktreeBranch || "";
-		this.sandboxEnabled = serverData.sandboxEnabled;
-		this.sandboxImage = serverData.sandboxImage || null;
 		this.channel = serverData.channel || null;
 		this.parentSessionId = serverData.parentSessionId || "";
 		this.forkPoint = serverData.forkPoint != null ? serverData.forkPoint : null;
@@ -107,8 +105,6 @@
 		}
 		this.createdAt = serverData.createdAt || 0;
 		this.worktreeBranch = serverData.worktreeBranch || "";
-		this.sandboxEnabled = serverData.sandboxEnabled;
-		this.sandboxImage = serverData.sandboxImage || null;
 		this.channel = serverData.channel || null;
 		this.parentSessionId = serverData.parentSessionId || "";
 		this.forkPoint = serverData.forkPoint != null ? serverData.forkPoint : null;

@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock, Weak},
     time::Instant,
 };
 
@@ -359,29 +359,45 @@ pub fn effective_bot_username(state: &AccountState) -> Option<String> {
 }
 
 pub fn shared_group_runtime(accounts: &AccountStateMap) -> Arc<Mutex<TelegramGroupRuntime>> {
-    static STORE: OnceLock<Mutex<HashMap<usize, Arc<Mutex<TelegramGroupRuntime>>>>> =
-        OnceLock::new();
+    type AccountMap = RwLock<HashMap<String, AccountState>>;
+    type Entry = (Weak<AccountMap>, Arc<Mutex<TelegramGroupRuntime>>);
+
+    static STORE: OnceLock<Mutex<HashMap<usize, Entry>>> = OnceLock::new();
     let store = STORE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = Arc::as_ptr(accounts) as usize;
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
-    Arc::clone(
-        store
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(TelegramGroupRuntime::new()))),
-    )
+
+    if let Some((accounts_ref, runtime)) = store.get(&key) {
+        // Guard against pointer-reuse collisions across dropped `AccountStateMap`s.
+        if accounts_ref.upgrade().is_some() {
+            return Arc::clone(runtime);
+        }
+    }
+
+    let runtime = Arc::new(Mutex::new(TelegramGroupRuntime::new()));
+    store.insert(key, (Arc::downgrade(accounts), Arc::clone(&runtime)));
+    runtime
 }
 
 pub fn shared_identity_links(accounts: &AccountStateMap) -> Arc<RwLock<Vec<TelegramIdentityLink>>> {
-    static STORE: OnceLock<Mutex<HashMap<usize, Arc<RwLock<Vec<TelegramIdentityLink>>>>>> =
-        OnceLock::new();
+    type AccountMap = RwLock<HashMap<String, AccountState>>;
+    type Entry = (Weak<AccountMap>, Arc<RwLock<Vec<TelegramIdentityLink>>>);
+
+    static STORE: OnceLock<Mutex<HashMap<usize, Entry>>> = OnceLock::new();
     let store = STORE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = Arc::as_ptr(accounts) as usize;
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
-    Arc::clone(
-        store
-            .entry(key)
-            .or_insert_with(|| Arc::new(RwLock::new(Vec::new()))),
-    )
+
+    if let Some((accounts_ref, links)) = store.get(&key) {
+        // Guard against pointer-reuse collisions across dropped `AccountStateMap`s.
+        if accounts_ref.upgrade().is_some() {
+            return Arc::clone(links);
+        }
+    }
+
+    let links = Arc::new(RwLock::new(Vec::new()));
+    store.insert(key, (Arc::downgrade(accounts), Arc::clone(&links)));
+    links
 }
 
 pub fn telegram_identity_links_snapshot(accounts: &AccountStateMap) -> Vec<TelegramIdentityLink> {

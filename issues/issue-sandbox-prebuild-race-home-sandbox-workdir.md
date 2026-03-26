@@ -1,15 +1,30 @@
+# SUPERSEDED BY `issues/issue-sandbox-runtime-image-and-container-lifecycle-one-cut.md`
+#
+# 2026-03-26 决策更新：
+# - Moltis sandbox 运行模型已 hard-cut 收敛为“唯一运行镜像 + 容器生命周期”。
+# - 旧的 prebuild / build / override / provision 模型不再作为实现方向。
+
 # Issue: sandbox 默认 `/home/sandbox` workdir 假设不成立 + 预构建镜像切换不触发重建（sandbox / exec）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: TODO
+- Status: SUPERSEDED（不再推进；以新主单为唯一准绳）
 - Priority: P1
+- Updated: 2026-03-26
 - Owners: <TBD>
 - Components: tools/sandbox, tools/exec, gateway
 - Affected providers/models: <N/A>
 
 **已实现（如有，写日期）**
-- 2026-02-xx：sandbox 镜像预构建在 gateway 启动后台执行（并通过 `set_global_image()` 切换默认 image）：`crates/gateway/src/server.rs:1507`
-- 2026-02-xx：exec tool 在 “sandboxed + 容器后端” 下默认 working_dir 为 `/home/sandbox`：`crates/tools/src/exec.rs:299`
+- 2026-02-xx：sandbox 镜像预构建在 gateway 启动后台执行（并通过 `SandboxRouter::set_global_image()` 切换默认 image）：`crates/gateway/src/server.rs`
+- 2026-02-xx：exec tool 在 “sandboxed + 容器后端” 下默认 working_dir 为 `/home/sandbox`：`crates/tools/src/exec.rs`
+
+**核实结果（2026-03-26）**
+- 复现确认：基础镜像 `ubuntu:25.10` 不包含 `/home/sandbox`，且对“未创建该目录”的容器执行 `docker exec -w /home/sandbox ...` 会稳定报错（与本单症状一致）：`OCI runtime exec failed ... chdir to cwd (\"/home/sandbox\") ... no such file or directory`。
+- 代码确认：`DockerSandbox::docker_run_args()` 启动容器时未设置工作目录、也未在非 prebuilt image 路径创建 `/home/sandbox`：`crates/tools/src/sandbox.rs`；因此只要容器不是 prebuilt image（或 prebuild 尚未完成），`ExecTool` 的默认 `working_dir=/home/sandbox` 会触发上述 OCI chdir 失败。
+- 代码确认：`container_contract_matches()` 当前只校验 env + mounts，不校验运行中容器的 image/tag/ImageID：`crates/tools/src/sandbox.rs:1078`；因此 prebuild 完成后的 `set_global_image()` 不会强制已存在容器重建（image 切换不会生效），存在“预构建完成但仍继续复用旧容器”的漂移风险。
+- 命令确认：存在“会话之外”的预构建入口（满足本单目标之一）：`moltis sandbox build/list/clean/remove`：`crates/cli/src/sandbox_commands.rs:1`。
+- 实测确认：`moltis sandbox build` 当前实际构建出的 image tag 为 `msb:<hash>`（由 `DockerSandbox::image_repo() == "msb"` 决定）：`crates/tools/src/sandbox.rs:965`；且 `moltis sandbox list/clean` 仅处理 `*-sandbox:*`，不会列出/清理 `msb:*`（运维/可观测 UX 存在缺口，且 CLI build 输出的 `Tag:` 与实际 build tag 不一致）。
+- 风险确认：`process` 工具当前硬编码 `working_dir=/home/sandbox`（且 host fallback 也带该 working_dir），仍可能在无容器后端或未创建目录时触发 ENOENT/OCI cwd 类错误：`crates/tools/src/process.rs:129`。
 
 **已覆盖测试（如有）**
 - <N/A>
@@ -35,7 +50,7 @@
 ## 概念与口径（Glossary & Semantics）【概念收敛/避免歧义】
 > 只允许在这里声明别名；正文统一使用“主称呼”。
 
-- **预构建沙盒镜像**（主称呼）：gateway 在后台把 `packages` bake 进镜像后生成的 `<instance>-sandbox:<hash>` 镜像，并通过 `SandboxRouter::set_global_image()` 设为默认。  
+- **预构建沙盒镜像**（主称呼）：gateway 在后台把 `packages` bake 进镜像后生成的 `msb:<hash>` 镜像（当前 Docker backend 实现），并通过 `SandboxRouter::set_global_image()` 设为默认。  
   - Why：避免每次 `docker run` 都安装包；提升启动/执行速度。
   - Not：它不是 `[tools.exec.sandbox].image` 显式指定的基础镜像（例如 `ubuntu:25.10`）。
   - Source/Method：effective（运行态 override）
@@ -72,7 +87,7 @@
    - `OCI runtime exec failed: exec failed: unable to start container process: chdir to cwd ("/home/sandbox") set in config.json failed: no such file or directory`
 2) 启动日志中可观察到：
    - 先出现 `exec tool invoked ... working_dir=Some("/home/sandbox")`
-   - 后出现 `sandbox image pre-build complete ... tag="<instance>-sandbox:<hash>"`
+   - 后出现 `sandbox image pre-build complete ... tag="msb:<hash>"`
    - 说明首次 exec 可能发生在预构建完成之前。
 3) 在 “镜像构建较慢（机械硬盘 + 需要翻墙/网络慢）” 的环境中，上述时序窗口会被显著放大，使该问题更容易复现且更具持续性。
 4) 附带 UX 问题：在 WebUI chat 中输入类似 `hello` 这样的短字符串，也可能被 runner 的 “direct shell command” 启发式误判为命令，从而触发一次强制 exec（进一步放大“启动后立刻触发 exec”的概率）。
@@ -95,27 +110,27 @@
 > 必须至少给出 1 条可定位证据：`path/to/file:line` / 测试 / 日志关键词。
 
 - 代码证据：
-  - `crates/tools/src/exec.rs:299`：sandbox + 容器后端下默认 `working_dir=/home/sandbox`。
-  - `crates/tools/src/sandbox.rs:1357`：Docker backend 执行时若设置了 `working_dir`，会传递给 `docker exec -w <dir>`。
-  - `crates/tools/src/sandbox.rs:1233`：`DockerSandbox::ensure_ready()` 启动容器未显式创建 `/home/sandbox`（基础镜像不保证存在）。
-  - `crates/tools/src/sandbox.rs:1247`：当 `container_contract_matches()` 为 true 时，`ensure_ready()` 直接复用既有容器，不会因 image/tag 变化而重建。
-  - `crates/tools/src/sandbox.rs:967`：`container_contract_matches()` 仅校验 env + mounts，不校验 image/tag，也不校验 `/home/sandbox` 是否存在。
-  - `crates/tools/src/sandbox.rs:1320`：预构建镜像的 Dockerfile 才会 `mkdir -p /home/sandbox` 并设置 `WORKDIR /home/sandbox`（基础镜像路径不保证）。
-  - `crates/gateway/src/server.rs:1507`：预构建镜像在后台任务完成后才 `set_global_image()`。
-  - `crates/cli/src/sandbox_commands.rs:45`：已有 CLI 支持列出/构建/清理预构建 sandbox images（`moltis sandbox build|list|clean`），可作为“会话之外预构建”的入口。
+  - `crates/tools/src/exec.rs`：sandbox + 容器后端下默认 `working_dir=/home/sandbox`（backend="none" 时会回退到 host data_dir，避免假设 `/home/sandbox` 存在）。
+  - `crates/tools/src/sandbox.rs`：`DockerSandbox::exec()` 若设置了 `working_dir`，会传递给 `docker exec -w <dir>`。
+  - `crates/tools/src/sandbox.rs`：`DockerSandbox::ensure_ready()` 启动容器未保证创建 `/home/sandbox`（基础镜像不保证存在）。
+  - `crates/tools/src/sandbox.rs`：当 `container_contract_matches()` 为 true 时，`ensure_ready()` 直接复用既有容器，不会因 image/tag 变化而重建。
+  - `crates/tools/src/sandbox.rs:1078`：`container_contract_matches()` 仅校验 env + mounts，不校验 image/tag，也不校验 `/home/sandbox` 是否存在。
+  - `crates/tools/src/sandbox.rs`：`DockerSandbox::build_image()` 生成的 Dockerfile 会 `mkdir -p /home/sandbox` 并设置 `WORKDIR /home/sandbox`（因此仅 prebuilt image 路径保证该目录存在）。
+  - `crates/tools/src/sandbox.rs:965`：Docker backend 的 prebuilt image repo 固定为 `msb`（`DockerSandbox::image_repo()`），因此预构建 tag 形如 `msb:<hash>`。
+  - `crates/gateway/src/server.rs`：预构建镜像在后台任务完成后才 `set_global_image()`。
+  - `crates/cli/src/sandbox_commands.rs`：已有 CLI 支持构建/列出/清理 sandbox images（`moltis sandbox build|list|clean`），但当前 list/clean 仅覆盖 `*-sandbox:*`，不覆盖 `msb:*`。
   - `crates/agents/src/runner.rs:153`：direct-shell-command 启发式对 `hello` 这类输入也会返回 Some，从而可能强制触发一次 exec（放大时序 race 的触发概率）。
-  - `crates/tools/src/exec.rs:379`：`image = router.resolve_image(...)`（resolved image）。
-  - `crates/tools/src/exec.rs:382`：`sandbox ensure_ready ... image` 日志打印 resolved image（不等同于“当前容器实际 image”）。
+  - `crates/tools/src/exec.rs`：`image = router.resolve_image(...)`（resolved image），以及 `sandbox ensure_ready ... image` 日志打印 resolved image（不等同于“当前容器实际 image”）。
 - 日志关键词（本地可 grep）：
   - `exec tool invoked`（字段 `working_dir="/home/sandbox"`）
-  - `sandbox image pre-build complete`（字段 `tag="<instance>-sandbox:<hash>"`）
+  - `sandbox image pre-build complete`（字段 `tag="msb:<hash>"`）
 
 ## 根因分析（Root Cause）
 - A. 逻辑前提不成立（workdir）：
   - 在容器后端下，exec 默认 `working_dir=/home/sandbox`，但基础镜像（例如 `ubuntu:25.10`）不保证存在该目录；`ensure_ready()` 也未保证创建该目录。
   - 这使得问题在某些配置下是“必现”，而不仅是 “prebuild race 才会发生”。
 - B. 契约不完整（image/tag）：
-  - 预构建完成后，resolved image 会切换到 `<instance>-sandbox:<hash>`，但 `container_contract_matches()` 未校验 image/tag，导致旧容器可能继续复用而不重建。
+  - 预构建完成后，resolved image 会切换到 `msb:<hash>`，但 `container_contract_matches()` 未校验 image/tag，导致旧容器可能继续复用而不重建。
 - C. 触发窗口放大（prebuild 慢 + 输入误判）：
   - gateway 启动后预构建在后台异步执行；预构建耗时受磁盘 I/O 与网络（apt/pull/翻墙）影响，窗口更长，更容易在预构建完成前触发首次 exec。
   - WebUI 的 direct-shell-command 误判（例如 `hello`）会额外提高“启动后立刻触发 exec”的概率。
@@ -164,6 +179,7 @@
 - [ ] 在 `tools.exec.sandbox.mode != "off"` 且容器后端可用时，首次 exec 不会出现 OCI `chdir /home/sandbox` 失败。
 - [ ] 预构建镜像完成后，后续 exec 使用与 resolved image 一致的容器（不复用旧 image 造成的坏状态）。
 - [ ] 有至少 1 条自动化测试覆盖“image 变化触发重建/或 workdir 兜底创建”的关键路径（或记录缺口 + 手工验收）。
+- [ ] “会话之外预构建”入口与运行态口径一致：`moltis sandbox build` 构建出的 tag 与 gateway/runtime prebuild 使用一致（当前为 `msb:<hash>`），且 `moltis sandbox list/clean` 能列出/清理该类 tag（避免“建了但看不到/清不掉”）。
 
 ## 测试计划（Test Plan）【不可省略】
 ### Unit

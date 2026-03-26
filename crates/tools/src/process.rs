@@ -17,7 +17,7 @@ use moltis_agents::tool_registry::AgentTool;
 
 use crate::{
     exec::ExecOpts,
-    sandbox::{SandboxId, SandboxRouter},
+    sandbox::{SandboxId, SandboxRouter, SANDBOX_GUEST_WORKDIR},
 };
 
 /// Regex pattern for valid tmux session names: only `[a-zA-Z0-9_-]`.
@@ -124,9 +124,8 @@ impl ProcessTool {
         timeout_secs: u64,
     ) -> Result<crate::exec::ExecResult> {
         let command = format!("tmux {tmux_args}");
-        let opts = ExecOpts {
+        let mut opts = ExecOpts {
             timeout: std::time::Duration::from_secs(timeout_secs),
-            working_dir: Some(std::path::PathBuf::from("/home/sandbox")),
             ..Default::default()
         };
 
@@ -135,11 +134,11 @@ impl ProcessTool {
             if is_sandboxed {
                 let _lease = router.acquire_lease(session_id, session_key)?;
                 router.touch(session_id, session_key)?;
-                let image = router.resolve_image(session_id, None).await;
                 let id = router
-                    .ensure_ready_for_session(session_id, session_key, Some(&image))
+                    .ensure_ready_for_session(session_id, session_key)
                     .await?;
                 let backend = router.backend();
+                opts.working_dir = Some(std::path::PathBuf::from(SANDBOX_GUEST_WORKDIR));
                 let res = backend.exec(&id, &command, &opts).await;
                 router.touch(session_id, session_key)?;
                 return res;
@@ -147,6 +146,7 @@ impl ProcessTool {
         }
 
         // Fallback: run directly on host (for non-sandboxed or no router).
+        opts.working_dir = Some(moltis_config::data_dir());
         crate::exec::exec_command(&command, &opts).await
     }
 

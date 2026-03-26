@@ -120,12 +120,18 @@ async function createSession(page) {
 }
 
 async function getActiveSessionId(page) {
-	return page.evaluate(() => {
-		const store = window.__moltis_stores?.sessionStore;
-		const sessionId = store?.activeSessionId?.value || "";
-		if (!sessionId) throw new Error("active sessionId not found");
-		return sessionId;
-	});
+	await expect
+		.poll(
+			() =>
+				page.evaluate(() => {
+					const store = window.__moltis_stores?.sessionStore;
+					return store?.activeSessionId?.value || "";
+				}),
+			{ timeout: 10_000 },
+		)
+		.not.toBe("");
+
+	return page.evaluate(() => window.__moltis_stores?.sessionStore?.activeSessionId?.value || "");
 }
 
 module.exports = {

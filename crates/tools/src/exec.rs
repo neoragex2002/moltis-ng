@@ -21,7 +21,7 @@ use moltis_agents::tool_registry::AgentTool;
 
 use crate::{
     approval::{ApprovalAction, ApprovalDecision, ApprovalManager},
-    sandbox::{NoSandbox, Sandbox, SandboxId, SandboxRouter},
+    sandbox::{NoSandbox, Sandbox, SandboxId, SandboxRouter, SANDBOX_GUEST_WORKDIR},
 };
 
 /// Broadcaster that notifies connected clients about pending approval requests.
@@ -279,21 +279,9 @@ impl AgentTool for ExecTool {
             self.sandbox_id.is_some()
         };
 
-        // Check whether the backend is a real container runtime.  When the
-        // backend is "none" (no Docker/container runtime available), commands
-        // run directly on the host even when the session mode says "sandboxed".
-        // Using /home/sandbox as the working directory would fail with ENOENT
-        // on the host, so we must fall back to the host data directory.
-        let has_container_backend = if let Some(ref router) = self.sandbox_router {
-            router.backend_name() != "none"
-        } else {
-            self.sandbox.backend_name() != "none"
-        };
-
-        // Resolve working directory.  When sandboxed *with a real container
-        // backend* the host CWD doesn't exist inside the container, so default
-        // to "/home/sandbox".  When the backend is "none" (no container), fall
-        // back to the host data directory to avoid ENOENT.
+        // Resolve working directory.
+        // - sandboxed: default to the fixed guest workdir contract.
+        // - unsandboxed: default to the host data_dir.
         let explicit_working_dir = params
             .get("working_dir")
             .and_then(|v| v.as_str())
@@ -303,8 +291,8 @@ impl AgentTool for ExecTool {
 
         let using_default_working_dir = explicit_working_dir.is_none();
         let mut working_dir = explicit_working_dir.or_else(|| {
-            if is_sandboxed && has_container_backend {
-                Some(PathBuf::from("/home/sandbox"))
+            if is_sandboxed {
+                Some(PathBuf::from(SANDBOX_GUEST_WORKDIR))
             } else {
                 Some(moltis_config::data_dir())
             }
@@ -312,8 +300,7 @@ impl AgentTool for ExecTool {
 
         // Ensure default host working directory exists so command spawning does
         // not fail on fresh machines where ~/.moltis/data has not been created yet.
-        if !(is_sandboxed && has_container_backend)
-            && using_default_working_dir
+        if !is_sandboxed && using_default_working_dir
             && let Some(dir) = working_dir.as_ref()
             && let Err(e) = tokio::fs::create_dir_all(dir).await
         {
@@ -383,12 +370,18 @@ impl AgentTool for ExecTool {
             if is_sandboxed {
                 let _lease = router.acquire_lease(session_id, session_key)?;
                 router.touch(session_id, session_key)?;
-                let image = router.resolve_image(session_id, None).await;
                 let id = router
-                    .ensure_ready_for_session(session_id, session_key, Some(&image))
+                    .ensure_ready_for_session(session_id, session_key)
                     .await?;
                 let backend = router.backend();
-                info!(session_id, session_key, sandbox_id = %id, backend = backend.backend_name(), image, "sandbox ensure_ready");
+                info!(
+                    session_id,
+                    session_key,
+                    sandbox_id = %id,
+                    backend = backend.backend_name(),
+                    image = %router.config().image.as_deref().unwrap_or("<missing>"),
+                    "sandbox ensure_ready"
+                );
                 debug!(session_id, session_key, sandbox_id = %id, command, "sandbox running command");
                 let mut sandbox_result = backend.exec(&id, command, &opts).await?;
                 if sandbox_result.exit_code != 0
@@ -402,7 +395,7 @@ impl AgentTool for ExecTool {
                         "sandbox exec failed because container is not running, reinitializing and retrying once"
                     );
                     router
-                        .ensure_ready_for_session(session_id, session_key, Some(&image))
+                        .ensure_ready_for_session(session_id, session_key)
                         .await?;
                     sandbox_result = backend.exec(&id, command, &opts).await?;
                 }
@@ -414,7 +407,7 @@ impl AgentTool for ExecTool {
             }
         } else if let Some(ref id) = self.sandbox_id {
             debug!(sandbox_id = %id, command, "static sandbox running command");
-            self.sandbox.ensure_ready(id, None).await?;
+            self.sandbox.ensure_ready(id).await?;
             let mut sandbox_result = self.sandbox.exec(id, command, &opts).await?;
             if sandbox_result.exit_code != 0
                 && is_container_not_running_exec_error(&sandbox_result.stderr)
@@ -424,7 +417,7 @@ impl AgentTool for ExecTool {
                     command,
                     "sandbox exec failed because container is not running, reinitializing and retrying once"
                 );
-                self.sandbox.ensure_ready(id, None).await?;
+                self.sandbox.ensure_ready(id).await?;
                 sandbox_result = self.sandbox.exec(id, command, &opts).await?;
             }
             sandbox_result
@@ -730,9 +723,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_tool_with_sandbox() {
-        use crate::sandbox::{NoSandbox, SandboxScopeKey};
+        use crate::sandbox::SandboxScopeKey;
 
-        let sandbox: Arc<dyn Sandbox> = Arc::new(NoSandbox);
+        struct MarkerSandbox;
+
+        #[async_trait]
+        impl Sandbox for MarkerSandbox {
+            fn backend_name(&self) -> &'static str {
+                "marker"
+            }
+
+            async fn ensure_ready(&self, _id: &SandboxId) -> Result<()> {
+                Ok(())
+            }
+
+            async fn exec(
+                &self,
+                _id: &SandboxId,
+                _command: &str,
+                _opts: &ExecOpts,
+            ) -> Result<ExecResult> {
+                Ok(ExecResult {
+                    stdout: "sandboxed".into(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                })
+            }
+
+            async fn cleanup(&self, _id: &SandboxId) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let sandbox: Arc<dyn Sandbox> = Arc::new(MarkerSandbox);
         let id = SandboxId {
             scope_key: SandboxScopeKey::SessionId,
             key: "test-session".into(),
@@ -759,9 +782,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_tool_cleanup_with_sandbox() {
-        use crate::sandbox::{NoSandbox, SandboxScopeKey};
+        use crate::sandbox::SandboxScopeKey;
 
-        let sandbox: Arc<dyn Sandbox> = Arc::new(NoSandbox);
+        struct MarkerSandbox;
+
+        #[async_trait]
+        impl Sandbox for MarkerSandbox {
+            fn backend_name(&self) -> &'static str {
+                "marker"
+            }
+
+            async fn ensure_ready(&self, _id: &SandboxId) -> Result<()> {
+                Ok(())
+            }
+
+            async fn exec(
+                &self,
+                _id: &SandboxId,
+                _command: &str,
+                _opts: &ExecOpts,
+            ) -> Result<ExecResult> {
+                Ok(ExecResult {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                })
+            }
+
+            async fn cleanup(&self, _id: &SandboxId) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let sandbox: Arc<dyn Sandbox> = Arc::new(MarkerSandbox);
         let id = SandboxId {
             scope_key: SandboxScopeKey::SessionId,
             key: "cleanup-test".into(),
@@ -882,10 +935,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_tool_with_sandbox_router_off() {
-        use crate::sandbox::{NoSandbox, SandboxConfig, SandboxRouter};
+        use crate::sandbox::{NoSandbox, SandboxConfig, SandboxMode, SandboxRouter};
 
         let router = Arc::new(SandboxRouter::with_backend(
-            SandboxConfig::default(),
+            SandboxConfig {
+                mode: SandboxMode::Off,
+                ..Default::default()
+            },
             Arc::new(NoSandbox),
         ));
         let temp_dir = tempfile::tempdir().unwrap();
@@ -903,10 +959,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_tool_requires_session_id_context() {
-        use crate::sandbox::{NoSandbox, SandboxConfig, SandboxRouter};
+        use crate::sandbox::{NoSandbox, SandboxConfig, SandboxMode, SandboxRouter};
 
         let router = Arc::new(SandboxRouter::with_backend(
-            SandboxConfig::default(),
+            SandboxConfig {
+                mode: SandboxMode::Off,
+                ..Default::default()
+            },
             Arc::new(NoSandbox),
         ));
         let tool = ExecTool::default().with_sandbox_router(router);
@@ -929,11 +988,7 @@ mod tests {
                 "marker"
             }
 
-            async fn ensure_ready(
-                &self,
-                _id: &SandboxId,
-                _image_override: Option<&str>,
-            ) -> Result<()> {
+            async fn ensure_ready(&self, _id: &SandboxId) -> Result<()> {
                 Ok(())
             }
 
@@ -957,14 +1012,12 @@ mod tests {
 
         let router = Arc::new(SandboxRouter::with_backend(
             SandboxConfig {
-                mode: SandboxMode::Off,
+                mode: SandboxMode::All,
                 scope_key: SandboxScopeKey::SessionId,
                 ..Default::default()
             },
             Arc::new(MarkerSandbox),
         ));
-        // Override to enable sandbox for this session (NoSandbox backend → still executes directly).
-        router.set_override("session:abc", true).await;
         let temp_dir = tempfile::tempdir().unwrap();
         let mut tool = ExecTool::default().with_sandbox_router(router);
         tool.working_dir = Some(temp_dir.path().to_path_buf());
@@ -993,11 +1046,7 @@ mod tests {
                 "marker"
             }
 
-            async fn ensure_ready(
-                &self,
-                _id: &SandboxId,
-                _image_override: Option<&str>,
-            ) -> Result<()> {
+            async fn ensure_ready(&self, _id: &SandboxId) -> Result<()> {
                 Ok(())
             }
 
@@ -1046,9 +1095,7 @@ mod tests {
     }
 
     /// Regression test: when SandboxMode=All (the default) but the backend is
-    /// NoSandbox (no container runtime), the exec tool must NOT use
-    /// /home/sandbox as the working directory.  It should fall back to the host
-    /// data directory and execute successfully.
+    /// NoSandbox (no container runtime), the exec tool must fail fast.
     #[tokio::test]
     async fn test_exec_tool_no_container_backend_with_sandbox_mode_all() {
         use crate::sandbox::{NoSandbox, SandboxConfig, SandboxRouter};
@@ -1059,17 +1106,19 @@ mod tests {
             SandboxConfig::default(),
             Arc::new(NoSandbox),
         ));
-        // No explicit working_dir — the tool must NOT default to /home/sandbox.
         let tool = ExecTool::default().with_sandbox_router(router);
-        let result = tool
+        let err = tool
             .execute(serde_json::json!({
                 "_sessionId": "sess_test",
                 "command": "echo works"
             }))
             .await
-            .unwrap();
-        assert_eq!(result["stdout"].as_str().unwrap().trim(), "works");
-        assert_eq!(result["exit_code"], 0);
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SANDBOX_BACKEND_UNAVAILABLE"),
+            "expected sandbox backend unavailable error, got: {msg}"
+        );
     }
 
     #[tokio::test]
