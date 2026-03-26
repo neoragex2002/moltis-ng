@@ -224,7 +224,7 @@ mode = "off"                      # Which commands to sandbox:
                                   #   "off"      - No sandboxing (commands run on host)
                                   #   "non-main" - Sandbox all except main session
                                   #   "all"      - Sandbox everything (recommended)
-scope_key = "session_key"         # Container reuse key:
+scope_key = "session_id"          # Container reuse key:
                                   #   "session_id"  - Container per session instance
                                   #   "session_key" - Shared by logical session bucket
 idle_ttl_secs = 0                 # Idle container TTL (seconds):

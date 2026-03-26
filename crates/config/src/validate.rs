@@ -1676,7 +1676,7 @@ container_prefix = "legacy"
     #[test]
     fn default_config_template_uses_scope_key() {
         let toml = crate::template::default_config_template(13131);
-        assert!(toml.contains("scope_key = \"session_key\""));
+        assert!(toml.contains("scope_key = \"session_id\""));
         assert!(!toml.contains("\nscope = \"chat\""));
 
         let result = validate_toml_str(&toml);

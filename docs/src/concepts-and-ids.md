@@ -356,17 +356,13 @@ UI 展示友好的信息。
 - 备注：上游 provider 的字段名/实现可能仍写作 `session_key`（历史遗留），但其语义必须
   等价于本文档定义的 `sessionId`。
 
-### Sandbox Scope
+### Sandbox Container Reuse Key
 
-**结论：sandbox scope 默认 = `chat`（按 chat 复用；由 `chanChatKey` 派生）。**
+**结论：sandbox 容器复用边界由配置 `tools.exec.sandbox.scope_key` 冻结，默认 = `session_id`。**
 
-- 意义：同一 chat/thread 内的多条指令可以复用同一套 sandbox 环境，提高连续操作效率。
-- 注意：如果你需要更强隔离（例如高风险命令、或不希望同一 chat 内共享环境），可以将 scope
-  设置为 `session`（channel-bound 场景按 `chanChatKey`；非 channel 场景按 `sessionId`）。
-
-```admonish note title="当前实现差异"
-当前实现已对齐：`SandboxScope` 默认值为 `chat`。
-```
+- `session_id`：每个 `sessionId` 独立容器（最强隔离，默认）。
+- `session_key`：同一逻辑会话桶共享容器（更强复用，但隔离更弱）。
+- 严格 one-cut：`tools.exec.sandbox.scope` 属于 legacy 字段，已删除；命中必须配置校验失败（不做兼容）。
 
 ## 过载词汇（Overloaded Words）【必须避免】
 
@@ -376,12 +372,12 @@ UI 展示友好的信息。
 
 **规则：文档与协议中禁止裸写 `scope`，必须写全称。**
 
-- `sandboxScope`：容器复用边界（session/chat/bot/global）。
+- `sandboxScopeKey`：容器复用边界（`session_id`/`session_key`；由 `tools.exec.sandbox.scope_key` 冻结）。
 - `authScope`：权限范围（例如 `operator.read`/`operator.write`）。
 - `throttleScope`：限流范围（login/api/ws/...）。
 
-配置文件中如果出现 `scope`，必须由所属对象限定语义（例如 `[tools.exec.sandbox] scope = "chat"`），
-并在文档中写作 “sandbox scope”。
+配置文件中不得出现 legacy `tools.exec.sandbox.scope`；sandbox 容器复用边界必须通过
+`tools.exec.sandbox.scope_key` 明确表达（例如 `[tools.exec.sandbox] scope_key = "session_id"`）。
 
 ### `channel`
 

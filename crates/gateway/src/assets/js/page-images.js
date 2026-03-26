@@ -58,11 +58,10 @@ function SandboxRuntimeCard() {
 
 	var backend = info.backend || "none";
 	var os = info.os || "";
-	var scopeKey = info.scopeKey || info.scope || "<n/a>";
-	var idleTtlSecs = info.idleTtlSecs ?? info.idle_ttl_secs ?? 0;
+	var scopeKey = info.scopeKey || "<n/a>";
+	var idleTtlSecs = info.idleTtlSecs ?? 0;
 	var image = info.image || "<unset>";
-	var startupPolicy =
-		info.startupContainerPolicy || info.startup_container_policy || "<n/a>";
+	var startupPolicy = info.startupContainerPolicy || "<n/a>";
 
 	var status = backend === "none" ? "off" : "on";
 	var badgeColor = backend === "none" ? "var(--error)" : "var(--muted)";
@@ -168,4 +167,3 @@ export function teardownImages() {
 	if (_imagesContainer) render(null, _imagesContainer);
 	_imagesContainer = null;
 }
-

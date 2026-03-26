@@ -1,5 +1,23 @@
 const { defineConfig } = require("@playwright/test");
 const { execFileSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+
+function maybeInjectPlaywrightRuntimeLibs() {
+	if (process.platform !== "linux") return;
+	var candidates = [
+		path.join(__dirname, ".playwright-libs", "root_v1", "usr", "lib", "x86_64-linux-gnu"),
+		path.join(__dirname, ".playwright-libs", "root", "usr", "lib", "x86_64-linux-gnu"),
+	];
+	var libsDir = candidates.find((dir) => fs.existsSync(dir));
+	if (!libsDir) return;
+	var current = process.env.LD_LIBRARY_PATH || "";
+	var parts = current ? current.split(":") : [];
+	if (parts.includes(libsDir)) return;
+	process.env.LD_LIBRARY_PATH = current ? `${libsDir}:${current}` : libsDir;
+}
+
+maybeInjectPlaywrightRuntimeLibs();
 
 function pickFreePort() {
 	return execFileSync(

@@ -55,33 +55,22 @@ Commands run inside isolated containers for security:
 ```toml
 [tools.exec.sandbox]
 mode = "all"                    # "off" | "non-main" | "all"
-scope_key = "session_key"       # "session_id" | "session_key"
-backend = "auto"                # "auto" | "docker" (apple-container is not supported)
-no_network = true
+scope_key = "session_id"        # "session_id" | "session_key"
+startup_container_policy = "reset" # "reset" | "reuse"
+no_network = true               # Disable network in the sandbox (recommended)
 
 # Fixed container path for instance data is `/moltis/data`.
-# Docker backend requires these when sandboxing is enabled:
-data_mount = "ro"               # "none" | "ro" | "rw"
+# Docker requires these when sandboxing is enabled:
+data_mount = "ro"               # "ro" | "rw"
 data_mount_type = "bind"        # "bind" | "volume"
 data_mount_source = "/srv/moltis-data" # bind: absolute host path | volume: volume name
 
-# Optional: override base image for sandbox containers (default: ubuntu:25.10)
-# image = "ubuntu:25.10"
-
-# Packages installed in the sandbox image
-packages = [
-    "curl",
-    "git",
-    "jq",
-    "python3",
-    "python3-pip",
-    "nodejs",
-    "npm",
-]
+# Sandbox runtime image (must exist locally; Moltis does not build or pull images)
+image = "moltis-sandbox:2026-03-26"
 ```
 
 ```admonish info
-When you modify the packages list and restart, Moltis automatically rebuilds the sandbox image with a new tag.
+Moltis does not build or pull sandbox images. Manage images with Docker CLI or your own CI pipeline.
 ```
 
 ## Memory System
@@ -231,13 +220,13 @@ default = "openai-codex"
 
 [tools.exec.sandbox]
 mode = "all"
-scope_key = "session_key"
-backend = "docker"
+scope_key = "session_id"
+startup_container_policy = "reset"
 no_network = true
 data_mount = "ro"
 data_mount_type = "bind"
 data_mount_source = "/srv/moltis-data"
-packages = ["curl", "git", "jq", "python3", "nodejs"]
+image = "moltis-sandbox:2026-03-26"
 
 [memory]
 enabled = true

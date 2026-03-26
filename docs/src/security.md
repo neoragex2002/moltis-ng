@@ -378,7 +378,13 @@ Always run with sandbox enabled in production:
 ```toml
 [tools.exec.sandbox]
 mode = "all"
-backend = "auto"  # uses docker when available
+# Docker-only: Moltis does not build/pull images, so the runtime image must
+# already exist in the local Docker image store.
+image = "moltis-sandbox:2026-03-26"
+startup_container_policy = "reset"
+data_mount = "ro"
+data_mount_type = "bind"
+data_mount_source = "/srv/moltis-data"
 ```
 
 ### 3. Limit Rate Limits

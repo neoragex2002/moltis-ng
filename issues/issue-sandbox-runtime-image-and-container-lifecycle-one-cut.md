@@ -160,24 +160,16 @@
 > 必须至少给出 1 条可定位证据：`path/to/file:line` / 测试 / 日志关键词。
 
 - 代码证据：
-  - [crates/gateway/src/server.rs](/home/luy/dev/moltis/crates/gateway/src/server.rs:1628)：gateway 启动时后台 `build_image()`，完成后再 `set_global_image()`。
-  - [crates/tools/src/sandbox.rs](/home/luy/dev/moltis/crates/tools/src/sandbox.rs:1403)：Docker sandbox 当前仍内置 `build_image()`。
-  - [crates/tools/src/sandbox.rs](/home/luy/dev/moltis/crates/tools/src/sandbox.rs:1393)：请求路径创建基础镜像容器后仍可能 `provision_packages()`。
-  - [crates/tools/src/sandbox.rs](/home/luy/dev/moltis/crates/tools/src/sandbox.rs:2689)：`set_global_image()` 维护运行时 image override。
-  - [crates/tools/src/sandbox.rs](/home/luy/dev/moltis/crates/tools/src/sandbox.rs:2706)：`resolve_image()` 以多优先级在请求时选择镜像。
-  - [crates/tools/src/sandbox.rs](/home/luy/dev/moltis/crates/tools/src/sandbox.rs:1078)：容器合同当前不只缺少 image 一致性，也没有冻结为唯一运行镜像语义。
-  - [crates/cli/src/sandbox_commands.rs](/home/luy/dev/moltis/crates/cli/src/sandbox_commands.rs:72)：CLI 仍直接暴露 sandbox image build/list/clean/remove。
-  - [crates/gateway/src/server.rs](/home/luy/dev/moltis/crates/gateway/src/server.rs:628)：Web API 仍暴露 `/api/images/build`、`/api/images/check-packages`、`/api/images/default`。
-  - [crates/gateway/src/server.rs](/home/luy/dev/moltis/crates/gateway/src/server.rs:4854)：Web API 仍允许运行时改默认 sandbox image。
-  - [crates/gateway/src/assets/js/page-images.js](/home/luy/dev/moltis/crates/gateway/src/assets/js/page-images.js:69)：Images 页仍直接发起 image build。
-  - [crates/gateway/src/assets/js/sandbox.js](/home/luy/dev/moltis/crates/gateway/src/assets/js/sandbox.js:105)：session UI 仍保留 per-session image 选择语义。
-  - [docs/src/sandbox.md](/home/luy/dev/moltis/docs/src/sandbox.md:1)：文档仍公开 `backend = "auto"` 与 host fallback 语义，尚未与 one-cut 新模型对齐。
-  - [crates/tools/src/exec.rs](/home/luy/dev/moltis/crates/tools/src/exec.rs:381)：请求执行前仍在请求路径上 `resolve_image()` + `ensure_ready_for_session()`。
-  - [crates/tools/src/process.rs](/home/luy/dev/moltis/crates/tools/src/process.rs:127)：`process` 仍独立硬编码 `/home/sandbox`，未与 `exec` 完全统一。
-  - 本地实测：`docker run -w /moltis/workdir ubuntu:25.10 ...` 会自动创建该目录，随后 `docker exec -w /moltis/workdir ...` 可稳定进入；因此默认工作目录可统一为 `/moltis/workdir`，无需依赖镜像预创建该路径。
+  - 旧模型（prebuild/build/provision/override）的历史证据保留在 superseded 旧单：`issues/issue-sandbox-prebuild-race-home-sandbox-workdir.md:1`
+  - one-cut 后的运行镜像与启动期合同校验：`crates/tools/src/sandbox.rs:1023`
+  - one-cut 后的容器合同（workdir/HOME/TMPDIR/labels/mounts/network）：`crates/tools/src/sandbox.rs:785`
+  - 配置校验拒绝 legacy 字段与 alias：`crates/config/src/validate.rs:907`
+  - 启动期同步 `startup_ensure_ready()`（ready 前校验镜像+合同+按策略清理旧容器）：`crates/gateway/src/server.rs:1565`
+  - UI 仅展示 runtime info（不再提供 build/default-image/per-session override）：`crates/gateway/src/assets/js/page-images.js:1`
+  - docs 已对齐为 Docker-only + no build/pull：`docs/src/sandbox.md:1`
 - 当前测试覆盖：
-  - 已有：当前主要覆盖旧的 image tag / sandbox id / working_dir 零散逻辑，尚未冻结“唯一运行镜像 + 启动容器策略 + 请求期不 build”的新主路径。
-  - 缺口：缺启动失败、启动复用策略、请求期只允许新建/复用/重建坏容器/失败、TTL 只影响空闲回收的测试。
+  - 已有：见文首“已覆盖测试”；包含 Rust 单测与 Playwright 全量跑通证据。
+  - 缺口：Docker daemon 级别的集成覆盖仍以手工验收为准（见 Test Plan 的 Manual Integration）。
 
 ## 根因分析（Root Cause）
 - A. 事实源分裂：配置、runtime override、per-session override、gateway prebuild、CLI/UI build 同时在影响“运行镜像”。

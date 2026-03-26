@@ -113,7 +113,7 @@
 
 ```toml
 [tools.exec.sandbox]
-scope_key = "session_key"
+scope_key = "session_id"
 ```
 
 此外，当前校验还会提示两条安全告警：

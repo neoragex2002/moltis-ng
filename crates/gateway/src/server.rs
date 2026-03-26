@@ -4229,11 +4229,16 @@ async fn api_bootstrap_handler(State(state): State<AppState>) -> impl IntoRespon
     );
     let identity = gw.services.agent.identity_get().await.ok();
     let sandbox = if let Some(ref router) = state.gateway.sandbox_router {
+        let cfg = router.config();
         serde_json::json!({
             "backend": router.backend_name(),
             "os": std::env::consts::OS,
-            "image": router.config().image,
-            "startupContainerPolicy": match router.config().startup_container_policy {
+            "mode": cfg.mode.to_string(),
+            "scopeKey": cfg.scope_key.to_string(),
+            "idleTtlSecs": cfg.idle_ttl_secs,
+            "noNetwork": cfg.no_network,
+            "image": cfg.image,
+            "startupContainerPolicy": match cfg.startup_container_policy {
                 moltis_tools::sandbox::StartupContainerPolicy::Reset => "reset",
                 moltis_tools::sandbox::StartupContainerPolicy::Reuse => "reuse",
             },
@@ -4242,6 +4247,10 @@ async fn api_bootstrap_handler(State(state): State<AppState>) -> impl IntoRespon
         serde_json::json!({
             "backend": "none",
             "os": std::env::consts::OS,
+            "mode": null,
+            "scopeKey": null,
+            "idleTtlSecs": null,
+            "noNetwork": null,
             "image": null,
             "startupContainerPolicy": null,
         })
