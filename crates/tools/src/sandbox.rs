@@ -974,19 +974,9 @@ impl DockerSandbox {
     }
 
     async fn list_managed_container_names(&self) -> Result<Vec<String>> {
+        let args = self.docker_ps_args_for_managed_containers();
         let output = tokio::process::Command::new("docker")
-            .args([
-                "ps",
-                "-a",
-                "--filter",
-                "label=moltis.managed=true",
-                "--filter",
-                "label=moltis.role=sandbox",
-                "--filter",
-                &format!("{SANDBOX_LABEL_INSTANCE_ID}={}", self.instance_id),
-                "--format",
-                "{{.Names}}",
-            ])
+            .args(&args)
             .output()
             .await?;
         if !output.status.success() {
@@ -1003,6 +993,21 @@ impl DockerSandbox {
             .filter(|l| !l.is_empty())
             .map(|l| l.to_string())
             .collect())
+    }
+
+    fn docker_ps_args_for_managed_containers(&self) -> Vec<String> {
+        vec![
+            "ps".to_string(),
+            "-a".to_string(),
+            "--filter".to_string(),
+            "label=moltis.managed=true".to_string(),
+            "--filter".to_string(),
+            "label=moltis.role=sandbox".to_string(),
+            "--filter".to_string(),
+            format!("label={SANDBOX_LABEL_INSTANCE_ID}={}", self.instance_id),
+            "--format".to_string(),
+            "{{.Names}}".to_string(),
+        ]
     }
 
     async fn remove_container_by_name(&self, name: &str, reason_code: &'static str) -> Result<()> {
@@ -1825,5 +1830,22 @@ mod tests {
 
         let calls = *backend.calls.lock().await;
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn test_docker_ps_args_include_instance_id_label_filter() {
+        let sandbox = DockerSandbox::new(SandboxConfig::default());
+        let args = sandbox.docker_ps_args_for_managed_containers();
+        let mut found = false;
+        for window in args.windows(2) {
+            if window[0] == "--filter" && window[1].starts_with("label=moltis.instance_id=") {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "expected docker ps args to include instance_id label filter; args={args:?}"
+        );
     }
 }
