@@ -16,6 +16,8 @@
 - 2026-03-26：配置 one-cut：拒绝 legacy `backend`/`packages`/`container_prefix`/`scope`，并新增 `startup_container_policy`：`crates/config/src/schema.rs:1`、`crates/config/src/validate.rs:1`
 - 2026-03-26：UI/RPC/CLI one-cut：移除 images build / per-session sandbox override / `moltis sandbox` 镜像管理命令组：`crates/gateway/src/assets/js/page-images.js:1`、`crates/gateway/src/session.rs:1`、`crates/cli/src/main.rs:1`
 - 2026-03-26：同步更新 sandbox 文档为 Docker-only + no build/pull：`docs/src/sandbox.md:1`
+- 2026-03-26：修复 UI sandbox 信息的唯一真源：`/api/bootstrap` 输出 canonical sandbox 字段，UI 不再做 snake_case fallback 读取：`crates/gateway/src/server.rs:4221`、`crates/gateway/src/assets/js/page-images.js:1`
+- 2026-03-26：修复 UI E2E runner 可复现性：Playwright Linux 自动注入 `.playwright-libs`，避免因系统缺少 `libnspr4/libnss3` 导致测试无法运行：`crates/gateway/ui/playwright.config.js:1`
 
 **已覆盖测试（如有）**
 - 单测：schema one-cut 拒绝 legacy/alias，镜像缺失/模式非法 fail-fast：`crates/tools/src/sandbox.rs:1683`
