@@ -5,7 +5,7 @@
 - Priority: P1
 - Updated: 2026-03-26
 - Checklist discipline: 每次增量更新除补“已实现 / 已覆盖测试”外，必须同步勾选正文里对应的 checklist；禁止出现文首已完成、正文 TODO 未更新的漂移
-- Owners: <TBD>
+- Owners: tools/sandbox（primary） + gateway/ui + config
 - Components: tools/sandbox, tools/exec, tools/process, gateway/ui, cli, config
 - Affected providers/models: <N/A>
 
@@ -22,7 +22,7 @@
 - 单测：sandbox 开启但无容器后端时 exec fail-fast：`crates/tools/src/exec.rs:1097`
 - 单测：配置校验拒绝 `mode="non_main"`：`crates/config/src/validate.rs:1506`
 - UI E2E：Images 页不再提供 build/default-image 控件：`crates/gateway/ui/e2e/specs/images.spec.js:1`
-- Playwright 全量已通过（2026-03-26，Docker runner）：`cd crates/gateway/ui && npm run e2e`（136 passed，3 skipped）
+- Playwright 全量已通过（2026-03-26，本机 runner；无需 sudo）：`just ui-e2e`（136 passed，3 skipped）
 - Rust 全量已通过（2026-03-26）：`cargo test --workspace`
 
 **已知差异/后续优化（非阻塞）**
@@ -220,13 +220,13 @@
   - `moltis.managed=true`
   - `moltis.role=sandbox`
   - `moltis.instance_id=<stable instance id>`
-  - `moltis.scope_key=<configured scope_key>`
-  - `moltis.scope_value=<effective scope value>`
-  - `moltis.image=<configured image>`
-  - `moltis.instance_id` 必须由**生效数据挂载身份**稳定派生：`bind` 时使用 canonicalized `data_mount_source`；`volume` 时使用 volume 名称；再加固定 schema/version 做哈希。不得引入额外用户可写状态。
-  - 若生效数据挂载身份改变，则 `moltis.instance_id` 也随之改变；旧 `moltis.instance_id` 命名空间下的容器不做自动迁移、不做跨命名空间自动清理，需由用户用 Docker 运维命令自行处理。
+  - `moltis.image_ref=<configured image>`
+  - `moltis.contract_version=sandbox_contract_v1`
+  - `moltis.workdir=/moltis/workdir`
+  - `moltis.tmpdir=/moltis/workdir/tmp`
+  - `moltis.instance_id` 必须由**当前 Moltis 实例的 data_dir（canonicalized）**稳定派生，并带固定 schema/version 做哈希；不得引入额外用户可写状态。
 - 规则 4：`startup_container_policy = "reset"` 时，启动阶段删除当前实例标签匹配的全部旧 sandbox 容器；`"reuse"` 时，只保留完全匹配当前运行合同且状态正常的旧容器，其余删除。
-  - 启动阶段凡是命中“应删除”的目标容器，只要 inspect/stop/rm 任一步失败，启动必须直接失败；不得部分删除后继续 ready。
+  - 启动阶段凡是命中“应删除”的目标容器，只要 `docker rm -f` 失败，启动必须直接失败；不得部分删除后继续 ready。
 - 规则 5：请求阶段只允许：
   - **新建容器**：该 scope 没有容器时，基于当前唯一 `image` 创建；
   - **复用容器**：已有容器存在、运行正常且合同匹配时直接使用；
@@ -241,9 +241,9 @@
 
 #### 接口与数据结构（Contracts）
 - 配置：
-  - 保留：`enabled`、`scope_key`、`image`、`startup_container_policy`、`idle_ttl_secs`、数据挂载字段、`no_network`、`resource_limits`、外部 mounts。
+  - 保留：`mode`、`scope_key`、`image`、`startup_container_policy`、`idle_ttl_secs`、数据挂载字段、`no_network`、`resource_limits`、外部 mounts。
   - 删除：`backend`、`packages`、`container_prefix`、任何 image build/prebuild/override 相关配置与持久化字段。
-  - 约束：当 `enabled = true` 时，`data_mount` 只能是 `ro` 或 `rw`；`none` 视为配置错误并直接失败。
+  - 约束：当 `mode != "off"` 时，`data_mount` 只能是 `ro` 或 `rw`；`none` 视为配置错误并直接失败。
   - 约束：外部 mounts 允许保留，但只作为显式附加挂载；不得借由 mounts 重新引入第三套“默认工作目录 / 默认临时目录 / 默认实例数据目录”语义。
 - API/RPC：
   - 删除：`/api/images/build`、`/api/images/check-packages`、`/api/images/default`。
@@ -336,7 +336,9 @@
   - `issues/issue-sandbox-prebuild-race-home-sandbox-workdir.md`（已 superseded；仅保留旧机制问题证据）
   - `issues/done/issue-sandbox-fixed-data-dir-mountpoint.md`
   - `docs/src/sandbox.md`
-- Related commits/PRs：<TBD>
+- Related commits/PRs：
+  - `e7cf1a3` One-cut sandbox runtime image & container lifecycle
+  - `2ed917a` docs+ui: harden sandbox one-cut contracts
 - External refs（可选）：Docker 本地镜像与容器 inspect 行为
 
 ## 未决问题（Open Questions）
