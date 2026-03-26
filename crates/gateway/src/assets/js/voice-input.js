@@ -6,6 +6,7 @@ import * as gon from "./gon.js";
 import { renderMarkdown, sendRpc, warmAudioPlayback } from "./helpers.js";
 import { bumpSessionCount, seedSessionPreviewFromUserText, setSessionReplying } from "./sessions.js";
 import * as S from "./state.js";
+import { sessionStore } from "./stores/session-store.js";
 
 var micBtn = null;
 var mediaRecorder = null;
@@ -240,14 +241,16 @@ function sendTranscribedMessage(text) {
 	chatAddMsg("user", renderMarkdown(text), true);
 
 	// Send the message
-	var chatParams = { text: text, _input_medium: "voice" };
+	var sessionId = sessionStore.activeSessionId.value;
+	if (!sessionId) return;
+	var chatParams = { text: text, _input_medium: "voice", _sessionId: sessionId };
 	var selectedModel = S.selectedModelId;
 	if (selectedModel) {
 		chatParams.model = selectedModel;
 	}
-	bumpSessionCount(S.activeSessionId, 1);
-	seedSessionPreviewFromUserText(S.activeSessionId, text);
-	setSessionReplying(S.activeSessionId, true);
+	bumpSessionCount(sessionId, 1);
+	seedSessionPreviewFromUserText(sessionId, text);
+	setSessionReplying(sessionId, true);
 	sendRpc("chat.send", chatParams).then((sendRes) => {
 		if (sendRes && !sendRes.ok && sendRes.error) {
 			chatAddMsg("error", sendRes.error.message || "Request failed");
@@ -273,7 +276,9 @@ async function transcribeAudio() {
 		var blob = new Blob(audioChunks, { type: "audio/webm" });
 		audioChunks = [];
 
-	var resp = await fetch(`/api/sessions/${encodeURIComponent(S.activeSessionId)}/upload?transcribe=true`, {
+	var sessionId = sessionStore.activeSessionId.value;
+	if (!sessionId) throw new Error("No active session");
+	var resp = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/upload?transcribe=true`, {
 			method: "POST",
 			headers: { "Content-Type": blob.type || "audio/webm" },
 			body: blob,

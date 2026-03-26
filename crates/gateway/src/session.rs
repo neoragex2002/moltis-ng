@@ -10,11 +10,8 @@ use {
     moltis_common::hooks::HookRegistry,
     moltis_projects::ProjectStore,
     moltis_sessions::{
-        SessionKey,
-        key::ParsedSessionKey,
-        metadata::SqliteSessionMetadata,
-        state_store::SessionStateStore,
-        store::SessionStore,
+        SessionKey, key::ParsedSessionKey, metadata::SqliteSessionMetadata,
+        state_store::SessionStateStore, store::SessionStore,
     },
     moltis_tools::sandbox::SandboxRouter,
 };
@@ -137,7 +134,11 @@ fn session_kind_for_entry(entry: &moltis_sessions::metadata::SessionEntry) -> &'
 }
 
 fn fallback_display_name(entry: &moltis_sessions::metadata::SessionEntry) -> String {
-    if let Some(label) = entry.label.as_deref().filter(|label| !label.trim().is_empty()) {
+    if let Some(label) = entry
+        .label
+        .as_deref()
+        .filter(|label| !label.trim().is_empty())
+    {
         return label.to_string();
     }
 
@@ -159,10 +160,23 @@ fn fallback_display_name(entry: &moltis_sessions::metadata::SessionEntry) -> Str
     match SessionKey::parse(&entry.session_key) {
         Ok(ParsedSessionKey::Agent { bucket_key, .. }) if bucket_key == "main" => "Main".into(),
         Ok(ParsedSessionKey::Agent { bucket_key, .. }) if bucket_key.starts_with("chat-") => {
-            "Chat".into()
+            let suffix = entry
+                .session_id
+                .trim_start_matches("sess_")
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            format!("Chat {suffix}")
         },
         Ok(ParsedSessionKey::Agent { bucket_key, .. }) => bucket_key,
-        Ok(ParsedSessionKey::System { service_id, bucket_key }) => {
+        Ok(ParsedSessionKey::System {
+            service_id,
+            bucket_key,
+        }) => {
             if service_id == "cron" && bucket_key == "heartbeat" {
                 "Heartbeat".into()
             } else if let Some(job_key) = bucket_key.strip_prefix("job-") {
@@ -195,10 +209,7 @@ fn can_clear(entry: &moltis_sessions::metadata::SessionEntry) -> bool {
     session_kind_for_entry(entry) == "agent" && is_main_session_key(&entry.session_key)
 }
 
-fn session_row(
-    entry: &moltis_sessions::metadata::SessionEntry,
-    active_channel: bool,
-) -> Value {
+fn session_row(entry: &moltis_sessions::metadata::SessionEntry, active_channel: bool) -> Value {
     let channel_target = entry
         .channel_binding
         .as_deref()
@@ -569,7 +580,10 @@ impl SessionService for LiveSessionService {
             .ok_or_else(|| "missing 'sessionId' parameter".to_string())?;
 
         let deleted_entry = self.metadata.get(session_id).await;
-        if deleted_entry.as_ref().is_some_and(|entry| is_main_session_key(&entry.session_key)) {
+        if deleted_entry
+            .as_ref()
+            .is_some_and(|entry| is_main_session_key(&entry.session_key))
+        {
             return Err("cannot delete the main session".to_string());
         }
         let force = params
@@ -625,7 +639,9 @@ impl SessionService for LiveSessionService {
             .map_err(|e| e.to_string())?;
 
         // Clean up sandbox resources for this session.
-        let deleted_session_key = deleted_entry.as_ref().map(|entry| entry.session_key.clone());
+        let deleted_session_key = deleted_entry
+            .as_ref()
+            .map(|entry| entry.session_key.clone());
         let deleted_effective_sandbox_key = self.sandbox_router.as_ref().and_then(|r| {
             r.effective_sandbox_key(session_id, deleted_session_key.as_deref())
                 .ok()
@@ -663,8 +679,8 @@ impl SessionService for LiveSessionService {
             let remaining_entries = self.metadata.list().await;
             let mut remaining_refs = 0usize;
             for entry in remaining_entries {
-                let Ok(effective_key) = router
-                    .effective_sandbox_key(&entry.session_id, Some(&entry.session_key))
+                let Ok(effective_key) =
+                    router.effective_sandbox_key(&entry.session_id, Some(&entry.session_key))
                 else {
                     continue;
                 };
@@ -764,7 +780,9 @@ impl SessionService for LiveSessionService {
             .await
             .map_err(|e| e.to_string())?;
 
-        self.metadata.touch(&new_session_id, fork_point as u32).await;
+        self.metadata
+            .touch(&new_session_id, fork_point as u32)
+            .await;
 
         // Inherit model, project, and mcp_disabled from parent.
         if parent_entry.model.is_some() {
@@ -793,11 +811,10 @@ impl SessionService for LiveSessionService {
             .await;
 
         // Re-fetch after all mutations to get the final version.
-        let final_entry = self
-            .metadata
-            .get(&new_session_id)
-            .await
-            .ok_or_else(|| format!("forked session '{new_session_id}' not found after creation"))?;
+        let final_entry =
+            self.metadata.get(&new_session_id).await.ok_or_else(|| {
+                format!("forked session '{new_session_id}' not found after creation")
+            })?;
         Ok(serde_json::json!({
             "sessionId": final_entry.session_id,
             "sessionKey": final_entry.session_key,
@@ -1197,7 +1214,10 @@ mod tests {
             Some(first_session_id.clone())
         );
 
-        let second = svc.home().await.expect("home should reuse active main session");
+        let second = svc
+            .home()
+            .await
+            .expect("home should reuse active main session");
         assert_eq!(second["sessionId"], first_session_id);
         assert_eq!(second["sessionKey"], "agent:default:main");
     }
@@ -1237,5 +1257,35 @@ mod tests {
             .expect("created session must be persisted");
         assert_eq!(stored.session_key, session_key);
         assert_eq!(stored.label.as_deref(), Some("Scratchpad"));
+    }
+
+    #[tokio::test]
+    async fn create_without_label_returns_distinct_fallback_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(moltis_sessions::store::SessionStore::new(
+            dir.path().to_path_buf(),
+        ));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(pool));
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata));
+
+        let created = svc
+            .create(serde_json::json!({}))
+            .await
+            .expect("create should succeed");
+        let session_id = created["sessionId"]
+            .as_str()
+            .expect("create must return sessionId");
+        let expected_suffix = session_id
+            .trim_start_matches("sess_")
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+
+        assert_eq!(created["displayName"], format!("Chat {expected_suffix}"));
     }
 }

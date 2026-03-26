@@ -5,6 +5,7 @@ const {
 	waitForWsConnected,
 	createSession,
 	watchPageErrors,
+	getActiveSessionId,
 } = require("../helpers");
 
 test.describe("Session management", () => {
@@ -15,7 +16,7 @@ test.describe("Session management", () => {
 		const sessionList = page.locator("#sessionList");
 		await expect(sessionList).toBeVisible();
 
-		// At least the default "main" session should be present
+		// At least one session should be present
 		const items = sessionList.locator(".session-item");
 		await expect(items).not.toHaveCount(0);
 	});
@@ -25,6 +26,11 @@ test.describe("Session management", () => {
 		await page.addInitScript((sessionId) => {
 			localStorage.setItem("moltis-sessionId", sessionId);
 		}, staleSessionId);
+
+		const warnings = [];
+		page.on("console", (msg) => {
+			if (msg.type() === "warning") warnings.push(msg.text());
+		});
 
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
@@ -41,8 +47,9 @@ test.describe("Session management", () => {
 							activeSessionId.length > 0 &&
 							activeSessionId !== oldId &&
 							(localStorage.getItem("moltis-sessionId") || "") === activeSessionId &&
-							window.location.pathname === `/chats/${activeSessionId}` &&
-							activeSession?.displayName === "Main" &&
+							window.location.pathname === `/chats/${encodeURIComponent(activeSessionId)}` &&
+							typeof activeSession?.displayName === "string" &&
+							activeSession.displayName.trim().length > 0 &&
 							activeSession?.sessionKind === "agent"
 						);
 					}, staleSessionId),
@@ -50,6 +57,7 @@ test.describe("Session management", () => {
 			)
 			.toBe(true);
 
+		expect(warnings.some((w) => w.includes('reason_code="stored_session_missing"'))).toBe(true);
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -85,17 +93,18 @@ test.describe("Session management", () => {
 	test("new session button creates a session", async ({ page }) => {
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
+		const homeSessionId = await getActiveSessionId(page);
 		const sessionItems = page.locator("#sessionList .session-item");
 		const initialCount = await sessionItems.count();
 
 		await createSession(page);
 		const firstSessionPath = new URL(page.url()).pathname;
-		const firstSessionKey = firstSessionPath.replace(/^\/chats\//, "").replace(/\//g, ":");
+		const firstSessionId = decodeURIComponent(firstSessionPath.replace(/^\/chats\//, ""));
 
-		// URL should change to a new session (not main)
-		await expect(page).not.toHaveURL(/\/chats\/main$/);
+		// URL should change to a new session (not home)
+		expect(firstSessionId).not.toBe(homeSessionId);
 		await expect(page).toHaveURL(/\/chats\//);
-			await expect(page.locator(`#sessionList .session-item[data-session-id="${firstSessionKey}"]`)).toHaveClass(
+		await expect(page.locator(`#sessionList .session-item[data-session-id="${firstSessionId}"]`)).toHaveClass(
 				/active/,
 			);
 		await expect(sessionItems).toHaveCount(initialCount + 1);
@@ -105,13 +114,29 @@ test.describe("Session management", () => {
 		// and mark the new session as active.
 		await createSession(page);
 		const secondSessionPath = new URL(page.url()).pathname;
-		const secondSessionKey = secondSessionPath.replace(/^\/chats\//, "").replace(/\//g, ":");
-			await expect(page.locator(`#sessionList .session-item[data-session-id="${secondSessionKey}"]`)).toHaveClass(
+		const secondSessionId = decodeURIComponent(secondSessionPath.replace(/^\/chats\//, ""));
+		expect(secondSessionId).not.toBe(firstSessionId);
+		await expect(page.locator(`#sessionList .session-item[data-session-id="${secondSessionId}"]`)).toHaveClass(
 				/active/,
 			);
 		await expect(sessionItems).toHaveCount(initialCount + 2);
 		await expect(page.locator("#chatInput")).toBeFocused();
 
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("new scratch sessions have distinct fallback display names", async ({ page }) => {
+		const pageErrors = await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		await createSession(page);
+		await createSession(page);
+
+		const labels = await page.locator("#sessionList .session-item [data-label-text]").allTextContents();
+		const chatLabels = labels.filter((label) => /^Chat /.test(label));
+
+		expect(chatLabels.length).toBeGreaterThanOrEqual(2);
+		expect(new Set(chatLabels).size).toBe(chatLabels.length);
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -123,17 +148,15 @@ test.describe("Session management", () => {
 		await createSession(page);
 		const newSessionUrl = page.url();
 
-		// Click the "main" session in the list
-			const mainItem = page.locator('#sessionList .session-item[data-session-id="main"]');
-			// If data-session-id isn't set, fall back to finding by label text
-			const target = (await mainItem.count()) ? mainItem : page.locator("#sessionList .session-item").first();
-		await target.click();
+		const inactiveSessionItem = page.locator("#sessionList .session-item:not(.active)").first();
+		await expect(inactiveSessionItem).toBeVisible();
+		await inactiveSessionItem.click();
 
 		await expect(page).not.toHaveURL(newSessionUrl);
 		await expectPageContentMounted(page);
 	});
 
-	test("main session shows clear action while non-main sessions show delete", async ({ page }) => {
+	test("home session shows clear action while scratch sessions show delete", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await page.goto("/");
 		await waitForWsConnected(page);
@@ -152,8 +175,9 @@ test.describe("Session management", () => {
 
 	test("main session preview updates after clear on first message without reload", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/chats/main");
+		await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
+		const homeSessionId = await getActiveSessionId(page);
 
 		const chatInput = page.locator("#chatInput");
 		await expect(chatInput).toBeVisible();
@@ -167,11 +191,12 @@ test.describe("Session management", () => {
 				() =>
 					page.evaluate(() => {
 						const store = window.__moltis_stores?.sessionStore;
-						const main = store?.getById?.("main");
-						if (!main) return null;
+						const activeSessionId = store?.activeSessionId?.value || "";
+						const active = store?.getById?.(activeSessionId);
+						if (!active) return null;
 						return {
-							messageCount: main.messageCount || 0,
-							preview: main.preview || "",
+							messageCount: active.messageCount || 0,
+							preview: active.preview || "",
 						};
 					}),
 				{ timeout: 10_000 },
@@ -182,7 +207,9 @@ test.describe("Session management", () => {
 		await chatInput.fill(firstMessage);
 		await chatInput.press("Enter");
 
-			await expect(page.locator('#sessionList .session-item[data-session-id="main"] .session-preview')).toContainText(
+		await expect(
+			page.locator(`#sessionList .session-item[data-session-id="${homeSessionId}"] .session-preview`),
+		).toContainText(
 				firstMessage,
 			);
 
@@ -215,6 +242,46 @@ test.describe("Session management", () => {
 		}
 	});
 
+	test("pending session item shows Loading… placeholder (no sessionId flash)", async ({ page }) => {
+		const pageErrors = await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		const pendingId = "sess_pending_test";
+		await page.evaluate((sessionId) => {
+			const store = window.__moltis_stores?.sessionStore;
+			store?.upsert?.({ sessionId, clientOnly: true, displayName: "", sessionKind: "agent", canDelete: true });
+		}, pendingId);
+
+		await expect(
+			page.locator(`#sessionList .session-item[data-session-id="${pendingId}"] [data-label-text]`),
+		).toHaveText("Loading…");
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("invalid session item shows Invalid session placeholder and logs warning", async ({ page }) => {
+		const warnings = [];
+		page.on("console", (msg) => {
+			if (msg.type() === "warning") warnings.push(msg.text());
+		});
+
+		const pageErrors = await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		const invalidId = "sess_invalid_test";
+		await page.evaluate((sessionId) => {
+			const store = window.__moltis_stores?.sessionStore;
+			store?.upsert?.({ sessionId, clientOnly: false, displayName: "", sessionKind: "agent", canDelete: true });
+		}, invalidId);
+
+		await expect(
+			page.locator(`#sessionList .session-item[data-session-id="${invalidId}"] [data-label-text]`),
+		).toHaveText("Invalid session");
+		expect(warnings.some((w) => w.includes('reason_code="missing_display_name"'))).toBe(true);
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("clear all sessions resets list", async ({ page }) => {
 		await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
@@ -225,6 +292,7 @@ test.describe("Session management", () => {
 
 		const clearBtn = page.locator("#clearAllSessionsBtn");
 		if (await clearBtn.isVisible()) {
+			await expect(clearBtn).toHaveText("Clear All");
 			// Accept the confirm dialog
 			page.on("dialog", (dialog) => dialog.accept());
 			await clearBtn.click();
@@ -296,23 +364,37 @@ test.describe("Session management", () => {
 		await waitForWsConnected(page);
 
 		await createSession(page);
-
-		// Simulate a modified fork: messageCount > forkPoint
+		const activeSessionId = await getActiveSessionId(page);
 		await expect
 			.poll(
 				() =>
 					page.evaluate(() => {
 						const store = window.__moltis_stores?.sessionStore;
 						const session = store?.activeSession?.value;
-						if (!session) return false;
-						session.forkPoint = 3;
-						session.messageCount = 5;
-						session.dataVersion.value++;
-						return true;
+						if (!store || !session) return false;
+						return store.switchInProgress?.value === false && session.clientOnly === false;
 					}),
 				{ timeout: 10_000 },
 			)
 			.toBe(true);
+
+		// Simulate a modified fork: messageCount > forkPoint
+		await expect
+			.poll(
+				() =>
+					page.evaluate((sessionId) => {
+						const store = window.__moltis_stores?.sessionStore;
+						const session = store?.getById?.(sessionId) || store?.activeSession?.value;
+						if (!session) return null;
+						session.forkPoint = 3;
+						session.messageCount = 5;
+						session.dataVersion.value++;
+						store?.notify?.();
+						return { forkPoint: session.forkPoint, messageCount: session.messageCount };
+					}, activeSessionId),
+				{ timeout: 10_000 },
+			)
+			.toEqual({ forkPoint: 3, messageCount: 5 });
 
 		const deleteBtn = page.locator('button[title="Delete session"]');
 		await expect(deleteBtn).toBeVisible();

@@ -2,6 +2,7 @@
 
 import { esc, sendRpc } from "./helpers.js";
 import { currentPrefix, navigate, sessionPath } from "./router.js";
+import { normalizeSearchHits } from "./session-search-normalize.js";
 import { switchSession } from "./sessions.js";
 import * as S from "./state.js";
 
@@ -28,7 +29,7 @@ function doSearch() {
 			hideSearch();
 			return;
 		}
-		searchHits = res.payload || [];
+		searchHits = normalizeSearchHits(res.payload || []);
 		searchIdx = -1;
 		renderSearchResults(q);
 	});
@@ -55,10 +56,10 @@ function renderSearchResults(query) {
 		el.className = "search-hit";
 		el.setAttribute("data-idx", i);
 
-		var lbl = document.createElement("div");
-		lbl.className = "search-hit-label";
-		lbl.textContent = hit.label || hit.sessionId;
-		el.appendChild(lbl);
+			var lbl = document.createElement("div");
+			lbl.className = "search-hit-label";
+			lbl.textContent = hit.displayName;
+			el.appendChild(lbl);
 
 		// Safe: esc() escapes all HTML entities first, then we only wrap
 		// the already-escaped query substring in <mark> tags.

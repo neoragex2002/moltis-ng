@@ -1,5 +1,5 @@
 const { expect, test } = require("@playwright/test");
-const { waitForWsConnected, watchPageErrors } = require("../helpers");
+const { createSession, getActiveSessionId, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 function isRetryableRpcError(message) {
 	if (typeof message !== "string") return false;
@@ -68,6 +68,8 @@ test.describe("WebSocket connection lifecycle", () => {
 	test("connection persists across SPA navigation", async ({ page }) => {
 		await page.goto("/");
 		await waitForWsConnected(page);
+		const sessionId = await getActiveSessionId(page);
+		const chatPath = `/chats/${encodeURIComponent(sessionId)}`;
 
 		// Navigate to a different page within the SPA
 		await page.goto("/settings");
@@ -77,7 +79,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expect(page.locator("#statusDot")).toHaveClass(/connected/);
 
 		// Navigate back to chat
-		await page.goto("/chats/main");
+		await page.goto(chatPath);
 		await expect(page.locator("#pageContent")).not.toBeEmpty();
 		await expect(page.locator("#statusDot")).toHaveClass(/connected/);
 	});
@@ -90,10 +92,11 @@ test.describe("WebSocket connection lifecycle", () => {
 
 	test("final chat text is kept when it includes tool output plus analysis", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await page.goto("/chats/main");
+		await page.goto("/");
 		await waitForWsConnected(page);
+		const sessionId = await getActiveSessionId(page);
 
-		await expectRpcOk(page, "chat.clear", {});
+		await expectRpcOk(page, "chat.clear", { _sessionId: sessionId });
 
 		const toolOutput = "Linux moltis-moltis-sandbox-main 6.12.28 #1 SMP Tue May 20 15:19:05 UTC 2025 aarch64 GNU/Linux";
 		const finalText =
@@ -103,7 +106,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionId: "main",
+				sessionId,
 				state: "tool_call_end",
 				toolCallId: "echo-test",
 				success: true,
@@ -114,7 +117,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionId: "main",
+				sessionId,
 				state: "delta",
 				text: finalText,
 			},
@@ -123,7 +126,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionId: "main",
+				sessionId,
 				state: "final",
 				text: finalText,
 				messageIndex: 999,
@@ -144,16 +147,17 @@ test.describe("WebSocket connection lifecycle", () => {
 
 	test("out-of-order tool events still resolve exec card", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await page.goto("/chats/main");
+		await page.goto("/");
 		await waitForWsConnected(page);
+		const sessionId = await getActiveSessionId(page);
 
-		await expectRpcOk(page, "chat.clear", {});
+		await expectRpcOk(page, "chat.clear", { _sessionId: sessionId });
 
 		const toolCallId = "reorder-exec-1";
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionId: "main",
+				sessionId,
 				state: "tool_call_end",
 				toolCallId,
 				toolName: "exec",
@@ -165,7 +169,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionId: "main",
+				sessionId,
 				state: "tool_call_start",
 				toolCallId,
 				toolName: "exec",
@@ -183,16 +187,17 @@ test.describe("WebSocket connection lifecycle", () => {
 
 	test("final event clears stale running exec status when tool end is missed", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await page.goto("/chats/main");
+		await page.goto("/");
 		await waitForWsConnected(page);
+		const sessionId = await getActiveSessionId(page);
 
-		await expectRpcOk(page, "chat.clear", {});
+		await expectRpcOk(page, "chat.clear", { _sessionId: sessionId });
 
 		const toolCallId = "stale-exec-1";
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionId: "main",
+				sessionId,
 				state: "tool_call_start",
 				toolCallId,
 				toolName: "exec",
@@ -205,7 +210,7 @@ test.describe("WebSocket connection lifecycle", () => {
 		await expectRpcOk(page, "system-event", {
 			event: "chat",
 			payload: {
-				sessionId: "main",
+				sessionId,
 				state: "final",
 				text: "done",
 				messageIndex: 999999,
@@ -220,8 +225,80 @@ test.describe("WebSocket connection lifecycle", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("inactive-session final event does not render into the active chat page", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.goto("/");
+		await waitForWsConnected(page);
+		const homeSessionId = await getActiveSessionId(page);
+		await createSession(page);
+		const activeSessionId = await getActiveSessionId(page);
+		expect(activeSessionId).not.toBe(homeSessionId);
+
+		const inactiveText = "inactive-session-final-should-not-render";
+		await expectRpcOk(page, "system-event", {
+			event: "chat",
+			payload: {
+				sessionId: homeSessionId,
+				state: "final",
+				text: inactiveText,
+				messageIndex: 999998,
+				model: "test-model",
+				provider: "test-provider",
+				replyMedium: "text",
+			},
+		});
+
+		await expect(page.locator("#messages .msg.assistant").filter({ hasText: inactiveText })).toHaveCount(0);
+		await expect(page.locator(`#sessionList .session-item[data-session-id="${homeSessionId}"]`)).toHaveClass(/unread/);
+		expect(pageErrors).toEqual([]);
+	});
+
+	test('active session chat event is dropped while switchInProgress (reason_code="active_session_switch_in_progress")', async ({
+		page,
+	}) => {
+		const warnings = [];
+		page.on("console", (msg) => {
+			if (msg.type() === "warning") warnings.push(msg.text());
+		});
+
+		await page.goto("/");
+		await waitForWsConnected(page);
+		const sessionId = await getActiveSessionId(page);
+
+		await expect
+			.poll(() => page.evaluate(() => window.__moltis_stores?.sessionStore?.switchInProgress?.value ?? null))
+			.toBe(false);
+
+		await page.evaluate(() => {
+			const store = window.__moltis_stores?.sessionStore;
+			if (!store) return;
+			store.switchInProgress.value = true;
+			store.switchGeneration.value = 7;
+		});
+		await expect
+			.poll(() => page.evaluate(() => window.__moltis_stores?.sessionStore?.switchInProgress?.value ?? null))
+			.toBe(true);
+
+		const droppedText = "switch-in-progress-should-drop";
+		await expectRpcOk(page, "system-event", {
+			event: "chat",
+			payload: {
+				sessionId,
+				state: "final",
+				text: droppedText,
+				messageIndex: 123456,
+				model: "test-model",
+				provider: "test-provider",
+				replyMedium: "text",
+			},
+		});
+
+		await expect(page.locator("#messages .msg.assistant").filter({ hasText: droppedText })).toHaveCount(0);
+		expect(warnings.some((w) => w.includes('reason_code="active_session_switch_in_progress"'))).toBe(true);
+	});
+
 	test("auth.credentials_changed event redirects through /login", async ({ page }) => {
-		await page.goto("/chats/main");
+		await page.goto("/");
 		await waitForWsConnected(page);
 
 		var loginNavigation = page.waitForRequest(

@@ -6,7 +6,7 @@ test("app shell loads chat route instead of onboarding", async ({ page }) => {
 
 	await page.goto("/");
 
-	await expect(page).toHaveURL(/\/chats\/main$/);
+	await expect(page).toHaveURL(/\/chats\/[^/]+$/);
 	await expectPageContentMounted(page);
 	await expect(page.locator("#sessionsPanel")).toBeVisible();
 	await expect(page.locator("#chatInput")).toBeVisible();
@@ -21,7 +21,7 @@ test("index page exposes OG and Twitter share metadata", async ({ page }) => {
 	const pageErrors = watchPageErrors(page);
 
 	await page.goto("/");
-	await expect(page).toHaveURL(/\/chats\/main$/);
+	await expect(page).toHaveURL(/\/chats\/[^/]+$/);
 
 	await expect.poll(() => page.locator('meta[property="og:title"]').getAttribute("content")).toContain("AI assistant");
 	await expect.poll(() => page.locator('meta[property="og:description"]').getAttribute("content")).toContain(
@@ -63,9 +63,9 @@ const routeCases = [
 	},
 	{
 		path: "/settings",
-		expectedUrl: /\/settings\/personas$/,
+		expectedUrl: /\/settings\/user$/,
 		settingsActive: true,
-		heading: "Personas",
+		heading: "User",
 	},
 ];
 

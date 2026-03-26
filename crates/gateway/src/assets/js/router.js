@@ -1,6 +1,7 @@
 // ── Router ──────────────────────────────────────────────────
 
 import { clearLogsAlert } from "./logs-alert.js";
+import { sessionPath } from "./route-utils.js";
 import { routes } from "./routes.js";
 import * as S from "./state.js";
 
@@ -9,9 +10,7 @@ var prefixRoutes = [];
 export var currentPage = null;
 export var currentPrefix = null;
 
-export function sessionPath(key) {
-	return `/chats/${key.replace(/:/g, "/")}`;
-}
+export { sessionPath };
 var pageContent = S.$("pageContent");
 var sessionsPanel = S.$("sessionsPanel");
 
@@ -58,12 +57,12 @@ function findPageRoute(path) {
 	var page = pages[path];
 	if (page) return { page: page, matchedPrefix: null, param: null };
 	for (var pr of prefixRoutes) {
-		if (path === pr.prefix || path.indexOf(`${pr.prefix}/`) === 0) {
-			var suffix = path.substring(pr.prefix.length + 1);
-			var param = suffix ? decodeURIComponent(suffix.replace(/\//g, ":")) : null;
-			return { page: pr, matchedPrefix: pr.prefix, param: param };
+			if (path === pr.prefix || path.indexOf(`${pr.prefix}/`) === 0) {
+				var suffix = path.substring(pr.prefix.length + 1);
+				var param = suffix ? decodeURIComponent(suffix) : null;
+				return { page: pr, matchedPrefix: pr.prefix, param: param };
+			}
 		}
-	}
 	return { page: pages["/"] || null, matchedPrefix: null, param: null };
 }
 

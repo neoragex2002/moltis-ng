@@ -2,7 +2,7 @@ const { expect, test } = require("@playwright/test");
 const { watchPageErrors } = require("../helpers");
 
 const LLM_STEP_HEADING = /^(Add LLMs|Add providers)$/;
-const IDENTITY_STEP_HEADING = /^(Set up your agent|Set up your identity)$/;
+const IDENTITY_STEP_HEADING = /^Set up your agent$/;
 
 function isVisible(locator) {
 	return locator.isVisible().catch(() => false);
@@ -92,7 +92,7 @@ async function maybeSkipAuth(page) {
 }
 
 async function maybeCompleteIdentity(page) {
-	const identityHeading = page.getByRole("heading", { name: "Set up your identity", exact: true });
+	const identityHeading = page.getByRole("heading", { name: "Set up your agent", exact: true });
 	if (!(await isVisible(identityHeading))) return false;
 
 	const userNameInput = page.getByPlaceholder("e.g. Alice");
@@ -172,7 +172,7 @@ test.describe("Onboarding wizard", () => {
 		await page.waitForLoadState("networkidle");
 
 		await expect(page.locator(".onboarding-step-dot").first()).toHaveClass(/active/);
-		await expect(page.locator(".onboarding-step-label", { hasText: "Identity" })).toBeVisible();
+		await expect(page.locator(".onboarding-step-label", { hasText: "Agent" })).toBeVisible();
 	});
 
 	test("auth step renders actionable controls when shown", async ({ page }) => {
@@ -183,7 +183,7 @@ test.describe("Onboarding wizard", () => {
 		const isAuthStepVisible = await authHeading.isVisible().catch(() => false);
 
 		if (!isAuthStepVisible) {
-			await expect(page.getByRole("heading", { name: "Set up your identity", exact: true })).toBeVisible();
+			await expect(page.getByRole("heading", { name: "Set up your agent", exact: true })).toBeVisible();
 			await expect(page.getByPlaceholder("e.g. Alice")).toBeVisible();
 			return;
 		}
@@ -202,7 +202,7 @@ test.describe("Onboarding wizard", () => {
 		await page.waitForLoadState("networkidle");
 
 		const identityHeading = page.getByRole("heading", {
-			name: "Set up your identity",
+			name: "Set up your agent",
 			exact: true,
 		});
 		const isIdentityStepVisible = await identityHeading.isVisible().catch(() => false);
@@ -263,8 +263,15 @@ test.describe("Onboarding wizard", () => {
 		await page.goto("/onboarding");
 		await page.waitForLoadState("networkidle");
 
-		await expect(page.locator(".onboarding-card")).toBeVisible();
-		await expect(page.getByText("Loading…")).toHaveCount(0);
+		await expect.poll(() => new URL(page.url()).pathname, { timeout: 15_000 }).toMatch(/^\/(?:onboarding|chats\/.+)$/);
+
+		const pathname = new URL(page.url()).pathname;
+		if (/^\/chats\//.test(pathname)) {
+			await expect(page.locator("#chatInput")).toBeVisible();
+		} else {
+			await expect(page.locator(".onboarding-step-dot").first()).toBeVisible();
+			await expect(page.getByText("Loading…")).toHaveCount(0);
+		}
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -273,6 +280,14 @@ test.describe("Onboarding wizard", () => {
 		await page.goto("/onboarding");
 		await page.waitForLoadState("networkidle");
 
+		await expect.poll(() => new URL(page.url()).pathname, { timeout: 15_000 }).toMatch(/^\/(?:onboarding|chats\/.+)$/);
+
+		const pathname = new URL(page.url()).pathname;
+		if (/^\/chats\//.test(pathname)) {
+			expect(pageErrors).toEqual([]);
+			return;
+		}
+
 		const authHeading = page.getByRole("heading", { name: "Secure your instance", exact: true });
 		if (await authHeading.isVisible().catch(() => false)) {
 			const authSkip = page.getByRole("button", { name: "Skip for now", exact: true });
@@ -280,7 +295,7 @@ test.describe("Onboarding wizard", () => {
 			await authSkip.click();
 		}
 
-		const identityHeading = page.getByRole("heading", { name: "Set up your identity", exact: true });
+		const identityHeading = page.getByRole("heading", { name: "Set up your agent", exact: true });
 		await expect(identityHeading).toBeVisible();
 		await page.getByPlaceholder("e.g. Alice").fill("E2E User");
 		await page.getByPlaceholder("e.g. Rex").fill("E2E Bot");

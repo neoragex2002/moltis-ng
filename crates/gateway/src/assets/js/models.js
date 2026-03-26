@@ -4,6 +4,7 @@ import { sendRpc } from "./helpers.js";
 import { showModelNotice } from "./page-chat.js";
 import * as S from "./state.js";
 import { modelStore } from "./stores/model-store.js";
+import { sessionStore } from "./stores/session-store.js";
 
 function setSessionModel(sessionId, modelId) {
 	sendRpc("sessions.patch", { sessionId: sessionId, model: modelId });
@@ -38,7 +39,8 @@ export function selectModel(m) {
 	S.setSelectedModelId(m.id);
 	updateModelComboLabel(m);
 	localStorage.setItem("moltis-model", m.id);
-	setSessionModel(S.activeSessionId, m.id);
+	var activeSessionId = sessionStore.activeSessionId.value;
+	if (activeSessionId) setSessionModel(activeSessionId, m.id);
 	closeModelDropdown();
 	// Show notice if model doesn't support tools
 	showModelNotice(m);

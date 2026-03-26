@@ -7,25 +7,14 @@ export var connected = false;
 export var reconnectDelay = 1000;
 export var pending = {};
 export var models = [];
-export var activeSessionId = localStorage.getItem("moltis-sessionId") || "";
 export var activeProjectId = localStorage.getItem("moltis-project") || "";
-export var sessions = [];
 export var projects = [];
 
-// Chat-page specific state (persists across page transitions)
+// Chat-page specific DOM refs and input history
 export var streamEl = null;
-export var streamText = "";
-export var lastToolOutput = "";
-export var voicePending = false;
 export var chatHistory = JSON.parse(localStorage.getItem("moltis-chat-history") || "[]");
 export var chatHistoryIdx = -1;
 export var chatHistoryDraft = "";
-// Client-side sequence counter for message ordering diagnostics.
-// Resumed from the highest user seq in history on session switch.
-export var chatSeq = 0;
-
-// Session token usage tracking (cumulative for the current session)
-export var sessionTokens = { input: 0, output: 0 };
 
 // Model selector elements — created dynamically inside the chat page
 export var modelCombo = null;
@@ -58,13 +47,6 @@ export var chatMsgBox = null;
 export var chatInput = null;
 export var chatSendBtn = null;
 export var chatBatchLoading = false;
-export var sessionSwitchInProgress = false;
-// Highest message index loaded from session history; used to deduplicate
-// real-time events that duplicate already-rendered history entries.
-export var lastHistoryIndex = -1;
-export var sessionContextWindow = 0;
-export var sessionToolsEnabled = true;
-export var sessionBudget = null;
 
 // Provider/channel page refresh callbacks
 export var refreshProvidersPage = null;
@@ -112,16 +94,8 @@ export function setModels(v) {
 	models = v;
 	// Store signal is now owned by model-store.js; don't overwrite here.
 }
-export function setActiveSessionId(v) {
-	activeSessionId = v;
-	// Store signal is now owned by session-store.js; don't overwrite here.
-}
 export function setActiveProjectId(v) {
 	activeProjectId = v;
-}
-export function setSessions(v) {
-	sessions = v;
-	// Store signal is now owned by session-store.js; don't overwrite here.
 }
 export function setProjects(v) {
 	projects = v;
@@ -129,15 +103,6 @@ export function setProjects(v) {
 }
 export function setStreamEl(v) {
 	streamEl = v;
-}
-export function setStreamText(v) {
-	streamText = v;
-}
-export function setLastToolOutput(v) {
-	lastToolOutput = v;
-}
-export function setVoicePending(v) {
-	voicePending = v;
 }
 export function setChatHistory(v) {
 	chatHistory = v;
@@ -147,12 +112,6 @@ export function setChatHistoryIdx(v) {
 }
 export function setChatHistoryDraft(v) {
 	chatHistoryDraft = v;
-}
-export function setChatSeq(v) {
-	chatSeq = v;
-}
-export function setSessionTokens(v) {
-	sessionTokens = v;
 }
 export function setModelCombo(v) {
 	modelCombo = v;
@@ -226,21 +185,6 @@ export function setChatSendBtn(v) {
 }
 export function setChatBatchLoading(v) {
 	chatBatchLoading = v;
-}
-export function setSessionSwitchInProgress(v) {
-	sessionSwitchInProgress = v;
-}
-export function setLastHistoryIndex(v) {
-	lastHistoryIndex = v;
-}
-export function setSessionContextWindow(v) {
-	sessionContextWindow = v;
-}
-export function setSessionToolsEnabled(v) {
-	sessionToolsEnabled = v;
-}
-export function setSessionBudget(v) {
-	sessionBudget = v;
 }
 export function setRefreshProvidersPage(v) {
 	refreshProvidersPage = v;

@@ -1,51 +1,33 @@
 const { expect, test } = require("@playwright/test");
 const { expectPageContentMounted, navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
 
-async function spoofSafari(page) {
-	await page.addInitScript(() => {
-		const safariUserAgent =
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15";
-		Object.defineProperty(Navigator.prototype, "userAgent", {
-			configurable: true,
-			get() {
-				return safariUserAgent;
-			},
-		});
-		Object.defineProperty(Navigator.prototype, "vendor", {
-			configurable: true,
-			get() {
-				return "Apple Computer, Inc.";
-			},
-		});
-	});
-}
-
 test.describe("Settings navigation", () => {
-	test("/settings redirects to /settings/personas", async ({ page }) => {
+	test("/settings redirects to /settings/user", async ({ page }) => {
 		await navigateAndWait(page, "/settings");
-		await expect(page).toHaveURL(/\/settings\/personas$/);
-		await expect(page.getByRole("heading", { name: "Personas", exact: true })).toBeVisible();
+		await expect(page).toHaveURL(/\/settings\/user$/);
+		await expect(page.getByRole("heading", { name: "User", exact: true })).toBeVisible();
 	});
 
 	const settingsSections = [
-		{ id: "personas", heading: "Personas" },
-		{ id: "owner", heading: "Owner" },
-		{ id: "memory", heading: "Memory" },
-		{ id: "environment", heading: "Environment" },
-		{ id: "crons", heading: "Cron Jobs" },
-		{ id: "voice", heading: "Voice" },
-		{ id: "security", heading: "Security" },
-		{ id: "tailscale", heading: "Tailscale" },
-		{ id: "notifications", heading: "Notifications" },
-		{ id: "providers", heading: "LLMs" },
-		{ id: "channels", heading: "Channels" },
-		{ id: "mcp", heading: "MCP" },
-		{ id: "hooks", heading: "Hooks" },
-		{ id: "skills", heading: "Skills" },
-		{ id: "sandboxes", heading: "Sandboxes" },
-		{ id: "monitoring", heading: "Monitoring" },
-		{ id: "logs", heading: "Logs" },
-		{ id: "config", heading: "Configuration" },
+		{ id: "user" },
+		{ id: "people" },
+		{ id: "contacts" },
+		{ id: "environment" },
+		{ id: "memory" },
+		{ id: "notifications" },
+		{ id: "crons" },
+		{ id: "security" },
+		{ id: "tailscale" },
+		{ id: "providers" },
+		{ id: "channels" },
+		{ id: "mcp" },
+		{ id: "hooks" },
+		{ id: "skills" },
+		{ id: "voice" },
+		{ id: "sandboxes" },
+		{ id: "monitoring" },
+		{ id: "logs" },
+		{ id: "config" },
 	];
 
 	for (const section of settingsSections) {
@@ -60,58 +42,28 @@ test.describe("Settings navigation", () => {
 			// from the section ID; check the page loaded content.
 			const content = page.locator("#pageContent");
 			await expect(content).not.toBeEmpty();
-
 			expect(pageErrors).toEqual([]);
 		});
 	}
 
-		test("personas form elements render", async ({ page }) => {
-			await navigateAndWait(page, "/settings/personas");
-			await expect(page.getByRole("heading", { name: "Personas", exact: true })).toBeVisible();
+	test("user form elements render", async ({ page }) => {
+		await navigateAndWait(page, "/settings/user");
+		await expect(page.getByRole("heading", { name: "User", exact: true })).toBeVisible();
 
-			await expect(page.getByText("agent_id", { exact: true })).toBeVisible();
-			await expect(page.locator("select")).toBeVisible();
-			await expect(page.getByRole("button", { name: "Save", exact: true })).toBeVisible();
-		});
-	
-	test("persona save shows Saved indicator", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/personas");
-		
-		const nameInput = page.getByPlaceholder("e.g. Rex");
-		await nameInput.fill("E2E Persona");
-		await page.getByRole("button", { name: "Save", exact: true }).click();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		
-		expect(pageErrors).toEqual([]);
+		await expect(page.getByText("USER.md", { exact: true })).toBeVisible();
+		await expect(page.getByRole("button", { name: "Reload", exact: true })).toBeVisible();
+		await expect(page.getByRole("button", { name: "Save", exact: true })).toBeVisible();
 	});
 
-	test("selecting persona emoji does not crash", async ({ page }) => {
+	test("user save shows Saved indicator", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/personas");
-		
-		const pickBtn = page.getByRole("button", { name: "Pick", exact: true });
-		await expect(pickBtn).toBeVisible();
-		await pickBtn.click();
+		await navigateAndWait(page, "/settings/user");
 
-		const selectedEmoji = await page.evaluate(() => {
-			var current = (window.__MOLTIS__?.identity?.emoji || "").trim();
-			var options = ["🦊", "🐙", "🤖", "🐶"];
-			return options.find((emoji) => emoji !== current) || "🦊";
-		});
-		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
+		const ownerInput = page.locator("input.provider-key-input").first();
+		await ownerInput.fill("E2E Owner");
 		await page.getByRole("button", { name: "Save", exact: true }).click();
 		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
 
-		expect(pageErrors).toEqual([]);
-	});
-
-	test("safari does not show favicon reload notice in personas", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await spoofSafari(page);
-		await navigateAndWait(page, "/settings/personas");
-		await expect(page.getByText("favicon updates requires reload", { exact: false })).toHaveCount(0);
-		await expect(page.getByRole("button", { name: "requires reload", exact: true })).toHaveCount(0);
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -150,7 +102,7 @@ test.describe("Settings navigation", () => {
 	});
 
 	test("sidebar groups and order match product layout", async ({ page }) => {
-		await navigateAndWait(page, "/settings/personas");
+		await navigateAndWait(page, "/settings/user");
 
 		await expect(page.locator(".settings-group-label").nth(0)).toHaveText("General");
 		await expect(page.locator(".settings-group-label").nth(1)).toHaveText("Security");
@@ -159,8 +111,9 @@ test.describe("Settings navigation", () => {
 
 		const navItems = (await page.locator(".settings-nav-item").allTextContents()).map((text) => text.trim());
 		const expectedWithVoice = [
-			"Personas",
-			"Owner",
+			"User",
+			"People",
+			"Contacts",
 			"Environment",
 			"Memory",
 			"Notifications",

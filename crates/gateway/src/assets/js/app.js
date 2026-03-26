@@ -11,16 +11,17 @@ import { initMobile } from "./mobile.js";
 import { updateNavCounts } from "./nav-counts.js";
 import { renderSessionProjectSelect } from "./project-combo.js";
 import { renderProjectSelect } from "./projects.js";
-import { initPWA } from "./pwa.js";
-import { initInstallBanner } from "./pwa-install.js";
-import { mount, navigate, registerPage, sessionPath } from "./router.js";
-import { routes } from "./routes.js";
-import { updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
-import { fetchSessions, refreshActiveSession, refreshWelcomeCardIfNeeded, renderSessionList } from "./sessions.js";
-import * as S from "./state.js";
-import { modelStore } from "./stores/model-store.js";
-import { projectStore } from "./stores/project-store.js";
-import { sessionStore } from "./stores/session-store.js";
+	import { initPWA } from "./pwa.js";
+	import { initInstallBanner } from "./pwa-install.js";
+	import { mount, navigate, registerPage } from "./router.js";
+	import { routes } from "./routes.js";
+	import { updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
+	import { fetchSessions, refreshActiveSession, refreshWelcomeCardIfNeeded, renderSessionList } from "./sessions.js";
+	import { preferredStartupChatPath } from "./startup-session.js";
+	import * as S from "./state.js";
+	import { modelStore } from "./stores/model-store.js";
+	import { projectStore } from "./stores/project-store.js";
+	import { sessionStore } from "./stores/session-store.js";
 import { initTheme, injectMarkdownStyles } from "./theme.js";
 import { connect } from "./websocket.js";
 
@@ -40,13 +41,10 @@ import "./nav-counts.js";
 import "./session-search.js";
 import "./time-format.js";
 
-function preferredChatPath() {
-	var storedSessionId = localStorage.getItem("moltis-sessionId") || "";
-	var sessionId = sessionStore.getById(storedSessionId)
-		? storedSessionId
-		: sessionStore.defaultSessionId();
-	return sessionId ? sessionPath(sessionId) : routes.chats;
-}
+	function preferredChatPath() {
+		var resolved = preferredStartupChatPath(null);
+		return resolved.path || routes.chats;
+	}
 
 // Redirect root to the active/default chat session.
 registerPage("/", () => {
@@ -91,7 +89,7 @@ onEvent("update.available", showUpdateBanner);
 initUpdateBannerDismiss();
 onEvent("session", (payload) => {
 	fetchSessions();
-	if (payload && payload.kind === "patched" && payload.sessionId === S.activeSessionId) {
+	if (payload && payload.kind === "patched" && payload.sessionId === sessionStore.activeSessionId.value) {
 		refreshActiveSession();
 	}
 });
@@ -295,13 +293,10 @@ function fetchBootstrap() {
 			if (boot.sessions) {
 				var bootSessions = boot.sessions || [];
 				sessionStore.setAll(bootSessions);
-				// Dual-write to state.js for backward compat
-				S.setSessions(bootSessions);
 				if (!sessionStore.activeSessionId.value) {
 					var defaultSessionId = sessionStore.defaultSessionId(bootSessions);
 					if (defaultSessionId) {
 						sessionStore.setActive(defaultSessionId);
-						S.setActiveSessionId(defaultSessionId);
 					}
 				}
 				renderSessionList();

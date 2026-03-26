@@ -18,6 +18,7 @@ import { initLogs, teardownLogs } from "./page-logs.js";
 import { initMcp, teardownMcp } from "./page-mcp.js";
 import { initMonitoring, teardownMonitoring } from "./page-metrics.js";
 import { initProviders, teardownProviders } from "./page-providers.js";
+import { sessionStore } from "./stores/session-store.js";
 import { initSkills, teardownSkills } from "./page-skills.js";
 import { detectPasskeyName } from "./passkey-detect.js";
 import * as push from "./push.js";
@@ -2533,7 +2534,7 @@ function VoiceSection() {
 
 					try {
 						var resp = await fetch(
-							`/api/sessions/${encodeURIComponent(S.activeSessionId)}/upload?transcribe=true&provider=${encodeURIComponent(providerId)}`,
+							`/api/sessions/${encodeURIComponent(sessionStore.activeSessionId.value || "")}/upload?transcribe=true&provider=${encodeURIComponent(providerId)}`,
 							{
 								method: "POST",
 								headers: { "Content-Type": audioBlob.type || "audio/webm" },

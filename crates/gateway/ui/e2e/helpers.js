@@ -106,17 +106,26 @@ async function createSession(page) {
 
 					const pathname = window.location.pathname || "";
 					if (!pathname.startsWith("/chats/")) return false;
-					const expectedSessionId = decodeURIComponent(pathname.slice("/chats/".length)).replace(/\//g, ":");
+					const expectedSessionId = decodeURIComponent(pathname.slice("/chats/".length));
 					
 					const activeSessionId = store.activeSessionId?.value || "";
 					if (activeSessionId !== expectedSessionId) return false;
 					
 					const activeSession = store.getById ? store.getById(activeSessionId) : store.activeSession?.value;
-					return Boolean(activeSession && activeSession.sessionId === activeSessionId);
+					return Boolean(activeSession && activeSession.sessionId === activeSessionId && activeSession.clientOnly === false);
 				}),
 			{ timeout: 10_000 },
 		)
 		.toBe(true);
+}
+
+async function getActiveSessionId(page) {
+	return page.evaluate(() => {
+		const store = window.__moltis_stores?.sessionStore;
+		const sessionId = store?.activeSessionId?.value || "";
+		if (!sessionId) throw new Error("active sessionId not found");
+		return sessionId;
+	});
 }
 
 module.exports = {
@@ -125,4 +134,5 @@ module.exports = {
 	waitForWsConnected,
 	navigateAndWait,
 	createSession,
+	getActiveSessionId,
 };

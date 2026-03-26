@@ -3,22 +3,36 @@
 // Single source of truth for session data. Each session becomes a
 // Session class instance with per-session signals for client-side state.
 
-import { computed, signal } from "@preact/signals";
-import { sendRpc } from "../helpers.js";
+	import { computed, signal } from "@preact/signals";
+	import { INVALID_SESSION_LABEL, PENDING_SESSION_LABEL, sessionLabelText } from "../session-label.js";
 
-// ── Session class ────────────────────────────────────────────
+	// ── Session class ────────────────────────────────────────────
 
-export class Session {
-	constructor(serverData) {
-		// Server fields (plain properties, set on construction/update)
-		this.sessionId = serverData.sessionId;
-		this.sessionKey = serverData.sessionKey || "";
-		this.label = serverData.label || "";
-		this.displayName = serverData.displayName || serverData.label || serverData.sessionId || "";
-		this.sessionKind = serverData.sessionKind || "";
-		this.canRename = !!serverData.canRename;
-		this.canDelete = !!serverData.canDelete;
-		this.canFork = !!serverData.canFork;
+	var missingDisplayNameWarned = new Set();
+	function warnMissingDisplayName(sessionId) {
+		if (!sessionId) return;
+		var key = `session_store_normalize:${sessionId}`;
+		if (missingDisplayNameWarned.has(key)) return;
+		missingDisplayNameWarned.add(key);
+		console.warn(
+			'[moltis] event="session.contract_violation" reason_code="missing_display_name" decision="warn" policy="web_ui_session_owner_v1"',
+			{ session_id: sessionId, surface: "session_store_normalize" },
+		);
+	}
+
+	export class Session {
+		constructor(serverData) {
+			// Server fields (plain properties, set on construction/update)
+			this.sessionId = serverData.sessionId;
+			this.sessionKey = serverData.sessionKey || "";
+			this.label = serverData.label || "";
+			this.clientOnly = !!serverData.clientOnly;
+			this.displayName = typeof serverData.displayName === "string" ? serverData.displayName.trim() : "";
+			if (!this.clientOnly && !this.displayName) warnMissingDisplayName(this.sessionId);
+			this.sessionKind = serverData.sessionKind || "";
+			this.canRename = !!serverData.canRename;
+			this.canDelete = !!serverData.canDelete;
+			this.canFork = !!serverData.canFork;
 		this.canClear = !!serverData.canClear;
 		this.model = serverData.model || "";
 		this.provider = serverData.provider || "";
@@ -45,8 +59,10 @@ export class Session {
 		this.streamText = signal("");
 		this.voicePending = signal(false);
 		this.lastHistoryIndex = signal(-1);
+		this.chatSeq = signal(0);
 		this.sessionTokens = signal({ input: 0, output: 0 });
 		this.contextWindow = signal(0);
+		this.sessionBudget = signal(null);
 		this.toolsEnabled = signal(true);
 		this.lastToolOutput = signal("");
 		// Total message count — reactive signal that drives the sidebar badge.
@@ -61,18 +77,20 @@ export class Session {
 		this.badgeCount.value = this.messageCount;
 	}
 
-	/** Merge server fields, preserving client signals. Returns false if stale. */
-	update(serverData) {
-		var incoming = serverData.version || 0;
-		if (incoming > 0 && this.version > 0 && incoming < this.version) return false;
-		this.version = incoming || this.version;
-		this.sessionKey = serverData.sessionKey || "";
-		this.label = serverData.label || "";
-		this.displayName = serverData.displayName || serverData.label || serverData.sessionId || "";
-		this.sessionKind = serverData.sessionKind || "";
-		this.canRename = !!serverData.canRename;
-		this.canDelete = !!serverData.canDelete;
-		this.canFork = !!serverData.canFork;
+		/** Merge server fields, preserving client signals. Returns false if stale. */
+		update(serverData) {
+			var incoming = serverData.version || 0;
+			if (incoming > 0 && this.version > 0 && incoming < this.version) return false;
+			this.version = incoming || this.version;
+			this.sessionKey = serverData.sessionKey || "";
+			this.label = serverData.label || "";
+			this.clientOnly = !!serverData.clientOnly;
+			this.displayName = typeof serverData.displayName === "string" ? serverData.displayName.trim() : "";
+			if (!this.clientOnly && !this.displayName) warnMissingDisplayName(this.sessionId);
+			this.sessionKind = serverData.sessionKind || "";
+			this.canRename = !!serverData.canRename;
+			this.canDelete = !!serverData.canDelete;
+			this.canFork = !!serverData.canFork;
 		this.canClear = !!serverData.canClear;
 		this.model = serverData.model || "";
 		this.provider = serverData.provider || "";
@@ -124,12 +142,23 @@ export class Session {
 		this.voicePending.value = false;
 		this.lastToolOutput.value = "";
 	}
+
+	resetViewState() {
+		this.resetStreamState();
+		this.lastHistoryIndex.value = -1;
+		this.chatSeq.value = 0;
+		this.sessionTokens.value = { input: 0, output: 0 };
+		this.contextWindow.value = 0;
+		this.sessionBudget.value = null;
+		this.toolsEnabled.value = true;
+	}
 }
 
-// ── Store signals ────────────────────────────────────────────
-export var sessions = signal([]);
-export var activeSessionId = signal(localStorage.getItem("moltis-sessionId") || "");
-export var switchInProgress = signal(false);
+	// ── Store signals ────────────────────────────────────────────
+	export var sessions = signal([]);
+	export var activeSessionId = signal(localStorage.getItem("moltis-sessionId") || "");
+	export var switchInProgress = signal(false);
+	export var switchGeneration = signal(0);
 
 export var activeSession = computed(() => {
 	var sessionId = activeSessionId.value;
@@ -188,9 +217,11 @@ export function upsert(serverData) {
 
 /** Fetch sessions from the server via RPC. */
 export function fetch() {
-	return sendRpc("sessions.list", {}).then((res) => {
-		if (!res?.ok) return;
-		setAll(res.payload || []);
+	return import("../helpers.js").then((helpers) => {
+		return helpers.sendRpc("sessions.list", {}).then((res) => {
+			if (!res?.ok) return;
+			setAll(res.payload || []);
+		});
 	});
 }
 
@@ -218,17 +249,19 @@ export function defaultSessionId(list = sessions.value) {
 	return list[0]?.sessionId || "";
 }
 
-export var sessionStore = {
-	sessions,
-	activeSessionId,
-	activeSession,
-	switchInProgress,
-	Session,
-	setAll,
-	upsert,
-	fetch,
+	export var sessionStore = {
+		sessions,
+		activeSessionId,
+		activeSession,
+		switchInProgress,
+		switchGeneration,
+		Session,
+		setAll,
+		upsert,
+		fetch,
 	getById,
 	setActive,
-	defaultSessionId,
-	notify,
-};
+		defaultSessionId,
+		notify,
+	};
+	export { INVALID_SESSION_LABEL, PENDING_SESSION_LABEL, sessionLabelText };

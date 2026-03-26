@@ -2,6 +2,7 @@
 
 import { sendRpc } from "./helpers.js";
 import * as S from "./state.js";
+import { sessionStore } from "./stores/session-store.js";
 
 export function openProjectDropdown() {
 	if (!S.projectDropdown) return;
@@ -47,8 +48,9 @@ export function selectProject(id, label) {
 	localStorage.setItem("moltis-project", S.activeProjectId);
 	if (S.projectComboLabel) S.projectComboLabel.textContent = label;
 	closeProjectDropdown();
-	if (S.connected && S.activeSessionId) {
-		sendRpc("sessions.patch", { sessionId: S.activeSessionId, projectId: id });
+	var activeSessionId = sessionStore.activeSessionId.value;
+	if (S.connected && activeSessionId) {
+		sendRpc("sessions.patch", { sessionId: activeSessionId, projectId: id });
 	}
 }
 

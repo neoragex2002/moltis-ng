@@ -1,5 +1,5 @@
 const { expect, test } = require("@playwright/test");
-const { navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
+const { getActiveSessionId, navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 function isRetryableRpcError(message) {
 	if (typeof message !== "string") return false;
@@ -44,23 +44,19 @@ async function waitForChatInputReady(page) {
 
 async function setChatSeq(page, seq) {
 	await page.evaluate(async (nextSeq) => {
-		var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-		if (!appScript) throw new Error("app module script not found");
-		var appUrl = new URL(appScript.src, window.location.origin);
-		var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-		var state = await import(`${prefix}js/state.js`);
-		state.setChatSeq(nextSeq);
+		var store = window.__moltis_stores?.sessionStore;
+		var session = store?.activeSession?.value;
+		if (!session) throw new Error("active session not found");
+		session.chatSeq.value = nextSeq;
 	}, seq);
 }
 
 async function getChatSeq(page) {
 	return await page.evaluate(async () => {
-		var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-		if (!appScript) throw new Error("app module script not found");
-		var appUrl = new URL(appScript.src, window.location.origin);
-		var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-		var state = await import(`${prefix}js/state.js`);
-		return state.chatSeq;
+		var store = window.__moltis_stores?.sessionStore;
+		var session = store?.activeSession?.value;
+		if (!session) throw new Error("active session not found");
+		return session.chatSeq.value;
 	});
 }
 
@@ -72,7 +68,8 @@ async function openFullContextWithRetry(page) {
 
 	for (let attempt = 0; attempt < 5; attempt++) {
 		await waitForWsConnected(page);
-		const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
+		const sessionId = await getActiveSessionId(page);
+		const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", { _sessionId: sessionId });
 		const noProvidersConfigured =
 			fullContextRpc?.error?.message?.includes("no LLM providers configured") ||
 			fullContextRpc?.error?.message?.includes("chat not configured");
@@ -112,6 +109,7 @@ async function runClearSlashCommandWithRetry(page) {
 	for (let attempt = 0; attempt < 6; attempt++) {
 		await waitForWsConnected(page);
 		await waitForChatInputReady(page);
+		const sessionId = await getActiveSessionId(page);
 		await chatInput.click();
 		await chatInput.fill("/clear");
 		await expect(chatInput).toHaveValue("/clear");
@@ -123,7 +121,7 @@ async function runClearSlashCommandWithRetry(page) {
 			.catch(() => false);
 		if (reset) return true;
 		// Recover test state so the next slash-command attempt starts cleanly.
-		await sendRpcFromPage(page, "chat.clear", {});
+		await sendRpcFromPage(page, "chat.clear", { _sessionId: sessionId });
 		await setChatSeq(page, 8);
 	}
 	return false;
@@ -131,7 +129,7 @@ async function runClearSlashCommandWithRetry(page) {
 
 test.describe("Chat input and slash commands", () => {
 	test.beforeEach(async ({ page }) => {
-		await navigateAndWait(page, "/chats/main");
+		await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
 		await waitForChatInputReady(page);
 	});
@@ -141,6 +139,31 @@ test.describe("Chat input and slash commands", () => {
 		await expect(chatInput).toBeVisible();
 		await chatInput.focus();
 		await expect(chatInput).toBeFocused();
+	});
+
+	test('sending while no active session does not clear input (reason_code="ui_missing_active_session")', async ({
+		page,
+	}) => {
+		const warnings = [];
+		page.on("console", (msg) => {
+			if (msg.type() === "warning") warnings.push(msg.text());
+		});
+
+		await page.evaluate(() => {
+			const store = window.__moltis_stores?.sessionStore;
+			if (!store) return;
+			store.sessions.value = [];
+			store.activeSessionId.value = "";
+			store.switchInProgress.value = true;
+		});
+
+		const chatInput = page.locator("#chatInput");
+		const msg = "should-not-drop-when-session-missing";
+		await chatInput.fill(msg);
+		await chatInput.press("Enter");
+
+		await expect(chatInput).toHaveValue(msg);
+		expect(warnings.some((w) => w.includes('reason_code="ui_missing_active_session"'))).toBe(true);
 	});
 
 	test('typing "/" shows slash command menu', async ({ page }) => {

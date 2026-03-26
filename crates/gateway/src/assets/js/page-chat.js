@@ -12,19 +12,25 @@ import {
 	initMediaDrop,
 	teardownMediaDrop,
 } from "./media-drop.js";
-import { bindModelComboEvents, setSessionModel } from "./models.js";
-import { registerPrefix, sessionPath } from "./router.js";
-import { routes } from "./routes.js";
-import { bindSandboxImageEvents, bindSandboxToggleEvents, updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
-import {
-	bumpSessionCount,
-	clearActiveSession,
-	seedSessionPreviewFromUserText,
-	setSessionReplying,
+	import { bindModelComboEvents, setSessionModel } from "./models.js";
+	import { registerPrefix, sessionPath } from "./router.js";
+	import { routes } from "./routes.js";
+	import { bindSandboxImageEvents, bindSandboxToggleEvents, updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
+	import { preferredStartupChatPath } from "./startup-session.js";
+	import {
+		bumpSessionCount,
+		clearActiveSession,
+		seedSessionPreviewFromUserText,
+		setSessionReplying,
 	switchSession,
 } from "./sessions.js";
 import * as S from "./state.js";
+import { sessionStore } from "./stores/session-store.js";
 import { initVoiceInput, teardownVoiceInput } from "./voice-input.js";
+
+function activeSessionId() {
+	return sessionStore.activeSessionId.value || "";
+}
 
 // ── Slash commands ───────────────────────────────────────
 var slashCommands = [
@@ -555,7 +561,10 @@ function refreshDebugPanel() {
 	var loading = ctxEl("div", "text-xs text-[var(--muted)]", "Loading context\u2026");
 	panel.appendChild(loading);
 
-	sendRpc("chat.context", { draftText: S.chatInput ? S.chatInput.value : "" }).then((res) => {
+	sendRpc("chat.context", {
+		_sessionId: activeSessionId(),
+		draftText: S.chatInput ? S.chatInput.value : "",
+	}).then((res) => {
 		panel.textContent = "";
 		if (!(res?.ok && res.payload)) {
 			panel.appendChild(ctxEl("div", "text-xs text-[var(--error)]", "Failed to load context"));
@@ -680,7 +689,7 @@ function refreshFullContextPanel() {
 	panel.textContent = "";
 	panel.appendChild(ctxEl("div", "text-xs text-[var(--muted)]", "Building full context\u2026"));
 
-	sendRpc("chat.full_context", {}).then((res) => {
+	sendRpc("chat.full_context", { _sessionId: activeSessionId() }).then((res) => {
 		panel.textContent = "";
 		if (!(res?.ok && res.payload)) {
 			panel.appendChild(ctxEl("div", "text-xs text-[var(--error)]", "Failed to build context"));
@@ -761,7 +770,7 @@ function toggleMcp() {
 	var label = S.$("mcpToggleLabel");
 	var isEnabled = label && label.textContent === "MCP";
 	var newDisabled = isEnabled;
-	sendRpc("sessions.patch", { sessionId: S.activeSessionId, mcpDisabled: newDisabled }).then((res) => {
+	sendRpc("sessions.patch", { sessionId: activeSessionId(), mcpDisabled: newDisabled }).then((res) => {
 		if (res?.ok) {
 			updateMcpToggleUI(!newDisabled);
 		}
@@ -794,9 +803,9 @@ function handleSlashCommand(cmdName) {
 	}
 	if (cmdName === "compact") {
 		chatAddMsg("system", "Compacting conversation\u2026");
-		sendRpc("chat.compact", {}).then((res) => {
+		sendRpc("chat.compact", { _sessionId: activeSessionId() }).then((res) => {
 			if (res?.ok) {
-				switchSession(S.activeSessionId);
+				switchSession(activeSessionId());
 			} else {
 				chatAddMsg("error", res?.error?.message || "Compact failed");
 			}
@@ -805,7 +814,10 @@ function handleSlashCommand(cmdName) {
 	}
 	if (cmdName === "context") {
 		chatAddMsg("system", "Loading context\u2026");
-		sendRpc("chat.context", { draftText: S.chatInput ? S.chatInput.value : "" }).then((res) => {
+		sendRpc("chat.context", {
+			_sessionId: activeSessionId(),
+			draftText: S.chatInput ? S.chatInput.value : "",
+		}).then((res) => {
 			if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
 			if (res?.ok && res.payload) {
 				try {
@@ -849,6 +861,26 @@ function sendChat() {
 	// Unlock audio playback while we still have user-gesture context.
 	warmAudioPlayback();
 
+	var session = sessionStore.activeSession.value;
+	if (!session) {
+		console.warn(
+			'[moltis] event="session.contract_violation" reason_code="ui_missing_active_session" decision="reject" policy="web_ui_session_owner_v1"',
+			{
+				method: "chat.send",
+				session_id: sessionStore.activeSessionId.value || null,
+				switch_in_progress: !!sessionStore.switchInProgress.value,
+				has_images: hasImages,
+				text_len: text.length,
+				remediation: "wait_for_session_switch",
+			},
+		);
+		if (!sessionStore.switchInProgress.value) {
+			switchSession(activeSessionId(), null, null, { source: "direct" });
+		}
+		chatAddMsg("error", "Session is still loading. Please wait and try again.");
+		return;
+	}
+
 	if (text.charAt(0) === "/" && !hasImages) {
 		var cmdName = text.substring(1).toLowerCase();
 		var matched = slashCommands.find((c) => c.name === cmdName);
@@ -871,22 +903,23 @@ function sendChat() {
 	S.chatInput.value = "";
 	chatAutoResize();
 
-	S.setChatSeq(S.chatSeq + 1);
-	var msg = buildChatMessage(text, S.chatSeq);
+	session.chatSeq.value += 1;
+	var msg = buildChatMessage(text, session.chatSeq.value);
 	var chatParams = msg.params;
 	var userEl = msg.el;
+	chatParams._sessionId = session.sessionId;
 
 	var selectedModel = S.selectedModelId;
 	if (selectedModel) {
 		chatParams.model = selectedModel;
-		setSessionModel(S.activeSessionId, selectedModel);
+		setSessionModel(session.sessionId, selectedModel);
 	}
-	bumpSessionCount(S.activeSessionId, 1);
-	seedSessionPreviewFromUserText(S.activeSessionId, text);
-	setSessionReplying(S.activeSessionId, true);
+	bumpSessionCount(session.sessionId, 1);
+	seedSessionPreviewFromUserText(session.sessionId, text);
+	setSessionReplying(session.sessionId, true);
 	sendRpc("chat.send", chatParams).then((res) => {
 		if (res?.payload?.queued) {
-			markMessageQueued(userEl, S.activeSessionId);
+			markMessageQueued(userEl, session.sessionId);
 		} else if (res && !res.ok && res.error) {
 			chatAddMsg("error", res.error.message || "Request failed");
 		}
@@ -1086,21 +1119,24 @@ registerPrefix(
 			}
 		}
 
-		var sessionId;
-		if (sessionIdFromUrl) {
-			sessionId = sessionIdFromUrl;
-		} else {
-			var storedSessionId = localStorage.getItem("moltis-sessionId") || "";
-			sessionId = sessionStore.getById(storedSessionId) ? storedSessionId : "";
-			if (sessionId) {
-				history.replaceState(null, "", sessionPath(sessionId));
+			var sessionId;
+			var restore = false;
+			if (sessionIdFromUrl) {
+				sessionId = sessionIdFromUrl;
+				restore = (localStorage.getItem("moltis-sessionId") || "") === sessionIdFromUrl;
+			} else {
+				var resolved = preferredStartupChatPath(null);
+				sessionId = resolved.restoreSessionId;
+				if (sessionId) {
+					restore = true;
+					history.replaceState(null, "", resolved.path);
+				}
 			}
-		}
 
-		if (S.connected) {
-			S.chatSendBtn.disabled = false;
-			switchSession(sessionId);
-		}
+			if (S.connected) {
+				S.chatSendBtn.disabled = false;
+				switchSession(sessionId, null, null, { source: restore ? "restore" : "direct" });
+			}
 
 		S.chatInput.addEventListener("input", () => {
 			chatAutoResize();
@@ -1148,7 +1184,6 @@ registerPrefix(
 		S.setChatInput(null);
 		S.setChatSendBtn(null);
 		S.setStreamEl(null);
-		S.setStreamText("");
 		S.setModelCombo(null);
 		S.setModelComboBtn(null);
 		S.setModelComboLabel(null);

@@ -2,6 +2,7 @@
 
 import { sendRpc } from "./helpers.js";
 import * as S from "./state.js";
+import { sessionStore } from "./stores/session-store.js";
 
 var SANDBOX_DISABLED_HINT =
 	"Sandboxes are disabled on cloud deploys without a container runtime. Install on a VM with Docker or Apple Container to enable this feature.";
@@ -85,9 +86,11 @@ export function bindSandboxToggleEvents() {
 	if (!S.sandboxToggleBtn) return;
 	S.sandboxToggleBtn.addEventListener("click", () => {
 		if (!sandboxRuntimeAvailable()) return;
+		var activeSessionId = sessionStore.activeSessionId.value;
+		if (!activeSessionId) return;
 		var newVal = !S.sessionSandboxEnabled;
 		sendRpc("sessions.patch", {
-			sessionId: S.activeSessionId,
+			sessionId: activeSessionId,
 			sandboxEnabled: newVal,
 		}).then((res) => {
 			if (res?.ok && res.payload) {
@@ -196,9 +199,11 @@ function addImageOption(tag, isActive, subtitle) {
 
 function selectImage(tag) {
 	if (!perSessionImageSupported()) return;
+	var activeSessionId = sessionStore.activeSessionId.value;
+	if (!activeSessionId) return;
 	var value = tag || "";
 	sendRpc("sessions.patch", {
-		sessionId: S.activeSessionId,
+		sessionId: activeSessionId,
 		sandboxImage: value,
 	}).then((res) => {
 		if (res?.ok && res.payload) {

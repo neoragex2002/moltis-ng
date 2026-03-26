@@ -2,6 +2,7 @@
 
 import { formatTokens, parseErrorMessage, sendRpc, updateCountdown } from "./helpers.js";
 import * as S from "./state.js";
+import { sessionStore } from "./stores/session-store.js";
 
 // Scroll chat to bottom and keep it pinned until layout settles.
 // Uses a ResizeObserver to catch any late layout shifts (sidebar re-render,
@@ -352,7 +353,8 @@ export function updateTokenBar() {
 	var bar = S.$("tokenBar");
 	if (!bar) return;
 
-	var b = S.sessionBudget || {};
+	var activeSession = sessionStore.activeSession.value;
+	var b = activeSession?.sessionBudget.value || {};
 	var parts = [];
 	if (b.autoCompactToksThred && b.promptInputToksEst) {
 		var pct = Math.round((b.promptInputToksEst / b.autoCompactToksThred) * 100);
@@ -364,7 +366,7 @@ export function updateTokenBar() {
 	if (b.autoCompactToksThred) {
 		parts.push(`Threshold: ${formatTokens(b.autoCompactToksThred)}`);
 	}
-	if (!S.sessionToolsEnabled) {
+	if (activeSession && !activeSession.toolsEnabled.value) {
 		parts.push("Tools: disabled");
 	}
 

@@ -70,16 +70,16 @@ test.describe("Onboarding with forced auth (remote)", () => {
 			pathname = new URL(page.url()).pathname;
 		}
 
-		if (/^\/chats\//.test(pathname)) {
-			expect(pageErrors).toEqual([]);
-			return;
-		}
+	if (/^\/chats\//.test(pathname)) {
+		expect(pageErrors).toEqual([]);
+		return;
+	}
 
-		const authHeading = page.getByRole("heading", { name: "Secure your instance", exact: true });
-		const identityHeading = page.getByRole("heading", { name: "Set up your identity", exact: true });
-		const providersHeading = page.getByRole("heading", { name: /^(Add LLMs|Add providers)$/ });
-		const voiceHeading = page.getByRole("heading", { name: "Voice (optional)", exact: true });
-		const channelHeading = page.getByRole("heading", { name: "Connect Telegram", exact: true });
+	const authHeading = page.getByRole("heading", { name: "Secure your instance", exact: true });
+	const identityHeading = page.getByRole("heading", { name: "Set up your agent", exact: true });
+	const providersHeading = page.getByRole("heading", { name: /^(Add LLMs|Add providers)$/ });
+	const voiceHeading = page.getByRole("heading", { name: "Voice (optional)", exact: true });
+	const channelHeading = page.getByRole("heading", { name: "Connect Telegram", exact: true });
 
 		let step = await waitForStableStep(page, authHeading, identityHeading, providersHeading);
 

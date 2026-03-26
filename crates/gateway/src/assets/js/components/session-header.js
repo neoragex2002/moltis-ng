@@ -1,14 +1,14 @@
 // ── SessionHeader Preact component ───────────────────────────
 //
-// Replaces the imperative updateChatSessionHeader() with a reactive
-// Preact component reading sessionStore.activeSession.
+// Reactive Preact component reading sessionStore.activeSession.
 
-import { html } from "htm/preact";
-import { useCallback, useRef, useState } from "preact/hooks";
-import { sendRpc } from "../helpers.js";
-import { clearActiveSession, fetchSessions, switchSession } from "../sessions.js";
-import { sessionStore } from "../stores/session-store.js";
-import { confirmDialog } from "../ui.js";
+	import { html } from "htm/preact";
+	import { useCallback, useRef, useState } from "preact/hooks";
+	import { sendRpc } from "../helpers.js";
+	import { clearActiveSession, fetchSessions, switchSession } from "../sessions.js";
+	import { PENDING_SESSION_LABEL, sessionLabelText } from "../session-label.js";
+	import { sessionStore } from "../stores/session-store.js";
+	import { confirmDialog } from "../ui.js";
 
 function nextSessionKey(currentKey) {
 	var allSessions = sessionStore.sessions.value;
@@ -20,16 +20,16 @@ function nextSessionKey(currentKey) {
 	return sessionStore.defaultSessionId(allSessions);
 }
 
-export function SessionHeader() {
-	var session = sessionStore.activeSession.value;
-	var currentKey = sessionStore.activeSessionId.value;
+	export function SessionHeader() {
+		var session = sessionStore.activeSession.value;
+		var currentKey = sessionStore.activeSessionId.value;
 
 	var [renaming, setRenaming] = useState(false);
 	var [clearing, setClearing] = useState(false);
 	var inputRef = useRef(null);
 
-	var fullName = session ? session.displayName || session.label || session.sessionId : currentKey;
-	var displayName = fullName.length > 20 ? `${fullName.slice(0, 20)}\u2026` : fullName;
+		var fullName = session ? sessionLabelText(session) : currentKey ? PENDING_SESSION_LABEL : "";
+		var displayName = fullName.length > 20 ? `${fullName.slice(0, 20)}\u2026` : fullName;
 
 	var canRename = !!session?.canRename;
 	var canDelete = !!session?.canDelete;
@@ -88,13 +88,15 @@ export function SessionHeader() {
 				if (res && !res.ok && res.error && res.error.indexOf("uncommitted changes") !== -1) {
 					confirmDialog("Worktree has uncommitted changes. Force delete?").then((yes) => {
 						if (!yes) return;
-						sendRpc("sessions.delete", { sessionId: currentKey, force: true }).then(() => {
+						sendRpc("sessions.delete", { sessionId: currentKey, force: true }).then((forceRes) => {
+							if (!forceRes?.ok) return;
 							switchSession(nextKey);
 							fetchSessions();
 						});
 					});
 					return;
 				}
+				if (!res?.ok) return;
 				switchSession(nextKey);
 				fetchSessions();
 			});

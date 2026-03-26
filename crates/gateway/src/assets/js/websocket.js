@@ -42,6 +42,14 @@ import { connectWs, forceReconnect } from "./ws-connect.js";
 var ttsWebStatus = null; // null = unknown, true/false = enabled state
 var pendingToolCallEnds = new Map();
 
+function activeSession() {
+	return sessionStore.activeSession.value;
+}
+
+function activeSessionId() {
+	return sessionStore.activeSessionId.value || "";
+}
+
 function toolCallLogicalId(payload) {
 	if (!payload) return "";
 	if (payload.runId) return `${payload.runId}:${payload.toolCallId}`;
@@ -146,8 +154,6 @@ function handleChatVoicePending(_p, isActive, isChatPage, eventSession) {
 	var session = sessionStore.getById(eventSession);
 	if (session) session.voicePending.value = true;
 	if (!(isActive && isChatPage)) return;
-	// Dual-write to global state for backward compat
-	S.setVoicePending(true);
 	// Keep the existing thinking dots visible — no separate voice indicator.
 }
 
@@ -161,7 +167,6 @@ function handleChatToolCallStart(p, isActive, isChatPage, eventSession) {
 	// call will create a fresh element positioned after the tool card
 	if (S.streamEl) {
 		S.setStreamEl(null);
-		S.setStreamText("");
 	}
 	var cardId = toolCallCardId(p);
 	if (document.getElementById(cardId)) return;
@@ -186,8 +191,6 @@ function appendToolResult(toolCard, result, eventSession) {
 	// Update per-session signal
 	var toolSession = sessionStore.getById(eventSession);
 	if (toolSession) toolSession.lastToolOutput.value = out;
-	// Dual-write to global state for backward compat
-	S.setLastToolOutput(out);
 	if (out) {
 		var outEl = document.createElement("pre");
 		outEl.className = "exec-output";
@@ -289,8 +292,8 @@ function handleChatChannelUser(p, isActive, isChatPage, eventSession) {
 	if (!(isChatPage && isActive)) return;
 	// Compare against the per-session history index, not the global one,
 	// to avoid skipping events when viewing a different session.
-	var chanSession = sessionStore.getById(p.sessionId || S.activeSessionId);
-	var chanLastIdx = chanSession ? chanSession.lastHistoryIndex.value : S.lastHistoryIndex;
+	var chanSession = sessionStore.getById(eventSession);
+	var chanLastIdx = chanSession ? chanSession.lastHistoryIndex.value : -1;
 	if (p.messageIndex !== undefined && p.messageIndex <= chanLastIdx) return;
 	var cleanText = stripChannelPrefix(p.text || "");
 	var el = chatAddMsg("user", renderMarkdown(cleanText), true);
@@ -312,19 +315,16 @@ function handleChatDelta(p, isActive, isChatPage, eventSession) {
 	if (session) session.streamText.value += p.text;
 	if (!(isActive && isChatPage)) return;
 	// When voice is pending, accumulate text silently without rendering.
-	if (S.voicePending) {
-		S.setStreamText(S.streamText + p.text);
+	if (session?.voicePending.value) {
 		return;
 	}
 	removeThinking();
 	if (!S.streamEl) {
-		S.setStreamText("");
 		S.setStreamEl(document.createElement("div"));
 		S.streamEl.className = "msg assistant";
 		S.chatMsgBox.appendChild(S.streamEl);
 	}
-	S.setStreamText(S.streamText + p.text);
-	setSafeMarkdownHtml(S.streamEl, S.streamText);
+	setSafeMarkdownHtml(S.streamEl, session?.streamText.value || p.text);
 	S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
 }
 
@@ -343,8 +343,9 @@ function isPureToolOutputEcho(finalText, toolOutput) {
 	return finalComparable === toolComparable;
 }
 
-function resolveFinalMessageEl(p) {
-	var isEcho = isPureToolOutputEcho(p.text, S.lastToolOutput);
+function resolveFinalMessageEl(p, eventSession) {
+	var session = sessionStore.getById(eventSession);
+	var isEcho = isPureToolOutputEcho(p.text, session?.lastToolOutput.value || "");
 	if (!isEcho) {
 		if (p.text && S.streamEl) {
 			setSafeMarkdownHtml(S.streamEl, p.text);
@@ -385,7 +386,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 	// Compare against the per-session history index so cross-session
 	// events aren't wrongly skipped by another session's index.
 	var evtSession = sessionStore.getById(eventSession);
-	var lastIdx = evtSession ? evtSession.lastHistoryIndex.value : S.lastHistoryIndex;
+	var lastIdx = evtSession ? evtSession.lastHistoryIndex.value : -1;
 	if (p.messageIndex !== undefined && p.messageIndex <= lastIdx) {
 		setSessionReplying(eventSession, false);
 		return;
@@ -395,13 +396,12 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 		setSessionUnread(eventSession, true);
 	}
 	if (!(isActive && isChatPage)) {
-		S.setVoicePending(false);
 		return;
 	}
 	removeThinking();
 	clearStaleRunningToolCards();
 
-	if (S.voicePending && p.text && p.replyMedium === "voice") {
+	if (evtSession?.voicePending.value && p.text && p.replyMedium === "voice") {
 		// Voice pending path: we suppressed streaming, so render everything at once.
 		console.debug("[audio] voice-pending path, audio:", !!p.audio, "text:", p.text.substring(0, 40));
 		var msgEl = S.streamEl || document.createElement("div");
@@ -411,7 +411,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 
 		if (p.audio) {
 			var filename = p.audio.split("/").pop();
-			var audioSrc = `/api/sessions/${encodeURIComponent(p.sessionId || S.activeSessionId)}/media/${encodeURIComponent(filename)}`;
+			var audioSrc = `/api/sessions/${encodeURIComponent(eventSession)}/media/${encodeURIComponent(filename)}`;
 			console.debug("[audio] rendering persisted audio:", filename);
 			renderAudioPlayer(msgEl, audioSrc, true);
 		}
@@ -423,19 +423,19 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 		appendFinalFooter(msgEl, p);
 		S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
 	} else {
-		var resolvedEl = resolveFinalMessageEl(p);
+		var resolvedEl = resolveFinalMessageEl(p, eventSession);
 		if (resolvedEl && p.text && p.replyMedium === "voice") {
 			console.debug(
 				"[audio] streamed path, audio:",
 				!!p.audio,
 				"voicePending:",
-				S.voicePending,
+				evtSession?.voicePending.value || false,
 				"text:",
 				p.text.substring(0, 40),
 			);
 			if (p.audio) {
 				var fn2 = p.audio.split("/").pop();
-				var src2 = `/api/sessions/${encodeURIComponent(p.sessionId || S.activeSessionId)}/media/${encodeURIComponent(fn2)}`;
+				var src2 = `/api/sessions/${encodeURIComponent(eventSession)}/media/${encodeURIComponent(fn2)}`;
 				console.debug("[audio] rendering persisted audio (streamed):", fn2);
 				resolvedEl.textContent = "";
 				renderAudioPlayer(resolvedEl, src2, true);
@@ -461,19 +461,19 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 		}
 	}
 	if (p.inputTokens || p.outputTokens) {
-		S.sessionTokens.input += p.inputTokens || 0;
-		S.sessionTokens.output += p.outputTokens || 0;
+		if (evtSession) {
+			evtSession.sessionTokens.value = {
+				input: evtSession.sessionTokens.value.input + (p.inputTokens || 0),
+				output: evtSession.sessionTokens.value.output + (p.outputTokens || 0),
+			};
+		}
 		updateTokenBar();
 	}
 	appendLastMessageTimestamp(Date.now());
 	// Reset per-session stream state
 	var finalSession = sessionStore.getById(eventSession);
 	if (finalSession) finalSession.resetStreamState();
-	// Dual-write to global state for backward compat
 	S.setStreamEl(null);
-	S.setStreamText("");
-	S.setLastToolOutput("");
-	S.setVoicePending(false);
 	maybeRefreshFullContext();
 	// Move the next queued message from the tray AFTER the response is
 	// fully rendered. This ensures correct ordering: user-msg → response →
@@ -488,7 +488,8 @@ function handleChatAutoCompact(p, isActive, isChatPage) {
 	} else if (p.phase === "done") {
 		if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
 		renderCompactCard(p);
-		S.setSessionTokens({ input: 0, output: 0 });
+		var session = activeSession();
+		if (session) session.sessionTokens.value = { input: 0, output: 0 };
 		updateTokenBar();
 	} else if (p.phase === "error") {
 		if (S.chatMsgBox?.lastChild) S.chatMsgBox.removeChild(S.chatMsgBox.lastChild);
@@ -502,10 +503,7 @@ function handleChatError(p, isActive, isChatPage, eventSession) {
 	// Reset per-session stream state
 	var errSession = sessionStore.getById(eventSession);
 	if (errSession) errSession.resetStreamState();
-	if (!(isActive && isChatPage)) {
-		S.setVoicePending(false);
-		return;
-	}
+	if (!(isActive && isChatPage)) return;
 	removeThinking();
 	clearStaleRunningToolCards();
 	if (p.error?.title) {
@@ -516,8 +514,6 @@ function handleChatError(p, isActive, isChatPage, eventSession) {
 		chatAddErrorMsg(p.message || "unknown");
 	}
 	S.setStreamEl(null);
-	S.setStreamText("");
-	S.setVoicePending(false);
 	moveFirstQueuedToChat();
 }
 
@@ -546,15 +542,12 @@ function handleChatSessionCleared(_p, isActive, isChatPage, eventSession) {
 	if (session) {
 		session.syncCounts(0, 0);
 		session.lastHistoryIndex.value = -1;
-	}
-	if (isActive) {
-		S.setLastHistoryIndex(-1);
-		S.setChatSeq(0);
+		session.chatSeq.value = 0;
+		session.sessionTokens.value = { input: 0, output: 0 };
 	}
 	if (!(isActive && isChatPage)) return;
 	// Active viewer: clear the chat box and token bar.
 	if (S.chatMsgBox) S.chatMsgBox.textContent = "";
-	S.setSessionTokens({ input: 0, output: 0 });
 	updateTokenBar();
 }
 
@@ -576,11 +569,29 @@ var chatHandlers = {
 };
 
 function handleChatEvent(p) {
-	var eventSession = p.sessionId || sessionStore.activeSessionId.value;
+	var eventSession = p.sessionId;
+	if (!eventSession) {
+		console.warn(
+			'[moltis] event="chat.event" reason_code="chat_event_missing_session_id" decision="drop" policy="web_ui_session_owner_v1"',
+			{ chat_event_type: p.state, run_id: p.runId || null },
+		);
+		return;
+	}
 	var isActive = eventSession === sessionStore.activeSessionId.value;
 	var isChatPage = currentPrefix === "/chats";
 
-	if (isActive && sessionStore.switchInProgress.value) return;
+	if (isActive && sessionStore.switchInProgress.value) {
+		console.warn(
+			'[moltis] event="chat.event" reason_code="active_session_switch_in_progress" decision="drop" policy="web_ui_session_owner_v1"',
+			{
+				session_id: eventSession,
+				chat_event_type: p.state,
+				run_id: p.runId || null,
+				switch_generation: sessionStore.switchGeneration.value || null,
+			},
+		);
+		return;
+	}
 
 	if (eventSession && !sessionStore.getById(eventSession)) {
 		fetchSessions();
@@ -885,7 +896,6 @@ var connectOpts = {
 		var activeS = sessionStore.activeSession.value;
 		if (activeS) activeS.resetStreamState();
 		S.setStreamEl(null);
-		S.setStreamText("");
 	},
 };
 

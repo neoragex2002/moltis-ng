@@ -29,6 +29,11 @@ import { sessionStore } from "./stores/session-store.js";
 import { confirmDialog } from "./ui.js";
 
 var SESSION_PREVIEW_MAX_CHARS = 200;
+var switchGenerationCounter = 0;
+
+function activeSessionId() {
+	return sessionStore.activeSessionId.value || "";
+}
 
 function truncateSessionPreview(text) {
 	var trimmed = (text || "").trim();
@@ -41,55 +46,40 @@ function truncateSessionPreview(text) {
 // ── Fetch & render ──────────────────────────────────────────
 
 export function fetchSessions() {
-		sendRpc("sessions.list", {}).then((res) => {
-			if (!res?.ok) return;
-			var incoming = res.payload || [];
-			// Preserve client-side flags (localUnread, replying) across fetches.
-			var oldBySessionId = {};
-			for (var old of S.sessions) {
-				if (old._localUnread || old._replying) {
-					oldBySessionId[old.sessionId] = {
-						localUnread: old._localUnread,
-						replying: old._replying,
-					};
-				}
-			}
-			for (var s of incoming) {
-				var prev = oldBySessionId[s.sessionId];
-				if (prev) {
-					if (prev.localUnread) s._localUnread = true;
-					if (prev.replying) s._replying = true;
-				}
-			}
-		// Update session store (source of truth) — version guard
-		// inside Session.update() prevents stale data from overwriting.
+	sendRpc("sessions.list", {}).then((res) => {
+		if (!res?.ok) return;
+		var incoming = res.payload || [];
 		sessionStore.setAll(incoming);
-		// Dual-write to state.js for backward compat
-		S.setSessions(incoming);
 		renderSessionList();
-		updateChatSessionHeader();
 	});
 }
 
 /** Clear history for the currently active session and reset local UI state. */
 export function clearActiveSession() {
-	var prevHistoryIdx = S.lastHistoryIndex;
-	var prevSeq = S.chatSeq;
-	S.setLastHistoryIndex(-1);
-	S.setChatSeq(0);
-	return sendRpc("chat.clear", {}).then((res) => {
-			if (res?.ok) {
-				if (S.chatMsgBox) S.chatMsgBox.textContent = "";
-				S.setSessionTokens({ input: 0, output: 0 });
-				updateTokenBar();
-				var activeSessionId = sessionStore.activeSessionId.value || S.activeSessionId;
-				var session = sessionStore.getById(activeSessionId);
-				if (session) session.syncCounts(0, 0);
-				fetchSessions();
-				return res;
-			}
-		S.setLastHistoryIndex(prevHistoryIdx);
-		S.setChatSeq(prevSeq);
+	var sessionId = activeSessionId();
+	if (!sessionId) {
+		return Promise.resolve({ ok: false, error: { message: "No active session" } });
+	}
+	var session = sessionStore.getById(sessionId);
+	var prevHistoryIdx = session?.lastHistoryIndex.value ?? -1;
+	var prevSeq = session?.chatSeq.value ?? 0;
+	if (session) {
+		session.lastHistoryIndex.value = -1;
+		session.chatSeq.value = 0;
+		session.sessionTokens.value = { input: 0, output: 0 };
+	}
+	return sendRpc("chat.clear", { _sessionId: sessionId }).then((res) => {
+		if (res?.ok) {
+			if (S.chatMsgBox) S.chatMsgBox.textContent = "";
+			updateTokenBar();
+			if (session) session.syncCounts(0, 0);
+			fetchSessions();
+			return res;
+		}
+		if (session) {
+			session.lastHistoryIndex.value = prevHistoryIdx;
+			session.chatSeq.value = prevSeq;
+		}
 		chatAddMsg("error", res?.error?.message || "Clear failed");
 		return res;
 	});
@@ -97,8 +87,9 @@ export function clearActiveSession() {
 
 /** Re-fetch the active session entry and restore sandbox/model state. */
 export function refreshActiveSession() {
-	if (!S.activeSessionId) return;
-	sendRpc("sessions.resolve", { sessionId: S.activeSessionId }).then((res) => {
+	var sessionId = activeSessionId();
+	if (!sessionId) return;
+	sendRpc("sessions.resolve", { sessionId: sessionId }).then((res) => {
 		if (!(res?.ok && res.payload)) return;
 		var entry = res.payload.entry || res.payload;
 		restoreSessionState(entry, entry.projectId);
@@ -134,38 +125,18 @@ export function renderSessionList() {
 // ── Status helpers ──────────────────────────────────────────
 
 export function setSessionReplying(sessionId, replying) {
-	// Update store signal — Preact SessionList re-renders automatically.
 	var session = sessionStore.getById(sessionId);
 	if (session) session.replying.value = replying;
-	// Dual-write: update plain S.sessions object
-	var entry = S.sessions.find((s) => s.sessionId === sessionId);
-	if (entry) entry._replying = replying;
 }
 
 export function setSessionUnread(sessionId, unread) {
-	// Update store signal — Preact SessionList re-renders automatically.
 	var session = sessionStore.getById(sessionId);
 	if (session) session.localUnread.value = unread;
-	// Dual-write: update plain S.sessions object
-	var entry = S.sessions.find((s) => s.sessionId === sessionId);
-	if (entry) entry._localUnread = unread;
 }
 
 export function bumpSessionCount(sessionId, increment) {
-	// Update store — bumpCount bumps dataVersion for automatic re-render.
 	var session = sessionStore.getById(sessionId);
-	if (session) {
-		session.bumpCount(increment);
-	}
-
-	// Dual-write: update the underlying S.sessions data.
-	var entry = S.sessions.find((s) => s.sessionId === sessionId);
-	if (entry) {
-		entry.messageCount = (entry.messageCount || 0) + increment;
-		if (sessionId === S.activeSessionId) {
-			entry.lastSeenMessageCount = entry.messageCount;
-		}
-	}
+	if (session) session.bumpCount(increment);
 }
 
 /** Set first-message preview optimistically so sidebar updates without reload. */
@@ -179,12 +150,6 @@ export function seedSessionPreviewFromUserText(sessionId, text) {
 		session.preview = preview;
 		session.updatedAt = now;
 		session.dataVersion.value++;
-	}
-
-	var entry = S.sessions.find((s) => s.sessionId === sessionId);
-	if (entry && !entry.preview) {
-		entry.preview = preview;
-		entry.updatedAt = now;
 	}
 }
 
@@ -228,7 +193,7 @@ if (clearAllBtn) {
 			clearAllBtn.textContent = "Clearing\u2026";
 			sendRpc("sessions.clear_all", {}).then((res) => {
 				clearAllBtn.disabled = false;
-				clearAllBtn.textContent = "Clear";
+				clearAllBtn.textContent = "Clear All";
 				if (res?.ok) {
 					var active = sessionStore.getById(sessionStore.activeSessionId.value);
 					var wasKept = !active || !(active.canDelete && active.sessionKind === "agent");
@@ -278,7 +243,6 @@ function restoreSessionState(entry, projectId) {
 	updateSandboxUI(entry.sandboxEnabled !== false);
 	updateSandboxImageUI(entry.sandboxImage || null);
 	restoreMcpToggle(!entry.mcpDisabled);
-	updateChatSessionHeader();
 }
 
 /** Extract text and images from a multimodal content array. */
@@ -327,7 +291,7 @@ function renderHistoryAssistantMessage(msg) {
 		el = chatAddMsg("assistant", "", true);
 	if (el) {
 		var filename = msg.audio.split("/").pop();
-		var audioSrc = `/api/sessions/${encodeURIComponent(S.activeSessionId)}/media/${encodeURIComponent(filename)}`;
+		var audioSrc = `/api/sessions/${encodeURIComponent(activeSessionId())}/media/${encodeURIComponent(filename)}`;
 		renderAudioPlayer(el, audioSrc);
 		if (msg.content) {
 				var textWrap = document.createElement("div");
@@ -344,8 +308,13 @@ function renderHistoryAssistantMessage(msg) {
 		el.appendChild(createModelFooter(msg));
 	}
 	if (msg.inputTokens || msg.outputTokens) {
-		S.sessionTokens.input += msg.inputTokens || 0;
-		S.sessionTokens.output += msg.outputTokens || 0;
+		var session = sessionStore.activeSession.value;
+		if (session) {
+			session.sessionTokens.value = {
+				input: session.sessionTokens.value.input + (msg.inputTokens || 0),
+				output: session.sessionTokens.value.output + (msg.outputTokens || 0),
+			};
+		}
 	}
 	return el;
 }
@@ -392,7 +361,7 @@ function renderHistoryToolResult(msg) {
 		// Render persisted screenshot from the media API.
 		if (msg.result.screenshot && !msg.result.screenshot.startsWith("data:")) {
 			var filename = msg.result.screenshot.split("/").pop();
-			var sessionId = S.activeSessionId || homeSessionId();
+			var sessionId = activeSessionId() || homeSessionId();
 			var mediaSrc = `/api/sessions/${encodeURIComponent(sessionId)}/media/${encodeURIComponent(filename)}`;
 			renderScreenshot(card, mediaSrc);
 		}
@@ -443,15 +412,19 @@ function makeThinkingDots() {
 }
 
 function postHistoryLoadActions(sessionId, searchContext, msgEls) {
-			sendRpc("chat.context", { draftText: S.chatInput ? S.chatInput.value : "" }).then((ctxRes) => {
-				if (ctxRes?.ok && ctxRes.payload) {
-					var next = ctxRes.payload.tokenDebug ? ctxRes.payload.tokenDebug.nextRequest : null;
-					S.setSessionContextWindow(next && next.contextWindow !== undefined ? next.contextWindow || 0 : 0);
-					S.setSessionBudget(next || null);
-					S.setSessionToolsEnabled(ctxRes.payload.supportsTools !== false);
-				}
-				updateTokenBar();
-			});
+	sendRpc("chat.context", {
+		_sessionId: sessionId,
+		draftText: S.chatInput ? S.chatInput.value : "",
+	}).then((ctxRes) => {
+		var session = sessionStore.getById(sessionId);
+		if (session && ctxRes?.ok && ctxRes.payload) {
+			var next = ctxRes.payload.tokenDebug ? ctxRes.payload.tokenDebug.nextRequest : null;
+			session.contextWindow.value = next && next.contextWindow !== undefined ? next.contextWindow || 0 : 0;
+			session.sessionBudget.value = next || null;
+			session.toolsEnabled.value = ctxRes.payload.supportsTools !== false;
+		}
+		updateTokenBar();
+	});
 	updateTokenBar();
 
 	if (searchContext?.query && S.chatMsgBox) {
@@ -470,11 +443,6 @@ function postHistoryLoadActions(sessionId, searchContext, msgEls) {
 		S.chatMsgBox.appendChild(thinkEl);
 		scrollChatToBottom();
 	}
-}
-
-/** No-op — the Preact SessionHeader component auto-updates from signals. */
-export function updateChatSessionHeader() {
-	// Retained for backward compat call sites; Preact handles rendering.
 }
 
 function showWelcomeCard() {
@@ -523,31 +491,28 @@ export function refreshWelcomeCardIfNeeded() {
 }
 
 function ensureSessionInClientStore(sessionId, entry, projectId) {
-	var existing = sessionStore.getById(sessionId);
-	if (existing) return existing;
-
 	var created = { ...entry, sessionId: sessionId };
 	if (projectId && !created.projectId) created.projectId = projectId;
-	var createdSession = sessionStore.upsert(created);
-
-	// Keep state.js mirror in sync for legacy call sites.
-	var inLegacy = S.sessions.some((s) => s.sessionId === sessionId);
-	if (!inLegacy) {
-		S.setSessions([...S.sessions, created]);
+	var existing = sessionStore.getById(sessionId);
+	if (existing) {
+		// Do not clobber an already-hydrated session with a clientOnly placeholder.
+		if (created.clientOnly) return existing;
+		existing.update(created);
+		return existing;
 	}
-	return createdSession;
+	return sessionStore.upsert(created);
 }
 
-export function switchSession(sessionId, searchContext, projectId) {
+export function switchSession(sessionId, searchContext, projectId, options = {}) {
 	if (!sessionId) {
 		ensureHomeSession().then((homeId) => {
-			if (homeId) switchSession(homeId, searchContext, projectId);
+			if (homeId) switchSession(homeId, searchContext, projectId, options);
 		});
 		return;
 	}
+	var switchGeneration = ++switchGenerationCounter;
+	sessionStore.switchGeneration.value = switchGeneration;
 	sessionStore.setActive(sessionId);
-	// Dual-write to state.js for backward compat
-	S.setActiveSessionId(sessionId);
 	history.replaceState(null, "", sessionPath(sessionId));
 	if (S.chatMsgBox) S.chatMsgBox.textContent = "";
 	var tray = document.getElementById("queuedMessages");
@@ -556,27 +521,40 @@ export function switchSession(sessionId, searchContext, projectId) {
 		tray.classList.add("hidden");
 	}
 	S.setStreamEl(null);
-	S.setStreamText("");
-	S.setLastHistoryIndex(-1);
-	S.setSessionTokens({ input: 0, output: 0 });
-	S.setSessionContextWindow(0);
-	S.setSessionBudget(null);
+	var pendingSession = ensureSessionInClientStore(
+		sessionId,
+		{ sessionId: sessionId, clientOnly: true },
+		projectId,
+	);
+	if (pendingSession) pendingSession.resetViewState();
 	updateTokenBar();
 	// Preact SessionList auto-rerenders active/unread from signals.
 
 	sessionStore.switchInProgress.value = true;
-	S.setSessionSwitchInProgress(true);
 	var switchParams = { sessionId: sessionId };
 	if (projectId) switchParams.projectId = projectId;
 	// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Session switch handles many state updates
 	sendRpc("sessions.switch", switchParams).then((res) => {
+		if (switchGeneration !== switchGenerationCounter || sessionStore.activeSessionId.value !== sessionId) {
+			var activeSessionId = sessionStore.activeSessionId.value || "";
+			console.info(
+				'[moltis] event="session.switch" reason_code="stale_switch_response" decision="drop" policy="web_ui_session_owner_v1"',
+				{
+					requested_session_id: sessionId,
+					active_session_id: activeSessionId,
+					switch_generation: switchGeneration,
+				},
+			);
+			return;
+		}
 		if (res?.ok && res.payload) {
 			var entry = res.payload.entry || {};
 			ensureSessionInClientStore(sessionId, entry, projectId);
 			restoreSessionState(entry, projectId);
 			var history = res.payload.history || [];
 			var msgEls = [];
-			S.setSessionTokens({ input: 0, output: 0 });
+			var sessionEntry = sessionStore.getById(sessionId);
+			if (sessionEntry) sessionEntry.sessionTokens.value = { input: 0, output: 0 };
 			S.setChatBatchLoading(true);
 			history.forEach((msg) => {
 				if (msg.role === "user") {
@@ -590,7 +568,6 @@ export function switchSession(sessionId, searchContext, projectId) {
 				}
 			});
 			S.setChatBatchLoading(false);
-			S.setLastHistoryIndex(history.length > 0 ? history.length - 1 : -1);
 			// Resume chatSeq from the highest user message seq in history
 			// so the counter continues from where it left off after reload.
 			var maxSeq = 0;
@@ -599,7 +576,6 @@ export function switchSession(sessionId, searchContext, projectId) {
 					maxSeq = hm.seq;
 				}
 			}
-			S.setChatSeq(maxSeq);
 			if (history.length === 0) {
 				showWelcomeCard();
 			}
@@ -609,34 +585,30 @@ export function switchSession(sessionId, searchContext, projectId) {
 				if (ts) appendLastMessageTimestamp(ts);
 			}
 			// Sync the store entry — syncCounts calls updateBadge() for re-render.
-			var sessionEntry = sessionStore.getById(sessionId);
 			if (sessionEntry) {
 				sessionEntry.syncCounts(history.length, history.length);
 				sessionEntry.localUnread.value = false;
 				sessionEntry.lastHistoryIndex.value = history.length > 0 ? history.length - 1 : -1;
-			}
-			// Also sync the plain S.sessions entry for backward compat
-			var sEntry = S.sessions.find((s) => s.sessionId === sessionId);
-			if (sEntry) {
-				sEntry.messageCount = history.length;
-				sEntry.lastSeenMessageCount = history.length;
-				sEntry._localUnread = false;
+				sessionEntry.chatSeq.value = maxSeq;
 			}
 			sessionStore.switchInProgress.value = false;
-			S.setSessionSwitchInProgress(false);
 			postHistoryLoadActions(sessionId, searchContext, msgEls);
 			if (S.chatInput) S.chatInput.focus();
-		} else {
-			sessionStore.switchInProgress.value = false;
-			S.setSessionSwitchInProgress(false);
-			if (isMissingSessionSwitchError(res)) {
-				sessionStore.setActive("");
-				S.setActiveSessionId("");
-				ensureHomeSession().then((homeId) => {
-					if (homeId) switchSession(homeId, searchContext, projectId);
-				});
+			} else {
+				sessionStore.switchInProgress.value = false;
+				if (isMissingSessionSwitchError(res)) {
+					if (options?.source === "restore") {
+						console.warn(
+							'[moltis] event="session.restore" reason_code="stored_session_missing" decision="fallback_home" policy="web_ui_session_owner_v1"',
+							{ stored_session_id: sessionId, active_session_id: sessionId },
+						);
+					}
+					sessionStore.setActive("");
+					ensureHomeSession().then((homeId) => {
+						if (homeId) switchSession(homeId, searchContext, projectId, options);
+					});
+				}
+				if (S.chatInput) S.chatInput.focus();
 			}
-			if (S.chatInput) S.chatInput.focus();
-		}
 	});
 }

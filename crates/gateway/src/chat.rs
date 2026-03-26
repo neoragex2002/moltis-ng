@@ -189,7 +189,7 @@ enum InputMediumParam {
 #[serde(rename_all = "camelCase")]
 struct ChatFinalBroadcast {
     run_id: String,
-    session_key: String,
+    session_id: String,
     state: &'static str,
     text: String,
     model: String,
@@ -222,7 +222,7 @@ struct ChatRunOutput {
 #[serde(rename_all = "camelCase")]
 struct ChatErrorBroadcast {
     run_id: String,
-    session_key: String,
+    session_id: String,
     state: &'static str,
     error: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1955,6 +1955,33 @@ impl LiveChatService {
         )
     }
 
+    fn require_explicit_session_id(
+        &self,
+        explicit_session_id: Option<&str>,
+        conn_id: Option<&str>,
+        method: &'static str,
+    ) -> Result<String, String> {
+        if let Some(session_id) = explicit_session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(session_id.to_string());
+        }
+        warn!(
+            event = "session.contract_violation",
+            reason_code = "ui_missing_explicit_session_id",
+            decision = "reject",
+            policy = "web_ui_session_owner_v1",
+            method,
+            conn_id = conn_id,
+            remediation = "resend with _sessionId from sessionStore.activeSessionId",
+            "chat method rejected missing explicit _sessionId"
+        );
+        Err(format!(
+            "{method} requires explicit _sessionId; remediation: resend with _sessionId from sessionStore.activeSessionId"
+        ))
+    }
+
     /// Resolve the project context prompt section for a session.
     async fn resolve_project_context(
         &self,
@@ -2170,12 +2197,11 @@ impl ChatService for LiveChatService {
             "send() mode decision"
         );
 
-        let session_key = self
-            .require_session_id(
-                params.get("_sessionId").and_then(|v| v.as_str()),
-                conn_id.as_deref(),
-            )
-            .await?;
+        let session_key = self.require_explicit_session_id(
+            params.get("_sessionId").and_then(|v| v.as_str()),
+            conn_id.as_deref(),
+            "chat.send",
+        )?;
         let channel_turn_id = params
             .get("_channelTurnId")
             .and_then(|v| v.as_str())
@@ -3600,12 +3626,11 @@ impl ChatService for LiveChatService {
             .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let session_key = self
-            .require_session_id(
-                params.get("_sessionId").and_then(|v| v.as_str()),
-                conn_id.as_deref(),
-            )
-            .await?;
+        let session_key = self.require_explicit_session_id(
+            params.get("_sessionId").and_then(|v| v.as_str()),
+            conn_id.as_deref(),
+            "chat.clear",
+        )?;
 
         self.session_store
             .clear(&session_key)
@@ -3645,12 +3670,11 @@ impl ChatService for LiveChatService {
             .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let session_key = self
-            .require_session_id(
-                params.get("_sessionId").and_then(|v| v.as_str()),
-                conn_id.as_deref(),
-            )
-            .await?;
+        let session_key = self.require_explicit_session_id(
+            params.get("_sessionId").and_then(|v| v.as_str()),
+            conn_id.as_deref(),
+            "chat.compact",
+        )?;
 
         let history = self
             .session_store
@@ -3689,12 +3713,11 @@ impl ChatService for LiveChatService {
             .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let session_key = self
-            .require_session_id(
-                params.get("_sessionId").and_then(|v| v.as_str()),
-                conn_id.as_deref(),
-            )
-            .await?;
+        let session_key = self.require_explicit_session_id(
+            params.get("_sessionId").and_then(|v| v.as_str()),
+            conn_id.as_deref(),
+            "chat.context",
+        )?;
 
         // Optional: draft text from the web UI input box (not yet sent).
         let draft_text = params
@@ -4030,12 +4053,11 @@ impl ChatService for LiveChatService {
             .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let session_key = self
-            .require_session_id(
-                params.get("_sessionId").and_then(|v| v.as_str()),
-                conn_id.as_deref(),
-            )
-            .await?;
+        let session_key = self.require_explicit_session_id(
+            params.get("_sessionId").and_then(|v| v.as_str()),
+            conn_id.as_deref(),
+            "chat.raw_prompt",
+        )?;
 
         // Resolve provider.
         let history = self
@@ -4180,12 +4202,11 @@ impl ChatService for LiveChatService {
             .get("_connId")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let session_key = self
-            .require_session_id(
-                params.get("_sessionId").and_then(|v| v.as_str()),
-                conn_id.as_deref(),
-            )
-            .await?;
+        let session_key = self.require_explicit_session_id(
+            params.get("_sessionId").and_then(|v| v.as_str()),
+            conn_id.as_deref(),
+            "chat.full_context",
+        )?;
 
         // Resolve provider.
         let history = self
@@ -4593,7 +4614,7 @@ async fn handle_run_failed_event(
     // Broadcast terminal error frame (Web UI).
     let error_payload = ChatErrorBroadcast {
         run_id: event.run_id.clone(),
-        session_key: event.session_key.clone(),
+        session_id: event.session_key.clone(),
         state: "error",
         error: error_obj,
         seq: event.seq,
@@ -5438,7 +5459,7 @@ async fn run_with_tools(
 
             let final_payload = ChatFinalBroadcast {
                 run_id: run_id.to_string(),
-                session_key: session_key.to_string(),
+                session_id: session_key.to_string(),
                 state: "final",
                 text: display_text.clone(),
                 model: provider_ref.id().to_string(),
@@ -6345,7 +6366,7 @@ async fn run_streaming(
 
                 let final_payload = ChatFinalBroadcast {
                     run_id: run_id.to_string(),
-                    session_key: session_key.to_string(),
+                    session_id: session_key.to_string(),
                     state: "final",
                     text: accumulated.clone(),
                     model: provider.id().to_string(),
@@ -6656,8 +6677,8 @@ async fn session_channel_binding_fields(
     let Some(binding) = entry.channel_binding.as_deref() else {
         return (None, None);
     };
-    let channel_type =
-        moltis_telegram::adapter::channel_target_from_binding(binding).map(|target| target.channel_type);
+    let channel_type = moltis_telegram::adapter::channel_target_from_binding(binding)
+        .map(|target| target.channel_type);
     let bucket_key = moltis_telegram::adapter::bucket_key_from_binding(binding);
     (channel_type, bucket_key)
 }
@@ -11954,5 +11975,127 @@ mod tests {
             .await
             .expect_err("missing session context must hard error");
         assert!(err.contains("missing session context"));
+    }
+
+    #[test]
+    fn chat_terminal_broadcasts_use_session_id_field() {
+        let final_payload = ChatFinalBroadcast {
+            run_id: "run-1".to_string(),
+            session_id: "sess_test".to_string(),
+            state: "final",
+            text: "done".to_string(),
+            model: "model".to_string(),
+            provider: "provider".to_string(),
+            input_tokens: 1,
+            output_tokens: 2,
+            message_index: 3,
+            reply_medium: ReplyMedium::Text,
+            iterations: Some(1),
+            tool_calls_made: Some(0),
+            audio: None,
+            seq: Some(9),
+        };
+        let error_payload = ChatErrorBroadcast {
+            run_id: "run-1".to_string(),
+            session_id: "sess_test".to_string(),
+            state: "error",
+            error: serde_json::json!({ "message": "boom" }),
+            seq: Some(9),
+        };
+
+        let final_json =
+            serde_json::to_value(final_payload).expect("final payload should serialize");
+        let error_json =
+            serde_json::to_value(error_payload).expect("error payload should serialize");
+
+        assert_eq!(
+            final_json.get("sessionId").and_then(|value| value.as_str()),
+            Some("sess_test")
+        );
+        assert!(final_json.get("sessionKey").is_none());
+        assert_eq!(
+            error_json.get("sessionId").and_then(|value| value.as_str()),
+            Some("sess_test")
+        );
+        assert!(error_json.get("sessionKey").is_none());
+    }
+
+    #[tokio::test]
+    async fn browser_current_session_methods_require_explicit_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
+        let metadata = sqlite_metadata().await;
+        metadata
+            .upsert("sess_active", "agent:default:chat-active", None)
+            .await
+            .expect("session metadata insert should succeed");
+        let state = crate::state::GatewayState::new(
+            crate::auth::ResolvedAuth {
+                mode: crate::auth::AuthMode::Token,
+                token: None,
+                password: None,
+            },
+            crate::services::GatewayServices::noop(),
+        );
+        {
+            let mut inner = state.inner.write().await;
+            inner
+                .active_sessions
+                .insert("conn-test".to_string(), "sess_active".to_string());
+        }
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = Arc::new(BudgetProvider {
+            context_window: 32,
+            input_limit: Some(32),
+            output_limit: Some(32),
+        });
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_agents::providers::ModelInfo {
+                id: "budget-model".to_string(),
+                provider: "budget".to_string(),
+                display_name: "budget".to_string(),
+                created_at: None,
+            },
+            Arc::clone(&provider),
+        );
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            store,
+            metadata,
+        );
+
+        let send_err = chat
+            .send(serde_json::json!({ "_connId": "conn-test", "text": "hello" }))
+            .await
+            .expect_err("chat.send must reject missing _sessionId");
+        assert!(send_err.contains("_sessionId"));
+
+        let clear_err = chat
+            .clear(serde_json::json!({ "_connId": "conn-test" }))
+            .await
+            .expect_err("chat.clear must reject missing _sessionId");
+        assert!(clear_err.contains("_sessionId"));
+
+        let compact_err = chat
+            .compact(serde_json::json!({ "_connId": "conn-test" }))
+            .await
+            .expect_err("chat.compact must reject missing _sessionId");
+        assert!(compact_err.contains("_sessionId"));
+
+        let context_err = chat
+            .context(serde_json::json!({ "_connId": "conn-test" }))
+            .await
+            .expect_err("chat.context must reject missing _sessionId");
+        assert!(context_err.contains("_sessionId"));
+
+        let full_context_err = chat
+            .full_context(serde_json::json!({ "_connId": "conn-test" }))
+            .await
+            .expect_err("chat.full_context must reject missing _sessionId");
+        assert!(full_context_err.contains("_sessionId"));
     }
 }

@@ -6,10 +6,11 @@
 import { html } from "htm/preact";
 import { useEffect, useRef } from "preact/hooks";
 import { makeBranchIcon, makeChatIcon, makeCronIcon, makeProjectIcon, makeTelegramIcon } from "../icons.js";
-import { currentPrefix, navigate, sessionPath } from "../router.js";
-import { switchSession } from "../sessions.js";
-import { projectStore } from "../stores/project-store.js";
-import { sessionStore } from "../stores/session-store.js";
+	import { currentPrefix, navigate, sessionPath } from "../router.js";
+	import { switchSession } from "../sessions.js";
+	import { projectStore } from "../stores/project-store.js";
+	import { sessionLabelText } from "../session-label.js";
+	import { sessionStore } from "../stores/session-store.js";
 
 // ── Braille spinner ─────────────────────────────────────────
 var spinnerFrames = [
@@ -158,7 +159,7 @@ function SessionItem({ session, activeKey, depth, keyMap }) {
 			<div class="session-info">
 				<div class="session-label">
 					<${SessionIcon} session=${session} isBranch=${isBranch} />
-					<span data-label-text>${session.displayName || session.label || session.sessionId}</span>
+						<span data-label-text>${sessionLabelText(session)}</span>
 					${
 						ts > 0 &&
 						html`

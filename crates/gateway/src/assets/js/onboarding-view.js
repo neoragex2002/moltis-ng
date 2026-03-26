@@ -10,13 +10,15 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { EmojiPicker } from "./emoji-picker.js";
 import { get as getGon, refresh as refreshGon } from "./gon.js";
 import { sendRpc as sendBaseRpc } from "./helpers.js";
-import { detectPasskeyName } from "./passkey-detect.js";
-import { providerApiKeyHelp } from "./provider-key-help.js";
-import { startProviderOAuth } from "./provider-oauth.js";
-import {
-	humanizeProbeError,
-	isModelServiceNotConfigured,
-	testModel,
+	import { detectPasskeyName } from "./passkey-detect.js";
+	import { providerApiKeyHelp } from "./provider-key-help.js";
+	import { startProviderOAuth } from "./provider-oauth.js";
+	import { sessionStore } from "./stores/session-store.js";
+	import { preferredStartupChatPath } from "./startup-session.js";
+	import {
+		humanizeProbeError,
+		isModelServiceNotConfigured,
+		testModel,
 	validateProviderKey,
 } from "./provider-validation.js";
 import * as S from "./state.js";
@@ -72,10 +74,10 @@ async function sendRpc(method, params, options = {}) {
 var BASE_STEP_LABELS = ["Security", "Agent", "LLM", "Channel", "Summary"];
 var VOICE_STEP_LABELS = ["Security", "Agent", "LLM", "Voice", "Channel", "Summary"];
 
-function preferredChatPath() {
-	var sessionId = localStorage.getItem("moltis-sessionId") || "";
-	return sessionId ? `/chats/${sessionId.replace(/:/g, "/")}` : "/chats";
-}
+	function goPreferredChat() {
+		var resolved = preferredStartupChatPath(null);
+		window.location.assign(resolved.path);
+	}
 
 function ErrorPanel({ message }) {
 	return html`<div role="alert" class="alert-error-text whitespace-pre-line">
@@ -1844,7 +1846,7 @@ function VoiceStep({ onNext, onBack }) {
 
 					try {
 						var resp = await fetch(
-							`/api/sessions/${encodeURIComponent(S.activeSessionId)}/upload?transcribe=true&provider=${encodeURIComponent(providerId)}`,
+							`/api/sessions/${encodeURIComponent(sessionStore.activeSessionId.value || "")}/upload?transcribe=true&provider=${encodeURIComponent(providerId)}`,
 							{
 								method: "POST",
 								headers: { "Content-Type": audioBlob.type || "audio/webm" },
@@ -2416,17 +2418,17 @@ function OnboardingPage() {
 	var stepIndex = authNeeded ? step : step - 1;
 	var lastStep = voiceAvailable ? 5 : 4;
 
-	function goNext() {
-		if (step === lastStep) {
-			window.location.assign(preferredChatPath());
-		} else {
-			setStep(step + 1);
+		function goNext() {
+			if (step === lastStep) {
+				goPreferredChat();
+			} else {
+				setStep(step + 1);
+			}
 		}
-	}
 
-	function goFinish() {
-		window.location.assign(preferredChatPath());
-	}
+		function goFinish() {
+			goPreferredChat();
+		}
 
 	function goBack() {
 		if (authNeeded) {
