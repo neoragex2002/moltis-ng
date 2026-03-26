@@ -1,9 +1,15 @@
+# SUPERSEDED BY `issues/issue-cron-system-governance-one-cut.md`
+#
+# 2026-03-27 决策更新：
+# - cron/heartbeat 的系统级治理已收敛为 one-cut 主单：`issues/issue-cron-system-governance-one-cut.md`。
+# - 本单只保留旧问题现象与旧路径证据，不再作为实施依据。
+
 # Issue: cron 定时提醒的 UI 展示异常与 Telegram 投递缺口（cron / telegram）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: SURVEY
+- Status: SUPERSEDED（不再推进；以新主单为唯一实施准绳）
 - Priority: P1
-- Updated: 2026-03-10
+- Updated: 2026-03-27
 - Owners: TBD
 - Components: cron / gateway / ui / telegram
 - Affected providers/models: openai-responses::gpt-5.2
@@ -15,7 +21,7 @@
 - 无
 
 **已知差异/后续优化（非阻塞）**
-- 当前单子先聚焦“提醒显示”和“提醒投递”两件事，不顺带修改 cron 重试、Telegram 轮询重连等其它机制。
+- N/A：本单已 superseded。若需实施与验证，以 `issues/issue-cron-system-governance-one-cut.md` 为准。
 
 ---
 

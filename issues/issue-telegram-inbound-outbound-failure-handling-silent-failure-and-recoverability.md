@@ -879,7 +879,7 @@
 - Related issues/docs：
   - `issues/issue-telegram-outbound-retry-policy-and-send-failure-recovery.md`
   - `issues/issue-observability-llm-and-telegram-timeouts-retries.md`
-  - `issues/issue-cron-schedule-ui-invalid-date-and-telegram-delivery-gap.md`
+  - `issues/issue-cron-system-governance-one-cut.md`
 - Related commits/PRs：
 - External refs（可选）：
 

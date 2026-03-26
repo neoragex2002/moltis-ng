@@ -1,15 +1,19 @@
-# SUPERSEDED BY `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md`
+# PARTIALLY SUPERSEDED BY `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md`
 #
-# 2026-03-25 决策更新：
-# - `bot_dispatch_cycle_budget`、hop limit、budget/fuse 这类 Telegram 渠道级隐藏协作配置已被 hard-cut 删除。
-# - Telegram 当前只保留 bot 账号配置与直接投递/运行时事实；相关过时方案以 `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md` 为准。
+# Superseded scope（已 hard-cut；本单不再承载，也不得在本单复活）：
+# - `bot_dispatch_cycle_budget`、hop limit、budget/fuse、dispatch fuse 等 Telegram 渠道级隐藏协作配置与运行时语义。
+# - 相关删除与替代口径以 `issues/issue-telegram-group-runtime-message-ref-and-dedupe-one-cut.md` 为唯一准绳。
+#
+# Not superseded（本单仍是唯一准绳；必须继续推进并闭环）：
+# - Telegram bot 账号配置（token/agent_id/dm_scope/group_scope/...）的唯一事实来源（DB vs `moltis.toml`）二选一决策与 one-cut 落地。
+# - 删除“配置文件先启动、DB 再补启动”的混源启动模型（当前代码仍存在该 precedence 拼装路径）。
 
 # Issue: Telegram 配置事实源分裂导致 owner 不清（single_source_of_truth / one_cut）
 
 ## 实施现状（Status）【增量更新主入口】
 - Status: SURVEY
 - Priority: P1
-- Updated: 2026-03-24
+- Updated: 2026-03-26
 - Owners: Codex
 - Components: gateway / telegram / config / ui / people
 - Affected providers/models: N/A
@@ -146,31 +150,38 @@
 
 - 代码证据：
   - `crates/channels/src/store.rs:5`：stored channel 的持久化载体就是整块 `config: serde_json::Value`，不是拆散后的半套列
-  - `crates/gateway/src/channel_store.rs:46`：SQLite `channels` 表只有 `config TEXT`，结构上可承载完整 Telegram bot 配置
-  - `crates/gateway/src/server.rs:1854`：启动时先从配置文件启动 Telegram 账号
-  - `crates/gateway/src/server.rs:1867`：随后再加载数据库 stored channels，并启动那些“不在配置文件里”的账号
+  - `crates/gateway/src/channel_store.rs:49`：SQLite `channels` 表 schema 含 `config TEXT`，结构上可承载完整 Telegram bot 配置
+  - `crates/gateway/src/server.rs:1706`：启动时先从配置文件启动 Telegram 账号（注释明确 “these take precedence”）
+  - `crates/gateway/src/server.rs:1719`：随后再加载数据库 stored channels，并启动那些“不在配置文件里”的账号（混源启动模型的直接证据）
   - `crates/gateway/src/people.rs:139`：Telegram `identity link` 从 `PEOPLE.md` 解析，不属于 bot 账号配置入口
-  - `crates/gateway/src/server.rs:1840`：启动时把 `PEOPLE.md` 解析出的 identity links 注入 Telegram plugin
-  - `crates/gateway/src/server.rs:1852`：Telegram 渠道级共享策略 `bot_dispatch_cycle_budget` 从配置文件注入
-  - `crates/gateway/src/channel_store.rs:79`：stored channel 把整段 `config` JSON 持久化到 SQLite
-  - `crates/telegram/src/plugin.rs:175`：Telegram plugin 启动账号时，直接把 JSON 反序列化为完整 `TelegramAccountConfig`
-  - `crates/gateway/src/channel.rs:261`：`channels.add` 入口按完整 `TelegramAccountConfig` 校验并持久化
-  - `crates/gateway/src/channel.rs:367`：`channels.update` 同样按完整 `TelegramAccountConfig` 校验并持久化
-  - `crates/gateway/src/channel.rs:267`：`channels.add` 会先用 token 调 `getMe` 探测 bot 身份，再把 `chan_user_id/chan_user_name/chan_nickname` 写回配置快照
+  - `crates/gateway/src/server.rs:1695`：启动时把 `PEOPLE.md` 解析出的 identity links 注入 Telegram plugin（identity link 与 bot config owner 独立）
+  - `crates/gateway/src/channel_store.rs:80`：stored channel 把整段 `config` JSON 持久化到 SQLite
+  - `crates/telegram/src/plugin.rs:168`：Telegram plugin 启动账号时，直接把 JSON 反序列化为完整 `TelegramAccountConfig`
+  - `crates/gateway/src/channel.rs:248`：`channels.add` 入口按完整 `TelegramAccountConfig` 校验并持久化
+  - `crates/gateway/src/channel.rs:343`：`channels.update` 同样按完整 `TelegramAccountConfig` 校验并持久化
+  - `crates/gateway/src/channel.rs:168`：`channels.list/status` 会合并“运行时已启动账号 + DB stored channels”，因此配置文件启动的账号也会出现在 UI 列表里
+  - `crates/gateway/src/channel.rs:362`：`channels.update` 当前要求该账号必须存在于 store（否则直接失败），因此“仅配置文件启动、未写入 DB”的账号在 UI 侧无法走 update 闭环
+  - `crates/gateway/src/channel.rs:269`：`channels.add` 会先用 token 调 `getMe` 探测 bot 身份，再把 `chan_user_id/chan_user_name/chan_nickname` 写回配置快照
   - `crates/telegram/src/bot.rs:60`：`probe_bot_identity()` 明确表明这些字段属于 Telegram authoritative 身份事实
-  - `crates/telegram/src/state.rs:487`：运行时有效 bot 身份优先来自 runtime state，其次才回落到 config 中的 `chan_user_*`
+  - `crates/telegram/src/state.rs:347`：运行时有效 bot 身份优先来自 runtime state，其次才回落到 config 中的 `chan_user_*`
   - `crates/config/src/telegram.rs:11`：`dm_scope` 是 TelegramAccountConfig 的正式字段
   - `crates/config/src/telegram.rs:26`：`group_scope` 是 TelegramAccountConfig 的正式字段
   - `crates/gateway/src/assets/js/page-channels.js:321`：新增 Telegram bot UI 草稿字段不包含 `dm_scope/group_scope`
-  - `crates/gateway/src/assets/js/page-channels.js:401`：`channels.add` 的 UI payload 未发送 `dm_scope/group_scope`
+  - `crates/gateway/src/assets/js/page-channels.js:415`：`channels.add` 的 UI payload 未发送 `dm_scope/group_scope`
   - `crates/gateway/src/assets/js/page-channels.js:333`：编辑 Telegram bot UI 草稿字段不包含 `dm_scope/group_scope`
-  - `crates/gateway/src/assets/js/page-channels.js:559`：`channels.update` 的 UI payload 未发送 `dm_scope/group_scope`
-  - `crates/gateway/src/assets/js/onboarding-view.js:2023`：onboarding 连接 Telegram bot 时同样未发送 `dm_scope/group_scope`
+  - `crates/gateway/src/assets/js/page-channels.js:568`：`channels.update` 的 UI payload 未发送 `dm_scope/group_scope`
+  - `crates/gateway/src/assets/js/onboarding-view.js:2025`：onboarding 连接 Telegram bot 时同样未发送 `dm_scope/group_scope`
 - 配置/协议证据（必要时）：
   - `crates/config/src/telegram.rs:53`：`TelegramChannelsConfig` 只表达 Telegram 渠道级共享配置与账号映射
 - 当前测试覆盖：
   - 已有：`channels.add/update` 与 Telegram 启动路径具备基础测试
   - 缺口：没有测试冻结“Telegram bot 账号配置 owner 只能有一个”“UI 暴露字段必须与 owner 生效字段一致”“非 owner 路径应如何拒绝”
+
+### 核实结论（2026-03-26，基于代码现实；用于决策备档）
+1) 本单未收口：当前仍存在 Telegram bot 账号配置混源启动（配置文件 precedence + DB 补启动），与唯一真源原则直接冲突（`crates/gateway/src/server.rs:1706`、`crates/gateway/src/server.rs:1719`）。
+2) “DB owner”并非不可行：DB 结构与后端入口已能承载完整 `TelegramAccountConfig`（`StoredChannel.config` 与 `channels.add/update`），问题在于 UI/onboarding 仅暴露半套字段（例如缺失 `dm_scope/group_scope` 等）。
+3) “配置文件 owner”也不是零成本：一旦选择配置文件为唯一 owner，就必须 one-cut 收口并明确拒绝/只读 `channels.add/update` 这类 DB 写入口，否则依旧是双真源。
+4) 当前 UI 列表会展示“配置文件启动但未入库”的账号，但 `channels.update` 无法更新这类账号（因为 update 依赖 store）；若未来选配置文件 owner，UI 必须明确只读/拒绝提示，禁止伪装成可编辑入口。
 
 ## 根因分析（Root Cause）
 - A. Telegram 相关事实没有先做 owner 切分，直接沿实现便利分散到 `PEOPLE.md`、配置文件、DB 与 UI 多条路径

@@ -1,9 +1,16 @@
+# SUPERSEDED BY `docs/plans/2026-03-26-cron-heartbeat-model-design.md`
+#
+# 2026-03-27 决策更新：
+# - `cron` 目标模型已 hard-cut 收敛为“无会话上下文执行 + 结果投递”。
+# - 旧的 `cron execution session 暴露到 generic Session UI` 讨论建立在已废弃的旧模型上。
+# - 后续实施以 `issues/issue-cron-system-governance-one-cut.md` 为实施主单，以设计稿为当前语义准绳。
+
 # Issue: cron 执行会话错误泄露到 Session UI，导致删除语义错位（cron / sessions / ui）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: SURVEY
+- Status: SUPERSEDED（不再推进；以新准绳与新主单为准）
 - Priority: P1
-- Updated: 2026-03-24
+- Updated: 2026-03-27
 - Owners: TBD
 - Components: gateway / ui / sessions / cron
 - Affected providers/models: N/A
@@ -17,8 +24,7 @@
 - `main` 与普通会话的 header action 可见性已有 E2E：`crates/gateway/ui/e2e/specs/sessions.spec.js:103`
 
 **已知差异/后续优化（非阻塞）**
-- 当前仓库内没有针对 generic Session UI 拒绝 cron artifact 的自动化覆盖。
-- 当前单子先聚焦“ownership 收口 + generic Session UI 去泄露 + 删除语义单点收口”，不顺带补 `/crons` transcript viewer。
+- N/A：本单已 superseded。旧证据保留仅用于追溯，不再作为实施依据。
 
 ---
 
@@ -315,7 +321,7 @@
 
 ## 交叉引用（Cross References）
 - Related issues/docs：
-  - `issues/issue-cron-schedule-ui-invalid-date-and-telegram-delivery-gap.md`
+  - `issues/issue-cron-system-governance-one-cut.md`
   - `issues/discussions/cron-trigger-execution-delivery-model.md`
   - `docs/src/session-branching.md`
 - Related commits/PRs：
