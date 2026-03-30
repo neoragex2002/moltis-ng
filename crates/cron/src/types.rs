@@ -1,63 +1,38 @@
-//! Core data types for the cron scheduling system.
+//! Core data types for the cron + heartbeat governance model.
+//!
+//! Contract note:
+//! - Internal identifiers use snake_case.
+//! - External JSON shapes use camelCase via explicit serde rename.
 
 use serde::{Deserialize, Serialize};
 
-/// How a job is scheduled.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum CronSchedule {
-    /// One-shot: fire once at `at_ms` (epoch millis).
-    At { at_ms: u64 },
-    /// Fixed interval: fire every `every_ms` millis, optionally anchored.
-    Every {
-        every_ms: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        anchor_ms: Option<u64>,
-    },
-    /// Cron expression (5-field standard or 6-field with seconds).
-    Cron {
-        expr: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tz: Option<String>,
-    },
+fn default_true() -> bool {
+    true
 }
 
-/// What happens when a job fires.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum CronPayload {
-    /// Inject a system event into the main session.
-    SystemEvent { text: String },
-    /// Run an isolated agent turn.
-    AgentTurn {
-        message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        timeout_secs: Option<u64>,
-        #[serde(default)]
-        deliver: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        channel: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        to: Option<String>,
-    },
+fn default_false() -> bool {
+    false
 }
 
-/// Where the job executes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionTarget {
-    /// Inject into the main conversation session.
-    Main,
-    /// Run in an isolated, throwaway session.
-    #[default]
-    Isolated,
-    /// Run in a named session that persists across runs (e.g. "heartbeat").
-    Named(String),
+// ── Shared ──────────────────────────────────────────────────────────────────
+
+/// Model selection policy for a single run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ModelSelector {
+    /// Inherit the model configured on the target session (or global default).
+    Inherit,
+    /// Use an explicit model id.
+    Explicit { model_id: String },
 }
 
-/// Outcome of a single job run.
+impl Default for ModelSelector {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
+/// Outcome of a single run.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RunStatus {
@@ -66,16 +41,59 @@ pub enum RunStatus {
     Skipped,
 }
 
-/// Mutable runtime state of a job.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
+/// A stable session target selector.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum SessionTarget {
+    Main,
+    Session { session_key: String },
+}
+
+// ── Cron ────────────────────────────────────────────────────────────────────
+
+/// How a cron job is scheduled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum CronSchedule {
+    /// One-shot: fire once at `at` (RFC3339).
+    Once { at: String },
+    /// Fixed interval: fire every `every` interval string (e.g. "30m").
+    Every { every: String },
+    /// Cron expression (5-field standard or 6-field with seconds).
+    Cron { expr: String, timezone: String },
+}
+
+/// Cron delivery policy (execution is always isolated; delivery is post-run).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum CronDelivery {
+    Silent,
+    Session { target: SessionTarget },
+    Telegram { target: TelegramTarget },
+}
+
+/// Telegram target address (minimal, strict).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TelegramTarget {
+    pub account_key: String,
+    /// Decimal string (avoid JS number precision loss).
+    pub chat_id: String,
+    /// Decimal string; optional.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// Mutable runtime state of a cron job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CronJobState {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_run_at_ms: Option<u64>,
+    pub next_run_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub running_at_ms: Option<u64>,
+    pub running_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_run_at_ms: Option<u64>,
+    pub last_run_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_status: Option<RunStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,139 +103,183 @@ pub struct CronJobState {
 }
 
 /// A scheduled cron job.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CronJob {
-    pub id: String,
+    pub job_id: String,
+    pub agent_id: String,
     pub name: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_false")]
     pub delete_after_run: bool,
     pub schedule: CronSchedule,
-    pub payload: CronPayload,
+    pub prompt: String,
     #[serde(default)]
-    pub session_target: SessionTarget,
+    pub model_selector: ModelSelector,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    pub delivery: CronDelivery,
     #[serde(default)]
     pub state: CronJobState,
-    /// Sandbox configuration for this job.
-    #[serde(default)]
-    pub sandbox: CronSandboxConfig,
-    /// Whether this is a system-managed job (e.g. heartbeat). System jobs are
-    /// hidden from the normal jobs table in the UI.
-    #[serde(default)]
-    pub system: bool,
-    pub created_at_ms: u64,
-    pub updated_at_ms: u64,
 }
 
-/// Record of a completed run, stored in run history.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+/// Input for creating a new cron job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CronJobCreate {
+    /// Optional job id. If not provided, a UUID will be generated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    pub agent_id: String,
+    pub name: String,
+    pub schedule: CronSchedule,
+    pub prompt: String,
+    #[serde(default)]
+    pub model_selector: ModelSelector,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    pub delivery: CronDelivery,
+    #[serde(default = "default_false")]
+    pub delete_after_run: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Patch for updating an existing cron job.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CronJobPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<CronSchedule>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_selector: Option<ModelSelector>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
+    pub timeout_secs: Option<Option<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<CronDelivery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_after_run: Option<bool>,
+}
+
+/// Summary status of the cron system.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CronStatus {
+    pub running: bool,
+    pub job_count: usize,
+    pub enabled_count: usize,
+    pub next_run_at: Option<String>,
+}
+
+/// Record of a completed cron job run, stored in run history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CronRunRecord {
+    pub run_id: String,
     pub job_id: String,
-    pub started_at_ms: u64,
-    pub finished_at_ms: u64,
+    pub started_at: String,
+    pub finished_at: String,
     pub status: RunStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
+    pub output_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
 }
 
-/// Sandbox configuration for a cron job.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CronSandboxConfig {
-    /// Whether to run the job inside a sandbox. Defaults to true.
+/// Notification emitted when cron jobs change.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum CronNotification {
+    Created { job: CronJob },
+    Updated { job: CronJob },
+    Removed { job_id: String },
+}
+
+// ── Heartbeat ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActiveHours {
+    pub start: String,
+    pub end: String,
+    pub timezone: String,
+}
+
+/// Heartbeat configuration stored in DB (prompt is owned by agents/<agent_id>/HEARTBEAT.md).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeartbeatConfig {
+    pub agent_id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Override the sandbox image. If `None`, uses the default image.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-}
-
-impl Default for CronSandboxConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            image: None,
-        }
-    }
-}
-
-/// Input for creating a new job.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CronJobCreate {
-    /// Optional ID for the job. If not provided, a UUID will be generated.
-    /// Use a fixed ID for system jobs to preserve run history across restarts.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    pub name: String,
-    pub schedule: CronSchedule,
-    pub payload: CronPayload,
-    #[serde(default)]
+    pub every: String,
     pub session_target: SessionTarget,
     #[serde(default)]
-    pub delete_after_run: bool,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub system: bool,
-    #[serde(default)]
-    pub sandbox: CronSandboxConfig,
+    pub model_selector: ModelSelector,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_hours: Option<ActiveHours>,
 }
 
-fn default_true() -> bool {
-    true
+/// Mutable runtime state of a heartbeat.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeartbeatState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub running_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<RunStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_duration_ms: Option<u64>,
 }
 
-/// Patch for updating an existing job.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct CronJobPatch {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schedule: Option<CronSchedule>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<CronPayload>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_target: Option<SessionTarget>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delete_after_run: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox: Option<CronSandboxConfig>,
+/// Summary status of a heartbeat (typed projection for UI/RPC).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeartbeatStatus {
+    pub config: HeartbeatConfig,
+    pub state: HeartbeatState,
 }
 
-/// Summary status of the cron system.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CronStatus {
-    pub running: bool,
-    pub job_count: usize,
-    pub enabled_count: usize,
-    pub next_run_at_ms: Option<u64>,
-}
-
-/// Notification emitted when cron jobs change.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum CronNotification {
-    /// A new job was created.
-    Created { job: CronJob },
-    /// An existing job was updated.
-    Updated { job: CronJob },
-    /// A job was removed.
-    Removed { job_id: String },
+/// Record of a completed heartbeat run, stored in run history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeartbeatRunRecord {
+    pub run_id: String,
+    pub agent_id: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub status: RunStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -226,229 +288,114 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_schedule_roundtrip_at() {
-        let s = CronSchedule::At { at_ms: 1234567890 };
-        let json = serde_json::to_string(&s).unwrap();
-        let back: CronSchedule = serde_json::from_str(&json).unwrap();
-        assert_eq!(s, back);
-    }
-
-    #[test]
-    fn test_schedule_roundtrip_every() {
-        let s = CronSchedule::Every {
-            every_ms: 60_000,
-            anchor_ms: Some(1000),
+    fn cron_schedule_roundtrip_once() {
+        let s = CronSchedule::Once {
+            at: "2026-03-29T00:00:00Z".into(),
         };
         let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"kind\":\"once\""));
         let back: CronSchedule = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
     }
 
     #[test]
-    fn test_schedule_roundtrip_cron() {
+    fn cron_schedule_roundtrip_every() {
+        let s = CronSchedule::Every { every: "30m".into() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"kind\":\"every\""));
+        let back: CronSchedule = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn cron_schedule_roundtrip_cron() {
         let s = CronSchedule::Cron {
             expr: "0 9 * * *".into(),
-            tz: Some("Europe/Paris".into()),
+            timezone: "Asia/Shanghai".into(),
         };
         let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"kind\":\"cron\""));
         let back: CronSchedule = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
     }
 
     #[test]
-    fn test_payload_system_event() {
-        let p = CronPayload::SystemEvent {
-            text: "hello".into(),
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        assert!(json.contains("systemEvent"));
-        let back: CronPayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(p, back);
+    fn model_selector_roundtrip_inherit() {
+        let m = ModelSelector::Inherit;
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, "{\"kind\":\"inherit\"}");
+        let back: ModelSelector = serde_json::from_str(&json).unwrap();
+        assert_eq!(m, back);
     }
 
     #[test]
-    fn test_payload_agent_turn() {
-        let p = CronPayload::AgentTurn {
-            message: "check emails".into(),
-            model: None,
-            timeout_secs: Some(120),
-            deliver: true,
-            channel: Some("slack".into()),
-            to: None,
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        let back: CronPayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(p, back);
+    fn telegram_target_rejects_unknown_fields() {
+        let bad = serde_json::json!({
+            "accountKey": "acc",
+            "chatId": "123",
+            "username": "nope"
+        });
+        let err = serde_json::from_value::<TelegramTarget>(bad).expect_err("unknown fields");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown field"));
     }
 
     #[test]
-    fn test_cronjob_roundtrip() {
-        let job = CronJob {
-            id: "abc".into(),
-            name: "test".into(),
-            enabled: true,
-            delete_after_run: false,
-            schedule: CronSchedule::Cron {
-                expr: "*/5 * * * *".into(),
-                tz: None,
-            },
-            payload: CronPayload::SystemEvent {
-                text: "ping".into(),
-            },
-            session_target: SessionTarget::Main,
-            state: CronJobState::default(),
-            sandbox: CronSandboxConfig::default(),
-            system: false,
-            created_at_ms: 1000,
-            updated_at_ms: 1000,
-        };
-        let json = serde_json::to_string(&job).unwrap();
-        let back: CronJob = serde_json::from_str(&json).unwrap();
-        assert_eq!(job, back);
+    fn cron_job_patch_allows_clearing_timeout_secs_with_null() {
+        let clear = serde_json::json!({ "timeoutSecs": null });
+        let patch: CronJobPatch = serde_json::from_value(clear).unwrap();
+        assert_eq!(patch.timeout_secs, Some(None));
+
+        let omit = serde_json::json!({});
+        let patch: CronJobPatch = serde_json::from_value(omit).unwrap();
+        assert_eq!(patch.timeout_secs, None);
+
+        let set = serde_json::json!({ "timeoutSecs": 42 });
+        let patch: CronJobPatch = serde_json::from_value(set).unwrap();
+        assert_eq!(patch.timeout_secs, Some(Some(42)));
+
+        let json = serde_json::to_value(&CronJobPatch {
+            timeout_secs: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(json.get("timeoutSecs"), Some(&serde_json::Value::Null));
     }
 
     #[test]
-    fn test_session_target_default_is_isolated() {
-        assert_eq!(SessionTarget::default(), SessionTarget::Isolated);
+    fn cron_schedule_rejects_legacy_at_ms() {
+        let bad = serde_json::json!({
+            "kind": "once",
+            "at_ms": 123
+        });
+        assert!(serde_json::from_value::<CronSchedule>(bad).is_err());
     }
 
     #[test]
-    fn test_run_record_roundtrip() {
-        let rec = CronRunRecord {
-            job_id: "j1".into(),
-            started_at_ms: 1000,
-            finished_at_ms: 2000,
-            status: RunStatus::Ok,
-            error: None,
-            duration_ms: 1000,
-            output: Some("done".into()),
-            input_tokens: None,
-            output_tokens: None,
-        };
-        let json = serde_json::to_string(&rec).unwrap();
-        let back: CronRunRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(rec, back);
-        // Tokens should be absent from JSON when None.
-        assert!(!json.contains("inputTokens"));
-        assert!(!json.contains("outputTokens"));
+    fn cron_schedule_rejects_legacy_tz_field() {
+        let bad = serde_json::json!({
+            "kind": "cron",
+            "expr": "0 9 * * *",
+            "timezone": "UTC",
+            "tz": "UTC"
+        });
+        assert!(serde_json::from_value::<CronSchedule>(bad).is_err());
     }
 
     #[test]
-    fn test_run_record_with_tokens() {
-        let rec = CronRunRecord {
-            job_id: "j1".into(),
-            started_at_ms: 1000,
-            finished_at_ms: 2000,
-            status: RunStatus::Ok,
-            error: None,
-            duration_ms: 1000,
-            output: Some("done".into()),
-            input_tokens: Some(150),
-            output_tokens: Some(42),
-        };
-        let json = serde_json::to_string(&rec).unwrap();
-        let back: CronRunRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(rec, back);
-        assert_eq!(back.input_tokens, Some(150));
-        assert_eq!(back.output_tokens, Some(42));
-    }
-
-    #[test]
-    fn test_run_record_deserialize_without_tokens() {
-        // Old records without token fields should deserialize with None.
-        let json = r#"{"jobId":"j1","startedAtMs":1000,"finishedAtMs":2000,"status":"ok","durationMs":1000}"#;
-        let rec: CronRunRecord = serde_json::from_str(json).unwrap();
-        assert_eq!(rec.input_tokens, None);
-        assert_eq!(rec.output_tokens, None);
-    }
-
-    #[test]
-    fn test_job_create_defaults() {
-        let json = r#"{
-            "name": "test",
-            "schedule": { "kind": "at", "at_ms": 1000 },
-            "payload": { "kind": "systemEvent", "text": "hi" }
-        }"#;
-        let create: CronJobCreate = serde_json::from_str(json).unwrap();
-        assert!(create.id.is_none());
-        assert!(create.enabled);
-        assert!(!create.delete_after_run);
-        assert_eq!(create.session_target, SessionTarget::Isolated);
-        assert!(create.sandbox.enabled);
-        assert!(create.sandbox.image.is_none());
-    }
-
-    #[test]
-    fn test_sandbox_config_default() {
-        let cfg = CronSandboxConfig::default();
-        assert!(cfg.enabled);
-        assert!(cfg.image.is_none());
-    }
-
-    #[test]
-    fn test_sandbox_config_roundtrip() {
-        let cfg = CronSandboxConfig {
-            enabled: false,
-            image: Some("custom:latest".into()),
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: CronSandboxConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(cfg, back);
-    }
-
-    #[test]
-    fn test_sandbox_config_deserialize_missing_defaults() {
-        let cfg: CronSandboxConfig = serde_json::from_str("{}").unwrap();
-        assert!(cfg.enabled);
-        assert!(cfg.image.is_none());
-    }
-
-    #[test]
-    fn test_cronjob_with_sandbox_roundtrip() {
-        let job = CronJob {
-            id: "abc".into(),
-            name: "test".into(),
-            enabled: true,
-            delete_after_run: false,
-            schedule: CronSchedule::Every {
-                every_ms: 60_000,
-                anchor_ms: None,
-            },
-            payload: CronPayload::AgentTurn {
-                message: "go".into(),
-                model: None,
-                timeout_secs: None,
-                deliver: false,
-                channel: None,
-                to: None,
-            },
-            session_target: SessionTarget::Isolated,
-            state: CronJobState::default(),
-            sandbox: CronSandboxConfig {
-                enabled: false,
-                image: Some("my-image:v1".into()),
-            },
-            system: false,
-            created_at_ms: 1000,
-            updated_at_ms: 1000,
-        };
-        let json = serde_json::to_string(&job).unwrap();
-        let back: CronJob = serde_json::from_str(&json).unwrap();
-        assert_eq!(job, back);
-        assert!(!back.sandbox.enabled);
-        assert_eq!(back.sandbox.image.as_deref(), Some("my-image:v1"));
-    }
-
-    #[test]
-    fn test_cron_status_serialize() {
-        let s = CronStatus {
-            running: true,
-            job_count: 5,
-            enabled_count: 3,
-            next_run_at_ms: Some(999),
-        };
-        let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["running"], true);
-        assert_eq!(v["jobCount"], 5);
+    fn cron_job_create_rejects_legacy_payload_kind() {
+        let bad = serde_json::json!({
+            "jobId": "j1",
+            "agentId": "default",
+            "name": "x",
+            "enabled": true,
+            "schedule": { "kind": "every", "every": "1m" },
+            "payloadKind": "agentTurn",
+            "prompt": "hi",
+            "modelSelector": { "kind": "inherit" },
+            "delivery": { "kind": "silent" },
+            "deleteAfterRun": false
+        });
+        assert!(serde_json::from_value::<CronJobCreate>(bad).is_err());
     }
 }

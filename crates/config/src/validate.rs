@@ -323,14 +323,6 @@ fn build_schema_map() -> KnownKeys {
         ]))
     };
 
-    let active_hours = || {
-        Struct(HashMap::from([
-            ("start", Leaf),
-            ("end", Leaf),
-            ("timezone", Leaf),
-        ]))
-    };
-
     let qmd_collection = || Struct(HashMap::from([("paths", Leaf), ("globs", Leaf)]));
 
     let qmd = || {
@@ -444,17 +436,6 @@ fn build_schema_map() -> KnownKeys {
             Struct(HashMap::from([
                 ("enabled", Leaf),
                 ("fallback_models", Leaf),
-            ])),
-        ),
-        (
-            "heartbeat",
-            Struct(HashMap::from([
-                ("enabled", Leaf),
-                ("every", Leaf),
-                ("model", Leaf),
-                ("prompt", Leaf),
-                ("ack_max_chars", Leaf),
-                ("active_hours", active_hours()),
             ])),
         ),
         (
@@ -1603,19 +1584,78 @@ sandbox_image = "ubuntu:25.10"
             result.diagnostics.iter().any(|d| {
                 d.severity == Severity::Error
                     && d.category == "unknown-field"
-                    && d.path == "heartbeat.sandbox_enabled"
+                    && d.path == "heartbeat"
             }),
-            "heartbeat.sandbox_enabled must hard-fail: {:?}",
+            "legacy heartbeat config must hard-fail at top level: {:?}",
             result.diagnostics
         );
         assert!(
-            result.diagnostics.iter().any(|d| {
-                d.severity == Severity::Error
-                    && d.category == "unknown-field"
-                    && d.path == "heartbeat.sandbox_image"
-            }),
-            "heartbeat.sandbox_image must hard-fail: {:?}",
+            result
+                .diagnostics
+                .iter()
+                .all(|d| d.path != "heartbeat.sandbox_enabled" && d.path != "heartbeat.sandbox_image"),
+            "strict one-cut should reject legacy heartbeat config via top-level owner removal: {:?}",
             result.diagnostics
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.category == "type-error"),
+            "legacy heartbeat config should surface a schema-parse error: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn legacy_heartbeat_table_is_not_part_of_valid_config() {
+        let toml = r#"
+[server]
+bind = "127.0.0.1"
+port = 8080
+
+[providers.anthropic]
+enabled = true
+models = ["claude-sonnet-4-20250514"]
+
+[auth]
+disabled = false
+
+[tls]
+enabled = true
+auto_generate = true
+
+[tools.exec]
+default_timeout_secs = 30
+
+[tools.exec.sandbox]
+mode = "off"
+
+[tailscale]
+mode = "off"
+
+[memory]
+backend = "builtin"
+provider = "local"
+
+[metrics]
+enabled = true
+
+[failover]
+enabled = true
+
+[cron]
+rate_limit_max = 10
+"#;
+        let result = validate_toml_str(toml);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "expected no errors for valid config without legacy heartbeat table, got: {errors:?}"
         );
     }
 
@@ -1811,14 +1851,6 @@ enabled = true
 
 [failover]
 enabled = true
-
-[heartbeat]
-enabled = true
-every = "30m"
-
-[heartbeat.active_hours]
-start = "08:00"
-end = "24:00"
 
 [cron]
 rate_limit_max = 10

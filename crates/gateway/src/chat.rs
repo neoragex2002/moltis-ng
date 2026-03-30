@@ -3547,6 +3547,184 @@ impl ChatService for LiveChatService {
         }))
     }
 
+    async fn background_turn(&self, params: Value) -> ServiceResult {
+        use moltis_agents::runner::RunnerHookContext;
+
+        let agent_id = params
+            .get("agentId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "missing 'agentId' parameter".to_string())?
+            .to_string();
+        let prompt = params
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'prompt' parameter".to_string())?
+            .to_string();
+        let run_id = params
+            .get("runId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "missing 'runId' parameter".to_string())?
+            .to_string();
+        let session_id_opt = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let explicit_model = params.get("model").and_then(|v| v.as_str()).map(str::to_string);
+        let timeout_secs = params.get("timeoutSecs").and_then(|v| v.as_u64());
+
+        let provider: Arc<dyn moltis_agents::model::LlmProvider> = {
+            let reg = self.providers.read().await;
+            if let Some(ref id) = explicit_model {
+                reg.get(id)
+                    .ok_or_else(|| format!("model '{id}' not found"))?
+            } else {
+                reg.first_with_tools()
+                    .or_else(|| reg.first())
+                    .ok_or_else(|| "no LLM providers configured".to_string())?
+            }
+        };
+
+        let session_id_for_runtime = session_id_opt
+            .as_deref()
+            .unwrap_or_else(|| run_id.as_str());
+        let session_entry = if let Some(ref sid) = session_id_opt {
+            self.session_metadata.get(sid).await
+        } else {
+            None
+        };
+
+        let runtime_context = build_prompt_runtime_context(
+            &self.state,
+            &provider,
+            session_id_for_runtime,
+            session_entry.as_ref(),
+        )
+        .await;
+
+        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
+        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
+        let skills = discoverer
+            .discover()
+            .await
+            .map_err(|e| format!("skills discovery failed: {e}"))?;
+
+        let mcp_disabled = session_entry
+            .as_ref()
+            .and_then(|e| e.mcp_disabled)
+            .unwrap_or(false);
+
+        let agent = load_prompt_agent_with_id(Some(&agent_id));
+        let native_tools = provider.supports_tools();
+        let filtered_registry = {
+            let registry_guard = self.tool_registry.read().await;
+            apply_runtime_tool_filters(&registry_guard, &agent.config, &skills, mcp_disabled)
+        };
+
+        let canonical = build_canonical_system_prompt_v1(
+            &filtered_registry,
+            native_tools,
+            false, // background_turn: omit verbose tool inventory section
+            None,  // project context
+            &skills,
+            &agent_id,
+            agent.identity_md_raw.as_deref(),
+            agent.soul_text.as_deref(),
+            agent.agents_text.as_deref(),
+            agent.tools_text.as_deref(),
+            PromptReplyMedium::Text,
+            Some(&runtime_context),
+            session_id_for_runtime,
+        )
+        .map_err(|e| e.to_string())?;
+
+        for w in &canonical.warnings {
+            warn!(warning = %w, "prompt template warning");
+        }
+
+        let mut system_prompt_text = canonical.system_prompt;
+        maybe_append_tg_gst_v1_system_prompt(&self.state, session_entry.as_ref(), &mut system_prompt_text).await;
+
+        let history_raw: Vec<serde_json::Value> = if let Some(ref session_id) = session_id_opt {
+            // Heartbeat: bounded context only (no persistence, no compaction).
+            self.session_store
+                .read_last_n(session_id, 80)
+                .await
+                .map_err(|e| e.to_string())?
+        } else {
+            Vec::new()
+        };
+
+        let chat_history = values_to_chat_messages(&history_raw);
+        let hist = if chat_history.is_empty() {
+            None
+        } else {
+            Some(chat_history)
+        };
+
+        let session_is_sandboxed = if let Some(ref router) = self.state.sandbox_router {
+            router
+                .is_sandboxed(
+                    session_id_for_runtime,
+                    session_key_from_session_entry(session_entry.as_ref()).as_deref(),
+                )
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let mut tool_context = serde_json::json!({
+            "_sessionId": session_id_for_runtime,
+            "_runId": run_id,
+            "_sandbox": session_is_sandboxed,
+        });
+        if let Some(sk) = session_key_from_session_entry(session_entry.as_ref()) {
+            tool_context["_sessionKey"] = serde_json::json!(sk);
+        }
+
+        let hook_context = RunnerHookContext {
+            session_key: session_key_from_session_entry(session_entry.as_ref()),
+            channel_target: channel_target_from_session_entry(session_entry.as_ref()),
+        };
+
+        let user_content = UserContent::Text(prompt);
+
+        let fut = run_agent_loop_streaming_with_prefix_and_hook_context(
+            provider,
+            &filtered_registry,
+            vec![ChatMessage::system(&system_prompt_text)],
+            &user_content,
+            None, // background_turn: no streaming events
+            hist,
+            Some(tool_context),
+            Some(hook_context),
+            self.hook_registry.clone(),
+        );
+
+        let result = if let Some(secs) = timeout_secs {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+                Ok(r) => r,
+                Err(_) => return Err("cron_run_timeout".into()),
+            }
+        } else {
+            fut.await
+        };
+
+        let out = result.map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "text": out.text,
+            "inputTokens": out.usage.input_tokens,
+            "outputTokens": out.usage.output_tokens,
+        }))
+    }
+
     async fn abort(&self, params: Value) -> ServiceResult {
         let run_id = params
             .get("runId")

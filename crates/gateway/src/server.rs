@@ -1,4 +1,4 @@
-use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use std::{collections::HashSet, future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 
 use secrecy::ExposeSecret;
 
@@ -44,7 +44,7 @@ use moltis_tools::{
 
 use {
     moltis_projects::ProjectStore,
-    moltis_sessions::{SessionKey, metadata::SqliteSessionMetadata, store::SessionStore},
+    moltis_sessions::{metadata::SqliteSessionMetadata, store::SessionStore},
 };
 
 use crate::{
@@ -78,6 +78,137 @@ use crate::tls::CertManager;
 pub struct TailscaleOpts {
     pub mode: String,
     pub reset_on_exit: bool,
+}
+
+type EnsureMainSessionIdFn =
+    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
+type ResolveSessionIdForSessionKeyFn =
+    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
+
+fn select_background_turn_model(
+    model_selector: &moltis_cron::types::ModelSelector,
+    inherited_model: Option<String>,
+) -> Option<String> {
+    match model_selector {
+        moltis_cron::types::ModelSelector::Inherit => inherited_model,
+        moltis_cron::types::ModelSelector::Explicit { model_id } => Some(model_id.clone()),
+    }
+}
+
+async fn resolve_session_target_context(
+    agent_id: &str,
+    session_target: &moltis_cron::types::SessionTarget,
+    session_metadata: &SqliteSessionMetadata,
+    ensure_main_session_id: &EnsureMainSessionIdFn,
+    resolve_session_id_for_session_key: &ResolveSessionIdForSessionKeyFn,
+) -> anyhow::Result<(String, Option<String>)> {
+    let session_id = match session_target {
+        moltis_cron::types::SessionTarget::Main => ensure_main_session_id(agent_id).await?,
+        moltis_cron::types::SessionTarget::Session { session_key } => {
+            resolve_session_id_for_session_key(session_key).await?
+        },
+    };
+    let inherited_model = session_metadata
+        .get(&session_id)
+        .await
+        .and_then(|entry| entry.model);
+    Ok((session_id, inherited_model))
+}
+
+async fn deliver_assistant_message_into_session(
+    state: Option<&Arc<GatewayState>>,
+    session_store: &SessionStore,
+    session_metadata: &SqliteSessionMetadata,
+    session_id: &str,
+    output: String,
+    run_id: String,
+) -> anyhow::Result<()> {
+    let msg = moltis_sessions::PersistedMessage::Assistant {
+        content: output.clone(),
+        created_at: Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        ),
+        model: None,
+        provider: None,
+        input_tokens: None,
+        output_tokens: None,
+        cached_tokens: None,
+        tool_calls: None,
+        audio: None,
+        seq: None,
+        run_id: Some(run_id.clone()),
+    };
+    let msg_val = msg.to_value();
+    session_store
+        .append(session_id, &msg_val)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let message_index = if let Ok(count) = session_store.count(session_id).await {
+        session_metadata.touch(session_id, count).await;
+        count.saturating_sub(1)
+    } else {
+        0
+    };
+
+    if let Some(preview) = crate::session::extract_preview_from_value(&msg_val) {
+        session_metadata.set_preview(session_id, Some(&preview)).await;
+    }
+
+    if let Some(state) = state {
+        let payload = serde_json::json!({
+            "runId": run_id,
+            "sessionId": session_id,
+            "state": "final",
+            "text": output,
+            "messageIndex": message_index,
+            "replyMedium": "text",
+            "inputTokens": 0,
+            "outputTokens": 0,
+        });
+        broadcast(state, "chat", payload, BroadcastOpts::default()).await;
+    }
+
+    Ok(())
+}
+
+fn make_on_heartbeat_deliver(
+    deferred_state: Arc<tokio::sync::OnceCell<Arc<GatewayState>>>,
+    session_store: Arc<SessionStore>,
+    session_metadata: Arc<SqliteSessionMetadata>,
+    ensure_main_session_id: EnsureMainSessionIdFn,
+    resolve_session_id_for_session_key: ResolveSessionIdForSessionKeyFn,
+) -> moltis_cron::heartbeat_service::DeliverHeartbeatFn {
+    Arc::new(move |req| {
+        let deferred_state = Arc::clone(&deferred_state);
+        let session_store = Arc::clone(&session_store);
+        let session_metadata = Arc::clone(&session_metadata);
+        let ensure_main_session_id = Arc::clone(&ensure_main_session_id);
+        let resolve_session_id_for_session_key = Arc::clone(&resolve_session_id_for_session_key);
+        Box::pin(async move {
+            let (session_id, _) = resolve_session_target_context(
+                &req.agent_id,
+                &req.session_target,
+                &session_metadata,
+                &ensure_main_session_id,
+                &resolve_session_id_for_session_key,
+            )
+            .await?;
+            deliver_assistant_message_into_session(
+                deferred_state.get(),
+                &session_store,
+                &session_metadata,
+                &session_id,
+                req.output,
+                req.run_id,
+            )
+            .await?;
+            Ok(())
+        })
+    })
 }
 
 // ── Location requester ───────────────────────────────────────────────────────
@@ -397,90 +528,24 @@ fn extract_yaml_frontmatter(content: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-fn cron_session_bucket_key(target: &moltis_cron::types::SessionTarget) -> String {
-    match target {
-        moltis_cron::types::SessionTarget::Named(name) if name.trim() == "heartbeat" => {
-            "heartbeat".to_string()
-        },
-        moltis_cron::types::SessionTarget::Named(name) => {
-            let mut normalized = String::new();
-            let mut last_dash = false;
-            for ch in name.trim().chars() {
-                let mapped = if ch.is_ascii_alphanumeric() {
-                    ch.to_ascii_lowercase()
-                } else {
-                    '-'
-                };
-                if mapped == '-' {
-                    if !last_dash {
-                        normalized.push(mapped);
-                    }
-                    last_dash = true;
-                } else {
-                    normalized.push(mapped);
-                    last_dash = false;
-                }
-            }
-            let normalized = normalized.trim_matches('-');
-            if normalized.is_empty() {
-                "job".to_string()
-            } else {
-                format!("job-{normalized}")
-            }
-        },
-        _ => panic!("cron_session_bucket_key only supports named cron sessions"),
+fn reject_legacy_root_heartbeat_prompt(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let legacy_root_prompt = data_dir.join("HEARTBEAT.md");
+    if legacy_root_prompt.exists() {
+        tracing::error!(
+            event = "heartbeat.prompt.reject_legacy_root_file",
+            policy = "cron_heartbeat_governance_v1",
+            decision = "reject",
+            reason_code = "legacy_contract_rejected",
+            legacy_path = %legacy_root_prompt.display(),
+            remediation = "move heartbeat prompt content into agents/<agent_id>/HEARTBEAT.md and remove the workspace-root HEARTBEAT.md",
+            "workspace-root HEARTBEAT.md is no longer supported"
+        );
+        anyhow::bail!(
+            "workspace-root HEARTBEAT.md is no longer supported: move its content into 'agents/<agent_id>/HEARTBEAT.md' and remove '{}'",
+            legacy_root_prompt.display()
+        );
     }
-}
-
-async fn resolve_home_session_id(state: &Arc<GatewayState>) -> anyhow::Result<String> {
-    let home = state
-        .services
-        .session
-        .home()
-        .await
-        .map_err(anyhow::Error::msg)?;
-    home.get("sessionId")
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("sessions.home returned no sessionId"))
-}
-
-async fn resolve_cron_runtime_session_id(
-    state: &Arc<GatewayState>,
-    target: &moltis_cron::types::SessionTarget,
-) -> anyhow::Result<String> {
-    match target {
-        moltis_cron::types::SessionTarget::Main => resolve_home_session_id(state).await,
-        moltis_cron::types::SessionTarget::Named(_) => {
-            let metadata = state
-                .services
-                .session_metadata
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("session metadata unavailable"))?;
-            let session_key = SessionKey::system("cron", &cron_session_bucket_key(target)).0;
-            if let Some(session_id) = metadata.get_active_session_id(&session_key).await
-                && metadata.get(&session_id).await.is_some()
-            {
-                return Ok(session_id);
-            }
-            let entry = metadata.create(&session_key, None).await?;
-            metadata
-                .set_active_session_id(&session_key, &entry.session_id)
-                .await;
-            Ok(entry.session_id)
-        },
-        moltis_cron::types::SessionTarget::Isolated => {
-            let metadata = state
-                .services
-                .session_metadata
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("session metadata unavailable"))?;
-            let opaque = uuid::Uuid::new_v4().simple().to_string();
-            let session_key = SessionKey::system("cron", &format!("job-{opaque}")).0;
-            let entry = metadata.create(&session_key, None).await?;
-            Ok(entry.session_id)
-        },
-    }
+    Ok(())
 }
 
 fn browser_container_prefix(instance_slug: &str) -> String {
@@ -980,7 +1045,24 @@ pub async fn start_gateway(
     let resolved_auth = auth::resolve_auth(token, password.clone());
 
     // Load config file (moltis.toml / .yaml / .json) if present.
-    let mut config = moltis_config::discover_and_load();
+    let config_path = moltis_config::loader::find_config_file();
+    let config_path_str = config_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+    let mut config = moltis_config::discover_and_load_strict().map_err(|e| {
+        tracing::error!(
+            event = "config.load.reject",
+            policy = "cron_heartbeat_governance_v1",
+            decision = "reject",
+            reason_code = "config_parse_failed",
+            path = %config_path_str,
+            remediation = "fix moltis.{toml,yaml,json} to match the current schema (legacy sections are not supported)",
+            error = %e,
+            "failed to load config"
+        );
+        e
+    })?;
 
     // Seed default workspace files and keep PEOPLE.md aligned to IDENTITY.md
     // without touching PEOPLE.md body content.
@@ -1403,122 +1485,393 @@ pub async fn start_gateway(
         &project_store,
     )));
 
-    // Initialize cron service with file-backed store.
-    let cron_store: Arc<dyn moltis_cron::store::CronStore> =
-        match moltis_cron::store_file::FileStore::default_path() {
-            Ok(fs) => Arc::new(fs),
-            Err(e) => {
-                tracing::warn!("cron file store unavailable ({e}), using in-memory");
-                Arc::new(moltis_cron::store_memory::InMemoryStore::new())
-            },
-        };
-
     // Deferred reference: populated once GatewayState is ready.
     let deferred_state: Arc<tokio::sync::OnceCell<Arc<GatewayState>>> =
         Arc::new(tokio::sync::OnceCell::new());
 
-    // System event: inject text into the main session and trigger an agent response.
-    let sys_state = Arc::clone(&deferred_state);
-    let on_system_event: moltis_cron::service::SystemEventFn = Arc::new(move |text| {
-        let st = Arc::clone(&sys_state);
-        tokio::spawn(async move {
-            if let Some(state) = st.get() {
-                let chat = state.chat().await;
-                let session_id = match resolve_home_session_id(state).await {
-                    Ok(session_id) => session_id,
-                    Err(e) => {
-                        tracing::error!("cron system event failed to resolve home session: {e}");
-                        return;
-                    },
-                };
-                let params = serde_json::json!({ "text": text, "_sessionId": session_id });
-                if let Err(e) = chat.send(params).await {
-                    tracing::error!("cron system event failed: {e}");
-                }
-            }
-        });
-    });
-
-    // Agent turn: run an LLM turn in a session determined by the job's session_target.
-    let agent_state = Arc::clone(&deferred_state);
-    let on_agent_turn: moltis_cron::service::AgentTurnFn = Arc::new(move |req| {
-        let st = Arc::clone(&agent_state);
-        Box::pin(async move {
-            let state = st
-                .get()
-                .ok_or_else(|| anyhow::anyhow!("gateway not ready"))?;
-
-            // OpenClaw-style cost guard: if HEARTBEAT.md exists but is effectively
-            // empty (comments/blank scaffold) and there's no explicit
-            // heartbeat.prompt override, skip the LLM turn entirely.
-            let is_heartbeat_turn = matches!(
-                &req.session_target,
-                moltis_cron::types::SessionTarget::Named(name) if name == "heartbeat"
+    // Strict one-cut: reject legacy cron file store shapes at startup.
+    //
+    // Note: The legacy file store lived under `~/.clawdbot/cron/` and is
+    // unrelated to `data_dir` overrides. Use the user-global config directory
+    // to resolve the OS home directory via `moltis-config` (no direct
+    // `directories::BaseDirs` usage outside that crate).
+    if let Some(user_cfg_dir) = moltis_config::user_global_config_dir()
+        && let Some(home_dir) = user_cfg_dir.parent().and_then(|p| p.parent())
+        && home_dir.is_absolute()
+    {
+        let legacy_dir = home_dir.join(".clawdbot/cron");
+        let legacy_jobs = legacy_dir.join("jobs.json");
+        let legacy_runs = legacy_dir.join("runs");
+        if legacy_jobs.exists() || legacy_runs.exists() {
+            tracing::error!(
+                event = "cron.store.reject_legacy_file_store",
+                policy = "cron_heartbeat_governance_v1",
+                decision = "reject",
+                reason_code = "legacy_contract_rejected",
+                jobs_json = %legacy_jobs.display(),
+                runs_dir = %legacy_runs.display(),
+                remediation = "remove ~/.clawdbot/cron/ and recreate cron/heartbeat in the DB-only contract",
+                "legacy cron file store is no longer supported"
             );
-            if is_heartbeat_turn {
-                let hb_cfg = state.inner.read().await.heartbeat_config.clone();
-                let has_prompt_override = hb_cfg
-                    .prompt
-                    .as_deref()
-                    .is_some_and(|p| !p.trim().is_empty());
-                let heartbeat_path = moltis_config::heartbeat_path();
-                let heartbeat_file_exists = heartbeat_path.exists();
-                let heartbeat_md = moltis_config::load_heartbeat_md();
-                if heartbeat_file_exists && heartbeat_md.is_none() && !has_prompt_override {
-                    tracing::info!(
-                        path = %heartbeat_path.display(),
-                        "skipping heartbeat LLM turn: HEARTBEAT.md is empty"
-                    );
-                    return Ok(moltis_cron::service::AgentTurnResult {
-                        output: moltis_cron::heartbeat::HEARTBEAT_OK.to_string(),
-                        input_tokens: None,
-                        output_tokens: None,
-                    });
+            anyhow::bail!(
+                "legacy cron file store is no longer supported: remove '{}' and '{}' then recreate jobs in the DB-only contract",
+                legacy_jobs.display(),
+                legacy_runs.display()
+            );
+        }
+    }
+
+    reject_legacy_root_heartbeat_prompt(&data_dir)?;
+
+    // DB-only owner: migrations must succeed, otherwise the gateway refuses to start.
+    if let Err(e) = moltis_cron::run_migrations(&db_pool).await {
+        tracing::error!(
+            event = "cron.db.migration.failed",
+            policy = "cron_heartbeat_governance_v1",
+            decision = "reject",
+            reason_code = "db_migration_failed",
+            error = %e,
+            "cron/heartbeat migrations failed"
+        );
+        return Err(e);
+    }
+
+    let sqlite_store = Arc::new(moltis_cron::store_sqlite::SqliteStore::with_pool(
+        db_pool.clone(),
+    ));
+    let cron_store: Arc<dyn moltis_cron::store::CronStore> = sqlite_store.clone();
+    let heartbeat_store: Arc<dyn moltis_cron::store_heartbeat::HeartbeatStore> =
+        sqlite_store.clone();
+
+    let validate_agent_id: Arc<
+        dyn Fn(&str) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> + Send + Sync,
+    > = Arc::new(
+        |agent_id: &str| -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+            let agent_id = agent_id.to_string();
+            Box::pin(async move {
+                if !moltis_config::is_valid_agent_id(&agent_id) {
+                    anyhow::bail!("agent_missing");
+                }
+                let dir = moltis_config::agents_dir().join(&agent_id);
+                if !dir.is_dir() {
+                    anyhow::bail!("agent_missing");
+                }
+                Ok(())
+            })
+        },
+    );
+
+    let validate_model_id = {
+        let registry = Arc::clone(&registry);
+        Arc::new(
+            move |model_id: &str| -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+                let registry = Arc::clone(&registry);
+                let model_id = model_id.to_string();
+                Box::pin(async move {
+                    let reg = registry.read().await;
+                    if reg.get(&model_id).is_none() {
+                        anyhow::bail!("model_not_found");
+                    }
+                    Ok(())
+                })
+            },
+        )
+    };
+
+    let cron_validate_session_target = {
+        let session_metadata = Arc::clone(&session_metadata);
+        Arc::new(
+            move |agent_id: &str,
+                  target: &moltis_cron::types::SessionTarget|
+                  -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+                let session_metadata = Arc::clone(&session_metadata);
+                let agent_id = agent_id.to_string();
+                let target = target.clone();
+                Box::pin(async move {
+                    match target {
+                        moltis_cron::types::SessionTarget::Main => Ok(()),
+                        moltis_cron::types::SessionTarget::Session { session_key } => {
+                            let parsed = moltis_sessions::SessionKey::parse(&session_key)
+                                .map_err(|_| anyhow::anyhow!("cron_delivery_target_invalid"))?;
+                            let moltis_sessions::key::ParsedSessionKey::Agent {
+                                agent_id: sk_agent_id,
+                                ..
+                            } = parsed
+                            else {
+                                anyhow::bail!("cron_delivery_target_invalid");
+                            };
+                            if sk_agent_id != agent_id {
+                                anyhow::bail!("session_agent_mismatch");
+                            }
+
+                            let ids = session_metadata
+                                .list_session_ids_by_session_key(&session_key, 2)
+                                .await
+                                .map_err(|e| anyhow::anyhow!(e))?;
+                            match ids.len() {
+                                1 => Ok(()),
+                                0 => anyhow::bail!("cron_delivery_session_missing"),
+                                _ => anyhow::bail!("cron_delivery_target_invalid"),
+                            }
+                        },
+                    }
+                })
+            },
+        )
+    };
+
+    let heartbeat_validate_session_target = {
+        let session_metadata = Arc::clone(&session_metadata);
+        Arc::new(
+            move |agent_id: &str,
+                  target: &moltis_cron::types::SessionTarget|
+                  -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+                let session_metadata = Arc::clone(&session_metadata);
+                let agent_id = agent_id.to_string();
+                let target = target.clone();
+                Box::pin(async move {
+                    match target {
+                        moltis_cron::types::SessionTarget::Main => Ok(()),
+                        moltis_cron::types::SessionTarget::Session { session_key } => {
+                            let parsed = moltis_sessions::SessionKey::parse(&session_key)
+                                .map_err(|_| anyhow::anyhow!("heartbeat_target_missing"))?;
+                            let moltis_sessions::key::ParsedSessionKey::Agent {
+                                agent_id: sk_agent_id,
+                                ..
+                            } = parsed
+                            else {
+                                anyhow::bail!("heartbeat_target_missing");
+                            };
+                            if sk_agent_id != agent_id {
+                                anyhow::bail!("session_agent_mismatch");
+                            }
+                            let ids = session_metadata
+                                .list_session_ids_by_session_key(&session_key, 2)
+                                .await
+                                .map_err(|e| anyhow::anyhow!(e))?;
+                            match ids.len() {
+                                1 => Ok(()),
+                                0 => anyhow::bail!("heartbeat_target_missing"),
+                                _ => anyhow::bail!("heartbeat_target_missing"),
+                            }
+                        },
+                    }
+                })
+            },
+        )
+    };
+
+    let cron_validate_telegram_target = Arc::new(
+        |target: &moltis_cron::types::TelegramTarget|
+         -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+        let target = target.clone();
+        Box::pin(async move {
+            let account_key = target.account_key.trim();
+            if !account_key.starts_with("telegram:") {
+                anyhow::bail!("cron_delivery_target_invalid");
+            }
+            let account_id = account_key
+                .strip_prefix("telegram:")
+                .unwrap_or_default()
+                .parse::<u64>()
+                .unwrap_or(0);
+            if account_id == 0 {
+                anyhow::bail!("cron_delivery_target_invalid");
+            }
+
+            let chat_id: i64 = target.chat_id.trim().parse().map_err(|_| {
+                anyhow::anyhow!("cron_delivery_target_invalid")
+            })?;
+            if chat_id == 0 {
+                anyhow::bail!("cron_delivery_target_invalid");
+            }
+            if let Some(ref thread_id) = target.thread_id {
+                let tid: i32 = thread_id.trim().parse().map_err(|_| {
+                    anyhow::anyhow!("cron_delivery_target_invalid")
+                })?;
+                if tid <= 0 {
+                    anyhow::bail!("cron_delivery_target_invalid");
                 }
             }
+            Ok(())
+        })
+    },
+    );
 
-            let chat = state.chat().await;
-            let session_id = resolve_cron_runtime_session_id(state, &req.session_target).await?;
+    let ensure_main_session_id: EnsureMainSessionIdFn = {
+        let session_metadata = Arc::clone(&session_metadata);
+        Arc::new(
+            move |agent_id: &str| -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> {
+                let session_metadata = Arc::clone(&session_metadata);
+                let agent_id = agent_id.to_string();
+                Box::pin(async move {
+                    let session_key = moltis_sessions::SessionKey::main(&agent_id).0;
+                    if let Some(active_session_id) =
+                        session_metadata.get_active_session_id(&session_key).await
+                        && session_metadata.get(&active_session_id).await.is_some()
+                    {
+                        return Ok(active_session_id);
+                    }
+                    let entry = session_metadata
+                        .create(&session_key, None)
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    session_metadata
+                        .set_active_session_id(&session_key, &entry.session_id)
+                        .await;
+                    tracing::info!(
+                        event = "sessions.main.materialize",
+                        policy = "cron_heartbeat_governance_v1",
+                        decision = "create",
+                        reason_code = "main_session_materialized",
+                        agent_id = %agent_id,
+                        session_key = %session_key,
+                        session_id = %entry.session_id,
+                        "materialized missing main session for cron/heartbeat delivery"
+                    );
+                    Ok(entry.session_id)
+                })
+            },
+        )
+    };
 
-            // Clear session history for named cron sessions before execution
-            // so the run starts fresh but the history remains readable for debugging.
-            if matches!(
-                req.session_target,
-                moltis_cron::types::SessionTarget::Named(_)
-            ) {
-                let _ = chat
-                    .clear(serde_json::json!({ "_sessionId": session_id }))
-                    .await;
-            }
-
-            // One-cut: sandbox behavior is controlled only by `[tools.exec.sandbox]` config.
-
-            let mut params = serde_json::json!({
-                "text": req.message,
-                "_sessionId": session_id,
-            });
-            if let Some(ref model) = req.model {
-                params["model"] = serde_json::Value::String(model.clone());
-            }
-            let result = chat.send_sync(params).await.map_err(|e| anyhow::anyhow!(e));
-
-            // One-cut: no sandbox overrides to clean up.
-
-            let val = result?;
-            let input_tokens = val.get("inputTokens").and_then(|v| v.as_u64());
-            let output_tokens = val.get("outputTokens").and_then(|v| v.as_u64());
-            let text = val
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Ok(moltis_cron::service::AgentTurnResult {
-                output: text,
-                input_tokens,
-                output_tokens,
+    let resolve_session_id_for_session_key: ResolveSessionIdForSessionKeyFn = {
+        let session_metadata = Arc::clone(&session_metadata);
+        Arc::new(move |session_key: &str| -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> {
+            let session_metadata = Arc::clone(&session_metadata);
+            let session_key = session_key.to_string();
+            Box::pin(async move {
+                let ids = session_metadata
+                    .list_session_ids_by_session_key(&session_key, 2)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                match ids.as_slice() {
+                    [only] => Ok(only.clone()),
+                    [] => anyhow::bail!("session not found"),
+                    _ => anyhow::bail!("session_key is not unique"),
+                }
             })
         })
-    });
+    };
+
+    let on_cron_run: moltis_cron::service::RunCronFn = {
+        let st = Arc::clone(&deferred_state);
+        let session_metadata = Arc::clone(&session_metadata);
+        let ensure_main_session_id = Arc::clone(&ensure_main_session_id);
+        let resolve_session_id_for_session_key = Arc::clone(&resolve_session_id_for_session_key);
+        Arc::new(move |req| {
+            let st = Arc::clone(&st);
+            let session_metadata = Arc::clone(&session_metadata);
+            let ensure_main_session_id = Arc::clone(&ensure_main_session_id);
+            let resolve_session_id_for_session_key =
+                Arc::clone(&resolve_session_id_for_session_key);
+            Box::pin(async move {
+                let state = st
+                    .get()
+                    .ok_or_else(|| anyhow::anyhow!("gateway not ready"))?;
+                let chat = state.chat().await;
+
+                let inherited_model = match req.delivery_session_target.as_ref() {
+                    Some(target) => {
+                        let (_, inherited_model) = resolve_session_target_context(
+                            &req.agent_id,
+                            target,
+                            &session_metadata,
+                            &ensure_main_session_id,
+                            &resolve_session_id_for_session_key,
+                        )
+                        .await?;
+                        inherited_model
+                    },
+                    None => None,
+                };
+                let model = select_background_turn_model(&req.model_selector, inherited_model);
+
+                let params = serde_json::json!({
+                    "agentId": req.agent_id,
+                    "runId": req.run_id,
+                    "prompt": req.prompt,
+                    "model": model,
+                    "timeoutSecs": req.timeout_secs,
+                });
+                let val = chat
+                    .background_turn(params)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                Ok(moltis_cron::service::AgentTurnResult {
+                    output: val
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    input_tokens: val.get("inputTokens").and_then(|v| v.as_u64()),
+                    output_tokens: val.get("outputTokens").and_then(|v| v.as_u64()),
+                })
+            })
+        })
+    };
+
+    let on_cron_deliver: moltis_cron::service::DeliverCronFn = {
+        let st = Arc::clone(&deferred_state);
+        let session_store = Arc::clone(&session_store);
+        let session_metadata = Arc::clone(&session_metadata);
+        let ensure_main_session_id = Arc::clone(&ensure_main_session_id);
+        let resolve_session_id_for_session_key = Arc::clone(&resolve_session_id_for_session_key);
+        Arc::new(move |req| {
+            let st = Arc::clone(&st);
+            let session_store = Arc::clone(&session_store);
+            let session_metadata = Arc::clone(&session_metadata);
+            let ensure_main_session_id = Arc::clone(&ensure_main_session_id);
+            let resolve_session_id_for_session_key =
+                Arc::clone(&resolve_session_id_for_session_key);
+            Box::pin(async move {
+	                match req.delivery {
+	                    moltis_cron::types::CronDelivery::Silent => Ok(()),
+	                    moltis_cron::types::CronDelivery::Session { target } => {
+	                        let (session_id, _) = resolve_session_target_context(
+	                            &req.agent_id,
+	                            &target,
+	                            &session_metadata,
+	                            &ensure_main_session_id,
+	                            &resolve_session_id_for_session_key,
+	                        )
+	                        .await?;
+	                        deliver_assistant_message_into_session(
+	                            st.get(),
+	                            &session_store,
+	                            &session_metadata,
+	                            &session_id,
+	                            req.output,
+	                            req.run_id,
+	                        )
+	                        .await
+	                    },
+	                    moltis_cron::types::CronDelivery::Telegram { target } => {
+	                        let state = st
+	                            .get()
+	                            .ok_or_else(|| anyhow::anyhow!("gateway not ready"))?;
+                        let Some(outbound) = state.services.channel_outbound_arc() else {
+                            anyhow::bail!("cron_delivery_account_missing");
+                        };
+                        let tgt = moltis_channels::ChannelReplyTarget {
+                            chan_type: moltis_channels::ChannelType::Telegram,
+                            chan_account_key: target.account_key,
+                            chan_user_name: None,
+                            chat_id: target.chat_id,
+                            message_id: None,
+                            thread_id: target.thread_id,
+                            bucket_key: None,
+                        };
+                        outbound
+                            .send_text_to_target(&tgt, &req.output)
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))?;
+                        Ok(())
+                    },
+                }
+            })
+        })
+    };
 
     // Build cron notification callback that broadcasts job changes.
     let deferred_for_cron = Arc::clone(&deferred_state);
@@ -1563,15 +1916,111 @@ pub async fn start_gateway(
 
     let cron_service = moltis_cron::service::CronService::with_config(
         cron_store,
-        on_system_event,
-        on_agent_turn,
+        on_cron_run,
+        on_cron_deliver,
         Some(on_cron_notify),
         rate_limit_config,
+        moltis_cron::service::CronValidators {
+            validate_agent_id: Some(validate_agent_id.clone()),
+            validate_model_id: Some(validate_model_id.clone()),
+            validate_session_target: Some(cron_validate_session_target),
+            validate_telegram_target: Some(cron_validate_telegram_target),
+        },
     );
 
     // Wire cron into gateway services.
     let live_cron = Arc::new(crate::cron::LiveCronService::new(Arc::clone(&cron_service)));
     services = services.with_cron(live_cron);
+
+    // Heartbeat service (DB-only, per-agent).
+    let on_heartbeat_run: moltis_cron::heartbeat_service::RunHeartbeatFn = {
+        let st = Arc::clone(&deferred_state);
+        let session_metadata = Arc::clone(&session_metadata);
+        let ensure_main_session_id = Arc::clone(&ensure_main_session_id);
+        let resolve_session_id_for_session_key = Arc::clone(&resolve_session_id_for_session_key);
+        Arc::new(move |req| {
+            let st = Arc::clone(&st);
+            let session_metadata = Arc::clone(&session_metadata);
+            let ensure_main_session_id = Arc::clone(&ensure_main_session_id);
+            let resolve_session_id_for_session_key =
+                Arc::clone(&resolve_session_id_for_session_key);
+            Box::pin(async move {
+                let state = st
+                    .get()
+                    .ok_or_else(|| anyhow::anyhow!("gateway not ready"))?;
+                let chat = state.chat().await;
+
+                let (session_id, inherited_model) = resolve_session_target_context(
+                    &req.agent_id,
+                    &req.session_target,
+                    &session_metadata,
+                    &ensure_main_session_id,
+                    &resolve_session_id_for_session_key,
+                )
+                .await?;
+                let model = select_background_turn_model(&req.model_selector, inherited_model);
+
+                let params = serde_json::json!({
+                    "agentId": req.agent_id,
+                    "sessionId": session_id,
+                    "runId": req.run_id,
+                    "prompt": req.prompt,
+                    "model": model,
+                    "timeoutSecs": req.timeout_secs,
+                });
+                let val = chat
+                    .background_turn(params)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                Ok(moltis_cron::heartbeat_service::HeartbeatRunResult {
+                    output: val
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    input_tokens: val.get("inputTokens").and_then(|v| v.as_u64()),
+                    output_tokens: val.get("outputTokens").and_then(|v| v.as_u64()),
+                })
+            })
+        })
+    };
+
+    let on_heartbeat_deliver: moltis_cron::heartbeat_service::DeliverHeartbeatFn = {
+        make_on_heartbeat_deliver(
+            Arc::clone(&deferred_state),
+            Arc::clone(&session_store),
+            Arc::clone(&session_metadata),
+            Arc::clone(&ensure_main_session_id),
+            Arc::clone(&resolve_session_id_for_session_key),
+        )
+    };
+
+    let heartbeat_service = moltis_cron::heartbeat_service::HeartbeatService::with_config(
+        heartbeat_store,
+        on_heartbeat_run,
+        on_heartbeat_deliver,
+        moltis_cron::heartbeat_service::HeartbeatValidators {
+            validate_agent_id: Some(validate_agent_id),
+            validate_model_id: Some(validate_model_id),
+            validate_session_target: Some(heartbeat_validate_session_target),
+            load_prompt: Some(Arc::new(|agent_id: &str| {
+                let agent_id = agent_id.to_string();
+                Box::pin(async move {
+                    let path = moltis_config::agents_dir()
+                        .join(&agent_id)
+                        .join("HEARTBEAT.md");
+                    let content = std::fs::read_to_string(&path)
+                        .map_err(|_| anyhow::anyhow!("heartbeat_prompt_missing"))?;
+                    Ok(content)
+                })
+            })),
+        },
+    );
+
+    let live_heartbeat = Arc::new(crate::heartbeat::LiveHeartbeatService::new(Arc::clone(
+        &heartbeat_service,
+    )));
+    services = services.with_heartbeat(live_heartbeat);
 
     // Build sandbox router from config (shared across sessions).
     let mut sandbox_config =
@@ -2234,9 +2683,6 @@ pub async fn start_gateway(
     // With dynamic model discovery, automatic probing at startup is too
     // expensive and noisy — non-chat models (image, audio, video) would
     // generate spurious warnings.
-
-    // Store heartbeat config on state for gon data and RPC methods.
-    state.inner.write().await.heartbeat_config = config.heartbeat.clone();
 
     // Wire live chat service (needs state reference, so done after state creation).
     {
@@ -3030,130 +3476,27 @@ pub async fn start_gateway(
 
     // Start the cron scheduler (loads persisted jobs, arms the timer).
     if let Err(e) = cron_service.start().await {
-        tracing::warn!("failed to start cron scheduler: {e}");
+        tracing::error!(
+            event = "cron.start.failed",
+            policy = "cron_heartbeat_governance_v1",
+            decision = "reject",
+            reason_code = "cron_store_unavailable",
+            error = %e,
+            "cron scheduler failed to start"
+        );
+        return Err(e);
     }
 
-    // Upsert the built-in heartbeat job from config.
-    // Use a fixed ID so run history persists across restarts.
-    {
-        use moltis_cron::{
-            heartbeat::{
-                DEFAULT_INTERVAL_MS, HeartbeatPromptSource, parse_interval_ms,
-                resolve_heartbeat_prompt,
-            },
-            types::{CronJobCreate, CronJobPatch, CronPayload, CronSchedule, SessionTarget},
-        };
-        const HEARTBEAT_JOB_ID: &str = "__heartbeat__";
-
-        let hb = &config.heartbeat;
-        let interval_ms = parse_interval_ms(&hb.every).unwrap_or(DEFAULT_INTERVAL_MS);
-        let heartbeat_md = moltis_config::load_heartbeat_md();
-        let (prompt, prompt_source) =
-            resolve_heartbeat_prompt(hb.prompt.as_deref(), heartbeat_md.as_deref());
-        if prompt_source == HeartbeatPromptSource::HeartbeatMd {
-            tracing::info!("loaded heartbeat prompt from HEARTBEAT.md");
-        }
-        if hb.prompt.as_deref().is_some_and(|p| !p.trim().is_empty())
-            && heartbeat_md
-                .as_deref()
-                .is_some_and(|p| !p.trim().is_empty())
-            && prompt_source == HeartbeatPromptSource::Config
-        {
-            tracing::warn!(
-                "heartbeat prompt source conflict: config heartbeat.prompt overrides HEARTBEAT.md"
-            );
-        }
-
-        // Check if heartbeat job already exists.
-        let existing = cron_service.list().await;
-        let existing_job = existing.iter().find(|j| j.id == HEARTBEAT_JOB_ID);
-
-        // Skip heartbeat when there is no meaningful prompt (no config prompt,
-        // no HEARTBEAT.md content). The built-in default prompt is generic and
-        // wastes LLM calls when the user hasn't configured anything.
-        let has_prompt = prompt_source != HeartbeatPromptSource::Default;
-
-        if hb.enabled && has_prompt {
-            if existing_job.is_some() {
-                // Update existing job to match config.
-                let patch = CronJobPatch {
-                    schedule: Some(CronSchedule::Every {
-                        every_ms: interval_ms,
-                        anchor_ms: None,
-                    }),
-                    payload: Some(CronPayload::AgentTurn {
-                        message: prompt,
-                        model: hb.model.clone(),
-                        timeout_secs: None,
-                        deliver: false,
-                        channel: None,
-                        to: None,
-                    }),
-                    enabled: Some(true),
-                    sandbox: Some(moltis_cron::types::CronSandboxConfig {
-                        enabled: !config
-                            .tools
-                            .exec
-                            .sandbox
-                            .mode
-                            .trim()
-                            .eq_ignore_ascii_case("off"),
-                        image: None,
-                    }),
-                    ..Default::default()
-                };
-                match cron_service.update(HEARTBEAT_JOB_ID, patch).await {
-                    Ok(job) => tracing::info!(id = %job.id, "heartbeat job updated"),
-                    Err(e) => tracing::warn!("failed to update heartbeat job: {e}"),
-                }
-            } else {
-                // Create new job with fixed ID.
-                let create = CronJobCreate {
-                    id: Some(HEARTBEAT_JOB_ID.into()),
-                    name: "__heartbeat__".into(),
-                    schedule: CronSchedule::Every {
-                        every_ms: interval_ms,
-                        anchor_ms: None,
-                    },
-                    payload: CronPayload::AgentTurn {
-                        message: prompt,
-                        model: hb.model.clone(),
-                        timeout_secs: None,
-                        deliver: false,
-                        channel: None,
-                        to: None,
-                    },
-                    session_target: SessionTarget::Named("heartbeat".into()),
-                    delete_after_run: false,
-                    enabled: true,
-                    system: true,
-                    sandbox: moltis_cron::types::CronSandboxConfig {
-                        enabled: !config
-                            .tools
-                            .exec
-                            .sandbox
-                            .mode
-                            .trim()
-                            .eq_ignore_ascii_case("off"),
-                        image: None,
-                    },
-                };
-                match cron_service.add(create).await {
-                    Ok(job) => tracing::info!(id = %job.id, "heartbeat job created"),
-                    Err(e) => tracing::warn!("failed to create heartbeat job: {e}"),
-                }
-            }
-        } else if existing_job.is_some() {
-            // Heartbeat is disabled or has no prompt content — remove the job.
-            let _ = cron_service.remove(HEARTBEAT_JOB_ID).await;
-            if !hb.enabled {
-                tracing::info!("heartbeat job removed (disabled)");
-            } else {
-                tracing::info!("heartbeat job removed (no prompt configured)");
-            }
-        } else if hb.enabled && !has_prompt {
-            tracing::info!("heartbeat skipped: no prompt in config and HEARTBEAT.md is empty");
-        }
+    if let Err(e) = heartbeat_service.start().await {
+        tracing::error!(
+            event = "heartbeat.start.failed",
+            policy = "cron_heartbeat_governance_v1",
+            decision = "reject",
+            reason_code = "cron_store_unavailable",
+            error = %e,
+            "heartbeat scheduler failed to start"
+        );
+        return Err(e);
     }
 
     #[cfg(feature = "tls")]
@@ -3533,8 +3876,6 @@ struct GonData {
     counts: NavCounts,
     crons: Vec<moltis_cron::types::CronJob>,
     cron_status: moltis_cron::types::CronStatus,
-    heartbeat_config: moltis_config::schema::HeartbeatConfig,
-    heartbeat_runs: Vec<moltis_cron::types::CronRunRecord>,
     voice_enabled: bool,
     /// Non-main git branch name, if running from a git checkout on a
     /// non-default branch. `None` when on `main`/`master` or outside a repo.
@@ -3668,18 +4009,6 @@ async fn build_gon_data(gw: &GatewayState) -> GonData {
         .ok()
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
-    let heartbeat_config = gw.inner.read().await.heartbeat_config.clone();
-
-    // Get heartbeat runs using the fixed heartbeat job ID.
-    // This preserves run history across restarts.
-    let heartbeat_runs: Vec<moltis_cron::types::CronRunRecord> = gw
-        .services
-        .cron
-        .runs(serde_json::json!({ "id": "__heartbeat__", "limit": 10 }))
-        .await
-        .ok()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
 
     let sandbox = if let Some(ref router) = gw.sandbox_router {
         SandboxGonInfo {
@@ -3710,8 +4039,6 @@ async fn build_gon_data(gw: &GatewayState) -> GonData {
         counts,
         crons,
         cron_status,
-        heartbeat_config,
-        heartbeat_runs,
         voice_enabled: cfg!(feature = "voice"),
         git_branch: detect_git_branch(),
         mem: collect_mem_snapshot(),
@@ -4763,7 +5090,6 @@ fn seed_skill_if_missing(name: &str, content: &str) {
 fn seed_default_workspace_markdown_files() {
     let data_dir = moltis_config::data_dir();
     seed_file_if_missing(data_dir.join("BOOT.md"), DEFAULT_BOOT_MD);
-    seed_file_if_missing(data_dir.join("HEARTBEAT.md"), DEFAULT_HEARTBEAT_MD);
 }
 
 fn seed_file_if_missing(path: std::path::PathBuf, content: &str) {
@@ -5013,20 +5339,6 @@ How Moltis uses this file:
 Recommended usage:
 - Keep it short and explicit.
 - Use for startup checks/reminders, not onboarding identity setup.
--->"#;
-
-/// Default HEARTBEAT.md content seeded into workspace root.
-const DEFAULT_HEARTBEAT_MD: &str = r#"<!--
-HEARTBEAT.md is an optional heartbeat prompt source.
-
-Prompt precedence:
-1) heartbeat.prompt from config
-2) HEARTBEAT.md
-3) built-in default prompt
-
-Cost guard:
-- If HEARTBEAT.md exists but is empty/comment-only and there is no explicit
-  heartbeat.prompt override, Moltis skips heartbeat LLM turns to avoid token use.
 -->"#;
 
 /// Discover hooks from the filesystem, check eligibility, and build a
@@ -5428,6 +5740,20 @@ mod tests {
         assert!(is_same_origin("https://example.com", "example.com"));
         assert!(is_same_origin("http://localhost", "localhost"));
         assert!(is_same_origin("http://localhost", "127.0.0.1"));
+    }
+
+    #[test]
+    fn reject_legacy_root_heartbeat_prompt_fails_when_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("HEARTBEAT.md"), "# old").unwrap();
+        let err = reject_legacy_root_heartbeat_prompt(dir.path()).expect_err("should reject");
+        assert!(err.to_string().contains("workspace-root HEARTBEAT.md"));
+    }
+
+    #[test]
+    fn reject_legacy_root_heartbeat_prompt_accepts_clean_root() {
+        let dir = tempfile::tempdir().unwrap();
+        reject_legacy_root_heartbeat_prompt(dir.path()).unwrap();
     }
 
     #[test]
@@ -6027,18 +6353,250 @@ mod tests {
     }
 
     #[test]
-    fn cron_named_session_bucket_uses_canonical_system_job_prefix() {
-        assert_eq!(
-            cron_session_bucket_key(&moltis_cron::types::SessionTarget::Named(
-                "nightly-sync".into()
-            )),
-            "job-nightly-sync"
+    fn select_background_turn_model_inherits_session_model() {
+        let model = select_background_turn_model(
+            &moltis_cron::types::ModelSelector::Inherit,
+            Some("claude-sonnet".into()),
         );
-        assert_eq!(
-            cron_session_bucket_key(&moltis_cron::types::SessionTarget::Named(
-                "heartbeat".into()
-            )),
-            "heartbeat"
+        assert_eq!(model.as_deref(), Some("claude-sonnet"));
+
+        let explicit = select_background_turn_model(
+            &moltis_cron::types::ModelSelector::Explicit {
+                model_id: "gpt-5".into(),
+            },
+            Some("claude-sonnet".into()),
         );
+        assert_eq!(explicit.as_deref(), Some("gpt-5"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_session_target_context_reads_model_from_bound_session() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+            .await
+            .unwrap();
+        let session_metadata = Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(
+            pool.clone(),
+        ));
+        let entry = session_metadata
+            .create("agent/default/ops", Some("ops".into()))
+            .await
+            .unwrap();
+        session_metadata
+            .set_model(&entry.session_id, Some("claude-sonnet".into()))
+            .await;
+
+        let session_id = entry.session_id.clone();
+        let ensure_main_session_id: EnsureMainSessionIdFn = Arc::new(|_agent_id| {
+            Box::pin(async { Err(anyhow::anyhow!("main session should not be used")) })
+        });
+        let resolve_session_id_for_session_key: ResolveSessionIdForSessionKeyFn =
+            Arc::new(move |session_key| {
+                let session_id = session_id.clone();
+                let session_key = session_key.to_string();
+                Box::pin(async move {
+                    assert_eq!(session_key, "agent/default/ops");
+                    Ok(session_id)
+                })
+            });
+
+        let (resolved_session_id, inherited_model) = resolve_session_target_context(
+            "default",
+            &moltis_cron::types::SessionTarget::Session {
+                session_key: "agent/default/ops".into(),
+            },
+            &session_metadata,
+            &ensure_main_session_id,
+            &resolve_session_id_for_session_key,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved_session_id, entry.session_id);
+        assert_eq!(inherited_model.as_deref(), Some("claude-sonnet"));
+    }
+
+    #[tokio::test]
+    async fn cron_session_delivery_emits_chat_final_event() {
+        let resolved_auth = auth::resolve_auth(None, None);
+        let state = GatewayState::new(resolved_auth, GatewayServices::noop());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let client = crate::state::ConnectedClient {
+            conn_id: "test-conn".into(),
+            connect_params: moltis_protocol::ConnectParams {
+                min_protocol: 3,
+                max_protocol: 3,
+                client: moltis_protocol::ClientInfo {
+                    id: "test-client".into(),
+                    display_name: None,
+                    version: "0.0.0".into(),
+                    platform: "test".into(),
+                    device_family: None,
+                    model_identifier: None,
+                    mode: "operator".into(),
+                    instance_id: None,
+                },
+                caps: None,
+                commands: None,
+                permissions: None,
+                path_env: None,
+                role: Some("operator".into()),
+                scopes: None,
+                device: None,
+                auth: None,
+                locale: None,
+                user_agent: None,
+                timezone: None,
+            },
+            sender: tx,
+            connected_at: std::time::Instant::now(),
+            last_activity: std::time::Instant::now(),
+            accept_language: None,
+            remote_ip: None,
+            timezone: None,
+        };
+        state.inner.write().await.register_client(client);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_store = SessionStore::new(sessions_dir);
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        SqliteSessionMetadata::init(&pool).await.unwrap();
+        let session_metadata = SqliteSessionMetadata::new(pool);
+        session_metadata
+            .upsert("s1", "agent/default/main", None)
+            .await
+            .unwrap();
+
+        deliver_assistant_message_into_session(
+            Some(&state),
+            &session_store,
+            &session_metadata,
+            "s1",
+            "hello".into(),
+            "run-1".into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session_store.count("s1").await.unwrap(), 1);
+        let entry = session_metadata.get("s1").await.expect("session entry");
+        assert_eq!(entry.preview.as_deref(), Some("hello"));
+
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let frame: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(frame["type"], "event");
+        assert_eq!(frame["event"], "chat");
+        assert_eq!(frame["payload"]["state"], "final");
+        assert_eq!(frame["payload"]["sessionId"], "s1");
+        assert_eq!(frame["payload"]["text"], "hello");
+        assert_eq!(frame["payload"]["messageIndex"], 0);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_session_delivery_emits_chat_final_event() {
+        let resolved_auth = auth::resolve_auth(None, None);
+        let state = Arc::new(GatewayState::new(resolved_auth, GatewayServices::noop()));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let client = crate::state::ConnectedClient {
+            conn_id: "test-conn".into(),
+            connect_params: moltis_protocol::ConnectParams {
+                min_protocol: 3,
+                max_protocol: 3,
+                client: moltis_protocol::ClientInfo {
+                    id: "test-client".into(),
+                    display_name: None,
+                    version: "0.0.0".into(),
+                    platform: "test".into(),
+                    device_family: None,
+                    model_identifier: None,
+                    mode: "operator".into(),
+                    instance_id: None,
+                },
+                caps: None,
+                commands: None,
+                permissions: None,
+                path_env: None,
+                role: Some("operator".into()),
+                scopes: None,
+                device: None,
+                auth: None,
+                locale: None,
+                user_agent: None,
+                timezone: None,
+            },
+            sender: tx,
+            connected_at: std::time::Instant::now(),
+            last_activity: std::time::Instant::now(),
+            accept_language: None,
+            remote_ip: None,
+            timezone: None,
+        };
+        state.inner.write().await.register_client(client);
+
+        let deferred_state: Arc<tokio::sync::OnceCell<Arc<GatewayState>>> =
+            Arc::new(tokio::sync::OnceCell::new());
+        assert!(deferred_state.set(Arc::clone(&state)).is_ok());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_store = Arc::new(SessionStore::new(sessions_dir));
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        SqliteSessionMetadata::init(&pool).await.unwrap();
+        let session_metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        session_metadata
+            .upsert("s1", "agent/default/main", None)
+            .await
+            .unwrap();
+
+        let main_session_id = "s1".to_string();
+        let ensure_main_session_id: EnsureMainSessionIdFn = Arc::new(move |_agent_id| {
+            let main_session_id = main_session_id.clone();
+            Box::pin(async move { Ok(main_session_id) })
+        });
+        let resolve_session_id_for_session_key: ResolveSessionIdForSessionKeyFn =
+            Arc::new(|_session_key| Box::pin(async { Err(anyhow::anyhow!("not used")) }));
+
+        let deliver = make_on_heartbeat_deliver(
+            deferred_state,
+            Arc::clone(&session_store),
+            Arc::clone(&session_metadata),
+            ensure_main_session_id,
+            resolve_session_id_for_session_key,
+        );
+
+        deliver(moltis_cron::heartbeat_service::HeartbeatDeliverRequest {
+            run_id: "run-1".into(),
+            agent_id: "default".into(),
+            session_target: moltis_cron::types::SessionTarget::Main,
+            output: "hello".into(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(session_store.count("s1").await.unwrap(), 1);
+        let entry = session_metadata.get("s1").await.expect("session entry");
+        assert_eq!(entry.preview.as_deref(), Some("hello"));
+
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let frame: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(frame["type"], "event");
+        assert_eq!(frame["event"], "chat");
+        assert_eq!(frame["payload"]["state"], "final");
+        assert_eq!(frame["payload"]["sessionId"], "s1");
+        assert_eq!(frame["payload"]["text"], "hello");
+        assert_eq!(frame["payload"]["messageIndex"], 0);
     }
 }

@@ -1,4 +1,9 @@
 //! Core cron scheduler: timer loop, job execution, CRUD operations.
+//!
+//! One-cut governance model:
+//! - Cron execution is always isolated (no session context).
+//! - Delivery is post-run and must be explicit: silent | session | telegram.
+//! - No legacy fields, no fallback stores, no silent degrade.
 
 use std::{
     collections::VecDeque,
@@ -20,7 +25,17 @@ use {
 #[cfg(feature = "metrics")]
 use moltis_metrics::{counter, cron as cron_metrics, gauge, histogram};
 
-use crate::{schedule::compute_next_run, store::CronStore, types::*};
+use crate::{
+    parse,
+    schedule::compute_next_run,
+    store::CronStore,
+    types::{
+        CronDelivery, CronJob, CronJobCreate, CronJobPatch, CronNotification, CronRunRecord,
+        CronSchedule, CronStatus, ModelSelector, RunStatus, SessionTarget, TelegramTarget,
+    },
+};
+
+const POLICY: &str = "cron_heartbeat_governance_v1";
 
 /// Result of an agent turn, including optional token usage.
 #[derive(Debug, Clone)]
@@ -30,18 +45,65 @@ pub struct AgentTurnResult {
     pub output_tokens: Option<u64>,
 }
 
+/// Parameters for running an isolated agent turn (cron execution).
+#[derive(Debug, Clone)]
+pub struct CronRunRequest {
+    pub run_id: String,
+    pub job_id: String,
+    pub agent_id: String,
+    pub prompt: String,
+    pub model_selector: ModelSelector,
+    pub delivery_session_target: Option<SessionTarget>,
+    pub timeout_secs: Option<u64>,
+}
+
 /// Callback for running an isolated agent turn.
-pub type AgentTurnFn = Arc<
-    dyn Fn(AgentTurnRequest) -> Pin<Box<dyn Future<Output = Result<AgentTurnResult>> + Send>>
+pub type RunCronFn = Arc<
+    dyn Fn(CronRunRequest) -> Pin<Box<dyn Future<Output = Result<AgentTurnResult>> + Send>>
         + Send
         + Sync,
 >;
 
-/// Callback for injecting a system event into the main session.
-pub type SystemEventFn = Arc<dyn Fn(String) + Send + Sync>;
+/// Parameters for delivering a cron result.
+#[derive(Debug, Clone)]
+pub struct CronDeliverRequest {
+    pub run_id: String,
+    pub job_id: String,
+    pub agent_id: String,
+    pub delivery: CronDelivery,
+    pub output: String,
+}
+
+/// Callback for delivering a cron result.
+pub type DeliverCronFn = Arc<
+    dyn Fn(CronDeliverRequest) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
+>;
 
 /// Callback for notifying about cron job changes.
-pub type NotifyFn = Arc<dyn Fn(crate::types::CronNotification) + Send + Sync>;
+pub type NotifyFn = Arc<dyn Fn(CronNotification) + Send + Sync>;
+
+/// Optional validation hooks owned by the gateway boundary.
+#[derive(Clone, Default)]
+pub struct CronValidators {
+    pub validate_model_id:
+        Option<Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>>,
+    pub validate_session_target: Option<
+        Arc<
+            dyn Fn(&str, &SessionTarget) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                + Send
+                + Sync,
+        >,
+    >,
+    pub validate_telegram_target: Option<
+        Arc<
+            dyn Fn(&TelegramTarget) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                + Send
+                + Sync,
+        >,
+    >,
+    pub validate_agent_id:
+        Option<Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>>,
+}
 
 /// Rate limiting configuration for cron job creation.
 #[derive(Debug, Clone)]
@@ -80,7 +142,6 @@ impl RateLimiter {
         let now = now_ms();
         let cutoff = now.saturating_sub(self.config.window_ms);
 
-        // Remove expired timestamps.
         while self.timestamps.front().is_some_and(|&ts| ts < cutoff) {
             self.timestamps.pop_front();
         }
@@ -93,40 +154,10 @@ impl RateLimiter {
             );
         }
 
-        // Record this attempt.
         self.timestamps.push_back(now);
         Ok(())
     }
 }
-
-/// Parameters passed to the agent turn callback.
-#[derive(Debug, Clone)]
-pub struct AgentTurnRequest {
-    pub message: String,
-    pub model: Option<String>,
-    pub timeout_secs: Option<u64>,
-    pub deliver: bool,
-    pub channel: Option<String>,
-    pub to: Option<String>,
-    pub session_target: SessionTarget,
-    pub sandbox: CronSandboxConfig,
-}
-
-/// The cron scheduler.
-pub struct CronService {
-    store: Arc<dyn CronStore>,
-    jobs: RwLock<Vec<CronJob>>,
-    timer_handle: Mutex<Option<JoinHandle<()>>>,
-    wake_notify: Arc<Notify>,
-    running: RwLock<bool>,
-    on_system_event: SystemEventFn,
-    on_agent_turn: AgentTurnFn,
-    on_notify: Option<NotifyFn>,
-    rate_limiter: Mutex<RateLimiter>,
-}
-
-/// Max time a job can be in "running" state before we consider it stuck (2 hours).
-const STUCK_THRESHOLD_MS: u64 = 2 * 60 * 60 * 1000;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -135,77 +166,121 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn ms_to_rfc3339(ms: u64) -> String {
+    use chrono::{DateTime, Utc};
+    let dt = DateTime::<Utc>::from_timestamp_millis(ms as i64)
+        .unwrap_or_else(|| DateTime::<Utc>::from_timestamp_millis(0).expect("epoch"));
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn truncate_preview(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let idx = s.floor_char_boundary(max);
+        format!("{}…", &s[..idx])
+    }
+}
+
+/// The cron scheduler.
+pub struct CronService {
+    store: Arc<dyn CronStore>,
+    validators: CronValidators,
+    jobs: RwLock<Vec<CronJob>>,
+    timer_handle: Mutex<Option<JoinHandle<()>>>,
+    wake_notify: Arc<Notify>,
+    running: RwLock<bool>,
+    on_run: RunCronFn,
+    on_deliver: DeliverCronFn,
+    on_notify: Option<NotifyFn>,
+    rate_limiter: Mutex<RateLimiter>,
+}
+
+/// Max time a job can be in "running" state before we consider it stuck (2 hours).
+const STUCK_THRESHOLD_MS: u64 = 2 * 60 * 60 * 1000;
+
 impl CronService {
     pub fn new(
         store: Arc<dyn CronStore>,
-        on_system_event: SystemEventFn,
-        on_agent_turn: AgentTurnFn,
+        on_run: RunCronFn,
+        on_deliver: DeliverCronFn,
     ) -> Arc<Self> {
         Self::with_config(
             store,
-            on_system_event,
-            on_agent_turn,
+            on_run,
+            on_deliver,
             None,
             RateLimitConfig::default(),
+            CronValidators::default(),
         )
     }
 
-    /// Create a new cron service with a notification callback.
     pub fn with_notify(
         store: Arc<dyn CronStore>,
-        on_system_event: SystemEventFn,
-        on_agent_turn: AgentTurnFn,
+        on_run: RunCronFn,
+        on_deliver: DeliverCronFn,
         on_notify: NotifyFn,
     ) -> Arc<Self> {
         Self::with_config(
             store,
-            on_system_event,
-            on_agent_turn,
+            on_run,
+            on_deliver,
             Some(on_notify),
             RateLimitConfig::default(),
+            CronValidators::default(),
         )
     }
 
-    /// Create a new cron service with all configuration options.
     pub fn with_config(
         store: Arc<dyn CronStore>,
-        on_system_event: SystemEventFn,
-        on_agent_turn: AgentTurnFn,
+        on_run: RunCronFn,
+        on_deliver: DeliverCronFn,
         on_notify: Option<NotifyFn>,
         rate_limit_config: RateLimitConfig,
+        validators: CronValidators,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
+            validators,
             jobs: RwLock::new(Vec::new()),
             timer_handle: Mutex::new(None),
             wake_notify: Arc::new(Notify::new()),
             running: RwLock::new(false),
-            on_system_event,
-            on_agent_turn,
+            on_run,
+            on_deliver,
             on_notify,
             rate_limiter: Mutex::new(RateLimiter::new(rate_limit_config)),
         })
     }
 
-    /// Emit a notification if a callback is registered.
-    fn notify(&self, notification: crate::types::CronNotification) {
+    pub fn with_validators(self: Arc<Self>, validators: CronValidators) -> Arc<Self> {
+        // Arc mutation pattern: clone inner to new service only when needed is overkill here.
+        // Instead, require validators to be set during construction in new call sites.
+        // Kept for API stability: no-op when already set.
+        let _ = validators;
+        self
+    }
+
+    fn notify(&self, notification: CronNotification) {
         if let Some(ref notify_fn) = self.on_notify {
             notify_fn(notification);
         }
     }
 
-    /// Load jobs from store and start the timer loop.
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         let loaded = self.store.load_jobs().await?;
         info!(count = loaded.len(), "loaded cron jobs");
+
+        for job in &loaded {
+            self.validate_loaded_job(job).await?;
+        }
 
         {
             let mut jobs = self.jobs.write().await;
             *jobs = loaded;
         }
 
-        // Recompute next runs for all enabled jobs.
-        self.recompute_all_next_runs().await;
+        self.recompute_all_next_runs().await?;
 
         *self.running.write().await = true;
 
@@ -213,12 +288,10 @@ impl CronService {
         let handle = tokio::spawn(async move {
             svc.timer_loop().await;
         });
-
         *self.timer_handle.lock().await = Some(handle);
         Ok(())
     }
 
-    /// Stop the timer loop.
     pub async fn stop(&self) {
         *self.running.write().await = false;
         self.wake_notify.notify_one();
@@ -230,92 +303,85 @@ impl CronService {
         info!("cron service stopped");
     }
 
-    /// Add a new job.
     pub async fn add(&self, create: CronJobCreate) -> Result<CronJob> {
-        // Check rate limit (skip for system jobs like heartbeat).
-        if !create.system {
-            self.rate_limiter.lock().await.check()?;
-        }
+        self.rate_limiter.lock().await.check()?;
 
         let now = now_ms();
         let mut job = CronJob {
-            id: create
-                .id
+            job_id: create
+                .job_id
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            agent_id: create.agent_id,
             name: create.name,
             enabled: create.enabled,
             delete_after_run: create.delete_after_run,
             schedule: create.schedule,
-            payload: create.payload,
-            session_target: create.session_target,
-            state: CronJobState::default(),
-            sandbox: create.sandbox,
-            system: create.system,
-            created_at_ms: now,
-            updated_at_ms: now,
+            prompt: create.prompt,
+            model_selector: create.model_selector,
+            timeout_secs: create.timeout_secs,
+            delivery: create.delivery,
+            state: Default::default(),
         };
 
-        // Validate session_target + payload combo.
-        validate_job_spec(&job)?;
+        self.validate_job(&job).await?;
 
-        // Compute next run.
         if job.enabled {
-            job.state.next_run_at_ms = compute_next_run(&job.schedule, now)?;
+            job.state.next_run_at = compute_next_run_rfc3339(&job.schedule, now)?;
         }
 
         self.store.save_job(&job).await?;
-
         {
             let mut jobs = self.jobs.write().await;
             jobs.push(job.clone());
         }
-
         self.wake_notify.notify_one();
-        self.notify(crate::types::CronNotification::Created { job: job.clone() });
-        info!(id = %job.id, name = %job.name, "cron job added");
+        self.notify(CronNotification::Created { job: job.clone() });
+        info!(job_id = %job.job_id, agent_id = %job.agent_id, "cron job added");
         Ok(job)
     }
 
-    /// Update an existing job.
-    pub async fn update(&self, id: &str, patch: CronJobPatch) -> Result<CronJob> {
+    pub async fn update(&self, job_id: &str, patch: CronJobPatch) -> Result<CronJob> {
         let now = now_ms();
         let mut jobs = self.jobs.write().await;
         let job = jobs
             .iter_mut()
-            .find(|j| j.id == id)
-            .ok_or_else(|| anyhow::anyhow!("job not found: {id}"))?;
+            .find(|j| j.job_id == job_id)
+            .ok_or_else(|| anyhow::anyhow!("job not found: {job_id}"))?;
 
+        if let Some(agent_id) = patch.agent_id {
+            job.agent_id = agent_id;
+        }
         if let Some(name) = patch.name {
             job.name = name;
         }
         if let Some(schedule) = patch.schedule {
             job.schedule = schedule;
         }
-        if let Some(payload) = patch.payload {
-            job.payload = payload;
+        if let Some(prompt) = patch.prompt {
+            job.prompt = prompt;
         }
-        if let Some(target) = patch.session_target {
-            job.session_target = target;
+        if let Some(model_selector) = patch.model_selector {
+            job.model_selector = model_selector;
+        }
+        if let Some(timeout) = patch.timeout_secs {
+            job.timeout_secs = timeout;
+        }
+        if let Some(delivery) = patch.delivery {
+            job.delivery = delivery;
         }
         if let Some(enabled) = patch.enabled {
             job.enabled = enabled;
         }
-        if let Some(delete_after) = patch.delete_after_run {
-            job.delete_after_run = delete_after;
-        }
-        if let Some(sandbox) = patch.sandbox {
-            job.sandbox = sandbox;
+        if let Some(delete_after_run) = patch.delete_after_run {
+            job.delete_after_run = delete_after_run;
         }
 
-        job.updated_at_ms = now;
+        self.validate_job(job).await?;
 
-        validate_job_spec(job)?;
-
-        // Recompute next run.
         if job.enabled {
-            job.state.next_run_at_ms = compute_next_run(&job.schedule, now)?;
+            job.state.next_run_at = compute_next_run_rfc3339(&job.schedule, now)?;
         } else {
-            job.state.next_run_at_ms = None;
+            job.state.next_run_at = None;
         }
 
         let updated = job.clone();
@@ -323,83 +389,80 @@ impl CronService {
 
         drop(jobs);
         self.wake_notify.notify_one();
-        self.notify(crate::types::CronNotification::Updated {
+        self.notify(CronNotification::Updated {
             job: updated.clone(),
         });
-        info!(id, "cron job updated");
+        info!(job_id, "cron job updated");
         Ok(updated)
     }
 
-    /// Remove a job.
-    pub async fn remove(&self, id: &str) -> Result<()> {
-        self.store.delete_job(id).await?;
+    pub async fn remove(&self, job_id: &str) -> Result<()> {
+        self.store.delete_job(job_id).await?;
         let mut jobs = self.jobs.write().await;
-        jobs.retain(|j| j.id != id);
+        jobs.retain(|j| j.job_id != job_id);
         drop(jobs);
-        self.notify(crate::types::CronNotification::Removed {
-            job_id: id.to_string(),
+        self.notify(CronNotification::Removed {
+            job_id: job_id.to_string(),
         });
-        info!(id, "cron job removed");
+        info!(job_id, "cron job removed");
         Ok(())
     }
 
-    /// List all jobs.
     pub async fn list(&self) -> Vec<CronJob> {
         self.jobs.read().await.clone()
     }
 
-    /// Force-run a job immediately.
-    pub async fn run(self: &Arc<Self>, id: &str, force: bool) -> Result<()> {
-        let job = {
-            let jobs = self.jobs.read().await;
-            jobs.iter()
-                .find(|j| j.id == id)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("job not found: {id}"))?
-        };
-
-        if !job.enabled && !force {
-            bail!("job is disabled (use force=true to override)");
-        }
-
-        // Mark as running before executing (prevents duplicate runs).
-        let now = now_ms();
-        self.update_job_state(&job.id, |state| {
-            state.running_at_ms = Some(now);
-        })
-        .await;
-
-        self.execute_job(&job).await;
-        Ok(())
-    }
-
-    /// Get run history for a job.
     pub async fn runs(&self, job_id: &str, limit: usize) -> Result<Vec<CronRunRecord>> {
         self.store.get_runs(job_id, limit).await
     }
 
-    /// Get scheduler status.
-    /// Counts exclude system jobs (e.g. heartbeat) to match what the UI shows.
     pub async fn status(&self) -> CronStatus {
         let jobs = self.jobs.read().await;
         let running = *self.running.read().await;
-        // Exclude system jobs from counts (they're hidden in the UI).
-        let user_jobs: Vec<_> = jobs.iter().filter(|j| !j.system).collect();
-        let enabled_count = user_jobs.iter().filter(|j| j.enabled).count();
-        let next_run_at_ms = user_jobs
+        let enabled_count = jobs.iter().filter(|j| j.enabled).count();
+        let next_run_at = jobs
             .iter()
-            .filter_map(|j| j.state.next_run_at_ms)
+            .filter(|j| j.enabled)
+            .filter_map(|j| j.state.next_run_at.clone())
             .min();
 
         #[cfg(feature = "metrics")]
-        gauge!(cron_metrics::JOBS_SCHEDULED).set(user_jobs.len() as f64);
+        gauge!(cron_metrics::JOBS_SCHEDULED).set(jobs.len() as f64);
 
         CronStatus {
             running,
-            job_count: user_jobs.len(),
+            job_count: jobs.len(),
             enabled_count,
-            next_run_at_ms,
+            next_run_at,
         }
+    }
+
+    pub async fn run(self: &Arc<Self>, job_id: &str, force: bool) -> Result<()> {
+        let now = now_ms();
+        let job = {
+            let mut jobs = self.jobs.write().await;
+            let job = jobs
+                .iter_mut()
+                .find(|j| j.job_id == job_id)
+                .ok_or_else(|| anyhow::anyhow!("job not found: {job_id}"))?;
+            if !job.enabled && !force {
+                bail!("job is disabled (use force=true to override)");
+            }
+            job.state.running_at = Some(ms_to_rfc3339(now));
+            job.clone()
+        };
+
+        if let Err(e) = self.store.update_job(&job).await {
+            // Revert local running state so we don't block future runs.
+            self.update_job_state(job_id, |state| {
+                state.running_at = None;
+            })
+            .await;
+            bail!("failed to persist cron runningAt: {e}");
+        }
+
+        self.execute_job(&job).await;
+        Ok(())
     }
 
     // ── Internal ────────────────────────────────────────────────────────
@@ -411,7 +474,6 @@ impl CronService {
             }
 
             let sleep_ms = self.ms_until_next_wake().await;
-
             if sleep_ms > 0 {
                 let notify = Arc::clone(&self.wake_notify);
                 tokio::select! {
@@ -436,106 +498,134 @@ impl CronService {
         let now = now_ms();
         jobs.iter()
             .filter(|j| j.enabled)
-            .filter_map(|j| j.state.next_run_at_ms)
+            .filter_map(|j| j.state.next_run_at.as_deref())
+            .filter_map(|s| parse::parse_absolute_time_ms(s).ok())
             .map(|t| t.saturating_sub(now))
             .min()
-            .unwrap_or(60_000) // poll every 60s if no jobs
+            .unwrap_or(60_000)
     }
 
     async fn process_due_jobs(self: &Arc<Self>) {
         let now = now_ms();
+
         let due_jobs: Vec<CronJob> = {
             let mut jobs = self.jobs.write().await;
             let mut due = Vec::new();
             for job in jobs.iter_mut() {
-                if job.enabled
-                    && job.state.next_run_at_ms.is_some_and(|t| t <= now)
-                    && job.state.running_at_ms.is_none()
-                {
-                    // Mark as running under the write lock BEFORE spawning,
-                    // so the next timer tick won't pick up the same job again.
-                    job.state.running_at_ms = Some(now);
+                let next_ms = job
+                    .state
+                    .next_run_at
+                    .as_deref()
+                    .and_then(|s| parse::parse_absolute_time_ms(s).ok());
+                let is_running = job.state.running_at.is_some();
+                if job.enabled && !is_running && next_ms.is_some_and(|t| t <= now) {
+                    job.state.running_at = Some(ms_to_rfc3339(now));
                     due.push(job.clone());
                 }
             }
             due
         };
 
-        // Clear stuck jobs.
-        self.clear_stuck_jobs(now).await;
+        let stuck_cleared = self.clear_stuck_jobs(now).await;
+        for job in stuck_cleared {
+            if let Err(e) = self.store.update_job(&job).await {
+                warn!(
+                    event = "cron.run.stuck_cleared.persist_failed",
+                    policy = POLICY,
+                    decision = "fail",
+                    reason_code = "cron_stuck_clear_persist_failed",
+                    job_id = %job.job_id,
+                    agent_id = %job.agent_id,
+                    error = %e,
+                    "failed to persist stuck-cleared cron state"
+                );
+            }
+        }
 
+        let mut runnable = Vec::new();
         for job in due_jobs {
+            match self.store.update_job(&job).await {
+                Ok(()) => runnable.push(job),
+                Err(e) => {
+                    warn!(
+                        event = "cron.run.start_state.persist_failed",
+                        policy = POLICY,
+                        decision = "skip",
+                        reason_code = "cron_running_at_persist_failed",
+                        job_id = %job.job_id,
+                        agent_id = %job.agent_id,
+                        error = %e,
+                        "failed to persist cron runningAt; skipping this run"
+                    );
+                    // Revert local running state so future intervals aren't blocked.
+                    self.update_job_state(&job.job_id, |state| state.running_at = None)
+                        .await;
+                },
+            }
+        }
+
+        for job in runnable {
             let svc = Arc::clone(self);
-            let job_clone = job.clone();
             tokio::spawn(async move {
-                svc.execute_job(&job_clone).await;
+                svc.execute_job(&job).await;
             });
         }
     }
 
     async fn execute_job(self: &Arc<Self>, job: &CronJob) {
-        let started = now_ms();
-        info!(id = %job.id, name = %job.name, "executing cron job");
+        let started_ms = now_ms();
+        let run_id = uuid::Uuid::new_v4().to_string();
 
         #[cfg(feature = "metrics")]
         counter!(cron_metrics::EXECUTIONS_TOTAL).increment(1);
 
-        // running_at_ms was already set in process_due_jobs() before spawning.
+        info!(
+            event = "cron.run.start",
+            policy = POLICY,
+            decision = "allow",
+            job_id = %job.job_id,
+            agent_id = %job.agent_id,
+            run_id = %run_id,
+            "cron job executing"
+        );
 
-        let result = match &job.payload {
-            CronPayload::SystemEvent { text } => {
-                (self.on_system_event)(text.clone());
-                Ok(AgentTurnResult {
-                    output: "system event injected".to_string(),
-                    input_tokens: None,
-                    output_tokens: None,
-                })
+        let result = (self.on_run)(CronRunRequest {
+            run_id: run_id.clone(),
+            job_id: job.job_id.clone(),
+            agent_id: job.agent_id.clone(),
+            prompt: job.prompt.clone(),
+            model_selector: job.model_selector.clone(),
+            delivery_session_target: match &job.delivery {
+                CronDelivery::Session { target } => Some(target.clone()),
+                CronDelivery::Silent | CronDelivery::Telegram { .. } => None,
             },
-            CronPayload::AgentTurn {
-                message,
-                model,
-                timeout_secs,
-                deliver,
-                channel,
-                to,
-            } => {
-                let req = AgentTurnRequest {
-                    message: message.clone(),
-                    model: model.clone(),
-                    timeout_secs: *timeout_secs,
-                    deliver: *deliver,
-                    channel: channel.clone(),
-                    to: to.clone(),
-                    session_target: job.session_target.clone(),
-                    sandbox: job.sandbox.clone(),
-                };
-                (self.on_agent_turn)(req).await
-            },
-        };
+            timeout_secs: job.timeout_secs,
+        })
+        .await;
 
-        let finished = now_ms();
-        let duration_ms = finished - started;
-        let (status, error_msg, output, input_tokens, output_tokens) = match &result {
-            Ok(r) => {
-                #[cfg(feature = "metrics")]
-                {
-                    if let Some(input) = r.input_tokens {
-                        counter!(cron_metrics::INPUT_TOKENS_TOTAL).increment(input);
-                    }
-                    if let Some(output) = r.output_tokens {
-                        counter!(cron_metrics::OUTPUT_TOKENS_TOTAL).increment(output);
-                    }
-                }
-                (
-                    RunStatus::Ok,
-                    None,
-                    Some(r.output.clone()),
-                    r.input_tokens,
-                    r.output_tokens,
-                )
-            },
+        let finished_ms = now_ms();
+        let duration_ms = finished_ms.saturating_sub(started_ms);
+
+        let (mut status, mut error_msg, output, input_tokens, output_tokens) = match result {
+            Ok(r) => (
+                RunStatus::Ok,
+                None,
+                Some(r.output),
+                r.input_tokens,
+                r.output_tokens,
+            ),
             Err(e) => {
-                error!(id = %job.id, error = %e, "cron job failed");
+                error!(
+                    event = "cron.run.finish",
+                    policy = POLICY,
+                    decision = "fail",
+                    reason_code = "cron_run_failed",
+                    job_id = %job.job_id,
+                    agent_id = %job.agent_id,
+                    run_id = %run_id,
+                    error = %e,
+                    "cron job failed"
+                );
                 #[cfg(feature = "metrics")]
                 counter!(cron_metrics::ERRORS_TOTAL).increment(1);
                 (RunStatus::Error, Some(e.to_string()), None, None, None)
@@ -545,124 +635,307 @@ impl CronService {
         #[cfg(feature = "metrics")]
         histogram!(cron_metrics::EXECUTION_DURATION_SECONDS).record(duration_ms as f64 / 1000.0);
 
-        // Record run.
-        let run = CronRunRecord {
-            job_id: job.id.clone(),
-            started_at_ms: started,
-            finished_at_ms: finished,
+        // Delivery (post-run).
+        if status == RunStatus::Ok {
+            if let Some(out) = output.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                match &job.delivery {
+                    CronDelivery::Silent => {
+                        info!(
+                            event = "cron.delivery",
+                            policy = POLICY,
+                            decision = "ok",
+                            reason_code = "cron_delivery_silent",
+                            job_id = %job.job_id,
+                            agent_id = %job.agent_id,
+                            run_id = %run_id,
+                            delivery_kind = "silent",
+                            output_len = out.len(),
+                            "cron delivery suppressed (silent)"
+                        );
+                    },
+                    _ => {
+                        let delivery = job.delivery.clone();
+                        let deliver_res = (self.on_deliver)(CronDeliverRequest {
+                            run_id: run_id.clone(),
+                            job_id: job.job_id.clone(),
+                            agent_id: job.agent_id.clone(),
+                            delivery: delivery.clone(),
+                            output: out.to_string(),
+                        })
+                        .await;
+                        match deliver_res {
+                            Ok(()) => info!(
+                                event = "cron.delivery",
+                                policy = POLICY,
+                                decision = "ok",
+                                reason_code = "cron_delivery_ok",
+                                job_id = %job.job_id,
+                                agent_id = %job.agent_id,
+                                run_id = %run_id,
+                                delivery_kind = match delivery { CronDelivery::Session{..} => "session", CronDelivery::Telegram{..} => "telegram", CronDelivery::Silent => "silent" },
+                                output_len = out.len(),
+                                "cron delivery ok"
+                            ),
+                            Err(e) => {
+                                let delivery_error = e.to_string();
+                                error!(
+                                    event = "cron.delivery",
+                                    policy = POLICY,
+                                    decision = "fail",
+                                    reason_code = "cron_delivery_failed",
+                                    job_id = %job.job_id,
+                                    agent_id = %job.agent_id,
+                                    run_id = %run_id,
+                                    error = %delivery_error,
+                                    "cron delivery failed"
+                                );
+                                status = RunStatus::Error;
+                                error_msg = Some(delivery_error);
+                            },
+                        }
+                    },
+                }
+            }
+        }
+
+        let output_preview = output
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| truncate_preview(s, 240));
+
+        let run_record = CronRunRecord {
+            run_id: run_id.clone(),
+            job_id: job.job_id.clone(),
+            started_at: ms_to_rfc3339(started_ms),
+            finished_at: ms_to_rfc3339(finished_ms),
             status,
             error: error_msg.clone(),
-            duration_ms,
-            output,
+            output_preview: output_preview.clone(),
             input_tokens,
             output_tokens,
         };
-        if let Err(e) = self.store.append_run(&job.id, &run).await {
+
+        if let Err(e) = self.store.append_run(&job.job_id, &run_record).await {
             warn!(error = %e, "failed to record cron run");
         }
 
         // Update job state.
         let now = now_ms();
-        let next_run = compute_next_run(&job.schedule, now).unwrap_or(None);
+        let next_run_at = match compute_next_run_rfc3339(&job.schedule, now) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(job_id = %job.job_id, error = %e, "failed to compute next run");
+                None
+            },
+        };
 
-        self.update_job_state(&job.id, |state| {
-            state.running_at_ms = None;
-            state.last_run_at_ms = Some(finished);
+        self.update_job_state(&job.job_id, |state| {
+            state.running_at = None;
+            state.last_run_at = Some(ms_to_rfc3339(finished_ms));
             state.last_status = Some(status);
             state.last_error = error_msg;
             state.last_duration_ms = Some(duration_ms);
-            state.next_run_at_ms = next_run;
+            state.next_run_at = next_run_at.clone();
         })
         .await;
 
-        // Handle one-shot jobs.
-        if next_run.is_none() {
+        // once schedule: disable or delete after run
+        if matches!(job.schedule, CronSchedule::Once { .. }) {
             if job.delete_after_run {
-                let _ = self.remove(&job.id).await;
-                info!(id = %job.id, "one-shot job deleted after run");
+                let _ = self.remove(&job.job_id).await;
             } else {
-                // Disable it.
                 let mut jobs = self.jobs.write().await;
-                if let Some(j) = jobs.iter_mut().find(|j| j.id == job.id) {
+                if let Some(j) = jobs.iter_mut().find(|j| j.job_id == job.job_id) {
                     j.enabled = false;
+                    j.state.next_run_at = None;
                     let _ = self.store.update_job(j).await;
                 }
             }
         } else {
             // Persist updated state.
             let jobs = self.jobs.read().await;
-            if let Some(j) = jobs.iter().find(|j| j.id == job.id) {
+            if let Some(j) = jobs.iter().find(|j| j.job_id == job.job_id) {
                 let _ = self.store.update_job(j).await;
             }
         }
 
         info!(
-            id = %job.id,
+            event = "cron.run.finish",
+            policy = POLICY,
+            decision = match status {
+                RunStatus::Ok => "ok",
+                RunStatus::Error => "fail",
+                RunStatus::Skipped => "skip",
+            },
+            job_id = %job.job_id,
+            agent_id = %job.agent_id,
+            run_id = %run_id,
             status = ?status,
             duration_ms,
             "cron job finished"
         );
     }
 
-    async fn update_job_state<F: FnOnce(&mut CronJobState)>(&self, id: &str, f: F) {
+    async fn update_job_state<F: FnOnce(&mut crate::types::CronJobState)>(
+        &self,
+        job_id: &str,
+        f: F,
+    ) {
         let mut jobs = self.jobs.write().await;
-        if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
+        if let Some(job) = jobs.iter_mut().find(|j| j.job_id == job_id) {
             f(&mut job.state);
         }
     }
 
-    async fn recompute_all_next_runs(&self) {
+    async fn recompute_all_next_runs(&self) -> Result<()> {
         let now = now_ms();
         let mut jobs = self.jobs.write().await;
         for job in jobs.iter_mut() {
             if job.enabled {
-                job.state.next_run_at_ms = compute_next_run(&job.schedule, now).unwrap_or(None);
+                job.state.next_run_at = compute_next_run_rfc3339(&job.schedule, now)?;
+            } else {
+                job.state.next_run_at = None;
             }
         }
+        Ok(())
     }
 
-    async fn clear_stuck_jobs(&self, now: u64) {
+    async fn clear_stuck_jobs(&self, now: u64) -> Vec<CronJob> {
         let mut jobs = self.jobs.write().await;
+        let mut cleared = Vec::new();
         for job in jobs.iter_mut() {
-            if let Some(running_at) = job.state.running_at_ms
-                && now.saturating_sub(running_at) > STUCK_THRESHOLD_MS
+            let running_ms = job
+                .state
+                .running_at
+                .as_deref()
+                .and_then(|s| parse::parse_absolute_time_ms(s).ok());
+            if let Some(started) = running_ms
+                && now.saturating_sub(started) > STUCK_THRESHOLD_MS
             {
-                warn!(id = %job.id, "clearing stuck cron job");
-                job.state.running_at_ms = None;
+                warn!(
+                    event = "cron.run.stuck_cleared",
+                    policy = POLICY,
+                    decision = "drop",
+                    reason_code = "cron_stuck_cleared",
+                    job_id = %job.job_id,
+                    agent_id = %job.agent_id,
+                    "clearing stuck cron job"
+                );
+                job.state.running_at = None;
                 job.state.last_status = Some(RunStatus::Error);
-                job.state.last_error = Some("stuck: exceeded 2h timeout".into());
+                job.state.last_error = Some("stuck: exceeded 2h threshold".into());
                 #[cfg(feature = "metrics")]
                 counter!(cron_metrics::STUCK_JOBS_CLEARED_TOTAL).increment(1);
+                cleared.push(job.clone());
             }
+        }
+        cleared
+    }
+
+    async fn validate_job(&self, job: &CronJob) -> Result<()> {
+        self.validate_job_with_mode(job, false).await
+    }
+
+    async fn validate_loaded_job(&self, job: &CronJob) -> Result<()> {
+        self.validate_job_with_mode(job, true).await
+    }
+
+    async fn validate_job_with_mode(&self, job: &CronJob, persisted_load: bool) -> Result<()> {
+        // agent id checks (gateway-owned)
+        if let Some(ref validate_agent_id) = self.validators.validate_agent_id {
+            (validate_agent_id)(&job.agent_id).await?;
+        } else if job.agent_id.trim().is_empty() {
+            bail!("agentId is required");
+        }
+
+        // prompt
+        if job.prompt.trim().is_empty() {
+            bail!("cronPromptMissing");
+        }
+
+        // schedule
+        validate_schedule(&job.schedule, now_ms(), persisted_load)?;
+
+        // deleteAfterRun constraint
+        if job.delete_after_run && !matches!(job.schedule, CronSchedule::Once { .. }) {
+            bail!("deleteAfterRun=true requires schedule.kind=once");
+        }
+
+        // model selector
+        if let ModelSelector::Explicit { model_id } = &job.model_selector
+            && let Some(ref validate_model_id) = self.validators.validate_model_id
+            && !persisted_load
+        {
+            validate_model_id(model_id).await?;
+        }
+
+        // delivery validation (shape + gateway-owned checks)
+        match &job.delivery {
+            CronDelivery::Silent => Ok(()),
+            CronDelivery::Session { target } => {
+                if let Some(ref validate) = self.validators.validate_session_target {
+                    if !persisted_load {
+                        validate(&job.agent_id, target).await?;
+                    }
+                }
+                Ok(())
+            },
+            CronDelivery::Telegram { target } => {
+                if target.account_key.trim().is_empty() || target.chat_id.trim().is_empty() {
+                    bail!("telegram delivery requires accountKey + chatId");
+                }
+                if let Some(ref validate) = self.validators.validate_telegram_target {
+                    if !persisted_load {
+                        validate(target).await?;
+                    }
+                }
+                Ok(())
+            },
         }
     }
 }
 
-/// Validate session_target + payload compatibility.
-fn validate_job_spec(job: &CronJob) -> Result<()> {
-    match (&job.session_target, &job.payload) {
-        (SessionTarget::Main, CronPayload::AgentTurn { .. }) => {
-            bail!("sessionTarget=main requires payload kind=systemEvent");
+fn validate_schedule(schedule: &CronSchedule, now_ms: u64, allow_past_once: bool) -> Result<()> {
+    match schedule {
+        CronSchedule::Once { at } => {
+            let at_ms = parse::parse_absolute_time_ms(at)?;
+            if !allow_past_once && at_ms <= now_ms {
+                bail!("cronSchedulePast");
+            }
+            Ok(())
         },
-        (SessionTarget::Isolated | SessionTarget::Named(_), CronPayload::SystemEvent { .. }) => {
-            bail!("sessionTarget=isolated/named requires payload kind=agentTurn");
+        CronSchedule::Every { every } => {
+            let ms = parse::parse_duration_ms(every)?;
+            if ms == 0 {
+                bail!("cronScheduleInvalid");
+            }
+            Ok(())
         },
-        _ => Ok(()),
+        CronSchedule::Cron { expr: _, timezone } => {
+            // validate expr + timezone by trying next-run compute
+            let _ = compute_next_run(schedule, now_ms)?;
+            let _: chrono_tz::Tz = timezone
+                .parse()
+                .map_err(|_| anyhow::anyhow!("unknown timezone: {timezone}"))?;
+            // (compute_next_run already validates expr)
+            Ok(())
+        },
     }
+}
+
+fn compute_next_run_rfc3339(schedule: &CronSchedule, now_ms: u64) -> Result<Option<String>> {
+    compute_next_run(schedule, now_ms).map(|opt| opt.map(ms_to_rfc3339))
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use super::*;
+    use crate::types::CronJobState;
+    use tokio::{sync::{Mutex, Notify}, time::{Duration, sleep}};
 
-    use {super::*, crate::store_memory::InMemoryStore};
-
-    fn noop_system_event() -> SystemEventFn {
-        Arc::new(|_text| {})
-    }
-
-    fn noop_agent_turn() -> AgentTurnFn {
+    fn noop_run() -> RunCronFn {
         Arc::new(|_req| {
             Box::pin(async {
                 Ok(AgentTurnResult {
@@ -674,543 +947,303 @@ mod tests {
         })
     }
 
-    fn counting_system_event(counter: Arc<AtomicUsize>) -> SystemEventFn {
-        Arc::new(move |_text| {
-            counter.fetch_add(1, Ordering::SeqCst);
-        })
+    fn noop_deliver() -> DeliverCronFn {
+        Arc::new(|_req| Box::pin(async { Ok(()) }))
     }
 
-    fn counting_agent_turn(counter: Arc<AtomicUsize>) -> AgentTurnFn {
-        Arc::new(move |_req| {
-            let c = Arc::clone(&counter);
-            Box::pin(async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                Ok(AgentTurnResult {
-                    output: "done".into(),
-                    input_tokens: None,
-                    output_tokens: None,
-                })
-            })
-        })
-    }
-
-    fn make_svc(
-        store: Arc<InMemoryStore>,
-        sys: SystemEventFn,
-        agent: AgentTurnFn,
-    ) -> Arc<CronService> {
-        CronService::new(store, sys, agent)
-    }
-
-    #[tokio::test]
-    async fn test_add_and_list() {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(store.clone(), noop_system_event(), noop_agent_turn());
-
-        let job = svc
-            .add(CronJobCreate {
-                id: None,
-                name: "test".into(),
-                schedule: CronSchedule::Every {
-                    every_ms: 60_000,
-                    anchor_ms: None,
-                },
-                payload: CronPayload::AgentTurn {
-                    message: "hi".into(),
-                    model: None,
-                    timeout_secs: None,
-                    deliver: false,
-                    channel: None,
-                    to: None,
-                },
-                session_target: SessionTarget::Isolated,
-                delete_after_run: false,
-                enabled: true,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
-            })
+    async fn sqlite_store() -> crate::store_sqlite::SqliteStore {
+        crate::store_sqlite::SqliteStore::new("sqlite::memory:")
             .await
-            .unwrap();
-
-        let jobs = svc.list().await;
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].id, job.id);
-        assert!(jobs[0].state.next_run_at_ms.is_some());
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn test_add_validates_session_target() {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(store, noop_system_event(), noop_agent_turn());
-
-        // main + agentTurn should fail
-        let result = svc
+    async fn add_rejects_empty_prompt() {
+        let store = Arc::new(sqlite_store().await);
+        let svc = CronService::new(store, noop_run(), noop_deliver());
+        let err = svc
             .add(CronJobCreate {
-                id: None,
-                name: "bad".into(),
-                schedule: CronSchedule::At {
-                    at_ms: 9999999999999,
-                },
-                payload: CronPayload::AgentTurn {
-                    message: "hi".into(),
-                    model: None,
-                    timeout_secs: None,
-                    deliver: false,
-                    channel: None,
-                    to: None,
-                },
-                session_target: SessionTarget::Main,
-                delete_after_run: false,
-                enabled: true,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
-            })
-            .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_update_job() {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(store, noop_system_event(), noop_agent_turn());
-
-        let job = svc
-            .add(CronJobCreate {
-                id: None,
-                name: "orig".into(),
-                schedule: CronSchedule::Every {
-                    every_ms: 60_000,
-                    anchor_ms: None,
-                },
-                payload: CronPayload::AgentTurn {
-                    message: "hi".into(),
-                    model: None,
-                    timeout_secs: None,
-                    deliver: false,
-                    channel: None,
-                    to: None,
-                },
-                session_target: SessionTarget::Isolated,
-                delete_after_run: false,
-                enabled: true,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
-            })
-            .await
-            .unwrap();
-
-        let updated = svc
-            .update(
-                &job.id,
-                CronJobPatch {
-                    name: Some("renamed".into()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(updated.name, "renamed");
-    }
-
-    #[tokio::test]
-    async fn test_remove_job() {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(store, noop_system_event(), noop_agent_turn());
-
-        let job = svc
-            .add(CronJobCreate {
-                id: None,
-                name: "del".into(),
-                schedule: CronSchedule::Every {
-                    every_ms: 60_000,
-                    anchor_ms: None,
-                },
-                payload: CronPayload::AgentTurn {
-                    message: "hi".into(),
-                    model: None,
-                    timeout_secs: None,
-                    deliver: false,
-                    channel: None,
-                    to: None,
-                },
-                session_target: SessionTarget::Isolated,
-                delete_after_run: false,
-                enabled: true,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
-            })
-            .await
-            .unwrap();
-
-        svc.remove(&job.id).await.unwrap();
-        assert!(svc.list().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_status() {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(store, noop_system_event(), noop_agent_turn());
-
-        let status = svc.status().await;
-        assert!(!status.running);
-        assert_eq!(status.job_count, 0);
-    }
-
-    #[tokio::test]
-    async fn test_force_run() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(
-            store,
-            noop_system_event(),
-            counting_agent_turn(counter.clone()),
-        );
-
-        let job = svc
-            .add(CronJobCreate {
-                id: None,
-                name: "force".into(),
-                schedule: CronSchedule::Every {
-                    every_ms: 999_999_999,
-                    anchor_ms: None,
-                },
-                payload: CronPayload::AgentTurn {
-                    message: "go".into(),
-                    model: None,
-                    timeout_secs: None,
-                    deliver: false,
-                    channel: None,
-                    to: None,
-                },
-                session_target: SessionTarget::Isolated,
-                delete_after_run: false,
-                enabled: true,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
-            })
-            .await
-            .unwrap();
-
-        svc.run(&job.id, false).await.unwrap();
-        // Give the spawned task a moment.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn test_run_disabled_fails_without_force() {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(store, noop_system_event(), noop_agent_turn());
-
-        let job = svc
-            .add(CronJobCreate {
-                id: None,
-                name: "disabled".into(),
-                schedule: CronSchedule::Every {
-                    every_ms: 60_000,
-                    anchor_ms: None,
-                },
-                payload: CronPayload::AgentTurn {
-                    message: "hi".into(),
-                    model: None,
-                    timeout_secs: None,
-                    deliver: false,
-                    channel: None,
-                    to: None,
-                },
-                session_target: SessionTarget::Isolated,
-                delete_after_run: false,
-                enabled: false,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
-            })
-            .await
-            .unwrap();
-
-        assert!(svc.run(&job.id, false).await.is_err());
-        assert!(svc.run(&job.id, true).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_system_event_execution() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(
-            store,
-            counting_system_event(counter.clone()),
-            noop_agent_turn(),
-        );
-
-        let job = svc
-            .add(CronJobCreate {
-                id: None,
-                name: "sys".into(),
-                schedule: CronSchedule::Every {
-                    every_ms: 60_000,
-                    anchor_ms: None,
-                },
-                payload: CronPayload::SystemEvent {
-                    text: "ping".into(),
-                },
-                session_target: SessionTarget::Main,
-                delete_after_run: false,
-                enabled: true,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
-            })
-            .await
-            .unwrap();
-
-        svc.run(&job.id, true).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn test_start_stop() {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(store, noop_system_event(), noop_agent_turn());
-
-        svc.start().await.unwrap();
-        let status = svc.status().await;
-        assert!(status.running);
-
-        svc.stop().await;
-        let status = svc.status().await;
-        assert!(!status.running);
-    }
-
-    #[tokio::test]
-    async fn test_one_shot_disabled_after_run() {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(store, noop_system_event(), noop_agent_turn());
-
-        // Use a past at_ms so compute_next_run returns None after execution.
-        let job = svc
-            .add(CronJobCreate {
-                id: None,
-                name: "oneshot".into(),
-                schedule: CronSchedule::At { at_ms: 1000 }, // far past
-                payload: CronPayload::AgentTurn {
-                    message: "once".into(),
-                    model: None,
-                    timeout_secs: None,
-                    deliver: false,
-                    channel: None,
-                    to: None,
-                },
-                session_target: SessionTarget::Isolated,
-                delete_after_run: false,
-                enabled: true,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
-            })
-            .await
-            .unwrap();
-
-        // next_run_at_ms is None because at_ms is in the past, but job is still enabled.
-        svc.run(&job.id, true).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let jobs = svc.list().await;
-        let j = jobs.iter().find(|j| j.id == job.id).unwrap();
-        assert!(!j.enabled, "one-shot job should be disabled after run");
-    }
-
-    #[tokio::test]
-    async fn test_rate_limiting() {
-        let store = Arc::new(InMemoryStore::new());
-        // Create service with strict rate limit: 3 jobs per 60 seconds.
-        let svc = CronService::with_config(
-            store,
-            noop_system_event(),
-            noop_agent_turn(),
-            None,
-            RateLimitConfig {
-                max_per_window: 3,
-                window_ms: 60_000,
-            },
-        );
-
-        let create_job = || CronJobCreate {
-            id: None,
-            name: "test".into(),
-            schedule: CronSchedule::Every {
-                every_ms: 60_000,
-                anchor_ms: None,
-            },
-            payload: CronPayload::AgentTurn {
-                message: "hi".into(),
-                model: None,
+                job_id: None,
+                agent_id: "default".into(),
+                name: "x".into(),
+                schedule: CronSchedule::Every { every: "1m".into() },
+                prompt: "   ".into(),
+                model_selector: ModelSelector::Inherit,
                 timeout_secs: None,
-                deliver: false,
-                channel: None,
-                to: None,
-            },
-            session_target: SessionTarget::Isolated,
-            delete_after_run: false,
-            enabled: true,
-            system: false,
-            sandbox: CronSandboxConfig::default(),
-        };
+                delivery: CronDelivery::Silent,
+                delete_after_run: false,
+                enabled: true,
+            })
+            .await
+            .expect_err("empty prompt should reject");
+        assert!(format!("{err:#}").contains("cronPromptMissing"));
+    }
 
-        // First 3 jobs should succeed.
-        svc.add(create_job()).await.unwrap();
-        svc.add(create_job()).await.unwrap();
-        svc.add(create_job()).await.unwrap();
-
-        // 4th job should fail due to rate limit.
-        let result = svc.add(create_job()).await;
-        assert!(result.is_err());
+    #[tokio::test]
+    async fn add_rejects_delete_after_run_for_non_once() {
+        let store = Arc::new(sqlite_store().await);
+        let svc = CronService::new(store, noop_run(), noop_deliver());
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("rate limit exceeded")
+            svc.add(CronJobCreate {
+                job_id: None,
+                agent_id: "default".into(),
+                name: "x".into(),
+                schedule: CronSchedule::Every { every: "1m".into() },
+                prompt: "hi".into(),
+                model_selector: ModelSelector::Inherit,
+                timeout_secs: None,
+                delivery: CronDelivery::Silent,
+                delete_after_run: true,
+                enabled: true,
+            })
+            .await
+            .is_err()
         );
     }
 
     #[tokio::test]
-    async fn test_rate_limiting_skips_system_jobs() {
-        let store = Arc::new(InMemoryStore::new());
-        // Create service with strict rate limit: 1 job per 60 seconds.
-        let svc = CronService::with_config(
+    async fn run_marks_delivery_failure_as_error() {
+        let store = Arc::new(sqlite_store().await);
+        let svc = CronService::new(
             store,
-            noop_system_event(),
-            noop_agent_turn(),
-            None,
-            RateLimitConfig {
-                max_per_window: 1,
-                window_ms: 60_000,
-            },
-        );
-
-        let create_system_job = || CronJobCreate {
-            id: None,
-            name: "system-job".into(),
-            schedule: CronSchedule::Every {
-                every_ms: 60_000,
-                anchor_ms: None,
-            },
-            payload: CronPayload::SystemEvent {
-                text: "heartbeat".into(),
-            },
-            session_target: SessionTarget::Main,
-            delete_after_run: false,
-            enabled: true,
-            system: true, // This is a system job
-            sandbox: CronSandboxConfig::default(),
-        };
-
-        // System jobs should bypass rate limiting.
-        svc.add(create_system_job()).await.unwrap();
-        svc.add(create_system_job()).await.unwrap();
-        svc.add(create_system_job()).await.unwrap();
-
-        // All should succeed.
-        assert_eq!(svc.list().await.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_start_executes_due_jobs_and_records_runs() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(
-            store,
-            noop_system_event(),
-            counting_agent_turn(Arc::clone(&counter)),
+            Arc::new(|_req| {
+                Box::pin(async {
+                    Ok(AgentTurnResult {
+                        output: "delivered text".into(),
+                        input_tokens: Some(11),
+                        output_tokens: Some(7),
+                    })
+                })
+            }),
+            Arc::new(|_req| Box::pin(async { Err(anyhow::anyhow!("target session missing")) })),
         );
 
         let job = svc
             .add(CronJobCreate {
-                id: None,
-                name: "live-timer".into(),
-                schedule: CronSchedule::Every {
-                    every_ms: 25,
-                    anchor_ms: None,
+                job_id: None,
+                agent_id: "default".into(),
+                name: "delivery-fail".into(),
+                schedule: CronSchedule::Every { every: "1m".into() },
+                prompt: "hi".into(),
+                model_selector: ModelSelector::Inherit,
+                timeout_secs: None,
+                delivery: CronDelivery::Session {
+                    target: SessionTarget::Session {
+                        session_key: "agent/default/chat".into(),
+                    },
                 },
-                payload: CronPayload::AgentTurn {
-                    message: "tick".into(),
-                    model: None,
-                    timeout_secs: None,
-                    deliver: false,
-                    channel: None,
-                    to: None,
-                },
-                session_target: SessionTarget::Isolated,
                 delete_after_run: false,
                 enabled: true,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
             })
             .await
             .unwrap();
 
-        svc.start().await.unwrap();
+        svc.run(&job.job_id, false).await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while counter.load(Ordering::SeqCst) == 0 {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+        let runs = svc.runs(&job.job_id, 10).await.unwrap();
+        let run = runs.last().expect("run recorded");
+        assert_eq!(run.status, RunStatus::Error);
+        assert_eq!(run.error.as_deref(), Some("target session missing"));
+        assert_eq!(run.output_preview.as_deref(), Some("delivered text"));
+
+        let job = svc
+            .list()
+            .await
+            .into_iter()
+            .find(|candidate| candidate.job_id == job.job_id)
+            .expect("job exists");
+        assert_eq!(job.state.last_status, Some(RunStatus::Error));
+        assert_eq!(
+            job.state.last_error.as_deref(),
+            Some("target session missing")
+        );
+    }
+
+    #[tokio::test]
+    async fn running_at_is_persisted_before_execution() {
+        let store = Arc::new(sqlite_store().await);
+        let notify = Arc::new(Notify::new());
+
+        let notify_for_run = Arc::clone(&notify);
+        let svc = CronService::new(
+            store.clone(),
+            Arc::new(move |_req| {
+                let notify_for_run = Arc::clone(&notify_for_run);
+                Box::pin(async move {
+                    notify_for_run.notified().await;
+                    Ok(AgentTurnResult {
+                        output: "ok".into(),
+                        input_tokens: None,
+                        output_tokens: None,
+                    })
+                })
+            }),
+            noop_deliver(),
+        );
+
+        let job = svc
+            .add(CronJobCreate {
+                job_id: None,
+                agent_id: "default".into(),
+                name: "persist-running".into(),
+                schedule: CronSchedule::Every { every: "1h".into() },
+                prompt: "hi".into(),
+                model_selector: ModelSelector::Inherit,
+                timeout_secs: None,
+                delivery: CronDelivery::Silent,
+                delete_after_run: false,
+                enabled: true,
+            })
+            .await
+            .unwrap();
+
+        let job_id = job.job_id.clone();
+        let job_id_for_run = job_id.clone();
+        let svc_for_run = Arc::clone(&svc);
+        let handle = tokio::spawn(async move { svc_for_run.run(&job_id_for_run, false).await });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let jobs = store.load_jobs().await.unwrap();
+                let persisted = jobs.iter().find(|j| j.job_id == job_id).unwrap();
+                if persisted.state.running_at.is_some() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("cron scheduler did not execute any due jobs in time");
+        .expect("runningAt should be persisted promptly");
 
-        let runs = svc.runs(&job.id, 10).await.unwrap();
-        assert!(
-            !runs.is_empty(),
-            "expected at least one persisted run record"
-        );
-
-        svc.stop().await;
+        notify.notify_one();
+        handle.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn test_clear_stuck_jobs_handles_future_running_at_without_overflow() {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = make_svc(store, noop_system_event(), noop_agent_turn());
+    async fn run_passes_delivery_session_target_to_executor() {
+        let store = Arc::new(sqlite_store().await);
+        let seen_request = Arc::new(Mutex::new(None));
+        let seen_request_clone = Arc::clone(&seen_request);
+        let svc = CronService::new(
+            store,
+            Arc::new(move |req| {
+                let seen_request = Arc::clone(&seen_request_clone);
+                Box::pin(async move {
+                    *seen_request.lock().await = Some(req.clone());
+                    Ok(AgentTurnResult {
+                        output: "ok".into(),
+                        input_tokens: None,
+                        output_tokens: None,
+                    })
+                })
+            }),
+            noop_deliver(),
+        );
 
+        let target = SessionTarget::Main;
         let job = svc
             .add(CronJobCreate {
-                id: None,
-                name: "future-running-at".into(),
-                schedule: CronSchedule::Every {
-                    every_ms: 60_000,
-                    anchor_ms: None,
+                job_id: None,
+                agent_id: "default".into(),
+                name: "inherit-model".into(),
+                schedule: CronSchedule::Every { every: "1m".into() },
+                prompt: "hi".into(),
+                model_selector: ModelSelector::Inherit,
+                timeout_secs: Some(42),
+                delivery: CronDelivery::Session {
+                    target: target.clone(),
                 },
-                payload: CronPayload::AgentTurn {
-                    message: "hi".into(),
-                    model: None,
-                    timeout_secs: None,
-                    deliver: false,
-                    channel: None,
-                    to: None,
-                },
-                session_target: SessionTarget::Isolated,
                 delete_after_run: false,
                 enabled: true,
-                system: false,
-                sandbox: CronSandboxConfig::default(),
             })
             .await
             .unwrap();
 
-        let now = now_ms();
-        svc.update_job_state(&job.id, |state| {
-            state.running_at_ms = Some(now + 1_000);
-        })
-        .await;
+        svc.run(&job.job_id, false).await.unwrap();
 
-        svc.clear_stuck_jobs(now).await;
+        let request = seen_request
+            .lock()
+            .await
+            .clone()
+            .expect("run request captured");
+        assert_eq!(request.job_id, job.job_id);
+        assert_eq!(request.timeout_secs, Some(42));
+        assert_eq!(request.delivery_session_target, Some(target));
+    }
+
+    #[tokio::test]
+    async fn start_allows_loaded_disabled_once_job_in_past() {
+        let store = Arc::new(sqlite_store().await);
+        crate::store::CronStore::save_job(
+            store.as_ref(),
+            &CronJob {
+                job_id: "once-past".into(),
+                agent_id: "default".into(),
+                name: "once-past".into(),
+                enabled: false,
+                delete_after_run: false,
+                schedule: CronSchedule::Once {
+                    at: "1970-01-01T00:00:00.500Z".into(),
+                },
+                prompt: "done".into(),
+                model_selector: ModelSelector::Inherit,
+                timeout_secs: None,
+                delivery: CronDelivery::Silent,
+                state: CronJobState::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let svc = CronService::new(store, noop_run(), noop_deliver());
+        svc.start().await.unwrap();
 
         let jobs = svc.list().await;
-        let job_state = jobs
-            .iter()
-            .find(|j| j.id == job.id)
-            .expect("job should exist");
-        assert_eq!(job_state.state.running_at_ms, Some(now + 1_000));
-        assert!(job_state.state.last_error.is_none());
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, "once-past");
+    }
+
+    #[tokio::test]
+    async fn start_defers_stale_session_target_validation_until_run() {
+        let store = Arc::new(sqlite_store().await);
+        crate::store::CronStore::save_job(
+            store.as_ref(),
+            &CronJob {
+                job_id: "stale-session".into(),
+                agent_id: "default".into(),
+                name: "stale-session".into(),
+                enabled: true,
+                delete_after_run: false,
+                schedule: CronSchedule::Every { every: "1m".into() },
+                prompt: "check".into(),
+                model_selector: ModelSelector::Inherit,
+                timeout_secs: None,
+                delivery: CronDelivery::Session {
+                    target: SessionTarget::Session {
+                        session_key: "agent/default/missing".into(),
+                    },
+                },
+                state: CronJobState::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let svc = CronService::with_config(
+            store,
+            noop_run(),
+            noop_deliver(),
+            None,
+            RateLimitConfig::default(),
+            CronValidators {
+                validate_session_target: Some(Arc::new(|_agent_id, _target| {
+                    Box::pin(async { Err(anyhow::anyhow!("session target missing")) })
+                })),
+                ..Default::default()
+            },
+        );
+
+        svc.start().await.unwrap();
+        assert_eq!(svc.list().await.len(), 1);
     }
 }

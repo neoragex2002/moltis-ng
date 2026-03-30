@@ -26,6 +26,25 @@ impl LiveCronService {
     }
 }
 
+fn reason_code_or(default_code: &str, err: &str) -> String {
+    let normalized = err
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let normalized = normalized.trim_matches('_').to_string();
+    if normalized.is_empty() {
+        default_code.to_string()
+    } else {
+        normalized
+    }
+}
+
 #[async_trait]
 impl CronServiceTrait for LiveCronService {
     async fn list(&self) -> ServiceResult {
@@ -42,7 +61,16 @@ impl CronServiceTrait for LiveCronService {
         let create: CronJobCreate =
             serde_json::from_value(params).map_err(|e| format!("invalid job spec: {e}"))?;
         let job = self.inner.add(create).await.map_err(|e| {
-            error!(error = %e, "cron add failed");
+            let reason_code = reason_code_or("cron_add_failed", &e.to_string());
+            error!(
+                event = "cron.request.reject",
+                policy = "cron_heartbeat_governance_v1",
+                decision = "reject",
+                reason_code = %reason_code,
+                operation = "add",
+                error = %e,
+                "cron add failed"
+            );
             e.to_string()
         })?;
         serde_json::to_value(job).map_err(|e| e.to_string())
@@ -64,7 +92,20 @@ impl CronServiceTrait for LiveCronService {
             .inner
             .update(id, patch)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                let reason_code = reason_code_or("cron_update_failed", &e.to_string());
+                error!(
+                    event = "cron.request.reject",
+                    policy = "cron_heartbeat_governance_v1",
+                    decision = "reject",
+                    reason_code = %reason_code,
+                    operation = "update",
+                    job_id = %id,
+                    error = %e,
+                    "cron update failed"
+                );
+                e.to_string()
+            })?;
         serde_json::to_value(job).map_err(|e| e.to_string())
     }
 
@@ -73,7 +114,20 @@ impl CronServiceTrait for LiveCronService {
             .get("id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "missing 'id'".to_string())?;
-        self.inner.remove(id).await.map_err(|e| e.to_string())?;
+        self.inner.remove(id).await.map_err(|e| {
+            let reason_code = reason_code_or("cron_remove_failed", &e.to_string());
+            error!(
+                event = "cron.request.reject",
+                policy = "cron_heartbeat_governance_v1",
+                decision = "reject",
+                reason_code = %reason_code,
+                operation = "remove",
+                job_id = %id,
+                error = %e,
+                "cron remove failed"
+            );
+            e.to_string()
+        })?;
         Ok(serde_json::json!({ "removed": id }))
     }
 
@@ -86,7 +140,21 @@ impl CronServiceTrait for LiveCronService {
             .get("force")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        self.inner.run(id, force).await.map_err(|e| e.to_string())?;
+        self.inner.run(id, force).await.map_err(|e| {
+            let reason_code = reason_code_or("cron_run_failed", &e.to_string());
+            error!(
+                event = "cron.request.reject",
+                policy = "cron_heartbeat_governance_v1",
+                decision = "reject",
+                reason_code = %reason_code,
+                operation = "run",
+                job_id = %id,
+                force,
+                error = %e,
+                "cron run failed"
+            );
+            e.to_string()
+        })?;
         Ok(serde_json::json!({ "ran": id }))
     }
 

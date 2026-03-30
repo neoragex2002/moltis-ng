@@ -22,6 +22,7 @@ pub mod channel_store;
 pub mod chat;
 pub mod chat_error;
 pub mod cron;
+pub mod heartbeat;
 pub mod env_routes;
 pub mod ids;
 #[cfg(feature = "local-llm")]

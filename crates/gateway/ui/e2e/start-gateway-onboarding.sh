@@ -11,9 +11,10 @@ PORT="${MOLTIS_E2E_ONBOARDING_PORT:-0}"
 RUNTIME_ROOT="${MOLTIS_E2E_ONBOARDING_RUNTIME_DIR:-${REPO_ROOT}/target/e2e-runtime-onboarding}"
 CONFIG_DIR="${RUNTIME_ROOT}/config"
 DATA_DIR="${RUNTIME_ROOT}/data"
+HOME_DIR="${RUNTIME_ROOT}/home"
 
 rm -rf "${RUNTIME_ROOT}"
-mkdir -p "${CONFIG_DIR}" "${DATA_DIR}"
+mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${HOME_DIR}"
 
 # Deliberately NOT creating IDENTITY.md or USER.md so onboarding triggers.
 
@@ -23,6 +24,7 @@ export MOLTIS_CONFIG_DIR="${CONFIG_DIR}"
 export MOLTIS_DATA_DIR="${DATA_DIR}"
 export MOLTIS_SERVER__PORT="${PORT}"
 export MOLTIS_ASSETS_DIR="${REPO_ROOT}/crates/gateway/src/assets"
+export HOME="${HOME_DIR}"
 
 # Prefer a pre-built binary to avoid recompiling every test run.
 BINARY="${MOLTIS_BINARY:-}"

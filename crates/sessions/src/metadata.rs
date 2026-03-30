@@ -655,6 +655,25 @@ impl SqliteSessionMetadata {
         .ok();
     }
 
+    /// List session IDs for a given stable `session_key`, newest-first.
+    ///
+    /// This is intended for strict contract validation where `session_key`
+    /// must resolve to exactly one session record.
+    pub async fn list_session_ids_by_session_key(
+        &self,
+        session_key: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT session_id FROM sessions WHERE session_key = ? ORDER BY updated_at DESC LIMIT ?",
+        )
+        .bind(session_key)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn list_channel_sessions(
         &self,
         channel_type: &str,

@@ -381,21 +381,10 @@ prometheus_endpoint = true        # Expose /metrics endpoint for Prometheus scra
 # ══════════════════════════════════════════════════════════════════════════════
 # HEARTBEAT
 # ══════════════════════════════════════════════════════════════════════════════
-# Periodic health-check agent turns to keep the agent "alive" and responsive.
-
-[heartbeat]
-enabled = true                    # Enable periodic heartbeats
-every = "30m"                     # Interval between heartbeats (e.g., "30m", "1h", "6h")
-# model = "anthropic/claude-sonnet-4-20250514"  # Override model for heartbeats
-# prompt = "..."                  # Custom heartbeat prompt (default: built-in)
-ack_max_chars = 300               # Max characters for acknowledgment reply
-# Sandbox behavior follows `[tools.exec.sandbox]` (no per-heartbeat override).
-
-# Active hours window - heartbeats only run during this time
-[heartbeat.active_hours]
-start = "08:00"                   # Start time (HH:MM, 24-hour format)
-end = "24:00"                     # End time (HH:MM, "24:00" = end of day)
-timezone = "local"                # Timezone: "local" or IANA name like "Europe/Paris"
+# Heartbeat is configured via the DB-only cron/heartbeat system (UI/RPC),
+# not via this config file.
+#
+# Prompt owner: `agents/<agent_id>/HEARTBEAT.md`.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FAILOVER

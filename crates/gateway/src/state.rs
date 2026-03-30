@@ -265,8 +265,6 @@ pub struct GatewayInner {
     pub active_sessions: HashMap<String, String>,
     /// Active project id per connection (conn_id → project id).
     pub active_projects: HashMap<String, String>,
-    /// Heartbeat configuration (for gon data and RPC methods).
-    pub heartbeat_config: moltis_config::schema::HeartbeatConfig,
     /// Runtime per-turn channel delivery context (session_id → turn_id → context).
     ///
     /// Each turn keeps the precise session binding, reply targets, and buffered
@@ -313,7 +311,6 @@ impl GatewayInner {
             chat_override: None,
             active_sessions: HashMap::new(),
             active_projects: HashMap::new(),
-            heartbeat_config: moltis_config::schema::HeartbeatConfig::default(),
             channel_turn_contexts: HashMap::new(),
             tts_session_overrides: HashMap::new(),
             tts_channel_overrides: HashMap::new(),

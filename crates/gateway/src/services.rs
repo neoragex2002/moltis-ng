@@ -533,6 +533,37 @@ impl CronService for NoopCronService {
     }
 }
 
+// ── Heartbeat ───────────────────────────────────────────────────────────────
+
+#[async_trait]
+pub trait HeartbeatService: Send + Sync {
+    async fn status(&self, params: Value) -> ServiceResult;
+    async fn update(&self, params: Value) -> ServiceResult;
+    async fn run(&self, params: Value) -> ServiceResult;
+    async fn runs(&self, params: Value) -> ServiceResult;
+}
+
+pub struct NoopHeartbeatService;
+
+#[async_trait]
+impl HeartbeatService for NoopHeartbeatService {
+    async fn status(&self, _p: Value) -> ServiceResult {
+        Ok(serde_json::json!(null))
+    }
+
+    async fn update(&self, _p: Value) -> ServiceResult {
+        Err("heartbeat not configured".into())
+    }
+
+    async fn run(&self, _p: Value) -> ServiceResult {
+        Err("heartbeat not configured".into())
+    }
+
+    async fn runs(&self, _p: Value) -> ServiceResult {
+        Ok(serde_json::json!([]))
+    }
+}
+
 // ── Chat ────────────────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -558,6 +589,16 @@ pub trait ChatService: Send + Sync {
     /// - Output: `{ "text": "...", "inputTokens": N, "outputTokens": N }`
     async fn internal_complete(&self, _params: Value) -> ServiceResult {
         Err("internal complete not supported".into())
+    }
+    /// Run a single background agent turn with tools enabled, without any
+    /// WebSocket streaming events and without persisting a user trigger message.
+    ///
+    /// Intended for cron/heartbeat runtimes.
+    /// Contract:
+    /// - Input: `{ "agentId": "...", "prompt": "...", "runId": "...", "sessionId"?: "...", "model"?: "...", "timeoutSecs"?: N }`
+    /// - Output: `{ "text": "...", "inputTokens": N, "outputTokens": N }`
+    async fn background_turn(&self, _params: Value) -> ServiceResult {
+        Err("background turn not supported".into())
     }
     async fn abort(&self, params: Value) -> ServiceResult;
     async fn cancel_queued(&self, params: Value) -> ServiceResult;
@@ -2199,6 +2240,7 @@ pub struct GatewayServices {
     pub channel: Arc<dyn ChannelService>,
     pub config: Arc<dyn ConfigService>,
     pub cron: Arc<dyn CronService>,
+    pub heartbeat: Arc<dyn HeartbeatService>,
     pub chat: Arc<dyn ChatService>,
     pub tts: Arc<dyn TtsService>,
     pub stt: Arc<dyn crate::voice::SttService>,
@@ -2240,6 +2282,11 @@ impl GatewayServices {
         self
     }
 
+    pub fn with_heartbeat(mut self, heartbeat: Arc<dyn HeartbeatService>) -> Self {
+        self.heartbeat = heartbeat;
+        self
+    }
+
     pub fn with_provider_setup(mut self, ps: Arc<dyn ProviderSetupService>) -> Self {
         self.provider_setup = ps;
         self
@@ -2262,6 +2309,7 @@ impl GatewayServices {
             channel: Arc::new(NoopChannelService),
             config: Arc::new(NoopConfigService),
             cron: Arc::new(NoopCronService),
+            heartbeat: Arc::new(NoopHeartbeatService),
             chat: Arc::new(NoopChatService),
             tts: Arc::new(NoopTtsService),
             stt: Arc::new(crate::voice::NoopSttService),

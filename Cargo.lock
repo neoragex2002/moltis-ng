@@ -4558,6 +4558,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "serde_with 3.16.1",
  "sqlx",
  "tempfile",
  "tokio",

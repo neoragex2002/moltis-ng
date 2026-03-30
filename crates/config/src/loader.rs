@@ -126,43 +126,52 @@ pub fn load_config_value(path: &Path) -> anyhow::Result<serde_json::Value> {
 ///
 /// If the config has port 0 (either from defaults or missing `[server]` section),
 /// a random available port is generated and saved to the config file.
+///
+/// This is a convenience wrapper around [`discover_and_load_strict`]:
+/// - On success, returns the loaded config.
+/// - On failure, logs and falls back to defaults.
 pub fn discover_and_load() -> MoltisConfig {
-    if let Some(path) = find_config_file() {
-        debug!(path = %path.display(), "loading config");
-        match load_config(&path) {
-            Ok(mut cfg) => {
-                // If port is 0 (default/missing), generate a random port and save it.
-                // Use `save_config_to_path` directly instead of `save_config` because
-                // this function may be called from within `update_config`, which already
-                // holds `CONFIG_SAVE_LOCK`. Re-acquiring a `std::sync::Mutex` on the
-                // same thread would deadlock.
-                if cfg.server.port == 0 {
-                    cfg.server.port = generate_random_port();
-                    debug!(
-                        port = cfg.server.port,
-                        "generated random port for existing config"
-                    );
-                    if let Err(e) = save_config_to_path(&path, &cfg) {
-                        warn!(error = %e, "failed to save config with generated port");
-                    }
-                }
-                return cfg; // env overrides already applied by load_config
-            },
-            Err(e) => {
-                warn!(path = %path.display(), error = %e, "failed to load config, using defaults");
-            },
-        }
-    } else {
+    match discover_and_load_strict() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!(
+                event = "config.load.fallback",
+                policy = "moltis_config_schema_v1",
+                decision = "fallback",
+                reason_code = "config_parse_failed",
+                error = %e,
+                "failed to load config; using defaults"
+            );
+            apply_env_overrides(MoltisConfig::default())
+        },
+    }
+}
+
+/// Discover and load config, failing fast on errors.
+///
+/// Used by runtime startup paths that must not silently ignore schema drift.
+pub fn discover_and_load_strict() -> anyhow::Result<MoltisConfig> {
+    let Some(path) = find_config_file() else {
         debug!("no config file found, writing default config with random port");
         let mut config = MoltisConfig::default();
-        // Generate a unique port for this installation
         config.server.port = generate_random_port();
-        if let Err(e) = write_default_config(&config) {
-            warn!(error = %e, "failed to write default config file");
-        }
-        return apply_env_overrides(config);
+        write_default_config(&config)?;
+        return Ok(apply_env_overrides(config));
+    };
+
+    debug!(path = %path.display(), "loading config");
+    let mut cfg = load_config(&path)?;
+
+    if cfg.server.port == 0 {
+        cfg.server.port = generate_random_port();
+        debug!(
+            port = cfg.server.port,
+            "generated random port for existing config"
+        );
+        save_config_to_path(&path, &cfg)?;
     }
-    apply_env_overrides(MoltisConfig::default())
+
+    Ok(cfg)
 }
 
 /// Find the first config file in standard locations.
@@ -615,11 +624,6 @@ fn load_markdown_raw(path: PathBuf) -> Option<String> {
     read_markdown_raw(&resolved)
 }
 
-/// Path to workspace heartbeat markdown.
-pub fn heartbeat_path() -> PathBuf {
-    data_dir().join("HEARTBEAT.md")
-}
-
 /// Load identity values from `IDENTITY.md` frontmatter if present.
 pub fn load_identity() -> Option<AgentIdentity> {
     load_identity_from_path(identity_path())
@@ -799,11 +803,6 @@ pub fn load_tools_md() -> Option<String> {
 pub fn load_agent_tools_md(agent_id: &str) -> Option<String> {
     let dir = agent_dir(agent_id)?;
     load_workspace_markdown(dir.join("TOOLS.md"))
-}
-
-/// Load HEARTBEAT.md from the workspace root (`<data_dir>`) if present and non-empty.
-pub fn load_heartbeat_md() -> Option<String> {
-    load_workspace_markdown(heartbeat_path())
 }
 
 /// Persist SOUL.md for the default agent (`<data_dir>/agents/default/SOUL.md`).
@@ -1526,6 +1525,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_config_rejects_unknown_top_level_tables() {
+        let raw = r#"
+[server]
+port = 1234
+
+[heartbeat]
+enabled = true
+"#;
+        let err = parse_config(raw, Path::new("moltis.toml")).expect_err("should reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("heartbeat"),
+            "error should mention the unknown [heartbeat] table: {msg}"
+        );
+    }
+
+    #[test]
     fn set_nested_creates_intermediate_objects() {
         let mut root = serde_json::json!({});
         set_nested(
@@ -2000,18 +2016,6 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
     }
 
     #[test]
-    fn load_heartbeat_md_reads_trimmed_content() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        set_data_dir(dir.path().to_path_buf());
-
-        std::fs::write(dir.path().join("HEARTBEAT.md"), "\n# Heartbeat\n- ping\n").unwrap();
-        assert_eq!(load_heartbeat_md().as_deref(), Some("# Heartbeat\n- ping"));
-
-        clear_data_dir();
-    }
-
-    #[test]
     fn workspace_markdown_ignores_leading_html_comments() {
         let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2027,18 +2031,6 @@ hooks = [{ name = "h", command = "echo hi", events = ["session.start"] }]
             load_tools_md().as_deref(),
             Some("Use read-only tools first.")
         );
-
-        clear_data_dir();
-    }
-
-    #[test]
-    fn workspace_markdown_comment_only_is_treated_as_empty() {
-        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        set_data_dir(dir.path().to_path_buf());
-
-        std::fs::write(dir.path().join("HEARTBEAT.md"), "<!-- guidance -->").unwrap();
-        assert_eq!(load_heartbeat_md(), None);
 
         clear_data_dir();
     }

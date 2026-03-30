@@ -1,7 +1,7 @@
 # Cron / Heartbeat 模型设计稿
 
-更新日期：2026-03-27
-状态：语义已定稿，已回写实施主单
+更新日期：2026-03-30
+状态：语义已定稿，代码已按主 issue 落地；后续增量修改继续回写主 issue
 
 ## 目的
 
@@ -254,13 +254,13 @@
 
 如果投递到会话，允许两种目标：
 
-- `sessionTarget = { kind: "main" }`
-- `sessionTarget = { kind: "session", sessionKey: "..." }`
+- `cron.delivery.session.target = { kind: "main" }`
+- `cron.delivery.session.target = { kind: "session", sessionKey: "..." }`
 
 如果投递到 Telegram，目标合同必须收敛为最小必要字段：
 
-- `telegramTarget = { accountKey: "...", chatId: "..." }`
-- `telegramTarget = { accountKey: "...", chatId: "...", threadId: "..." }`
+- `delivery = { kind: "telegram", target: { accountKey: "...", chatId: "..." } }`
+- `delivery = { kind: "telegram", target: { accountKey: "...", chatId: "...", threadId: "..." } }`
 
 其中：
 
@@ -268,7 +268,7 @@
 - `chatId`：指定发往哪个 Telegram chat
 - `threadId`：仅在 topic / 子线程投递时出现
 
-不再暴露以下字段到 `cron.telegramTarget` 外部合同：
+不再暴露以下字段到 `cron.delivery.telegram.target` 外部合同：
 
 - `channel_type`
 - `username`
@@ -405,10 +405,10 @@
 
 推荐收敛为统一模型选择语义：
 
-- `inherit`：继承 `agent` 默认模型
+- `inherit`：若本次运行绑定了明确会话，则继承该目标会话当前模型；若目标会话没有显式模型，则回到全局默认模型
 - `explicit(model_id)`：显式指定模型
 
-不要再用空值、猜测、隐式 fallback 表达“继承默认模型”。
+不要再用空值、猜测、隐式 fallback 表达“继承模型”。
 
 ### 3. 运行上下文绑定
 
@@ -419,8 +419,8 @@
 
 推荐合同形状：
 
-- `sessionTarget = { kind: "main" }`
-- `sessionTarget = { kind: "session", sessionKey: "..." }`
+- `heartbeat.sessionTarget = { kind: "main" }`
+- `heartbeat.sessionTarget = { kind: "session", sessionKey: "..." }`
 
 禁止以下语义：
 
@@ -559,7 +559,7 @@
 
 例如它的 Telegram 投递目标可以是：
 
-- `telegramTarget = { accountKey: "telegram:ops_bot", chatId: "-1001234567890" }`
+- `delivery = { kind: "telegram", target: { accountKey: "telegram:ops_bot", chatId: "-1001234567890" } }`
 
 ### 示例 1.1：把 cron 结果投到 main
 
@@ -605,7 +605,7 @@
 ### 1. `heartbeat` 配置失败
 
 - `enabled=true` 但 `agents/<agent_id>/HEARTBEAT.md` 缺失：直接拒绝
-- `enabled=true` 但 `agents/<agent_id>/HEARTBEAT.md` 为空或只有注释：直接拒绝
+- `enabled=true` 但 `agents/<agent_id>/HEARTBEAT.md` 有效内容为空：直接拒绝
 - `sessionTarget.kind="session"` 但目标会话不存在：直接拒绝
 - `sessionTarget.kind="main"` 但 `main` 物化创建失败：直接失败
 - `modelSelector=explicit(...)` 但模型不存在：直接拒绝
@@ -629,6 +629,7 @@
 - `cron` 投递到 Telegram 时，`accountKey` 已不存在：直接失败
 - `cron` 投递到 Telegram 时，`chatId` / `threadId` 不被 Telegram 接受：直接失败
 - `heartbeat` 绑定的具体会话在运行前已被删除：直接失败
+- 只要 delivery 失败，本次 run 的最终 `status` 就必须记为 `Error`，并同步写入 `lastError`；禁止“日志报错但 run/history 仍显示成功”
 
 ### 4. legacy 命中
 
@@ -745,7 +746,7 @@
 
 后续实现必须优先覆盖以下关键路径：
 
-- `heartbeat` 在 `enabled=true` 时要求 `agents/<agent_id>/HEARTBEAT.md` 非空，否则直接拒绝
+- `heartbeat` 在 `enabled=true` 时要求 `agents/<agent_id>/HEARTBEAT.md` 有效内容非空，否则直接拒绝
 - DB 不可用时，`cron` / `heartbeat` 相关能力直接失败，不降级到其它 store
 - `heartbeat` 绑定 `main`，`main` 未物化时自动创建成功
 - `heartbeat` 绑定 `main`，自动创建失败时直接失败且有结构化日志
@@ -809,7 +810,7 @@
 - `delivery = { kind: "silent" } | { kind: "session", target } | { kind: "telegram", target }`
 - `deleteAfterRun`
 
-### `cron.session` target 字段
+### `cron.delivery.session.target` 字段
 
 - `{ kind: "main" }`
 - `{ kind: "session", sessionKey: "..." }`
@@ -830,10 +831,26 @@
 - `lastError`
 - `lastDurationMs`
 
-### run history 字段
+### `cron` run history 字段
+
+`runId` 必须是真实持久化字段，不能在日志里是一套 UUID、落库后再被 SQLite 自增行号替代。
 
 - `runId`
 - `jobId`
+- `startedAt`
+- `finishedAt`
+- `status`
+- `error`
+- `outputPreview`
+- `inputTokens`
+- `outputTokens`
+
+### `heartbeat` run history 字段
+
+同理，`heartbeat.runId` 必须与结构化日志、会话投递记录中的 `runId` 保持同一值。
+
+- `runId`
+- `agentId`
 - `startedAt`
 - `finishedAt`
 - `status`

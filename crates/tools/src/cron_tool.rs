@@ -34,20 +34,9 @@ impl AgentTool for CronTool {
     }
 
     fn description(&self) -> &str {
-        "Manage scheduled tasks (reminders, recurring jobs, cron schedules).\n\
-         \n\
-         For reminders and recurring tasks that should produce a response in the \
-         main conversation (e.g. \"tell me a joke every day at 9am\"), use:\n\
-         - sessionTarget: \"main\"\n\
-         - payload.kind: \"systemEvent\"\n\
-         - payload.text: a message that will be injected as if the user typed it \
-           (the agent will then process it and respond). Write the text as an \
-           instruction to yourself, e.g. \"Tell me a funny joke.\"\n\
-         \n\
-         For isolated background tasks (no main session interaction), use:\n\
-         - sessionTarget: \"isolated\"\n\
-         - payload.kind: \"agentTurn\"\n\
-         - payload.message: the prompt for the isolated agent run"
+        "Manage governed cron jobs. Cron execution is always isolated: it does not \
+         read chat session context while running. Each job must define its own \
+         prompt and post-run delivery policy: silent, session target, or telegram target."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -63,40 +52,100 @@ impl AgentTool for CronTool {
                     "type": "object",
                     "description": "Job specification (for 'add' action)",
                     "properties": {
+                        "jobId": { "type": "string", "description": "Optional UUID job id" },
+                        "agentId": { "type": "string", "description": "Owning agent id" },
                         "name": { "type": "string", "description": "Human-readable job name" },
                         "schedule": {
                             "type": "object",
-                            "description": "Schedule: {kind:'at', at_ms}, {kind:'every', every_ms, anchor_ms?}, or {kind:'cron', expr, tz?}",
+                            "description": "Schedule: {kind:'once', at}, {kind:'every', every}, or {kind:'cron', expr, timezone}",
                             "properties": {
-                                "kind": { "type": "string", "enum": ["at", "every", "cron"] },
-                                "at_ms": { "type": "integer" },
-                                "every_ms": { "type": "integer" },
-                                "anchor_ms": { "type": "integer" },
+                                "kind": { "type": "string", "enum": ["once", "every", "cron"] },
+                                "at": { "type": "string", "description": "RFC3339 timestamp for kind=once" },
+                                "every": { "type": "string", "description": "Interval string such as 30m for kind=every" },
                                 "expr": { "type": "string" },
-                                "tz": { "type": "string" }
+                                "timezone": { "type": "string", "description": "IANA timezone for kind=cron" }
                             },
                             "required": ["kind"]
                         },
-                        "payload": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "Task prompt executed in isolated cron runtime"
+                        },
+                        "modelSelector": {
                             "type": "object",
-                            "description": "What to do: {kind:'systemEvent', text} or {kind:'agentTurn', message, model?, deliver?, channel?, to?}",
+                            "description": "Model policy: {kind:'inherit'} or {kind:'explicit', modelId}",
                             "properties": {
-                                "kind": { "type": "string", "enum": ["systemEvent", "agentTurn"] },
-                                "text": { "type": "string" },
-                                "message": { "type": "string" },
-                                "model": { "type": "string" },
-                                "timeout_secs": { "type": "integer" },
-                                "deliver": { "type": "boolean" },
-                                "channel": { "type": "string" },
-                                "to": { "type": "string" }
+                                "kind": { "type": "string", "enum": ["inherit", "explicit"] },
+                                "modelId": { "type": "string" }
                             },
                             "required": ["kind"]
                         },
-                        "sessionTarget": { "type": "string", "enum": ["main", "isolated"], "default": "isolated" },
+                        "timeoutSecs": { "type": "integer", "minimum": 1 },
+                        "delivery": {
+                            "description": "Post-run delivery: silent, session target, or telegram target",
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": { "type": "string", "enum": ["silent"] }
+                                    },
+                                    "required": ["kind"],
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": { "type": "string", "enum": ["session"] },
+                                        "target": {
+                                            "description": "Session target: {kind:'main'} or {kind:'session', sessionKey}",
+                                            "oneOf": [
+                                                {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "kind": { "type": "string", "enum": ["main"] }
+                                                    },
+                                                    "required": ["kind"],
+                                                    "additionalProperties": false
+                                                },
+                                                {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "kind": { "type": "string", "enum": ["session"] },
+                                                        "sessionKey": { "type": "string" }
+                                                    },
+                                                    "required": ["kind", "sessionKey"],
+                                                    "additionalProperties": false
+                                                }
+                                            ]
+                                        }
+                                    },
+                                    "required": ["kind", "target"],
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": { "type": "string", "enum": ["telegram"] },
+                                        "target": {
+                                            "type": "object",
+                                            "properties": {
+                                                "accountKey": { "type": "string" },
+                                                "chatId": { "type": "string" },
+                                                "threadId": { "type": "string" }
+                                            },
+                                            "required": ["accountKey", "chatId"],
+                                            "additionalProperties": false
+                                        }
+                                    },
+                                    "required": ["kind", "target"],
+                                    "additionalProperties": false
+                                }
+                            ]
+                        },
                         "deleteAfterRun": { "type": "boolean", "default": false },
                         "enabled": { "type": "boolean", "default": true }
                     },
-                    "required": ["name", "schedule", "payload"]
+                    "required": ["agentId", "name", "schedule", "prompt", "delivery"]
                 },
                 "patch": {
                     "type": "object",
@@ -196,20 +245,16 @@ mod tests {
     use std::sync::Arc;
 
     use moltis_cron::{
-        service::{AgentTurnFn, CronService, SystemEventFn},
-        store_memory::InMemoryStore,
+        service::{AgentTurnResult, CronService, DeliverCronFn, RunCronFn},
+        store_sqlite::SqliteStore,
     };
 
     use super::*;
 
-    fn noop_sys() -> SystemEventFn {
-        Arc::new(|_| {})
-    }
-
-    fn noop_agent() -> AgentTurnFn {
+    fn noop_run() -> RunCronFn {
         Arc::new(|_| {
             Box::pin(async {
-                Ok(moltis_cron::service::AgentTurnResult {
+                Ok(AgentTurnResult {
                     output: "ok".into(),
                     input_tokens: None,
                     output_tokens: None,
@@ -218,43 +263,48 @@ mod tests {
         })
     }
 
-    fn make_tool() -> CronTool {
-        let store = Arc::new(InMemoryStore::new());
-        let svc = CronService::new(store, noop_sys(), noop_agent());
+    fn noop_deliver() -> DeliverCronFn {
+        Arc::new(|_| Box::pin(async { Ok(()) }))
+    }
+
+    async fn make_tool() -> CronTool {
+        let store = Arc::new(SqliteStore::new("sqlite::memory:").await.unwrap());
+        let svc = CronService::new(store, noop_run(), noop_deliver());
         CronTool::new(svc)
     }
 
     #[tokio::test]
     async fn test_status() {
-        let tool = make_tool();
+        let tool = make_tool().await;
         let result = tool.execute(json!({ "action": "status" })).await.unwrap();
         assert_eq!(result["running"], false);
     }
 
     #[tokio::test]
     async fn test_list_empty() {
-        let tool = make_tool();
+        let tool = make_tool().await;
         let result = tool.execute(json!({ "action": "list" })).await.unwrap();
         assert!(result.as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn test_add_and_list() {
-        let tool = make_tool();
+        let tool = make_tool().await;
         let add_result = tool
             .execute(json!({
                 "action": "add",
                 "job": {
+                    "agentId": "default",
                     "name": "test job",
-                    "schedule": { "kind": "every", "every_ms": 60000 },
-                    "payload": { "kind": "agentTurn", "message": "do stuff" },
-                    "sessionTarget": "isolated"
+                    "schedule": { "kind": "every", "every": "1m" },
+                    "prompt": "do stuff",
+                    "delivery": { "kind": "silent" }
                 }
             }))
             .await
             .unwrap();
 
-        assert!(add_result.get("id").is_some());
+        assert!(add_result.get("jobId").is_some());
 
         let list = tool.execute(json!({ "action": "list" })).await.unwrap();
         assert_eq!(list.as_array().unwrap().len(), 1);
@@ -262,21 +312,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove() {
-        let tool = make_tool();
+        let tool = make_tool().await;
         let add = tool
             .execute(json!({
                 "action": "add",
                 "job": {
+                    "agentId": "default",
                     "name": "to remove",
-                    "schedule": { "kind": "every", "every_ms": 60000 },
-                    "payload": { "kind": "agentTurn", "message": "x" },
-                    "sessionTarget": "isolated"
+                    "schedule": { "kind": "every", "every": "1m" },
+                    "prompt": "x",
+                    "delivery": { "kind": "silent" }
                 }
             }))
             .await
             .unwrap();
 
-        let id = add["id"].as_str().unwrap();
+        let id = add["jobId"].as_str().unwrap();
         let result = tool
             .execute(json!({ "action": "remove", "id": id }))
             .await
@@ -286,18 +337,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_unknown_action() {
-        let tool = make_tool();
+        let tool = make_tool().await;
         let result = tool.execute(json!({ "action": "nope" })).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_runs_empty() {
-        let tool = make_tool();
+        let tool = make_tool().await;
         let result = tool
             .execute(json!({ "action": "runs", "id": "nonexistent" }))
             .await
             .unwrap();
         assert!(result.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn parameters_schema_uses_governance_v1_fields() {
+        let schema = make_tool().await.parameters_schema();
+
+        let job = &schema["properties"]["job"]["properties"];
+        assert!(job.get("prompt").is_some());
+        assert!(job.get("delivery").is_some());
+        assert!(job.get("payload").is_none());
+        assert!(job.get("sessionTarget").is_none());
+    }
+
+    #[tokio::test]
+    async fn parameters_schema_does_not_mix_session_and_telegram_targets() {
+        let schema = make_tool().await.parameters_schema();
+
+        let delivery = &schema["properties"]["job"]["properties"]["delivery"];
+        let one_of = delivery["oneOf"].as_array().expect("delivery.oneOf");
+        let telegram = one_of
+            .iter()
+            .find(|variant| {
+                variant["properties"]["kind"]["enum"]
+                    .as_array()
+                    .and_then(|vals| vals.first())
+                    .and_then(|v| v.as_str())
+                    == Some("telegram")
+            })
+            .expect("telegram delivery variant");
+
+        let props = telegram["properties"]["target"]["properties"]
+            .as_object()
+            .expect("telegram target properties");
+        assert!(!props.contains_key("kind"));
+        assert!(!props.contains_key("sessionKey"));
+        assert!(props.contains_key("accountKey"));
+        assert!(props.contains_key("chatId"));
     }
 }

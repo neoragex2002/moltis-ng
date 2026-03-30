@@ -1,23 +1,58 @@
 # Issue: cron / heartbeat 系统级治理 one-cut（owner / contract / lifecycle / ui / observability / tests）
 
 ## 实施现状（Status）【增量更新主入口】
-- Status: TODO
+- Status: IN-PROGRESS（代码实现与自动化测试已完成；`telegram` 真正外发仍待手工验收）
 - Priority: P0
-- Updated: 2026-03-27
+- Updated: 2026-03-31
 - Checklist discipline: 每次增量更新除补“已实现 / 已覆盖测试”外，必须同步勾选正文里对应的 checklist；禁止出现文首已完成、正文 TODO 未更新的漂移
-- Owners: TBD
+- Owners: cron / gateway / config / ui
 - Components: cron / gateway / ui / agents / config / telegram
 - Affected providers/models: openai-responses::gpt-5.2
 
 **已实现（如有，必须逐条写日期）**
-- 无
+- 2026-03-30：`crates/cron/src/types.rs`、`crates/cron/src/service.rs`、`crates/cron/src/heartbeat_service.rs`、`crates/cron/src/store_sqlite.rs` 已收敛到 DB-only contract；删除 file/memory store 产品路径，冻结 `cron.schedule` / `cron.delivery` / `heartbeat` typed contract，并把运行/投递语义切到 `cron` 隔离执行、`heartbeat` 绑定会话。
+- 2026-03-30：`crates/gateway/src/server.rs`、`crates/gateway/src/heartbeat.rs`、`crates/gateway/src/methods.rs` 已接通 gateway 边界：启动时 strict reject 根级 `HEARTBEAT.md` 与 legacy `~/.clawdbot/cron` 文件持久化；运行时统一从 `agents/<agent_id>/HEARTBEAT.md` 读取 heartbeat prompt，统一校验 `main` / 显式会话 / telegram target。
+- 2026-03-30：`crates/gateway/src/assets/js/page-crons.js` 与 `crates/tools/src/cron_tool.rs` 已切到最终外部合同：不再暴露 `payloadKind` / `sessionTarget` 执行语义 / `heartbeat.prompt` / `ackMax` / `local` timezone alias；heartbeat UI 默认使用显式 IANA timezone，并保留 `24:00` 输入。
+- 2026-03-30：`crates/config/src/schema.rs`、`crates/config/src/template.rs`、`crates/config/src/validate.rs` 已删除 `[heartbeat]` 配置 owner；legacy heartbeat 配置命中时按 top-level unknown-field 直接失败，不再保留配置层兼容尾巴。
+- 2026-03-30：`crates/gateway/src/cron.rs`、`crates/gateway/src/heartbeat.rs`、`crates/gateway/src/server.rs` 已补齐请求拒绝结构化日志与 `main` 自动物化日志；`crates/gateway/ui/e2e/specs/cron.spec.js` 已覆盖 heartbeat agent 切换后的 stale status 护栏。
+- 2026-03-30：已补齐 reviewer 指出的 4 个阻塞回归：`cron` / `heartbeat` delivery 失败会回写 `RunStatus::Error` 与 `lastError`；`cron` 的 `modelSelector=inherit` 改为从 `delivery.session.target` 绑定会话继承模型；`heartbeat.update` 保留既有 runtime state，不再清空 `lastRunAt / lastStatus / lastError`。
+- 2026-03-30：已补齐后续复审挖出的持久层缺口：`heartbeat` 早退路径现在会把更新后的状态 `upsert` 回 DB；`cron_runs` / `heartbeat_runs` 已持久化真实 `runId`，不再用 SQLite 自增行号冒充历史 `runId`。
+- 2026-03-30：已补齐启动与并发语义回归：persisted `cron` / `heartbeat` 启动改为只做加载期校验，不再因 past once job、stale session target、缺失 prompt 等运行时失败面阻断启动；手动 `heartbeat.run` 现在会先写 `runningAt` 并拒绝重入。
+- 2026-03-31：修复 `cron.update` patch 语义：允许通过 `timeoutSecs: null` 清空既有 timeout（`crates/cron/src/types.rs:166`），避免 UI 留空时被误判为“字段缺失 -> 保留旧值”。
+- 2026-03-31：修复 session 投递可见性：对 `cron.delivery.session` 投递路径，持久化 assistant message 后同步广播 `chat` websocket `final` 事件（`crates/gateway/src/server.rs:118`、`crates/gateway/src/server.rs:1781`），保证 Web UI 打开会话的实时更新与未读/列表刷新。
+- 2026-03-31：修复 heartbeat 永久阻塞：scheduler 与手动 `heartbeat.run` 均会在运行前清理超过 2h 的 stale `runningAt`，并写结构化日志 `event="heartbeat.run.stuck_cleared"`、`reason_code="heartbeat_stuck_cleared"`（`crates/cron/src/heartbeat_service.rs:39`、`crates/cron/src/heartbeat_service.rs:378`、`crates/cron/src/heartbeat_service.rs:873`）。
+- 2026-03-31：补齐 P0 追踪缺口：新增的 heartbeat 模块源码与 SQLite migrations 已纳入版本控制，干净环境不再因缺文件/缺表编译或运行失败（`crates/cron/src/heartbeat_service.rs`、`crates/cron/src/store_heartbeat.rs`、`crates/gateway/src/heartbeat.rs`、`crates/cron/migrations/20260330000001_add_heartbeat_tables.sql`、`crates/cron/migrations/20260330000002_persist_run_ids.sql`）。
+- 2026-03-31：严格 one-cut：`moltis.toml` 顶层未知 table 不再被静默忽略；gateway 启动改用 strict 配置加载并在失败时结构化拒绝（`crates/config/src/schema.rs`、`crates/config/src/loader.rs`、`crates/gateway/src/server.rs`）。
+- 2026-03-31：生命周期：cron/heartbeat 在开始执行前先把 `runningAt` 落库；stuck 清理也同步落库，避免崩溃重启窗口的重复调度或永久阻塞（`crates/cron/src/service.rs`、`crates/cron/src/heartbeat_service.rs`）。
+- 2026-03-31：UI 可见性：heartbeat 投递到 session 改为复用统一投递 helper，补齐 websocket `chat final` 广播（`crates/gateway/src/server.rs`）。
+- 2026-03-31：tool 合同：`cron` tool schema 不再混用 session/telegram target 字段，避免 agent 生成 payload 被 backend 严格拒绝（`crates/tools/src/cron_tool.rs`）。
+- 2026-03-31：strict active-hours：`activeHours.start="24:00"` 现在按无效输入 reject（仍保留 `end="24:00"` 作为 end-of-day 语义）（`crates/cron/src/heartbeat.rs`）。
+- 2026-03-31：UI 投影：background 投递写入 assistant message 时同步更新 `sessions.preview`，避免侧边栏摘要长期陈旧（`crates/gateway/src/server.rs`、`crates/sessions/src/metadata.rs`）。
 
 **已覆盖测试（如有）**
-- 无
+- 2026-03-30：`cargo test -p moltis-config`
+- 2026-03-30：`cargo test -p moltis-cron`
+- 2026-03-30：`cargo test -p moltis-tools`
+- 2026-03-30：`cargo test -p moltis-gateway`
+- 2026-03-30：`cd crates/gateway/ui && npm run e2e -- e2e/specs/cron.spec.js`
+- 2026-03-30：新增定点回归测试，冻结 `cron delivery failed -> Error`、`heartbeat delivery failed -> Error`、`heartbeat update preserves runtime state`、`cron inherit model <- delivery session target`。
+- 2026-03-30：新增持久层回归测试，冻结 `heartbeat` 早退状态必须回写 DB、`cron/heartbeat` run history 必须保留真实 `runId`。
+- 2026-03-30：新增启动与并发回归测试，冻结 persisted `cron` / `heartbeat` 启动不被 past once / stale target 卡死，以及手动 `heartbeat.run` 必须标记 `runningAt` 并拒绝重入。
+- 2026-03-31：`cargo test -p moltis-cron`
+- 2026-03-31：`cargo test -p moltis-gateway`
+- 2026-03-31：`cargo test -p moltis-config -p moltis-cron -p moltis-gateway -p moltis-tools`
+- 2026-03-31：新增定点回归测试，冻结 `timeoutSecs:null` 清空语义（`crates/cron/src/types.rs:344`）、`cron` session 投递触发 `chat final` live update（`crates/gateway/src/server.rs:6403`）、heartbeat stale `runningAt` 清理后可继续调度（`crates/cron/src/heartbeat_service.rs:1279`）。
+- 2026-03-31：新增定点回归测试，冻结 `cron/heartbeat` start-state `runningAt` 必须先落库、heartbeat session 投递必须广播且更新 preview、tool schema 不混用 telegram/session target 字段、activeHours start=24:00 必须 reject（`crates/cron/src/service.rs`、`crates/cron/src/heartbeat_service.rs`、`crates/gateway/src/server.rs`、`crates/tools/src/cron_tool.rs`、`crates/cron/src/heartbeat.rs`）。
 
 **已知差异/后续优化（非阻塞）**
 - 本单已完成对 `docs/plans/2026-03-26-cron-heartbeat-model-design.md` 的实施回写；后续代码实施以本单为唯一实施准绳，设计稿保留为设计依据与追溯依据。
 - `issues/issue-session-page-cron-session-delete-entry-missing.md` 已过时，仅保留旧模型问题证据；不再作为实施依据。
+- `telegram` 真正外发仍缺少真实账号/真实 chat 的手工验收；自动化只覆盖 target 形状、gateway 校验与 delivery 路径，不覆盖真实网络外发。
+
+**未修复问题清单（Review Findings, Pending Fixes）【P0-P3】**
+> 口径：这里仅记录“已发现但尚未修掉”的缺口；修复后必须从本段移除，并把证据回写到上面的“已实现/已覆盖测试”。
+
+- 无（截至 2026-03-31，P0-P3 review findings 已逐条修复并补齐自动化测试；见上方“已实现/已覆盖测试”。）
 
 ---
 
@@ -60,13 +95,13 @@
   - Aliases（仅记录，不在正文使用）：心跳任务
 
 - **main 会话**（主称呼）：某个 `agent` 逻辑上固定拥有且只拥有一个 `main` 会话。
-  - Why：`heartbeat` 与 `cron.session` 都允许显式绑定 `main`。
+  - Why：`heartbeat` 与 `cron.delivery.session.target` 都允许显式绑定 `main`。
   - Not：不等于系统全局唯一 main；不等于“用户先手工创建才允许存在”。
   - Source/Method：authoritative
   - Aliases（仅记录，不在正文使用）：主会话
 
 - **显式会话**（主称呼）：除 `main` 以外，已经存在且可稳定引用的具体会话。
-  - Why：`heartbeat` 与 `cron.session` 只允许绑定 `main` 或正式具体会话。
+  - Why：`heartbeat` 与 `cron.delivery.session.target` 只允许绑定 `main` 或正式具体会话。
   - Not：不包括临时分支会话、内部 lane 会话、不可稳定引用的对象。
   - Source/Method：authoritative
   - Aliases（仅记录，不在正文使用）：正式会话
@@ -86,11 +121,11 @@
 
 ## 需求与目标（Requirements & Goals）
 ### 功能目标（Functional）
-- [ ] 把 `cron` 与 `heartbeat` 收敛成两套且仅两套任务系统，不再保留 `session cron`、`systemEvent + main 注入` 等旧执行模型。
-- [ ] 冻结并落实唯一事实来源：结构化任务配置 / 状态归 DB，`heartbeat` 长文本 prompt 归 `agents/<agent_id>/HEARTBEAT.md`，`persona` 归 agent 身份文档体系。
-- [ ] 冻结并落实唯一外部合同：外部 JSON / RPC / UI 统一 `camelCase`，并与本单“最终字段冻结（Final External Shapes）”完全一致。
-- [ ] 冻结并落实唯一运行语义：`cron` 执行时无会话上下文；`heartbeat` 执行时必须绑定明确会话上下文。
-- [ ] 冻结并落实 UI owner：`cron` 与 `heartbeat` 使用两套明确表面，不再让 generic session UI、旧隐式 prompt 来源、旧字段表面继续指导实现。
+- [x] 把 `cron` 与 `heartbeat` 收敛成两套且仅两套任务系统，不再保留 `session cron`、`systemEvent + main 注入` 等旧执行模型。
+- [x] 冻结并落实唯一事实来源：结构化任务配置 / 状态归 DB，`heartbeat` 长文本 prompt 归 `agents/<agent_id>/HEARTBEAT.md`，`persona` 归 agent 身份文档体系。
+- [x] 冻结并落实唯一外部合同：外部 JSON / RPC / UI 统一 `camelCase`，并与本单“最终字段冻结（Final External Shapes）”完全一致。
+- [x] 冻结并落实唯一运行语义：`cron` 执行时无会话上下文；`heartbeat` 执行时必须绑定明确会话上下文。
+- [x] 冻结并落实 UI owner：`cron` 与 `heartbeat` 使用两套明确表面，不再让 generic session UI、旧隐式 prompt 来源、旧字段表面继续指导实现。
 
 ### 非功能目标（Non-functional）
 - 正确性口径（必须/不得）：
@@ -102,12 +137,14 @@
 - 可观测性：所有拒绝、跳过、投递、自动创建 `main`、legacy 命中、DB 不可用都必须有结构化日志，至少包含 `event`、`reason_code`、`decision`、`policy`。
 - 安全与隐私：日志不得打印敏感 token、完整正文、完整 prompt；如需排障，仅允许 `preview` / `len` / `hash` 等有限诊断字段。
 
-## 问题陈述（Problem Statement）
-### 现象（Symptoms）
-1. 当前代码仍同时存在 `cron`、`heartbeat`、`sessionTarget`、`payloadKind`、`systemEvent`、`agentTurn`、`deliver/channel/to`、根级 `HEARTBEAT.md`、`heartbeat.prompt`、多 store 并存等多套旧语义。
-2. 当前 Web UI 仍把 `heartbeat` 当成“根级 `HEARTBEAT.md` + config prompt 覆盖 + ackMax”模式来配置，不符合已冻结模型。
-3. 当前 `cron` 仍以内嵌会话目标、`systemEvent/main` 注入、旧毫秒字段、旧 store 形状为中心，无法作为后续 one-cut 治理的唯一实施基础。
-4. 当前仍有旧子 issue 围绕 `cron execution session`、generic session UI 暴露、删除入口错位等旧模型做局部修补，这些不应再继续充当准绳。
+## 问题陈述（Historical Problem Statement）
+> 注：本节保留开工前 inventory / 根因快照，用来解释为什么要做本次 one-cut；当前代码实施现状以上方“实施现状（Status）”与下一节“实施后现状与证据”为准。
+
+### 实施前现象（Symptoms Before One-cut）
+1. 开工前代码同时存在 `cron`、`heartbeat`、`sessionTarget`、`payloadKind`、`systemEvent`、`agentTurn`、`deliver/channel/to`、根级 `HEARTBEAT.md`、`heartbeat.prompt`、多 store 并存等多套旧语义。
+2. 开工前 Web UI 仍把 `heartbeat` 当成“根级 `HEARTBEAT.md` + config prompt 覆盖 + ackMax”模式来配置，不符合已冻结模型。
+3. 开工前 `cron` 仍以内嵌会话目标、`systemEvent/main` 注入、旧毫秒字段、旧 store 形状为中心，无法作为后续 one-cut 治理的唯一实施基础。
+4. 开工前仍有旧子 issue 围绕 `cron execution session`、generic session UI 暴露、删除入口错位等旧模型做局部修补，这些不应再继续充当准绳。
 
 ### 影响（Impact）
 - 用户体验：
@@ -119,7 +156,7 @@
 - 排障成本：
   - 文档、代码、UI、测试没有单点准绳，review 会持续在旧口径与新口径之间来回猜。
 
-### 复现步骤（Reproduction）
+### 实施前最小复现（Reproduction Before One-cut）
 1. 打开 `docs/plans/2026-03-26-cron-heartbeat-model-design.md`，再对照本单与前端 / 后端代码。
 2. 检查 heartbeat UI 是否仍显示根级 `HEARTBEAT.md`、`heartbeat.prompt`、`ackMax` 等旧概念。
 3. 检查 cron 类型、payload、store、sessionTarget、投递字段是否仍围绕旧模型实现。
@@ -127,47 +164,45 @@
    - 期望：只有一套冻结模型指导后续实现。
    - 实际：代码现状仍残留旧模型，尚未按本单收敛。
 
-## 现状核查与证据（As-is / Evidence）【不可省略】
-> 必须至少给出 1 条可定位证据：`path/to/file:line` / 测试 / 日志关键词。
+## 实施后现状与证据（Current Evidence）【不可省略】
+> 本节是当前唯一事实依据；已失效的开工前现状不再作为实施判断口径。
 
 - 文档证据：
-  - `docs/plans/2026-03-26-cron-heartbeat-model-design.md:4`：设计稿状态已经更新为“语义已定稿，已回写实施主单”。
-  - `docs/plans/2026-03-26-cron-heartbeat-model-design.md:11`：明确写死“后续代码实施与 review 以 `issues/issue-cron-system-governance-one-cut.md` 为唯一实施准绳”。
-  - `docs/plans/2026-03-26-cron-heartbeat-model-design.md:24`：系统只保留两类定时任务语义：`cron` 与 `heartbeat`。
-  - `docs/plans/2026-03-26-cron-heartbeat-model-design.md:497`：one-cut 删除项已明确包含 `payloadKind = systemEvent | agentTurn`（以及同段落里的 `deliver/channel/to`、`anchor_ms`、`tz`、根级 `HEARTBEAT.md`、`heartbeat.prompt`、`heartbeat.ack_max_chars` 等）。
+  - `docs/plans/2026-03-26-cron-heartbeat-model-design.md:4`：设计稿状态已冻结为“语义已定稿，已回写实施主单”。
+  - `docs/plans/2026-03-26-cron-heartbeat-model-design.md:11`：后续代码实施与 review 只以本单为唯一实施准绳。
 
-- 代码证据：`cron` 仍停留在旧模型
-  - `crates/cron/src/types.rs:9`：`CronSchedule` 仍使用 `at_ms`、`every_ms`、`anchor_ms`、`tz`。
-  - `crates/cron/src/types.rs:28`：`CronPayload` 仍保留 `SystemEvent` / `AgentTurn` 两类旧 payload 语义。
-  - `crates/cron/src/types.rs:39`：`AgentTurn` 仍保留 `deliver`、`channel`、`to` 这组 legacy 投递字段。
-  - `crates/cron/src/types.rs:100`：`CronJob` 仍把 `session_target` 作为执行期合同的一部分。
-  - `crates/cron/src/service.rs:641`：运行时仍按 `session_target + payload` 组合做旧合法性校验。
-  - `crates/cron/src/service.rs:506`：运行时仍把 `deliver/channel/to/session_target` 一起塞进 `AgentTurnRequest`。
-  - `crates/cron/src/store_file.rs:17`、`crates/cron/src/store_memory.rs:16`、`crates/cron/src/store_sqlite.rs:15`：三套 store 仍并存于产品路径。
+- 代码证据：`cron` / `heartbeat` 已切到新合同
+  - `crates/cron/src/types.rs:57`：`CronSchedule` 只保留 `once / every / cron` 三种外部形状。
+  - `crates/cron/src/types.rs:69`：`CronDelivery` 已收敛为 `silent | session | telegram`。
+  - `crates/cron/src/types.rs:130`：`CronJobCreate` 不再接受旧 payload / 执行期会话字段。
+  - `crates/cron/src/types.rs:221`：`heartbeat` 结构化配置已冻结为 DB owner，prompt owner 为 `agents/<agent_id>/HEARTBEAT.md`。
+  - `crates/cron/src/heartbeat_service.rs:435`、`crates/cron/src/heartbeat_service.rs:461`：`heartbeat` 对 prompt 缺失 / 有效空内容直接 reject，并带结构化 `reason_code`。
+  - `crates/gateway/src/server.rs:401`：gateway 启动时 strict reject 工作区根级 `HEARTBEAT.md`。
+  - `crates/gateway/src/server.rs:1344`：gateway 启动时 strict reject legacy `~/.clawdbot/cron` file store。
+  - `crates/gateway/src/server.rs:1384`、`crates/gateway/src/server.rs:3352`：DB 迁移失败 / store 不可用按 `db_migration_failed`、`cron_store_unavailable` 直接失败，不做 fallback。
+  - `crates/gateway/src/server.rs:1449`、`crates/gateway/src/server.rs:1491`：跨 agent 会话绑定命中 `session_agent_mismatch` 直接失败。
+  - `crates/gateway/src/server.rs:1576`：`main` 会话已通过统一 `ensure_main_session_id` 合同物化。
+  - `crates/gateway/src/assets/js/page-crons.js:53`、`crates/gateway/src/assets/js/page-crons.js:290`、`crates/gateway/src/assets/js/page-crons.js:719`：heartbeat UI 已只指向 agent 级 `HEARTBEAT.md`，`Run Now` 对未保存 heartbeat 明确报错，`cron` 投递 UI 已切到 `silent / session / telegram`。
+  - `crates/gateway/src/methods.rs:1924`、`crates/gateway/src/methods.rs:1937`、`crates/gateway/src/methods.rs:1963`：gateway RPC 已收敛为按 `agentId` 维度的 `heartbeat.status / update / runs`。
+  - `crates/tools/src/cron_tool.rs:39`：tool schema 与文案已明确 `cron` 隔离执行 + post-run delivery。
+  - `crates/config/src/template.rs:387`：配置模板已明确 heartbeat prompt owner 为 `agents/<agent_id>/HEARTBEAT.md`。
+  - `crates/config/src/validate.rs:1576`、`crates/config/src/validate.rs:1611`：legacy `[heartbeat]` 顶层表已作为 strict one-cut 直接失败，不再保留配置 owner。
 
-- 代码证据：`heartbeat` 仍停留在旧模型
-  - `crates/cron/src/heartbeat.rs:164`：当前 heartbeat prompt 解析仍把 `HEARTBEAT.md` 作为输入源之一。
-  - `crates/gateway/src/methods.rs:1930`：`heartbeat.status` 仍从根级 `HEARTBEAT.md` 取 prompt。
-  - `crates/gateway/src/methods.rs:2016`：`heartbeat.update` 仍记录“loaded heartbeat prompt from HEARTBEAT.md”。
-  - `crates/gateway/src/server.rs:4766`：gateway 启动仍会在工作区根目录 seed `HEARTBEAT.md`。
-  - `crates/gateway/src/server.rs:5020`：默认文案仍把根级 `HEARTBEAT.md` 写成 heartbeat prompt 来源。
-  - `crates/gateway/src/assets/js/page-crons.js:341`：heartbeat UI 仍告诉用户“留空则使用 workspace root 的 `HEARTBEAT.md`”。
-  - `crates/gateway/src/assets/js/page-crons.js:346`：heartbeat UI 仍暴露 `ack_max_chars` 输入项。
+- 自动化证据：
+  - `crates/cron/src/types.rs:319`、`crates/cron/src/types.rs:328`、`crates/cron/src/types.rs:340`、`crates/cron/src/types.rs:349`、`crates/cron/src/types.rs:360`：已覆盖 `modelSelector.inherit`、telegram target 严格字段、legacy `at_ms` / `tz` / `payloadKind` reject。
+  - `crates/cron/src/service.rs`、`crates/cron/src/heartbeat_service.rs`、`crates/gateway/src/server.rs`：已覆盖 `cron/heartbeat` delivery 失败记为 `Error`、heartbeat upsert 保留 `lastRunAt/lastStatus/lastError`、`cron modelSelector=inherit` 从绑定会话继承模型。
+  - `crates/cron/src/service.rs:270`、`crates/cron/src/service.rs:793`、`crates/cron/src/service.rs:1072`、`crates/cron/src/service.rs:1105`：已覆盖 persisted `cron` 启动改走加载期校验，不再被 disabled past once job 与 stale session target 阻断启动。
+  - `crates/cron/src/heartbeat_service.rs:658`、`crates/cron/src/heartbeat_service.rs:728`、`crates/cron/src/heartbeat_service.rs:741`、`crates/cron/src/heartbeat_service.rs:1034`：已覆盖 heartbeat 早退路径状态回写 DB，不再出现“内存态更新、DB 态陈旧”。
+  - `crates/cron/src/heartbeat_service.rs:199`、`crates/cron/src/heartbeat_service.rs:312`、`crates/cron/src/heartbeat_service.rs:756`、`crates/cron/src/heartbeat_service.rs:1110`、`crates/cron/src/heartbeat_service.rs:1149`：已覆盖 persisted `heartbeat` 启动不被 stale target 阻断、手动运行先写 `runningAt` 并拒绝重入。
+  - `crates/cron/migrations/20260330000002_persist_run_ids.sql:1`、`crates/cron/src/store_sqlite.rs:105`、`crates/cron/src/store_sqlite.rs:125`、`crates/cron/src/store_sqlite.rs:245`、`crates/cron/src/store_sqlite.rs:265`、`crates/cron/src/store_sqlite.rs:392`、`crates/cron/src/store_sqlite.rs:460`：已冻结 `cron/heartbeat` run history 的真实 `runId` 持久化合同，并覆盖 SQLite round-trip 回归。
+  - `crates/cron/src/heartbeat_service.rs:792`、`crates/cron/src/heartbeat_service.rs:819`：已覆盖 heartbeat prompt 缺失 reject 与 `local` timezone alias reject。
+  - `crates/gateway/src/server.rs:5615`：已覆盖根级 `HEARTBEAT.md` strict reject。
+  - `crates/gateway/src/session.rs:1152`：已覆盖 `main` 会话物化与复用。
+  - `crates/gateway/ui/e2e/specs/cron.spec.js:13`、`crates/gateway/ui/e2e/specs/cron.spec.js:24`、`crates/gateway/ui/e2e/specs/cron.spec.js:35`、`crates/gateway/ui/e2e/specs/cron.spec.js:58`：已覆盖 heartbeat 新 UI、显式 timezone、未保存 heartbeat 失败语义、cron 表单编辑与保存主路径。
+  - 2026-03-30 实跑通过：`cargo test -p moltis-config`、`cargo test -p moltis-cron`、`cargo test -p moltis-tools`、`cargo test -p moltis-gateway`、`cd crates/gateway/ui && npm run e2e -- e2e/specs/cron.spec.js`。
 
-- 代码证据：启动 / owner / 可观测性仍停留在旧模型
-  - `crates/gateway/src/server.rs:1408`：gateway 启动仍默认选择 `FileStore`。
-  - `crates/gateway/src/server.rs:1411`：`FileStore` 不可用时仍 warn 并降级到 `InMemoryStore`。
-  - `crates/gateway/src/server.rs:3032`：`cron_service.start()` 失败仍只是 warn，不阻断服务启动。
-  - `crates/gateway/ui/e2e/specs/cron.spec.js:13`：现有 E2E 仍围绕旧 heartbeat tab 进行浅层加载验证，未冻结新主路径。
-  - `crates/sessions/src/key.rs:33`：`main` 会话 key 已经是按 agent 维度建模（`SessionKey::main(agent_id) -> agent:<agent_id>:main`），可作为本单“main 归属 agent”的实现基础。
-  - `crates/gateway/src/personas.rs:15`：agent id 已有合法性校验（拒绝空白、空格、路径穿越等），可作为本单 `agentId` 合同约束的实现基础。
-
-- 当前测试覆盖：
-  - 已有：`crates/cron/src/types.rs`、`crates/cron/src/service.rs` 对旧字段、旧 payload、旧 store 行为有基础测试。
-  - 缺口：
-    - 没有围绕新 `cron` / `heartbeat` 模型的主路径测试。
-    - 没有 legacy 命中直接 reject 的关键测试矩阵。
-    - 没有 DB-only owner、agent 级 `HEARTBEAT.md`、`main` 自动物化、`cron.delivery` 三分法的自动化证明。
+- 当前缺口：
+  - `telegram` 真实网络外发仍缺少真实 bot / chat 的手工验收；当前代码与自动化只证明 schema、gateway 校验与 delivery 路径，不证明真实外网投递成功率。
 
 ## 根因分析（Root Cause）
 - A. 旧系统在一个对象里同时混了“调度”“会话”“投递”“persona”“prompt 来源”“存储 owner”，没有第一性拆分。
@@ -191,6 +226,7 @@
 - `cron` run history：DB
 - `heartbeat` 结构化配置：DB
 - `heartbeat` 运行状态：DB
+- `heartbeat` run history：DB
 - `heartbeat` 长文本 prompt：`agents/<agent_id>/HEARTBEAT.md`
 - `persona`：agent 身份文档体系
 - DB 具体落点冻结为：gateway 的 canonical SQLite（复用 `db_pool`；与 sessions/metrics 等同一 DB 文件），不再允许 cron 独立 file store 或内存 store
@@ -217,9 +253,11 @@
 - 本轮允许修改的层：
   - `crates/cron/*`
   - `crates/gateway/src/server.rs`
+  - `crates/gateway/src/session.rs`
   - `crates/gateway/src/methods.rs`
   - `crates/gateway/src/assets/js/page-crons.js`
   - `crates/gateway/ui/e2e/specs/cron.spec.js`
+  - `crates/sessions/*`
   - agent 目录相关文件读写与默认 seed 逻辑
 - 本轮闭环必改项：
   - `cron / heartbeat` typed contract
@@ -407,7 +445,7 @@
   - 必须只保留两类任务系统：`cron` 与 `heartbeat`。
   - 必须把结构化配置 / 运行状态收敛到 DB，把 `heartbeat` 长文本 prompt 收敛到 `agents/<agent_id>/HEARTBEAT.md`。
   - 必须把 `persona` 收敛为 agent 自身身份文档的唯一事实来源。
-  - 必须保证 `heartbeat` 与 `cron.session` 只能绑定同 agent 的会话。
+  - 必须保证 `heartbeat` 与 `cron.delivery.session.target` 只能绑定同 agent 的会话。
   - 必须把 `cron` 定义为“无会话上下文执行，执行后再按 `silent / session / telegram` 投递”。
   - 必须把 `heartbeat` 定义为“绑定 `main` 或显式会话的一轮周期性关注”，且每个 agent 最多一个 heartbeat。
   - 必须支持 `main` 显式绑定，且在首次引用时按合同自动物化。
@@ -474,7 +512,7 @@
   - `agentId`
   - `enabled`
   - `every`
-  - `sessionTarget = { kind: "main" } | { kind: "session", sessionKey: "..." }`
+  - `heartbeat.sessionTarget = { kind: "main" } | { kind: "session", sessionKey: "..." }`
   - `modelSelector = { kind: "inherit" } | { kind: "explicit", modelId: "..." }`
   - `activeHours? = { start, end, timezone }`
 - `heartbeat` prompt 文件
@@ -490,7 +528,7 @@
   - `timeoutSecs?`
   - `delivery = { kind: "silent" } | { kind: "session", target } | { kind: "telegram", target }`
   - `deleteAfterRun`
-- `cron.session.target`
+  - `cron.delivery.session.target`
   - `{ kind: "main" }`
   - `{ kind: "session", sessionKey: "..." }`
 - `cron.telegram.target`
@@ -503,9 +541,19 @@
   - `lastStatus`
   - `lastError`
   - `lastDurationMs`
-- run history 字段
+- `cron` run history 字段
   - `runId`
   - `jobId`
+  - `startedAt`
+  - `finishedAt`
+  - `status`
+  - `error`
+  - `outputPreview`
+  - `inputTokens`
+  - `outputTokens`
+- `heartbeat` run history 字段
+  - `runId`
+  - `agentId`
   - `startedAt`
   - `finishedAt`
   - `status`
@@ -573,40 +621,54 @@
   - token、完整 prompt、完整消息正文、完整会话 transcript。
 
 ## 验收标准（Acceptance Criteria）【不可省略】
-- [ ] `cron` 与 `heartbeat` 的最终语义、字段、owner、失败语义与本单冻结一致，且不与设计依据冲突。
-- [ ] 外部 JSON / RPC / UI 合同全部收敛为本单“最终字段冻结（Final External Shapes）”中的 `camelCase` 形状。
-- [ ] `cron` 不再依赖会话上下文执行；`heartbeat` 不再作为无上下文重型任务执行。
-- [ ] 根级 `HEARTBEAT.md`、`heartbeat.prompt`、`heartbeat.ack_max_chars`、`payloadKind`、`deliver/channel/to`、`anchor_ms`、`tz`、job 级 `sandbox`、file store、memory store 已从产品合同删除。
-- [ ] `main` 显式绑定、自动物化、显式会话绑定拒绝语义全部落地，且有结构化日志。
-- [ ] 跨 agent 会话绑定会被直接拒绝，且有稳定 `reason_code`。
-- [ ] `cron.delivery = silent | session | telegram` 三分法落地，且投递语义与运行上下文严格分离。
-- [ ] 所有 strict reject / skip / legacy 命中 / DB 不可用 / delivery 成败都具备结构化日志。
-- [ ] 关键主路径、关键边界、关键失败面、关键 legacy reject 路径具备自动化测试或明示的手工验收缺口说明。
+- [x] `cron` 与 `heartbeat` 的最终语义、字段、owner、失败语义与本单冻结一致，且不与设计依据冲突。
+- [x] 外部 JSON / RPC / UI 合同全部收敛为本单“最终字段冻结（Final External Shapes）”中的 `camelCase` 形状。
+- [x] `cron` 不再依赖会话上下文执行；`heartbeat` 不再作为无上下文重型任务执行。
+- [x] 根级 `HEARTBEAT.md`、`heartbeat.prompt`、`heartbeat.ack_max_chars`、`payloadKind`、`deliver/channel/to`、`anchor_ms`、`tz`、job 级 `sandbox`、file store、memory store 已从产品合同删除。
+- [x] `main` 显式绑定、自动物化、显式会话绑定拒绝语义全部落地，且有结构化日志。
+- [x] 跨 agent 会话绑定会被直接拒绝，且有稳定 `reason_code`。
+- [x] `cron.delivery = silent | session | telegram` 三分法落地，且投递语义与运行上下文严格分离。
+- [x] 所有 strict reject / skip / legacy 命中 / DB 不可用 / delivery 成败都具备结构化日志。
+- [x] 关键主路径、关键边界、关键失败面、关键 legacy reject 路径具备自动化测试或明示的手工验收缺口说明。
+
+## 复审自检（Review Checklist）【强制】
+> 用于后续增量 review 的定点雷达：每次改动必须先按此清单扫一遍，优先抓“owner 分裂 / 生命周期不闭环 / UI 投影缺口”这三类高频返工源头。
+
+- owner/唯一真源：每个事实（配置/状态/prompt/run history/投影刷新）必须只有一个 owner；禁止并行保留 DB + 文件 + 运行时补丁的同级真源。
+- 边界与失败语义：区分“启动期校验”与“运行期失败面”；失败必须落在主路径上自然失败，并保留结构化日志（含 `reason_code` 与 remediation）。
+- legacy inventory：对旧字段/旧入口/旧 store 做关键词全局盘点并一次性删除；禁止“新合同已落地但旧路径仍在被调用”。
+- patch 三态：对所有 patch 字段强制核对“缺失=不改 / null=清空 / value=设置”的显式语义，并用测试冻结（避免 serde 默认吞语义）。
+- 生命周期闭环：重点复核 `runningAt/nextRunAt/finish/early_return/timeout`；必须覆盖 stuck 清理、早退落库、并发拒绝/恢复（避免“卡一次永远跳过”）。
+- UI 投影/实时性：凡是“持久化会改变用户感知”的路径，必须发 websocket 事件或明确写可观测拒绝/降级日志；禁止只写 DB 不发投影刷新导致 UI 看起来没生效。
 
 ## 测试计划（Test Plan）【不可省略】
 > 已完成且有证据的测试项必须同步勾选；未勾选项表示当前仍未补到自动化证据或手工验收说明。
 ### Unit
-- [ ] `crates/cron/src/types.rs`：冻结 `cron.schedule`、`cron.delivery`、`heartbeat` 最终外部字段形状，并补 legacy 反向用例。
-- [ ] `crates/cron/src/heartbeat.rs`：覆盖 `HEARTBEAT.md` 有效空内容判定与 `activeHours` 解析失败直接 reject（禁止“无效配置 -> 永远 active”）。
+- [x] `crates/cron/src/types.rs`：冻结 `cron.schedule`、`cron.delivery`、`heartbeat` 最终外部字段形状，并补 legacy 反向用例。
+- [x] `crates/cron/src/heartbeat.rs`：覆盖 `HEARTBEAT.md` 有效空内容判定与 `activeHours` 解析失败直接 reject（禁止“无效配置 -> 永远 active”）。
+- [x] `crates/cron/src/service.rs` / `crates/cron/src/heartbeat_service.rs` / `crates/gateway/src/server.rs`：覆盖 delivery 失败记为 `Error`、heartbeat upsert 保留 runtime state、`cron modelSelector=inherit` 从绑定会话继承模型。
+- [x] `crates/cron/src/heartbeat_service.rs` / `crates/cron/src/store_sqlite.rs`：覆盖 heartbeat 早退路径状态回写 DB、`cron/heartbeat` run history 保留真实 `runId`。
+- [x] `crates/cron/src/service.rs` / `crates/cron/src/heartbeat_service.rs`：覆盖 persisted `cron` / `heartbeat` 启动不被 past once / stale target 卡死，以及手动 `heartbeat.run` 的 `runningAt` 与重入拒绝语义。
 - [ ] `crates/cron/src/service.rs`：覆盖 `cron` 无会话执行语义、`heartbeat` 会话绑定语义、`main` 自动物化语义。
 - [ ] `crates/cron/src/service.rs`：覆盖 legacy 命中 reject、`deleteAfterRun` 限定、DB 不可用失败语义、`reason_code` 可观测性。
 - [ ] `crates/cron/src/service.rs`：覆盖跨 agent 会话绑定直接 reject。
-- [ ] `crates/gateway/src/methods.rs` / `crates/gateway/src/server.rs`：覆盖 agent 级 `HEARTBEAT.md`、根级 `HEARTBEAT.md` 退场、UI / RPC 合同变更。
-- [ ] `crates/cron/src/types.rs`：覆盖 `cron.telegram.target` 只接受 `accountKey + chatId + threadId?`，拒绝 `username / peer_id / message_id / bucket_key`。
-- [ ] `crates/cron/src/types.rs`：覆盖 `modelSelector = { kind: \"inherit\" } | { kind: \"explicit\", modelId }`，不接受空值 / 隐式 fallback。
+- [x] `crates/gateway/src/methods.rs` / `crates/gateway/src/server.rs`：覆盖 agent 级 `HEARTBEAT.md`、根级 `HEARTBEAT.md` 退场、UI / RPC 合同变更。
+- [x] `crates/cron/src/types.rs`：覆盖 `cron.telegram.target` 只接受 `accountKey + chatId + threadId?`，拒绝 `username / peer_id / message_id / bucket_key`。
+- [x] `crates/cron/src/types.rs`：覆盖 `modelSelector = { kind: \"inherit\" } | { kind: \"explicit\", modelId }`，不接受空值 / 隐式 fallback。
 
 ### Integration
 - [ ] `cron`：`once / every / cron` 三种 schedule 的保存、调度、运行、投递闭环。
 - [ ] `heartbeat`：绑定 `main`、绑定具体会话、目标缺失失败、无输出安静结束。
 - [ ] DB-only owner：DB 不可用时相关能力直接失败，不降级到 file / memory store。
+- [ ] 启动边界：发现 legacy `~/.clawdbot/cron/jobs.json` 或 `~/.clawdbot/cron/runs/` 时直接启动失败，并给 remediation。
 - [ ] 并发边界：删除中的对象不再进入下一轮调度；运行中的删除不会悄悄复活对象。
 - [ ] 唯一性边界：同一 agent 创建第二个 heartbeat 直接 reject。
 - [ ] 生命周期边界：`enabled=false` 不补跑、重新启用后按新语义重新计算。
 - [ ] 时间边界：`cron.timeoutSecs`、`deleteAfterRun`、DST 语义按冻结合同执行。
 
 ### UI E2E（Playwright，如适用）
-- [ ] `crates/gateway/ui/e2e/specs/cron.spec.js`：覆盖 `cron` 与 `heartbeat` 两套 UI 表面、关键字段展示、保存与拒绝语义。
-- [ ] `crates/gateway/ui/e2e/specs/cron.spec.js`：覆盖 `heartbeat` 不再使用根级 `HEARTBEAT.md` / textarea prompt / `ackMax`。
+- [x] `crates/gateway/ui/e2e/specs/cron.spec.js`：覆盖 `cron` 与 `heartbeat` 两套 UI 表面、关键字段展示、保存与拒绝语义。
+- [x] `crates/gateway/ui/e2e/specs/cron.spec.js`：覆盖 `heartbeat` 不再使用根级 `HEARTBEAT.md` / textarea prompt / `ackMax`。
 - [ ] `crates/gateway/ui/e2e/specs/cron.spec.js`：覆盖 `main` 可被显式选择，即使尚未物化。
 
 ### 自动化缺口（如有，必须写手工验收）
@@ -674,8 +736,9 @@
 ## Close Checklist（关单清单）【不可省略】
 - [ ] 行为已按 Spec 实现（口径一致）
 - [ ] authoritative vs estimate 边界清晰（且 UI/日志标注 method/source）
-- [ ] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
-- [ ] 文档/配置示例已同步更新（避免断链）
-- [ ] 兼容性/迁移说明已写清（strict one-cut；legacy 直接 reject）
+- [ ] 已按“复审自检（Review Checklist）”逐条复核（owner/边界/legacy/三态/生命周期/投影刷新）
+- [x] 已补齐/更新自动化测试（或记录缺口 + 手工验收）
+- [x] 文档/配置示例已同步更新（避免断链）
+- [x] 兼容性/迁移说明已写清（strict one-cut；legacy 直接 reject）
 - [ ] 安全隐私检查通过（敏感字段不泄露）
-- [ ] 回滚策略明确
+- [x] 回滚策略明确

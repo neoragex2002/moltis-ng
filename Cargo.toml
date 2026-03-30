@@ -54,6 +54,7 @@ axum-extra = "0.10"
 # Serialization
 serde      = { features = ["derive"], version = "1" }
 serde_json = "1"
+serde_with = "3"
 # Error handling
 anyhow    = "1"
 thiserror = "2"
