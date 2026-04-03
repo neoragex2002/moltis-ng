@@ -115,6 +115,81 @@ async fn resolve_session_target_context(
     Ok((session_id, inherited_model))
 }
 
+async fn inherited_model_for_cron_run(
+    agent_id: &str,
+    session_target: &moltis_cron::types::SessionTarget,
+    session_metadata: &SqliteSessionMetadata,
+) -> anyhow::Result<Option<String>> {
+    let session_id = match session_target {
+        moltis_cron::types::SessionTarget::Main => {
+            session_metadata
+                .get_active_session_id(&moltis_sessions::SessionKey::main(agent_id).0)
+                .await
+        },
+        moltis_cron::types::SessionTarget::Session { session_key } => {
+            let ids = session_metadata
+                .list_session_ids_by_session_key(session_key, 2)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            match ids.as_slice() {
+                [only] => Some(only.clone()),
+                [] => None,
+                _ => anyhow::bail!("session_key is not unique"),
+            }
+        },
+    };
+
+    Ok(match session_id {
+        Some(session_id) => session_metadata
+            .get(&session_id)
+            .await
+            .and_then(|entry| entry.model),
+        None => None,
+    })
+}
+
+fn validate_cron_telegram_target(
+    target: &moltis_cron::types::TelegramTarget,
+    registered_accounts: &HashSet<String>,
+) -> anyhow::Result<()> {
+    let account_key = target.account_key.trim();
+    if !account_key.starts_with("telegram:") {
+        anyhow::bail!("cron_delivery_target_invalid");
+    }
+    let account_id = account_key
+        .strip_prefix("telegram:")
+        .unwrap_or_default()
+        .parse::<u64>()
+        .unwrap_or(0);
+    if account_id == 0 {
+        anyhow::bail!("cron_delivery_target_invalid");
+    }
+
+    let chat_id: i64 = target
+        .chat_id
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("cron_delivery_target_invalid"))?;
+    if chat_id == 0 {
+        anyhow::bail!("cron_delivery_target_invalid");
+    }
+    if let Some(ref thread_id) = target.thread_id {
+        let tid: i32 = thread_id
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("cron_delivery_target_invalid"))?;
+        if tid <= 0 {
+            anyhow::bail!("cron_delivery_target_invalid");
+        }
+    }
+
+    if !registered_accounts.contains(account_key) {
+        anyhow::bail!("cron_delivery_account_missing");
+    }
+
+    Ok(())
+}
+
 async fn deliver_assistant_message_into_session(
     state: Option<&Arc<GatewayState>>,
     session_store: &SessionStore,
@@ -155,7 +230,9 @@ async fn deliver_assistant_message_into_session(
     };
 
     if let Some(preview) = crate::session::extract_preview_from_value(&msg_val) {
-        session_metadata.set_preview(session_id, Some(&preview)).await;
+        session_metadata
+            .set_preview(session_id, Some(&preview))
+            .await;
     }
 
     if let Some(state) = state {
@@ -1661,39 +1738,24 @@ pub async fn start_gateway(
         )
     };
 
-    let cron_validate_telegram_target = Arc::new(
+    let configured_telegram_account_keys: HashSet<String> = configured_telegram_accounts(&config)
+        .into_iter()
+        .map(|(account_handle, _)| account_handle)
+        .collect();
+
+    let deferred_state_for_telegram_validation = Arc::clone(&deferred_state);
+    let cron_validate_telegram_target = Arc::new(move
         |target: &moltis_cron::types::TelegramTarget|
          -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+        let deferred_state = Arc::clone(&deferred_state_for_telegram_validation);
+        let configured_telegram_account_keys = configured_telegram_account_keys.clone();
         let target = target.clone();
         Box::pin(async move {
-            let account_key = target.account_key.trim();
-            if !account_key.starts_with("telegram:") {
-                anyhow::bail!("cron_delivery_target_invalid");
+            let mut registered_accounts = configured_telegram_account_keys;
+            if let Some(state) = deferred_state.get() {
+                registered_accounts.extend(state.services.channel.list_telegram_accounts().await);
             }
-            let account_id = account_key
-                .strip_prefix("telegram:")
-                .unwrap_or_default()
-                .parse::<u64>()
-                .unwrap_or(0);
-            if account_id == 0 {
-                anyhow::bail!("cron_delivery_target_invalid");
-            }
-
-            let chat_id: i64 = target.chat_id.trim().parse().map_err(|_| {
-                anyhow::anyhow!("cron_delivery_target_invalid")
-            })?;
-            if chat_id == 0 {
-                anyhow::bail!("cron_delivery_target_invalid");
-            }
-            if let Some(ref thread_id) = target.thread_id {
-                let tid: i32 = thread_id.trim().parse().map_err(|_| {
-                    anyhow::anyhow!("cron_delivery_target_invalid")
-                })?;
-                if tid <= 0 {
-                    anyhow::bail!("cron_delivery_target_invalid");
-                }
-            }
-            Ok(())
+            validate_cron_telegram_target(&target, &registered_accounts)
         })
     },
     );
@@ -1757,34 +1819,23 @@ pub async fn start_gateway(
     let on_cron_run: moltis_cron::service::RunCronFn = {
         let st = Arc::clone(&deferred_state);
         let session_metadata = Arc::clone(&session_metadata);
-        let ensure_main_session_id = Arc::clone(&ensure_main_session_id);
-        let resolve_session_id_for_session_key = Arc::clone(&resolve_session_id_for_session_key);
         Arc::new(move |req| {
             let st = Arc::clone(&st);
             let session_metadata = Arc::clone(&session_metadata);
-            let ensure_main_session_id = Arc::clone(&ensure_main_session_id);
-            let resolve_session_id_for_session_key =
-                Arc::clone(&resolve_session_id_for_session_key);
             Box::pin(async move {
                 let state = st
                     .get()
                     .ok_or_else(|| anyhow::anyhow!("gateway not ready"))?;
                 let chat = state.chat().await;
 
-                let inherited_model = match req.delivery_session_target.as_ref() {
-                    Some(target) => {
-                        let (_, inherited_model) = resolve_session_target_context(
-                            &req.agent_id,
-                            target,
-                            &session_metadata,
-                            &ensure_main_session_id,
-                            &resolve_session_id_for_session_key,
-                        )
-                        .await?;
-                        inherited_model
-                    },
-                    None => None,
-                };
+                let inherited_model =
+                    match (&req.model_selector, req.delivery_session_target.as_ref()) {
+                        (moltis_cron::types::ModelSelector::Inherit, Some(target)) => {
+                            inherited_model_for_cron_run(&req.agent_id, target, &session_metadata)
+                                .await?
+                        },
+                        _ => None,
+                    };
                 let model = select_background_turn_model(&req.model_selector, inherited_model);
 
                 let params = serde_json::json!({
@@ -1825,31 +1876,31 @@ pub async fn start_gateway(
             let resolve_session_id_for_session_key =
                 Arc::clone(&resolve_session_id_for_session_key);
             Box::pin(async move {
-	                match req.delivery {
-	                    moltis_cron::types::CronDelivery::Silent => Ok(()),
-	                    moltis_cron::types::CronDelivery::Session { target } => {
-	                        let (session_id, _) = resolve_session_target_context(
-	                            &req.agent_id,
-	                            &target,
-	                            &session_metadata,
-	                            &ensure_main_session_id,
-	                            &resolve_session_id_for_session_key,
-	                        )
-	                        .await?;
-	                        deliver_assistant_message_into_session(
-	                            st.get(),
-	                            &session_store,
-	                            &session_metadata,
-	                            &session_id,
-	                            req.output,
-	                            req.run_id,
-	                        )
-	                        .await
-	                    },
-	                    moltis_cron::types::CronDelivery::Telegram { target } => {
-	                        let state = st
-	                            .get()
-	                            .ok_or_else(|| anyhow::anyhow!("gateway not ready"))?;
+                match req.delivery {
+                    moltis_cron::types::CronDelivery::Silent => Ok(()),
+                    moltis_cron::types::CronDelivery::Session { target } => {
+                        let (session_id, _) = resolve_session_target_context(
+                            &req.agent_id,
+                            &target,
+                            &session_metadata,
+                            &ensure_main_session_id,
+                            &resolve_session_id_for_session_key,
+                        )
+                        .await?;
+                        deliver_assistant_message_into_session(
+                            st.get(),
+                            &session_store,
+                            &session_metadata,
+                            &session_id,
+                            req.output,
+                            req.run_id,
+                        )
+                        .await
+                    },
+                    moltis_cron::types::CronDelivery::Telegram { target } => {
+                        let state = st
+                            .get()
+                            .ok_or_else(|| anyhow::anyhow!("gateway not ready"))?;
                         let Some(outbound) = state.services.channel_outbound_arc() else {
                             anyhow::bail!("cron_delivery_account_missing");
                         };
@@ -6414,6 +6465,145 @@ mod tests {
 
         assert_eq!(resolved_session_id, entry.session_id);
         assert_eq!(inherited_model.as_deref(), Some("claude-sonnet"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_inherited_model_does_not_materialize_missing_main_session() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+            .await
+            .unwrap();
+        let session_metadata = Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(
+            pool.clone(),
+        ));
+        let inherited_model = inherited_model_for_cron_run(
+            "default",
+            &moltis_cron::types::SessionTarget::Main,
+            &session_metadata,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(inherited_model, None);
+        assert!(
+            session_metadata
+                .get_active_session_id(&moltis_sessions::SessionKey::main("default").0)
+                .await
+                .is_none(),
+            "cron model inheritance must not materialize main session before delivery"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_inherited_model_reads_existing_main_session_model() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+            .await
+            .unwrap();
+        let session_metadata = Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(
+            pool.clone(),
+        ));
+        let session_key = moltis_sessions::SessionKey::main("default").0;
+        let entry = session_metadata
+            .create(&session_key, Some("main".into()))
+            .await
+            .unwrap();
+        session_metadata
+            .set_active_session_id(&session_key, &entry.session_id)
+            .await;
+        session_metadata
+            .set_model(&entry.session_id, Some("claude-sonnet".into()))
+            .await;
+
+        let inherited_model = inherited_model_for_cron_run(
+            "default",
+            &moltis_cron::types::SessionTarget::Main,
+            &session_metadata,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(inherited_model.as_deref(), Some("claude-sonnet"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_inherited_model_reads_existing_bound_session_model() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+            .await
+            .unwrap();
+        let session_metadata = Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(
+            pool.clone(),
+        ));
+        let entry = session_metadata
+            .create("agent/default/ops", Some("ops".into()))
+            .await
+            .unwrap();
+        session_metadata
+            .set_model(&entry.session_id, Some("claude-sonnet".into()))
+            .await;
+
+        let inherited_model = inherited_model_for_cron_run(
+            "default",
+            &moltis_cron::types::SessionTarget::Session {
+                session_key: "agent/default/ops".into(),
+            },
+            &session_metadata,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(inherited_model.as_deref(), Some("claude-sonnet"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_inherited_model_does_not_block_missing_bound_session_before_delivery() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+            .await
+            .unwrap();
+        let session_metadata = Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(
+            pool.clone(),
+        ));
+
+        let inherited_model = inherited_model_for_cron_run(
+            "default",
+            &moltis_cron::types::SessionTarget::Session {
+                session_key: "agent/default/missing".into(),
+            },
+            &session_metadata,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            inherited_model, None,
+            "deleted delivery session must not block cron execution before delivery"
+        );
+    }
+
+    #[test]
+    fn validate_cron_telegram_target_rejects_unknown_account() {
+        let registered_accounts =
+            HashSet::from(["telegram:123".to_string(), "telegram:456".to_string()]);
+
+        let ok_target = moltis_cron::types::TelegramTarget {
+            account_key: "telegram:123".into(),
+            chat_id: "-100123".into(),
+            thread_id: Some("7".into()),
+        };
+        validate_cron_telegram_target(&ok_target, &registered_accounts).expect("known account");
+
+        let err = validate_cron_telegram_target(
+            &moltis_cron::types::TelegramTarget {
+                account_key: "telegram:999".into(),
+                chat_id: "-100123".into(),
+                thread_id: None,
+            },
+            &registered_accounts,
+        )
+        .expect_err("unknown account must be rejected at save time");
+        assert_eq!(err.to_string(), "cron_delivery_account_missing");
     }
 
     #[tokio::test]

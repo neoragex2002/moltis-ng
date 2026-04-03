@@ -3,7 +3,7 @@
 ## 实施现状（Status）【增量更新主入口】
 - Status: IN-PROGRESS（代码实现与自动化测试已完成；`telegram` 真正外发仍待手工验收）
 - Priority: P0
-- Updated: 2026-03-31
+- Updated: 2026-04-03
 - Checklist discipline: 每次增量更新除补“已实现 / 已覆盖测试”外，必须同步勾选正文里对应的 checklist；禁止出现文首已完成、正文 TODO 未更新的漂移
 - Owners: cron / gateway / config / ui
 - Components: cron / gateway / ui / agents / config / telegram
@@ -28,6 +28,8 @@
 - 2026-03-31：tool 合同：`cron` tool schema 不再混用 session/telegram target 字段，避免 agent 生成 payload 被 backend 严格拒绝（`crates/tools/src/cron_tool.rs`）。
 - 2026-03-31：strict active-hours：`activeHours.start="24:00"` 现在按无效输入 reject（仍保留 `end="24:00"` 作为 end-of-day 语义）（`crates/cron/src/heartbeat.rs`）。
 - 2026-03-31：UI 投影：background 投递写入 assistant message 时同步更新 `sessions.preview`，避免侧边栏摘要长期陈旧（`crates/gateway/src/server.rs`、`crates/sessions/src/metadata.rs`）。
+- 2026-04-03：修复 `cron modelSelector=inherit` 的执行前会话读取语义：`cron` 在 `delivery.session.target=main` 时只读取已存在 `main` 会话的模型，不再因为预读继承模型而提前调用 `ensure_main_session_id()` 物化空会话；对显式 `session` target，若会话在 delivery 前已被删除，run 前继承模型读取也不再提前阻断执行，真正会话解析/失败仍保留到 delivery 主路径（`crates/gateway/src/server.rs`）。
+- 2026-04-03：修复 `cron.delivery.telegram.target` 的 save-time 严格校验：除字段形状外，保存时还必须校验 `accountKey` 属于已注册 Telegram account，未知账号直接以 `cron_delivery_account_missing` reject，不再把永久损坏任务写入 DB（`crates/gateway/src/server.rs`）。
 
 **已覆盖测试（如有）**
 - 2026-03-30：`cargo test -p moltis-config`
@@ -43,6 +45,8 @@
 - 2026-03-31：`cargo test -p moltis-config -p moltis-cron -p moltis-gateway -p moltis-tools`
 - 2026-03-31：新增定点回归测试，冻结 `timeoutSecs:null` 清空语义（`crates/cron/src/types.rs:344`）、`cron` session 投递触发 `chat final` live update（`crates/gateway/src/server.rs:6403`）、heartbeat stale `runningAt` 清理后可继续调度（`crates/cron/src/heartbeat_service.rs:1279`）。
 - 2026-03-31：新增定点回归测试，冻结 `cron/heartbeat` start-state `runningAt` 必须先落库、heartbeat session 投递必须广播且更新 preview、tool schema 不混用 telegram/session target 字段、activeHours start=24:00 必须 reject（`crates/cron/src/service.rs`、`crates/cron/src/heartbeat_service.rs`、`crates/gateway/src/server.rs`、`crates/tools/src/cron_tool.rs`、`crates/cron/src/heartbeat.rs`）。
+- 2026-04-03：`cargo test -p moltis-gateway`
+- 2026-04-03：新增定点回归测试，冻结 `cron modelSelector=inherit` 在 `delivery.session.target=main/session` 两条分支上的执行前语义：不得在 run 前物化空 `main` 会话、已存在 `main`/显式会话仍可正确继承模型、已删除显式会话不再在 run 前阻断执行；同时冻结保存时未知 Telegram account 必须以 `cron_delivery_account_missing` 直接 reject（`crates/gateway/src/server.rs`）。
 
 **已知差异/后续优化（非阻塞）**
 - 本单已完成对 `docs/plans/2026-03-26-cron-heartbeat-model-design.md` 的实施回写；后续代码实施以本单为唯一实施准绳，设计稿保留为设计依据与追溯依据。
@@ -52,7 +56,7 @@
 **未修复问题清单（Review Findings, Pending Fixes）【P0-P3】**
 > 口径：这里仅记录“已发现但尚未修掉”的缺口；修复后必须从本段移除，并把证据回写到上面的“已实现/已覆盖测试”。
 
-- 无（截至 2026-03-31，P0-P3 review findings 已逐条修复并补齐自动化测试；见上方“已实现/已覆盖测试”。）
+- 无（截至 2026-04-03，本单新增 review findings 已逐条修复并补齐自动化测试；见上方“已实现/已覆盖测试”。）
 
 ---
 
